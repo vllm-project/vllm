@@ -513,7 +513,7 @@ class Siglip2VisionAttention(nn.Module):
         self.out_proj = RowParallelLinear(
             input_size=config.hidden_size,
             output_size=config.hidden_size,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -622,13 +622,12 @@ class Siglip2Encoder(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.layers = nn.ModuleList(
             [
                 Siglip2EncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -669,7 +668,7 @@ class Siglip2VisionTransformer(nn.Module):
         self.pixel_shuffle_scale_factor = config.pixel_shuffle_scale_factor
         self.encoder = Siglip2Encoder(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)

@@ -29,6 +29,7 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -46,9 +47,9 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.token_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hidden_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -58,7 +59,6 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         self.mtp_block = Qwen2DecoderLayer(
             config=config,
             vllm_config=vllm_config,
-            quant_config=quant_config,
             prefix=prefix,
         )
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -105,9 +105,7 @@ class MiMoMultiTokenPredictor(nn.Module):
                 str(idx): MiMoMultiTokenPredictorLayer(
                     config,
                     f"{prefix}.layers.{idx}",
-                    model_config=vllm_config.model_config,
-                    cache_config=vllm_config.cache_config,
-                    quant_config=vllm_config.quant_config,
+                    vllm_config=vllm_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

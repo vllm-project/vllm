@@ -180,6 +180,7 @@ class MultiHeadDotProductAttention(nn.Module):
         use_bias: bool = True,
         nlayers: int = 1,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -228,7 +229,7 @@ class MultiHeadDotProductAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=use_bias,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.wo",
         )
 
@@ -273,7 +274,7 @@ class ResidualAttentionBlock(nn.Module):
         super().__init__()
         quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.attention = MultiHeadDotProductAttention(
-            config, quant_config=quant_config, prefix=f"{prefix}.attention"
+            config, vllm_config=vllm_config, prefix=f"{prefix}.attention"
         )
         self.feed_forward = ViTMLP(
             config, quant_config, prefix=f"{prefix}.feed_forward"
@@ -683,7 +684,6 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.vit_layers = VIT_LAYERS
         self.image_num_patch = vision_config.image_num_patch
         self.llm_patches_per_crop = (
@@ -691,7 +691,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
             (self.image_num_patch[1] + 1) // POOLING_SIZE,
         )
         self.image_vit = VisionTransformer(
-            vision_config, quant_config=quant_config, prefix=f"{prefix}.image_vit"
+            vision_config, vllm_config=vllm_config, prefix=f"{prefix}.image_vit"
         )
         self.num_prefix_tokens = self.image_vit.num_prefix_tokens
         assert self.num_prefix_tokens in {0, 1}, (

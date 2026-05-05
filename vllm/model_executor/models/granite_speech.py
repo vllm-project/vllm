@@ -620,7 +620,7 @@ class GraniteSpeechForConditionalGeneration(
             # Conformer encoder
             self.encoder = GraniteSpeechCTCEncoder(
                 config=config.encoder_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.encoder",
             )
 

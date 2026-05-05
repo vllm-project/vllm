@@ -310,7 +310,7 @@ class Qwen2VisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -400,6 +400,7 @@ class Qwen2VisionBlock(nn.Module):
         act_layer: type[nn.Module] = QuickGELU,
         norm_layer: Callable[[int], nn.Module] | None = None,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -1232,7 +1233,6 @@ class Qwen2VLForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: Qwen2VLConfig = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
@@ -1243,7 +1243,7 @@ class Qwen2VLForConditionalGeneration(
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

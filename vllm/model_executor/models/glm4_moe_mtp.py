@@ -80,6 +80,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
     ) -> None:
         super().__init__()
@@ -94,7 +95,6 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.mtp_block = Glm4MoeDecoderLayer(
             config=config,
             vllm_config=vllm_config,
-            quant_config=quant_config,
             prefix=prefix,
             enable_eplb=self.enable_eplb,
         )

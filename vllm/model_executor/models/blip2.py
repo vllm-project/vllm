@@ -248,6 +248,7 @@ class Blip2QFormerLayer(nn.Module):
         config: Blip2QFormerConfig,
         *,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int,
         prefix: str = "",
     ) -> None:
@@ -385,6 +386,7 @@ class Blip2QFormerModel(nn.Module):
         config: Blip2QFormerConfig,
         *,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -560,7 +562,7 @@ class Blip2ForConditionalGeneration(
             self.qformer = Blip2QFormerModel(
                 config.qformer_config,
                 cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 model_config=model_config,
                 prefix=f"{prefix}.qformer",
             )

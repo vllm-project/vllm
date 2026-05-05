@@ -276,7 +276,6 @@ class SolarModel(nn.Module):
             lambda prefix: SolarDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

@@ -433,7 +433,6 @@ class Ernie4_5_MoeModel(nn.Module):
             lambda prefix: Ernie4_5_MoeDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

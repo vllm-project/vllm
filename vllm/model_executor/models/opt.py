@@ -100,7 +100,7 @@ class OPTAttention(nn.Module):
             embed_dim,
             embed_dim,
             bias=bias,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
         self.attn = Attention(

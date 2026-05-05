@@ -123,7 +123,7 @@ class BertWithRopeAttention(nn.Module):
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
 
@@ -412,14 +412,13 @@ class BertWithRopeEncoder(nn.Module):
         model_config = vllm_config.model_config
         config = model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         every_n = getattr(config, "moe_every_n_layers", 0)
         self.layers = nn.ModuleList(
             [
                 BertWithRopeBlock(
                     config=config,
                     cache_config=cache_config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     model_config=model_config,
                     bias=bias,
                     moe=every_n > 0 and (layer_idx % every_n == 1),

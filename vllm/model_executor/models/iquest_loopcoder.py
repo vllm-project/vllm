@@ -425,7 +425,6 @@ class IQuestLoopCoderModel(nn.Module):
             lambda prefix: LoopCoderDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
                 layer_idx=extract_layer_index(prefix),
             ),

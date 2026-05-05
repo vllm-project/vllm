@@ -227,6 +227,7 @@ class BertSelfAttention(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
 
@@ -249,7 +250,7 @@ class BertSelfAttention(nn.Module):
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=True,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
 

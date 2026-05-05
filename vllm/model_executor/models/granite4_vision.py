@@ -487,7 +487,7 @@ class Granite4VisionForConditionalGeneration(
             # encoder output list).
             self.vision_tower = SiglipVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )

@@ -617,7 +617,6 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                 config=config,
                 vllm_config=vllm_config,
                 layer_id=int(prefix.split(".")[-1]),
-                quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

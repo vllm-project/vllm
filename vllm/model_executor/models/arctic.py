@@ -378,7 +378,6 @@ class ArcticModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -390,7 +389,6 @@ class ArcticModel(nn.Module):
             lambda prefix: ArcticDecoderLayer(
                 config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

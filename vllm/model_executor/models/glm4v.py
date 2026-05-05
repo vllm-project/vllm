@@ -132,7 +132,7 @@ class EVA2CLIPAttention(nn.Module):
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.dense",
         )
 
@@ -195,7 +195,7 @@ class EVA2CLIPTransformerLayer(nn.Module):
         quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.input_layernorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.attention = EVA2CLIPAttention(
-            config, quant_config=quant_config, prefix=f"{prefix}.attention"
+            config, vllm_config=vllm_config, prefix=f"{prefix}.attention"
         )
         self.mlp = EVA2CLIPMLP(
             config, quant_config=quant_config, prefix=f"{prefix}.mlp"
@@ -219,15 +219,15 @@ class EVA2CLIPTransformer(nn.Module):
         self,
         config,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layers = nn.ModuleList(
             [
                 EVA2CLIPTransformerLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)

@@ -238,7 +238,7 @@ class MiniMaxText01Attention(nn.Module):
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
         self.attn = Attention(

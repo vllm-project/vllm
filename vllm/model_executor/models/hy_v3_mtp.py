@@ -90,6 +90,7 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         quant_config = vllm_config.quant_config if vllm_config is not None else None
@@ -101,7 +102,6 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
         self.mtp_block = HYV3DecoderLayer(
             config=config,
             vllm_config=vllm_config,
-            quant_config=quant_config,
             prefix=prefix,
         )
         # Final layernorm applied after transformer block, before logits

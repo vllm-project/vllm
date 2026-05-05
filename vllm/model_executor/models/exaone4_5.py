@@ -112,7 +112,7 @@ class EXAONE4_5_VisionAttention(nn.Module):
             input_size=projection_size,
             output_size=embed_dim,
             bias=True,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -208,6 +208,7 @@ class Exaone4_5_VisionBlock(nn.Module):
         hidden_act: str = "silu",
         norm_layer: Callable[[int], nn.Module] | None = None,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:

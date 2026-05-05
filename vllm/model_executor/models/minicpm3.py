@@ -62,6 +62,7 @@ class MiniCPM3Attention(nn.Module):
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

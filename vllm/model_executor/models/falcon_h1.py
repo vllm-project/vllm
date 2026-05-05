@@ -272,7 +272,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -340,7 +340,6 @@ class FalconH1ParallelHybrid(nn.Module):
         self.self_attn = FalconH1AttentionDecoderLayer(
             config=config,
             vllm_config=vllm_config,
-            quant_config=quant_config,
             prefix=prefix,
         )
 

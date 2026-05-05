@@ -318,7 +318,6 @@ class ExaoneModel(nn.Module):
             lambda prefix: ExaoneDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

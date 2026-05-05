@@ -117,7 +117,7 @@ class BlipAttention(nn.Module):
         self.projection = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.projection",
         )
 
@@ -239,7 +239,6 @@ class BlipEncoder(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
 
@@ -252,7 +251,7 @@ class BlipEncoder(nn.Module):
             [
                 BlipEncoderLayer(
                     config=config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(num_hidden_layers)
@@ -282,13 +281,12 @@ class BlipVisionModel(nn.Module, SupportsQuant):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
 
         self.embeddings = BlipVisionEmbeddings(config)
         self.encoder = BlipEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
         )

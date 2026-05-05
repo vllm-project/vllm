@@ -402,7 +402,6 @@ class GlmAsrEncoder(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
 
         # Convolutional feature extraction layers
@@ -425,7 +424,7 @@ class GlmAsrEncoder(nn.Module):
             [
                 GlmAsrEncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -956,7 +955,7 @@ class GlmAsrForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = GlmAsrEncoder(
                 config.audio_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
             self.multi_modal_projector = GlmAsrMultiModalProjector(

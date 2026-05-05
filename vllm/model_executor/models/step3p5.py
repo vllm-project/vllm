@@ -459,7 +459,7 @@ class Step3p5DecoderLayer(nn.Module):
                 head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
                 model_config=model_config,
                 cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 rope_scaling=getattr(config, "rope_scaling", None),
                 sliding_window=getattr(config, "sliding_window", None),
                 use_head_wise_attn_gate=getattr(

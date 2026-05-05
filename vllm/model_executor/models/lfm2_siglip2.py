@@ -193,7 +193,7 @@ class Siglip2Attention(nn.Module):
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -343,7 +343,6 @@ class Siglip2Encoder(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
 
         if num_hidden_layers_override is None:
@@ -355,7 +354,7 @@ class Siglip2Encoder(nn.Module):
             [
                 Siglip2EncoderLayer(
                     config=config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(num_hidden_layers)
@@ -395,13 +394,12 @@ class Siglip2VisionTransformer(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         embed_dim = config.hidden_size
         self.config = config
         self.embeddings = Siglip2VisionEmbeddings(config)
         self.encoder = Siglip2Encoder(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
         )
@@ -469,11 +467,10 @@ class Siglip2Model(torch.nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.vision_model = Siglip2VisionTransformer(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",

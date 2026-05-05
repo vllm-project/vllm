@@ -380,7 +380,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
         self.config = config
 
@@ -399,7 +398,6 @@ class AfmoeModel(nn.Module, EagleModelMixin):
             lambda prefix: AfmoeDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

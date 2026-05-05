@@ -293,10 +293,10 @@ class TransformerBlock(nn.Module):
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.width = width
         self.layers = layers
 
@@ -307,7 +307,7 @@ class TransformerBlock(nn.Module):
                     heads,
                     mlp_ratio,
                     norm_layer=norm_layer,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.resblocks.{i}",
                 )
                 for i in range(layers)
@@ -341,11 +341,11 @@ class VisionTransformer(nn.Module):
         output_dim: int = 512,
         image_start_id: int = 151857,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         **kwargs,
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
@@ -371,7 +371,7 @@ class VisionTransformer(nn.Module):
             heads,
             mlp_ratio,
             norm_layer=norm_layer,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.transformer",
         )
 
@@ -429,10 +429,9 @@ class QwenVLModel(QWenModel):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         self.visual = VisionTransformer(
-            **config.visual, quant_config=quant_config, prefix=f"{prefix}.visual"
+            **config.visual, vllm_config=vllm_config, prefix=f"{prefix}.visual"
         )
 
 

@@ -595,7 +595,6 @@ class LagunaModel(nn.Module):
             lambda prefix: LagunaDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

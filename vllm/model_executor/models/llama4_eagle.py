@@ -171,14 +171,13 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             vllm_config.parallel_config
         )
         # draft model quantization config may differ from target model
-        quant_config = VllmConfig.get_quantization_config(
+        VllmConfig.get_quantization_config(
             vllm_config.speculative_config.draft_model_config, vllm_config.load_config
         )
         self.model = LlamaModel(
             vllm_config=vllm_config,
             prefix="model",
             start_layer_id=target_layer_num,
-            quant_config=quant_config,
         )
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(

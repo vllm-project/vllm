@@ -539,7 +539,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = AriaVisionTransformer(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.vision_tower",
             )
             self.multi_modal_projector = AriaProjector(

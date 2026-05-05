@@ -352,7 +352,7 @@ class DbrxModel(nn.Module):
                 config,
                 model_config=model_config,
                 cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.blocks",

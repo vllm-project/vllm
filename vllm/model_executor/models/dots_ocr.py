@@ -258,7 +258,7 @@ class DotsVisionAttention(nn.Module):
             input_size=dim,
             output_size=dim,
             bias=bias,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -436,6 +436,7 @@ class DotsVisionBlock(nn.Module):
         config,
         *,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()

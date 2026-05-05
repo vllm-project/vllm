@@ -292,7 +292,7 @@ class Phi4ForCausalLMV(nn.Module, SupportsMultiModal, SupportsPP):
 
             self.vision_tower = Siglip2Model(
                 siglip2_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 num_hidden_layers_override=num_hidden_layers,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),

@@ -348,7 +348,6 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
                 config,
                 prefix,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
             ),
             prefix=f"{prefix}.layers",
         )

@@ -1085,7 +1085,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             self.visual = Qwen2_5_VisionTransformer(
                 vision_config=thinker_config.vision_config,
                 norm_eps=getattr(thinker_config.text_config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

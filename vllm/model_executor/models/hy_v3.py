@@ -412,7 +412,6 @@ class HYV3Model(nn.Module):
             lambda prefix: HYV3DecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

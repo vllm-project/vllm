@@ -383,13 +383,12 @@ class GlmOcrForConditionalGeneration(Glm4vForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = GlmOcrVisionTransformer(
                 config.text_config,
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )

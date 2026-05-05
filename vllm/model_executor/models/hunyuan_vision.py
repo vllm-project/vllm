@@ -230,7 +230,7 @@ class HunYuanVisionAttention(nn.Module):
         self.o_proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
             disable_tp=use_data_parallel,
         )
@@ -435,10 +435,10 @@ class HunYuanVisionTransformer(nn.Module):
         self,
         vision_config: HunYuanVLVisionConfig,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         num_hidden_layers = vision_config.num_hidden_layers
         self.hidden_size = vision_config.hidden_size
@@ -461,7 +461,7 @@ class HunYuanVisionTransformer(nn.Module):
                         mlp_hidden_dim=vision_config.intermediate_size,
                         act_fn=get_act_fn(vision_config.hidden_act),
                         norm_layer=norm_layer,
-                        quant_config=quant_config,
+                        vllm_config=vllm_config,
                         prefix=f"{prefix}.layers.{layer_idx}",
                     )
                     for layer_idx in range(num_hidden_layers)

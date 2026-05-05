@@ -170,7 +170,6 @@ class GraniteMoeSharedModel(nn.Module):
             lambda prefix: GraniteMoeSharedDecoderLayer(
                 config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

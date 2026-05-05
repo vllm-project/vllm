@@ -634,7 +634,7 @@ class Gemma4DecoderLayer(nn.Module):
         if self.enable_moe_block:
             self.router = Gemma4Router(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.router",
             )
             self.moe = Gemma4MoE(
@@ -1044,7 +1044,6 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             lambda prefix: Gemma4DecoderLayer(
                 config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

@@ -640,7 +640,7 @@ class CheersForConditionalGeneration(
 
             self.vision_representation = SiglipVisionModel(
                 config=vit_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_representation"),
             )
 

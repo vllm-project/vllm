@@ -160,7 +160,7 @@ class Idefics2VisionAttention(nn.Module):
             self.embed_dim,
             self.embed_dim,
             bias=True,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -312,7 +312,6 @@ class Idefics2Encoder(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
 
@@ -325,7 +324,7 @@ class Idefics2Encoder(nn.Module):
             [
                 Idefics2EncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(num_hidden_layers)
@@ -358,6 +357,7 @@ class Idefics2VisionTransformer(nn.Module):
         self,
         config: Idefics2VisionConfig,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
@@ -365,7 +365,6 @@ class Idefics2VisionTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         embed_dim = config.hidden_size
         self.config = config
@@ -374,7 +373,7 @@ class Idefics2VisionTransformer(nn.Module):
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
         )

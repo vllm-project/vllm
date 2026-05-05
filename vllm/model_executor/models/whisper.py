@@ -187,7 +187,7 @@ class WhisperAttention(nn.Module):
             input_size=embed_dim,
             output_size=embed_dim,
             bias=bias,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
         if attn_type == AttentionType.ENCODER:

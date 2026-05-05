@@ -1303,7 +1303,7 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = KeyeSiglipVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
             self.mlp_AR = self._build_projector(

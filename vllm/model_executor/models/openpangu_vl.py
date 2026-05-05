@@ -119,7 +119,7 @@ class OpenPanguVisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
         self.attn = MMEncoderAttention(
@@ -232,6 +232,7 @@ class OpenPanguVisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         vision_config=None,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

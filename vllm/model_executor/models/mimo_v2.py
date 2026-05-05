@@ -226,6 +226,7 @@ class MiMoV2Attention(nn.Module):
         rope_theta: float = 1000000,
         max_position_embeddings: int = 32768,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         partial_rotary_factor: float = 1.0,
         prefix: str = "",
     ) -> None:

@@ -212,7 +212,7 @@ class InternParallelAttention(nn.Module):
         self.proj = RowParallelLinear(
             self.dummy_dim,
             self.embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -404,13 +404,13 @@ class InternVisionModel(nn.Module):
         self,
         config: PretrainedConfig,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         self.use_data_parallel = is_vit_use_data_parallel()
@@ -418,7 +418,7 @@ class InternVisionModel(nn.Module):
         self.embeddings = InternVisionEmbeddings(config)
         self.encoder = InternVisionEncoder(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers_override,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.encoder",

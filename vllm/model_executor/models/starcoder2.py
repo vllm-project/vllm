@@ -236,7 +236,6 @@ class Starcoder2Model(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Starcoder2DecoderLayer(
                 config,
-                quant_config=quant_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
             ),

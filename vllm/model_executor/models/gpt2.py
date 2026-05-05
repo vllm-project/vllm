@@ -89,7 +89,7 @@ class GPT2Attention(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.c_proj",
         )
         self.attn = Attention(

@@ -336,7 +336,6 @@ class OuroModel(nn.Module):
             lambda prefix: decoder_layer_type(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

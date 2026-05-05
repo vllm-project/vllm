@@ -229,7 +229,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
 

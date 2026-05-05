@@ -348,7 +348,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -441,6 +441,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

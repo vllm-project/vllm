@@ -295,7 +295,7 @@ class Glm4vVisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             bias=False,
             disable_tp=use_data_parallel,
@@ -373,6 +373,7 @@ class Glm4vVisionBlock(nn.Module):
         mlp_hidden_dim: int,
         norm_layer: Callable[[int], nn.Module] | None = None,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -1419,7 +1420,6 @@ class Glm4vForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
@@ -1431,7 +1431,7 @@ class Glm4vForConditionalGeneration(
                 config.text_config,
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

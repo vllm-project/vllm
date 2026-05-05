@@ -347,6 +347,7 @@ class MoonViTEncoderLayer(nn.Module):
         hidden_dim: int,
         mlp_dim: int,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
         activation=F.gelu,
@@ -387,7 +388,7 @@ class MoonViTEncoderLayer(nn.Module):
             hidden_dim,
             hidden_dim,
             bias=attn_bias,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.wo",
             disable_tp=self.use_data_parallel,
         )
@@ -557,6 +558,7 @@ class MoonViT3dPretrainedModel(nn.Module):
         self,
         config: KimiK25VisionConfig,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()

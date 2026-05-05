@@ -363,7 +363,6 @@ class Dots1Model(nn.Module):
                 config,
                 prefix,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
             ),
             prefix=f"{prefix}.layers",
         )

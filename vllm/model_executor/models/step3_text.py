@@ -255,7 +255,7 @@ class Step3TextDecoderLayer(nn.Module):
 
         if layer_idx in moe_layers_idx:
             self.moe = FusedMoEBlock(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.moe"
+                config=config, vllm_config=vllm_config, prefix=f"{prefix}.moe"
             )
             self.share_expert = Step3TextMLP(
                 hidden_size=self.hidden_size,
@@ -313,7 +313,6 @@ class Step3TextModel(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
 
@@ -332,7 +331,6 @@ class Step3TextModel(nn.Module):
             lambda prefix: Step3TextDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

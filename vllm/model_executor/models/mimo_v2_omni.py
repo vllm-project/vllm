@@ -178,7 +178,7 @@ class MiMoVisionAttention(nn.Module):
             input_size=num_heads * kv_channels,
             output_size=embed_dim,
             bias=True,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -329,6 +329,7 @@ class MiMoVisionBlock(nn.Module):
         use_sink: bool = False,
         visual_token_window_size: int = 64,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

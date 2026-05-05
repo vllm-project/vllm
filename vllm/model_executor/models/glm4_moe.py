@@ -398,7 +398,6 @@ class Glm4MoeModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
         self.config = config
 
@@ -416,7 +415,6 @@ class Glm4MoeModel(nn.Module):
             lambda prefix: Glm4MoeDecoderLayer(
                 config=config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

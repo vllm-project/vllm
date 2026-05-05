@@ -319,10 +319,9 @@ class MixtralModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: MixtralDecoderLayer(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
                 enable_eplb=self.enable_eplb,
-                vllm_config=vllm_config,
             ),
             prefix=f"{prefix}.layers",
         )

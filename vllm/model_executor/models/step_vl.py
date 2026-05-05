@@ -217,7 +217,7 @@ class PerceptionEncoderVisionAttention(nn.Module):
             embed_dim,
             embed_dim,
             bias=True,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -320,7 +320,6 @@ class PerceptionEncoderVisionTransformer(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.width = width
         self.layers = layers
         self.resblocks = nn.ModuleList(
@@ -335,7 +334,7 @@ class PerceptionEncoderVisionTransformer(nn.Module):
                     act_layer=act_layer,
                     norm_layer=norm_layer,
                     use_cls_token=use_cls_token,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.resblocks.{i}",
                 )
                 for i in range(layers)
@@ -358,7 +357,6 @@ class PerceptionEncoder(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.patch_size = config.patch_size
 
         self.output_dim = config.output_dim or config.width
@@ -395,7 +393,7 @@ class PerceptionEncoder(nn.Module):
             act_layer=act_layer,
             norm_layer=norm_layer,
             use_cls_token=self.use_cls_token,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.transformer",
         )
 
@@ -511,7 +509,7 @@ class StepVLForConditionalGeneration(Step3VLForConditionalGeneration):
             self.vision_model = PerceptionEncoder(
                 config.vision_config,
                 get_act_fn(config.vision_config.hidden_act),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.vit_large_projector = ColumnParallelLinear(

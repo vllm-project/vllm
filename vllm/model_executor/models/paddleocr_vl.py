@@ -584,7 +584,7 @@ class SiglipAttention(nn.Module):
         self.out_proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
         self.attn = MMEncoderAttention(
@@ -742,7 +742,6 @@ class SiglipEncoder(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         embed_dim = config.hidden_size
         num_heads = config.num_attention_heads
@@ -757,7 +756,7 @@ class SiglipEncoder(nn.Module):
             [
                 SiglipEncoderLayer(
                     config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -843,14 +842,13 @@ class SiglipVisionTransformer(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         embed_dim = config.hidden_size
 
         self.embeddings = SiglipVisionEmbeddings(config)
         self.encoder = SiglipEncoder(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -896,7 +894,7 @@ class SiglipVisionModel(nn.Module):
 
         self.vision_model = SiglipVisionTransformer(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.vision_model",
         )
         self.quant_config = quant_config
@@ -1026,14 +1024,12 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
                 text_config.pop(key, None)
             config.update(text_config)
 
-        quant_config = vllm_config.quant_config
-
         self.config = config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.visual = SiglipVisionModel(
                 config=config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
             self.mlp_AR = Projector(config, config.vision_config)

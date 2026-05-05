@@ -578,6 +578,7 @@ class RadioInternVisionModel(nn.Module):
         self,
         config: PretrainedConfig = None,
         vllm_config: VllmConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
