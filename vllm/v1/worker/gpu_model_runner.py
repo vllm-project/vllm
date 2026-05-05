@@ -3131,6 +3131,12 @@ class GPUModelRunner(
         model = self.get_model()
         assert is_mixture_of_experts(model)
 
+        # Release I/O held by the previous state (e.g. expert-load-stats
+        # file descriptor) before dropping the reference, otherwise FDs
+        # leak across elastic EP scale changes.
+        if self.eplb_state is not None:
+            self.eplb_state.close()
+
         self.eplb_state = EplbState.from_mapping(
             model=model,
             model_config=self.model_config,

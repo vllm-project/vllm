@@ -725,6 +725,16 @@ class EplbState:
 
             state.pending_initial_mapping_rearrange = False
 
+    def close(self) -> None:
+        """Release I/O resources held by this state. Safe to call multiple
+        times. Callers must invoke before discarding an EplbState (e.g.
+        before replacing `self.eplb_state` on elastic EP scale changes),
+        otherwise the open expert-load-stats file descriptor leaks until
+        GC."""
+        if self._expert_load_stats_file is not None:
+            self._expert_load_stats_file.close()
+            self._expert_load_stats_file = None
+
     def _write_expert_load_stats(
         self,
         eplb_model_state: EplbModelState,
