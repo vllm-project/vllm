@@ -22,7 +22,6 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
     _DecodeConcatQuantFP8,
-    get_mla_prefill_scale,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -787,7 +786,8 @@ def test_backend_correctness(
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
     )
     decode_scale = 1.0 / (total_head_size**0.5)
-    prefill_scale = get_mla_prefill_scale(vllm_config.model_config)
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+    prefill_scale = qk_head_dim**-0.5
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
