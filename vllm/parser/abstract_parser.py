@@ -755,6 +755,7 @@ class DelegatingParser(Parser):
                 delta_text = current_text
                 delta_token_ids = current_token_ids
 
+        recovered_reasoning_prefix = ""
         if state.end_token_skip_armed and not state.end_token_skip_done:
             end_str = state.end_token_skip_literal
             if not boundary_just_handed_off:
@@ -768,6 +769,9 @@ class DelegatingParser(Parser):
                     None,
                 )
                 literal_pos = state.end_token_skip_buffer.find(end_str)
+                # Pre-literal text is reasoning content; preserve it
+                # for the merge below.
+                recovered_reasoning_prefix = state.end_token_skip_buffer[:literal_pos]
                 content_start = literal_pos + (
                     0 if end_str == tool_section else len(end_str)
                 )
@@ -824,6 +828,14 @@ class DelegatingParser(Parser):
             and not self._in_tool_call_phase(state)
         ):
             delta_message = DeltaMessage(content=delta_text)
+
+        # Merge reasoning text recovered from the skip buffer (see above).
+        if recovered_reasoning_prefix:
+            if delta_message is None:
+                delta_message = DeltaMessage()
+            delta_message.reasoning = (
+                delta_message.reasoning or ""
+            ) + recovered_reasoning_prefix
 
         state.previous_text = current_text
         state.previous_token_ids = current_token_ids
