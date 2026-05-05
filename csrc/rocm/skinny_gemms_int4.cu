@@ -114,6 +114,33 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
 
+// HBM->LDS preload of the activation slice consumed by the compute bodies
+// below.  Factored out of compute_sml_/compute_ so the MoE caller can issue
+// one preload per src_row and reuse the result across the (up to top_k)
+// expert blocks that share that row, while the non-MoE wrapper kernels
+// just call it once before compute.  Ends with __syncthreads() so the
+// caller can read s[] immediately.  s[] is sized by the caller's
+// __shared__ declaration; max_lds_len caps the per-call copy so the
+// preload never overruns it.
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
+template <typename scalar_t, int THRDS, int WvPrGrp, int A_CHUNK, int N>
+__device__ __forceinline__ void load_act_into_lds(
+    scalar_t* s, const scalar_t* __restrict__ A, const int K,
+    const int max_lds_len) {
+  union bigTypeA {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+  };
+  for (uint32_t k = 0; k < min__(K * N, max_lds_len);
+       k += THRDS * WvPrGrp * A_CHUNK) {
+    uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
+    if (k_in >= min__(K * N, max_lds_len)) break;
+    *((bigTypeA*)(&s[k_in])) = *((bigTypeA*)(&A[k_in]));
+  }
+  __syncthreads();
+}
+#endif  // defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
+
 // W4A16 skinny GEMM kernel: packed int4 weights, fp16/bf16 activations
 // Targets the "sml" case where activations fit in LDS.
 // A_CHUNK: number of K-elements processed per thread per step.
@@ -123,17 +150,18 @@ __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
 //   Requires GROUP_SIZE % A_CHUNK == 0 when GROUP_SIZE > 0.
 // Device function: compute body shared by original and MoE kernels.
 // All pointers are for a single expert; the caller offsets them.
+// `s` is the LDS staging buffer; the caller is responsible for its
+// __shared__ declaration and for invoking load_act_into_lds() to populate
+// it before this function reads from it.
 #if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false,
-          int LDS_ELEMS = LDS_SIZE / 2>
+          int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
 __device__ __forceinline__ void wvSplitK_int4_compute_sml_(
     const int K, const int M, const int Bx, const int By,
     const uint8_t* B_packed, const scalar_t* __restrict__ A,
     const scalar_t* scale, const scalar_t* zero_points,
     const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
-    const int CuCount, const bool do_preload = true) {
-  constexpr int max_lds_len = LDS_ELEMS;
+    const int CuCount, scalar_t* s) {
   const int K_packed = K / 2;
 
   union bigTypeA {
@@ -147,30 +175,12 @@ __device__ __forceinline__ void wvSplitK_int4_compute_sml_(
     float f[A_CHUNK / 8];
   };
 
-  __shared__ scalar_t s[max_lds_len];
-
-  // When do_preload == false the caller guarantees that s[] is already
-  // populated with the exact same A slice we need (detected by stable
-  // source-row on the MoE side), so we skip the HBM->LDS copy and its
-  // paired __syncthreads().  The trailing __syncthreads() at the bottom
-  // of the previous call already synchronized all 16 y-rows.
-  if (do_preload) {
-    for (uint32_t k = 0; k < min__(K * N, max_lds_len);
-         k += THRDS * WvPrGrp * A_CHUNK) {
-      uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
-
-      if (k_in >= min__(K * N, max_lds_len)) break;
-
-      *((bigTypeA*)(&s[k_in])) = *((bigTypeA*)(&A[k_in]));
-    }
-    __syncthreads();
-  }
-
   // Guarded section (replaces an early 'return' for threadIdx.y >= _WvPrGrp)
   // so every thread reaches the trailing __syncthreads() at the bottom of
-  // the function.  This keeps the compute body re-entrant: MoE callers may
-  // invoke it in a for-loop over expert blocks without the next iteration's
-  // LDS preload racing against this iteration's LDS reads.
+  // the function.  Keeps the compute body re-entrant: MoE callers iterate
+  // over expert blocks and may issue a fresh load_act_into_lds() between
+  // iterations; the trailing barrier protects this iteration's LDS reads
+  // from the next iteration's LDS writes.
   if (threadIdx.y < _WvPrGrp) {
     uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
@@ -416,10 +426,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                           const scalar_t* zero_points,
                           const scalar_t* __restrict__ BIAS, scalar_t* C,
                           const int _WvPrGrp, const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE / 2;
+  __shared__ scalar_t s[max_lds_len];
+  load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K, max_lds_len);
   wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
                              GROUP_SIZE, HAS_ZERO_POINTS>(
-      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp,
-      CuCount);
+      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
+      s);
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
@@ -449,7 +462,7 @@ __device__ __forceinline__ void wvSplitK_int4_compute_(
     const uint8_t* B_packed, const scalar_t* __restrict__ A,
     const scalar_t* scale, const scalar_t* zero_points,
     const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
-    const int CuCount, const bool do_preload = true) {
+    const int CuCount, scalar_t* s) {
   constexpr int max_lds_len = LDS_SIZE / 2;
   const int K_packed = K / 2;
 
@@ -463,8 +476,6 @@ __device__ __forceinline__ void wvSplitK_int4_compute_(
     uint32_t u32[A_CHUNK / 8];
     float f[A_CHUNK / 8];
   };
-
-  __shared__ scalar_t s[max_lds_len];
 
   uint32_t commitColumn[YTILE];
   for (uint32_t i = 0; i < YTILE; i++) {
@@ -481,28 +492,11 @@ __device__ __forceinline__ void wvSplitK_int4_compute_(
     m = startColumn;
   }
 
-  // See wvSplitK_int4_compute_sml_ for the do_preload rationale.  Note: in
-  // this (non-sml) variant, only the first max_lds_len elements of A live
-  // in LDS; the suffix is read directly from global memory inside the
-  // compute loop.  When do_preload == false the caller also guarantees the
-  // A pointer is unchanged, so those global reads hit L1/L2 as before.
-  if (do_preload) {
-    for (uint32_t k = 0; k < min__(K * N, max_lds_len);
-         k += THRDS * WvPrGrp * A_CHUNK) {
-      uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
-
-      if (k_in >= min__(K * N, max_lds_len)) break;
-
-      *((bigTypeA*)(&s[k_in])) = *((bigTypeA*)(&A[k_in]));
-    }
-    __syncthreads();
-  }
-
-  // Guarded section (replaces an early 'return' for threadIdx.y >= _WvPrGrp)
-  // so every thread reaches the trailing __syncthreads() at the bottom of
-  // the function.  This keeps the compute body re-entrant: MoE callers may
-  // invoke it in a for-loop over expert blocks without the next iteration's
-  // LDS preload racing against this iteration's LDS reads.
+  // Note: in this (non-sml) variant, only the first max_lds_len elements
+  // of A live in LDS; the suffix is read directly from global memory
+  // inside the compute loop (see the bigA load below).  s[] must already
+  // be populated by load_act_into_lds() in the caller.
+  // See wvSplitK_int4_compute_sml_ for the guarded-section rationale.
   if (threadIdx.y < _WvPrGrp) {
     [[maybe_unused]] const int num_groups =
         (GROUP_SIZE > 0) ? (K / GROUP_SIZE) : 0;
@@ -761,10 +755,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                       const scalar_t* scale, const scalar_t* zero_points,
                       const scalar_t* __restrict__ BIAS, scalar_t* C,
                       const int _WvPrGrp, const int CuCount) {
+  constexpr int max_lds_len = LDS_SIZE / 2;
+  __shared__ scalar_t s[max_lds_len];
+  load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K, max_lds_len);
   wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
-                         GROUP_SIZE, HAS_ZERO_POINTS>(K, M, Bx, By, B_packed, A,
-                                                      scale, zero_points, BIAS,
-                                                      C, _WvPrGrp, CuCount);
+                         GROUP_SIZE, HAS_ZERO_POINTS>(
+      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
+      s);
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
@@ -910,15 +907,16 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS) moe_wvSplitK_int4_hf_sml_(
     const int num_expert_blocks) {
   // Walk every expert block in order.  All CuCount workgroups cooperate on
   // each expert block in turn (full M-split parallelism per expert).
-  // compute_sml_ is re-entrant thanks to the trailing __syncthreads() it
-  // gained alongside the in-kernel eb loop.
+  // compute_sml_ is re-entrant thanks to the trailing __syncthreads() at
+  // its bottom.
   //
   // In decode-GEMM1 (sorted_token_ids != nullptr, top_k > 1), consecutive
   // eb values map to the same source row of A_base (the same token
-  // routed to different experts).  Track the source row and skip the LDS
-  // preload whenever it is unchanged from the previous iteration -- the
-  // trailing __syncthreads() of the prior call guarantees s[] is still
-  // populated with the exact A slice we need.
+  // routed to different experts).  Track the source row and skip the
+  // load_act_into_lds() call whenever it is unchanged from the previous
+  // iteration -- the trailing __syncthreads() of the prior compute call
+  // guarantees s[] is still populated with the exact A slice we need.
+  __shared__ scalar_t s[MOE_LDS_ELEMS];
   long last_src_row = -1;
   for (int eb = 0; eb < num_expert_blocks; ++eb) {
     int expert_id = expert_ids[eb];
@@ -947,12 +945,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS) moe_wvSplitK_int4_hf_sml_(
       C = C_base + src_row * M;
     }
 
-    const bool do_preload = (src_row != last_src_row);
-    last_src_row = src_row;
+    if (src_row != last_src_row) {
+      load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K,
+                                                              MOE_LDS_ELEMS);
+      last_src_row = src_row;
+    }
 
     wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL,
-                               N, GROUP_SIZE, HAS_ZERO_POINTS, MOE_LDS_ELEMS>(
-        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, do_preload);
+                               N, GROUP_SIZE, HAS_ZERO_POINTS>(
+        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s);
   }
 }
 
@@ -970,9 +971,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                           const long expert_stride_s,
                           const long expert_stride_zp, const int _WvPrGrp,
                           const int CuCount, const int num_expert_blocks) {
-  // See moe_wvSplitK_int4_hf_sml_ for the iteration and do_preload
-  // rationale; this non-sml variant is used when K*N exceeds
-  // MOE_LDS_ELEMS.
+  // See moe_wvSplitK_int4_hf_sml_ for the iteration + load_act_into_lds
+  // rationale; this non-sml variant is used when K*N exceeds MOE_LDS_ELEMS.
+  // Note: in compute_, only the first LDS_SIZE/2 elements of A live in s[];
+  // the suffix is read directly from A in the compute loop, so we cannot
+  // skip passing the live A pointer even when the LDS preload is reused.
+  __shared__ scalar_t s[LDS_SIZE / 2];
   long last_src_row = -1;
   for (int eb = 0; eb < num_expert_blocks; ++eb) {
     int expert_id = expert_ids[eb];
@@ -998,12 +1002,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       C = C_base + src_row * M;
     }
 
-    const bool do_preload = (src_row != last_src_row);
-    last_src_row = src_row;
+    if (src_row != last_src_row) {
+      load_act_into_lds<scalar_t, THRDS, WvPrGrp, A_CHUNK, N>(s, A, K,
+                                                              LDS_SIZE / 2);
+      last_src_row = src_row;
+    }
 
     wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
                            GROUP_SIZE, HAS_ZERO_POINTS>(
-        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, do_preload);
+        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s);
   }
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
