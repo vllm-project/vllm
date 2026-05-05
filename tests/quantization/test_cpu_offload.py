@@ -70,4 +70,5 @@ def test_cpu_offload_compressed_tensors(monkeypatch):
         ["--enforce_eager"],
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
+        include_seeded_sampling=False,
     )

@@ -68,7 +68,7 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
         print(generated_text)
     ```
 
-Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
+Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
 
 To substitute multiple images inside the same text prompt, you can pass in a list of images instead:
 
@@ -101,7 +101,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
         print(generated_text)
     ```
 
-Full example: [examples/offline_inference/vision_language_multi_image.py](../../examples/offline_inference/vision_language_multi_image.py)
+Full example: [examples/generate/multimodal/vision_language_multi_image_offline.py](../../examples/generate/multimodal/vision_language_multi_image_offline.py)
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
@@ -215,6 +215,67 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
     - This setting only affects RGBA images with transparency; RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
+#### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
+
+`Moondream3ForCausalLM` supports two task-specific prompt formats:
+
+- `query`: ask a question about the image.
+- `caption`: generate a caption for the image.
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
+
+llm = LLM(
+    model="moondream/moondream3-preview",
+    tokenizer="moondream/starmie-v1",
+    trust_remote_code=True,
+    max_model_len=2048,
+    limit_mm_per_prompt={"image": 1},
+)
+
+image = ImageAsset("stop_sign").pil_image
+
+
+def make_query_prompt(question: str) -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        f"{question}<|md_reserved_2|>"
+    )
+
+
+def make_caption_prompt(length: str = "normal") -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>"
+        f"describe<|md_reserved_1|>{length}<|md_reserved_2|>"
+    )
+
+
+query_out = llm.generate(
+    {
+        "prompt": make_query_prompt("What is shown in this image?"),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=64, temperature=0),
+)[0].outputs[0].text
+
+caption_out = llm.generate(
+    {
+        "prompt": make_caption_prompt(),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=100, temperature=0),
+)[0].outputs[0].text
+
+print("query:", query_out)
+print("caption:", caption_out)
+```
+
+!!! note
+    The native Moondream3 model also has `detect` and `point` skills. Those
+    require custom coordinate decoding and are not exposed by this vLLM
+    implementation.
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
@@ -287,13 +348,13 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     !!! note
         'process_vision_info' is only applicable to Qwen2.5-VL and similar models.
 
-Full example: [examples/offline_inference/vision_language.py](../../examples/offline_inference/vision_language.py)
+Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
 
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
-Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
+Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
 #### Chunking Long Audio for Transcription
 
@@ -674,7 +735,7 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output:", chat_response.choices[0].message.content)
     ```
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+Full example: [examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py](../../examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py)
 
 !!! tip
     Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via `--allowed-local-media-path` when launching the API server/engine,
@@ -745,7 +806,7 @@ Then, you can use the OpenAI client as follows:
     print("Chat completion output from image url:", result)
     ```
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+Full example: [examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py](../../examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py)
 
 !!! note
     By default, the timeout for fetching videos through HTTP URL is `30` seconds.
@@ -958,7 +1019,7 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
     print("Chat completion output from audio url:", result)
     ```
 
-Full example: [examples/online_serving/openai_chat_completion_client_for_multimodal.py](../../examples/online_serving/openai_chat_completion_client_for_multimodal.py)
+Full example: [examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py](../../examples/generate/multimodal/openai_chat_completion_client_for_multimodal.py)
 
 !!! note
     By default, the timeout for fetching audios through HTTP URL is `10` seconds.
