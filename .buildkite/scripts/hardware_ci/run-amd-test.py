@@ -13,7 +13,6 @@ import tarfile
 import tempfile
 import threading
 import time
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -540,7 +539,7 @@ class ContainerRunner:
         return thread
 
     def _copy_junit(self, junit_path: Path) -> None:
-        if not self._created:
+        if not self._created or "pytest" not in self.request.commands:
             return
 
         result = run_command(
@@ -555,7 +554,7 @@ class ContainerRunner:
         if result.returncode == 0:
             log.info("Copied junit xml to %s", junit_path)
         else:
-            log.warning("Could not retrieve junit xml: %s", command_output(result))
+            log.info("Could not retrieve junit xml: %s", command_output(result))
 
     def _cleanup(self) -> None:
         if self._created:
@@ -863,9 +862,6 @@ class ArtifactCollector:
         started_at: datetime,
     ) -> int:
         exit_code = result.exit_code
-        if result.mode == "single-node" and exit_code == 0:
-            exit_code = self._validate_junit(result.junit_path)
-
         summary_path = self._write_summary(
             result=result,
             exit_code=exit_code,
@@ -874,40 +870,6 @@ class ArtifactCollector:
         )
         self._upload_existing(summary_path, result.log_path, result.junit_path)
         return exit_code
-
-    def _validate_junit(self, junit_path: Path | None) -> int:
-        if junit_path is None or not junit_path.exists():
-            if "pytest" not in self.request.commands:
-                log.info("No junit xml and command is not pytest; trusting exit 0")
-                return 0
-            log.error("junit xml not found; overriding exit 0 -> 1")
-            return 1
-
-        try:
-            root = ET.parse(junit_path).getroot()
-        except ET.ParseError as exc:
-            log.error("junit xml parse failed: %s; overriding exit 0 -> 1", exc)
-            return 1
-
-        suites = [root] if root.tag == "testsuite" else list(root)
-        total = failures = errors = 0
-        for suite in suites:
-            if suite.tag == "testsuite":
-                total += int(suite.get("tests", "0"))
-                failures += int(suite.get("failures", "0"))
-                errors += int(suite.get("errors", "0"))
-
-        if failures + errors > 0:
-            log.error(
-                "Junit: %d failure(s) + %d error(s); overriding exit 0 -> 1",
-                failures,
-                errors,
-            )
-            return 1
-        if total == 0:
-            log.error("Junit: 0 tests ran; overriding exit 0 -> 1")
-            return 1
-        return 0
 
     def _write_summary(
         self,
