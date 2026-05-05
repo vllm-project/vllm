@@ -134,18 +134,26 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
                                &fail_idx, static_cast<CUstream>(stream));
     TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
                 fail_idx, " with error ", result);
-  } else
+    return;
+  }
+#elif defined(USE_ROCM) && defined(HIP_VERSION) && HIP_VERSION >= 70100000
+  // ROCm 7.1 does not yet honor hipMemcpyAttributes; pass nullptr.
+  size_t fail_idx = 0;
+  hipError_t result = hipMemcpyBatchAsync(
+      reinterpret_cast<void**>(dst_data), reinterpret_cast<void**>(src_data),
+      reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), nullptr,
+      nullptr, 0, &fail_idx, stream);
+  TORCH_CHECK(result == hipSuccess, "hipMemcpyBatchAsync failed at index ",
+              fail_idx, " with error ", result);
+  return;
 #endif
-  {
-    // Fallback for CUDA < 12.8, older drivers, and ROCm:
-    // individual async copies.
-    // cudaMemcpyDefault lets the driver infer direction from pointer types.
-    for (int64_t i = 0; i < n; i++) {
-      cudaMemcpyAsync(reinterpret_cast<void*>(dst_data[i]),
-                      reinterpret_cast<void*>(src_data[i]),
-                      static_cast<size_t>(size_data[i]), cudaMemcpyDefault,
-                      stream);
-    }
+  // Fallback for CUDA < 12.8, older drivers, and ROCm < 7.1.
+  // cudaMemcpyDefault lets the driver infer direction from pointer types.
+  for (int64_t i = 0; i < n; i++) {
+    cudaMemcpyAsync(reinterpret_cast<void*>(dst_data[i]),
+                    reinterpret_cast<void*>(src_data[i]),
+                    static_cast<size_t>(size_data[i]), cudaMemcpyDefault,
+                    stream);
   }
 }
 
