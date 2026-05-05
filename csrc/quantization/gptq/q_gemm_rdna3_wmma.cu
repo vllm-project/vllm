@@ -122,6 +122,19 @@ __forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
   y_prep = scale_f;
 }
 
+// fp32 → bf16 narrow that skips the defensive NaN-canonicalisation hipcc
+// emits for __float2bfloat16. Round-half-to-even via add (0x7FFF + lsb)
+// + truncate; no NaN check, since dequant outputs are bounded products
+// of (nibble - zero) ∈ [-15, 15] and bf16 scales — never NaN/Inf.
+__forceinline__ __device__ bf16_t f32_to_bf16_no_canon(float f) {
+  uint32_t fu = __float_as_uint(f);
+  uint32_t lsb = (fu >> 16) & 1u;
+  uint16_t out_u = (uint16_t)((fu + 0x7FFFu + lsb) >> 16);
+  bf16_t out;
+  __builtin_memcpy(&out, &out_u, sizeof(out));
+  return out;
+}
+
 // 4-bit GPTQ dequant for the bf16 WMMA path: 8 nibbles per int32 in qa,
 // outputs bf162_t dq[4]. Implementation rationale:
 //
@@ -155,14 +168,14 @@ __forceinline__ __device__ void dequant_4bit_8_bf16_to_bf16(
   const float q3x = __uint_as_float((q3 & 0xFFFFu) << 16);
   const float q3y = __uint_as_float(q3 & 0xFFFF0000u);
   // r = q*scale + (-(128+zero)*scale) = (nibble - zero)*scale, then narrow.
-  dq[0].x = __float2bfloat16(__fmaf_rn(q0x, y_prep, z_prep));
-  dq[0].y = __float2bfloat16(__fmaf_rn(q0y, y_prep, z_prep));
-  dq[1].x = __float2bfloat16(__fmaf_rn(q1x, y_prep, z_prep));
-  dq[1].y = __float2bfloat16(__fmaf_rn(q1y, y_prep, z_prep));
-  dq[2].x = __float2bfloat16(__fmaf_rn(q2x, y_prep, z_prep));
-  dq[2].y = __float2bfloat16(__fmaf_rn(q2y, y_prep, z_prep));
-  dq[3].x = __float2bfloat16(__fmaf_rn(q3x, y_prep, z_prep));
-  dq[3].y = __float2bfloat16(__fmaf_rn(q3y, y_prep, z_prep));
+  dq[0].x = f32_to_bf16_no_canon(__fmaf_rn(q0x, y_prep, z_prep));
+  dq[0].y = f32_to_bf16_no_canon(__fmaf_rn(q0y, y_prep, z_prep));
+  dq[1].x = f32_to_bf16_no_canon(__fmaf_rn(q1x, y_prep, z_prep));
+  dq[1].y = f32_to_bf16_no_canon(__fmaf_rn(q1y, y_prep, z_prep));
+  dq[2].x = f32_to_bf16_no_canon(__fmaf_rn(q2x, y_prep, z_prep));
+  dq[2].y = f32_to_bf16_no_canon(__fmaf_rn(q2y, y_prep, z_prep));
+  dq[3].x = f32_to_bf16_no_canon(__fmaf_rn(q3x, y_prep, z_prep));
+  dq[3].y = f32_to_bf16_no_canon(__fmaf_rn(q3y, y_prep, z_prep));
 }
 
 // ---------------------------------------------------------------------------
