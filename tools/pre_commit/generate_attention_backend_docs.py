@@ -810,6 +810,9 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         "compute_capability": compute_cap,
         "is_mla": is_mla_backend or check_method_overrides(class_node, "is_mla"),
         "supports_sink": check_method_overrides(class_node, "supports_sink"),
+        "supports_non_causal": check_method_overrides(
+            class_node, "supports_non_causal"
+        ),
         "is_sparse": check_method_overrides(class_node, "is_sparse"),
         "supports_mm_prefix": check_method_overrides(class_node, "supports_mm_prefix"),
         "supports_dcp": supports_dcp,
@@ -1311,6 +1314,10 @@ _COL_KV_DTYPES: TableColumn = (
 _COL_BLOCK_SIZES: TableColumn = ("Block Sizes", lambda b: b["block_sizes"])
 _COL_HEAD_SIZES: TableColumn = ("Head Sizes", lambda b: b["head_sizes"])
 _COL_SINK: TableColumn = ("Sink", lambda b: bool_to_emoji(b["supports_sink"]))
+_COL_NON_CAUSAL: TableColumn = (
+    "Non-Causal",
+    lambda b: bool_to_emoji(b["supports_non_causal"]),
+)
 _COL_SPARSE: TableColumn = ("Sparse", lambda b: bool_to_emoji(b["is_sparse"]))
 _COL_MM_PREFIX: TableColumn = (
     "MM Prefix",
@@ -1344,6 +1351,7 @@ def _build_columns(is_mla: bool, has_versions: bool) -> list[TableColumn]:
         cols.append(_COL_VERSION)
     cols.extend([_COL_DTYPES, _COL_KV_DTYPES, _COL_BLOCK_SIZES, _COL_HEAD_SIZES])
     cols.append(_COL_SINK)
+    cols.append(_COL_NON_CAUSAL)
     if is_mla:
         cols.append(_COL_SPARSE)
     cols.extend([_COL_MM_PREFIX, _COL_DCP, _COL_ATTN_TYPES, _COL_COMPUTE_CAP])
@@ -1554,6 +1562,7 @@ def generate_legend() -> str:
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
 | **Sink** | Attention sink support (for StreamingLLM) |
+| **Non-Causal** | Non-causal (bidirectional) attention support for decoder models |
 | **Sparse** | Sparse attention support (MLA only) |
 | **MM Prefix** | Multimodal prefix full attention support |
 | **DCP** | Decode Context Parallelism support (`--decode-context-parallel-size`) |
