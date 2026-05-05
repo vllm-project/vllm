@@ -1252,7 +1252,6 @@ class FusedMoEKernelModularImpl:
             from vllm._aiter_ops import rocm_aiter_ops
             if (
                 rocm_aiter_ops.is_fused_moe_enabled()
-                and rocm_aiter_ops.is_aiter_enabled()
                 and output_alias is not None
                 and output_alias.shape == fused_out.shape
                 and output_alias.dtype == fused_out.dtype
