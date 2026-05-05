@@ -120,13 +120,21 @@ class nccl_symm_mem_context:
         pynccl_comm: PyNcclCommunicator,
         disabled: bool = False,
     ):
+        _torch_too_old = version.parse(torch.__version__) < version.parse("2.11.0")
+        if _torch_too_old:
+            logger.debug(
+                "NCCL symmetric memory disabled: requires torch >= 2.11.0, "
+                "found %s. The NCCL backend MemPool is broken in older versions "
+                "(pytorch/pytorch#168129).",
+                torch.__version__,
+            )
         self.disabled = (
             disabled
             or not is_symmetric_memory_enabled()
             or pynccl_comm.world_size == 1
             or not current_platform.is_cuda()
             or get_nccl_mem_pool() is None
-            or version.parse(torch.__version__) < version.parse("2.11.0")
+            or _torch_too_old
         )
         if self.disabled:
             self.pynccl_comm: PyNcclCommunicator | None = None

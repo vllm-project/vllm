@@ -8,6 +8,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 import torch
+from nccl.core.interop.torch import _to_nccl_dtype
+from nccl.core.typing import NcclInvalid
 from torch.distributed import (
     P2POp,
     ProcessGroup,
@@ -15,9 +17,6 @@ from torch.distributed import (
 )
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.device_communicators.pynccl_wrapper_legacy import (
-    ncclDataTypeEnum,
-)
 from vllm.distributed.parallel_state import GroupCoordinator, is_local_first_rank
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -221,11 +220,19 @@ def create_eplb_communicator(
                 "EPLB communicator 'pynccl' supports only cuda-like devices "
                 f"(got {tensor_device_type})."
             )
+
+        def _dtype_supported(dtype: torch.dtype) -> bool:
+            try:
+                _to_nccl_dtype(dtype)
+                return True
+            except NcclInvalid:
+                return False
+
         unsupported_dtypes = sorted(
             {
                 tensor.dtype
                 for tensor in expert_weights
-                if not ncclDataTypeEnum.supports_torch_dtype(tensor.dtype)
+                if not _dtype_supported(tensor.dtype)
             },
             key=str,
         )

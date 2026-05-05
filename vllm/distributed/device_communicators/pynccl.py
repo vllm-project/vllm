@@ -792,6 +792,13 @@ if envs.VLLM_DISABLE_NCCL4PY:
         def deregister_comm_window(self, window):
             return self.nccl.ncclCommWindowDeregister(self.comm, window)
 
+        def destroy(self):
+            if self.available and not self.disabled:
+                with torch.accelerator.device_index(self.device.index):
+                    self.nccl.ncclCommDestroy(self.comm)
+                self.available = False
+                self.disabled = True
+
         def batch_isend_irecv(self, p2p_ops: list, stream=None):
             if self.disabled:
                 return
