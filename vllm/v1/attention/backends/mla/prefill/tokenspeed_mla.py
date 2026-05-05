@@ -64,24 +64,34 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             layer_names=layer_names,
         )
 
-        # Pre-JIT the kernel for the FP8 prefill shape so the first forward
-        # pass doesn't pay the compile cost. warmup_compile_prefill is
+        # Pre-JIT the kernel for both BF16 and FP8 prefill shapes so the first
+        # forward pass doesn't pay the compile cost. warmup_compile_prefill is
         # idempotent: each (q_dtype, d_qk, d_v) is compiled at most once
-        # process-wide, so calling it once per layer instantiation is fine.
+        # process-wide. Whether prefill runs FP8 or BF16 depends on
+        # `use_prefill_query_quantization`, which we can't see here, so warm up
+        # both.
         from tokenspeed_mla import warmup_compile_prefill
 
-        warmup_compile_prefill(
-            q_dtype=torch.float8_e4m3fn,
-            d_qk=qk_nope_head_dim + qk_rope_head_dim,
-            d_v=v_head_dim,
-            enable_pdl=False,
-        )
+        for q_dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            warmup_compile_prefill(
+                q_dtype=q_dtype,
+                d_qk=qk_nope_head_dim + qk_rope_head_dim,
+                d_v=v_head_dim,
+                enable_pdl=False,
+            )
 
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
         super().prepare_metadata(prefill_metadata)
+        # Kernel signature requires `seq_lens` but the implementation never reads
+        # it (per-batch lengths are derived from `cum_seq_lens` diffs); compute
+        # for parity with trtllm_ragged. cuda-graph padding in
+        # `query_start_loc` is saturated to `total_num_tokens`
+        # (gpu_model_runner.py:1905), so trailing diffs are 0 and padded batches
+        # are kernel no-ops — same reason trtllm passes the padded length as
+        # batch_size directly.
         self._query_seq_lens = (
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
