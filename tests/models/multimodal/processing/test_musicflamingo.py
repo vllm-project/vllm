@@ -58,11 +58,14 @@ class MockFeatureExtractor:
     def __init__(self):
         self.sampling_rate = 16000
         self.chunk_length = 30
+        self.hop_length = 160
 
     def __call__(self, audios, **kwargs):
         return {
             "input_features": torch.zeros((len(audios), 80, 3000)),
-            "attention_mask": torch.ones((len(audios), 3000), dtype=torch.long),
+            "attention_mask": torch.ones(
+                (len(audios), 30 * self.sampling_rate), dtype=torch.long
+            ),
         }
 
 
@@ -108,6 +111,7 @@ def test_musicflamingo_chunk_counting_without_rote_timestamps(mock_ctx):
 
     assert chunk_counts.tolist() == [1, 2]
     assert "rote_timestamps" not in processed
+    assert processed["feature_attention_mask"].shape == (3, 3000)
 
 
 def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):

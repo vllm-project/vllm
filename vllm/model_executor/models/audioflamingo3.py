@@ -372,6 +372,37 @@ class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
+    def _normalize_feature_attention_mask(
+        self,
+        feature_attention_mask: torch.Tensor,
+        input_features: torch.Tensor,
+        feature_extractor: Any,
+    ) -> torch.Tensor:
+        feature_len = input_features.shape[-1]
+        if feature_attention_mask.shape[-1] == feature_len:
+            return feature_attention_mask
+
+        input_lengths = feature_attention_mask.sum(-1).to(torch.long)
+        hop_length = getattr(feature_extractor, "hop_length", None)
+        if hop_length is None:
+            raise ValueError(
+                "Cannot convert sample-level audio attention mask without "
+                "`feature_extractor.hop_length`."
+            )
+
+        feature_lengths = torch.div(
+            input_lengths + hop_length - 1,
+            hop_length,
+            rounding_mode="floor",
+        ).clamp(max=feature_len)
+        feature_positions = torch.arange(
+            feature_len,
+            device=feature_attention_mask.device,
+        )
+        return (feature_positions[None, :] < feature_lengths[:, None]).to(
+            feature_attention_mask.dtype
+        )
+
     def _expand_audio_tokens(
         self,
         prompt: str,
@@ -462,6 +493,11 @@ class AudioFlamingo3MultiModalProcessor(
         elif "attention_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("attention_mask")
 
+        outputs["feature_attention_mask"] = self._normalize_feature_attention_mask(
+            outputs["feature_attention_mask"],
+            outputs["input_features"],
+            feature_extractor,
+        )
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
 
         expanded_prompt = self._expand_audio_tokens(

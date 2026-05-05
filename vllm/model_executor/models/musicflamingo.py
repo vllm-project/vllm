@@ -170,7 +170,7 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
 
 class MusicFlamingoFeatureInputs(AudioFlamingo3FeatureInputs):
     rote_timestamps: Annotated[
-        torch.Tensor,
+        torch.Tensor | None,
         TensorShape(
             "num_chunks",
             "num_audio_time_steps",

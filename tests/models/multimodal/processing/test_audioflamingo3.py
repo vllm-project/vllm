@@ -55,11 +55,14 @@ class MockFeatureExtractor:
     def __init__(self):
         self.sampling_rate = 16000
         self.chunk_length = 30
+        self.hop_length = 160
 
     def __call__(self, audios, **kwargs):
         return {
             "input_features": torch.zeros((len(audios), 80, 3000)),
-            "attention_mask": torch.ones((len(audios), 3000), dtype=torch.long),
+            "attention_mask": torch.ones(
+                (len(audios), 30 * self.sampling_rate), dtype=torch.long
+            ),
         }
 
 
@@ -106,6 +109,7 @@ def test_audio_chunk_counting(mock_ctx):
     assert chunk_counts[0].item() == 1
     assert chunk_counts[1].item() == 2
     assert len(chunk_counts) == 2
+    assert processed["feature_attention_mask"].shape == (3, 3000)
 
 
 def test_dummy_data_generation(mock_ctx):
