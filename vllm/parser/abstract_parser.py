@@ -743,8 +743,11 @@ class DelegatingParser(Parser):
                     state.end_token_skip_literal = literal
                     boundary_just_handed_off = True
 
-        # Strip the buffered end-token text from the start of phase B,
-        # otherwise the tool branch below leaks it as delta.content.
+        # Strip buffered end-token text so the tool branch doesn't leak
+        # it as delta.content. Reasoning text buffered alongside a
+        # partial literal (e.g. "thinking_tail</th") is recovered and
+        # merged into delta.reasoning after the tool branch runs.
+        recovered_reasoning_prefix = ""
         if state.end_token_skip_armed and not state.end_token_skip_done:
             end_str = state.end_token_skip_literal
             if not boundary_just_handed_off:
@@ -760,6 +763,9 @@ class DelegatingParser(Parser):
                     None,
                 )
                 literal_pos = state.end_token_skip_buffer.find(end_str)
+                # Pre-literal text is reasoning content; preserve it
+                # for the merge below.
+                recovered_reasoning_prefix = state.end_token_skip_buffer[:literal_pos]
                 content_start = literal_pos + (
                     0 if end_str == tool_section else len(end_str)
                 )
@@ -799,6 +805,14 @@ class DelegatingParser(Parser):
         # No parsers: pass through as content
         if self._reasoning_parser is None and self._tool_parser is None:
             delta_message = DeltaMessage(content=delta_text)
+
+        # Merge reasoning text recovered from the skip buffer (see above).
+        if recovered_reasoning_prefix:
+            if delta_message is None:
+                delta_message = DeltaMessage()
+            delta_message.reasoning = (
+                delta_message.reasoning or ""
+            ) + recovered_reasoning_prefix
 
         state.previous_text = current_text
         state.previous_token_ids = current_token_ids

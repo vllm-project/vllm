@@ -458,3 +458,52 @@ def test_delegating_parser_recovers_partial_end_token_in_boundary_chunk(
     assert "</think>" not in content, (
         f"partial end-token leaked into content: {content!r}"
     )
+
+
+def test_delegating_parser_recovers_reasoning_prefix_buffered_with_partial_end_token(
+    wrapped_kimi_parser, kimi_k2_tokenizer
+):
+    """Reasoning text in the boundary chunk preceding a partial `</think>`
+    must not be silently discarded.
+
+    When delta_text is `"final_thought</th"` plus the end-token id, the
+    Kimi parser returns None (literal not yet visible) and the whole
+    `"final_thought</th"` lands in the skip buffer. Without recovery the
+    pre-literal `"final_thought"` is dropped on resolve; downstream sees
+    reasoning that ends one chunk too early."""
+    request = ChatCompletionRequest(
+        model="test-model", messages=[], temperature=1.0, stream=True
+    )
+    start_id = wrapped_kimi_parser._reasoning_parser._start_token_id
+    end_id = wrapped_kimi_parser._reasoning_parser._end_token_id
+
+    def encode(s: str) -> int:
+        return kimi_k2_tokenizer.encode(s, add_special_tokens=False)[0]
+
+    # Boundary chunk: meaningful reasoning text + partial `</th` + end id.
+    timeline = [
+        Chunk("<think>", [start_id]),
+        Chunk("earlier_reasoning", [encode("earlier_reasoning")]),
+        Chunk("final_thought</th", [encode("final_thought"), end_id]),
+        Chunk("ink>", []),
+        Chunk(" answer", [encode("answer")]),
+    ]
+
+    reasoning, content = _drive(wrapped_kimi_parser, timeline, request)
+
+    assert "final_thought" in reasoning, (
+        f"pre-literal reasoning text dropped on skip resolve: {reasoning!r}"
+    )
+    assert "earlier_reasoning" in reasoning, (
+        f"earlier reasoning unexpectedly missing: {reasoning!r}"
+    )
+    assert "answer" in content, f"post-boundary content lost: {content!r}"
+    assert "</think>" not in content, (
+        f"partial end-token leaked into content: {content!r}"
+    )
+    assert "</think>" not in reasoning, (
+        f"end-token leaked into reasoning: {reasoning!r}"
+    )
+    assert "final_thought" not in content, (
+        f"pre-literal reasoning leaked into content: {content!r}"
+    )
