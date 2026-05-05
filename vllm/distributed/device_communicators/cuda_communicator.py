@@ -356,6 +356,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # on ROCm.
         pynccl_comm = self.pynccl_comm
         if pynccl_comm is not None and not pynccl_comm.disabled:
+            input_ = input_.contiguous()
             output_size = (input_size[0] * world_size,) + input_size[1:]
             output_tensor = torch.empty(
                 output_size, dtype=input_.dtype, device=input_.device
