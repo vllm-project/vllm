@@ -84,22 +84,28 @@ def _build_config(
     return cfg
 
 
-def test_nixl_connector_rejects_expandable_segments(monkeypatch):
-    """NixlConnector pins KV cache via ibv_reg_mr; expandable_segments lets
-    the CUDA VMM allocator remap memory and invalidates the IB rkey."""
+@pytest.mark.parametrize(
+    "kv_connector", ["NixlConnector", "MooncakeConnectorV1", "SomeOOTConnector"]
+)
+def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
+    """KV connectors that pin KV cache memory (e.g. via ibv_reg_mr) are
+    invalidated when expandable_segments lets the CUDA VMM allocator remap
+    the underlying physical pages. We can't enumerate every connector that
+    does this (especially OOT ones), so reject the combination whenever any
+    connector is configured."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     with pytest.raises(ValueError, match="expandable_segments"):
-        _build_config(kv_connector="NixlConnector")
+        _build_config(kv_connector=kv_connector)
 
 
-def test_nixl_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
+def test_kv_connector_allows_expandable_segments_with_sleep_mode(monkeypatch):
     """Sleep mode routes KV allocations through CuMemAllocator's pool, which
     auto-disables expandable_segments (see #40812)."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector="NixlConnector", enable_sleep_mode=True)
 
 
-def test_nixl_connector_allows_other_alloc_conf(monkeypatch):
+def test_kv_connector_allows_other_alloc_conf(monkeypatch):
     """Other PYTORCH_CUDA_ALLOC_CONF values must not be rejected."""
     monkeypatch.setenv(
         "PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512,expandable_segments:False"
@@ -107,10 +113,11 @@ def test_nixl_connector_allows_other_alloc_conf(monkeypatch):
     _build_config(kv_connector="NixlConnector")
 
 
-def test_non_nixl_connector_ignores_expandable_segments(monkeypatch):
-    """The expandable_segments check only applies to NixlConnector."""
+def test_no_kv_connector_ignores_expandable_segments(monkeypatch):
+    """The expandable_segments check only applies when a KV connector is
+    configured."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    _build_config(kv_connector="LMCacheConnectorV1")
+    _build_config(kv_connector=None)
 
 
 def test_kv_offloading_size_only_uses_native_default():

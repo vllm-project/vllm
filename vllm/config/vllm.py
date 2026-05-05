@@ -713,16 +713,20 @@ class VllmConfig:
         """Reject configurations that silently corrupt KV transfers."""
         if (
             self.kv_transfer_config is None
-            or self.kv_transfer_config.kv_connector != "NixlConnector"
+            or self.kv_transfer_config.kv_connector is None
         ):
             return
 
         # PyTorch's expandable_segments allocator uses CUDA VMM, which can
         # remap a virtual address range to different physical pages over the
-        # engine's lifetime. NixlConnector pins KV cache memory once via
-        # ibv_reg_mr, so any later remap leaves the registered rkey pointing
-        # at stale physical pages, producing IBV_WC_REM_ACCESS_ERR /
+        # engine's lifetime. KV connectors that pin KV cache memory (e.g.
+        # NixlConnector via ibv_reg_mr, MooncakeConnector) end up with their
+        # registrations pointing at stale physical pages after any remap,
+        # producing RDMA failures like IBV_WC_REM_ACCESS_ERR /
         # NIXL_ERR_REMOTE_DISCONNECT at the first inter-node KV transfer.
+        # We can't enumerate every in-tree and out-of-tree connector that
+        # pins memory, so we conservatively reject the combination whenever
+        # any KV connector is configured.
         #
         # Sleep mode is exempt: CuMemAllocator.use_memory_pool toggles
         # expandable_segments off around its pool (see #40812), so the KV
@@ -736,11 +740,12 @@ class VllmConfig:
             return
 
         raise ValueError(
-            "NixlConnector is incompatible with "
-            "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True unless "
-            "enable_sleep_mode is also enabled. PyTorch's CUDA VMM allocator "
-            "can remap KV cache virtual addresses to different physical pages, "
-            "invalidating the IB memory regions registered by NIXL. Either "
+            f"KV connector {self.kv_transfer_config.kv_connector} is "
+            "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+            "unless enable_sleep_mode is also enabled. PyTorch's CUDA VMM "
+            "allocator can remap KV cache virtual addresses to different "
+            "physical pages, invalidating any pinned/registered KV memory "
+            "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
             "unset expandable_segments:True or enable sleep mode (which "
             "routes KV allocations through CuMemAllocator's pool, where "
             "expandable_segments is automatically disabled)."
