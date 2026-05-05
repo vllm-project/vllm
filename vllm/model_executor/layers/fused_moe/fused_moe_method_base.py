@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
-    from vllm.model_executor.layers.runner.shared_experts import SharedExperts
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 logger = init_logger(__name__)
 

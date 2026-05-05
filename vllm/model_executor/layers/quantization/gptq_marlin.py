@@ -821,5 +821,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
