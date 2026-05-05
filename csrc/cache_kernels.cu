@@ -99,9 +99,11 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
   // Use cuMemcpyBatchAsync (CUDA 12.8+) to submit all copies in a single
   // driver call, amortizing per-copy submission overhead.
-  // int64_t and CUdeviceptr/size_t are both 8 bytes on 64-bit platforms,
-  // so we reinterpret_cast the tensor data directly to avoid copies.
+  // int64_t, CUdeviceptr, void*, and size_t are all 8 bytes on 64-bit
+  // platforms, so we reinterpret_cast the tensor data directly to avoid
+  // copies.
   static_assert(sizeof(CUdeviceptr) == sizeof(int64_t));
+  static_assert(sizeof(void*) == sizeof(int64_t));
   static_assert(sizeof(size_t) == sizeof(int64_t));
 #if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12080
   // Resolve cuMemcpyBatchAsync at runtime via cuGetProcAddress so that
