@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TypeAlias
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers.tokenization_utils_tokenizers import TokenizersBackend
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
@@ -122,4 +123,26 @@ class CachedHfTokenizer(TokenizerLike):
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
+        return get_cached_tokenizer(tokenizer)
+
+
+class CachedTokenizersBackend(TokenizerLike):
+    @classmethod
+    def from_pretrained(
+        cls,
+        path_or_repo_id: str | Path,
+        *args,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+        download_dir: str | None = None,
+        **kwargs,
+    ) -> HfTokenizer:
+        tokenizer = TokenizersBackend.from_pretrained(
+            path_or_repo_id,
+            *args,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            cache_dir=download_dir,
+            **kwargs,
+        )
         return get_cached_tokenizer(tokenizer)

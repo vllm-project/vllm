@@ -3,7 +3,10 @@
 from pathlib import Path
 
 import pytest
+from transformers import PretrainedConfig
 
+import vllm.tokenizers.registry as registry
+from vllm.renderers.params import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.registry import (
     TokenizerRegistry,
@@ -75,3 +78,31 @@ def test_customized_tokenizer():
     assert tokenizer.bos_token_id == 0
     assert tokenizer.eos_token_id == 1
     assert tokenizer.pad_token_id == 2
+
+
+@pytest.mark.parametrize(
+    "model_type",
+    sorted(registry._MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS),
+)
+def test_get_tokenizer_incorrect_tokenizer_class_returns_cached_tokenizer(
+    monkeypatch,
+    model_type,
+):
+    # These model types are loaded through the TokenizersBackend fallback.
+    monkeypatch.setattr(
+        registry,
+        "get_config",
+        lambda *args, **kwargs: PretrainedConfig(model_type=model_type),
+    )
+
+    # Use gpt2 as a small tokenizer fixture; the monkeypatched config
+    # forces get_tokenizer through the incorrect-tokenizer-class fallback.
+    tokenizer = registry.get_tokenizer("gpt2")
+    params = TokenizeParams(max_total_tokens=10, max_output_tokens=1)
+
+    assert tokenizer.max_chars_per_token > 0
+    assert tokenizer.max_token_id >= len(tokenizer) - 1
+    assert isinstance(tokenizer.all_special_ids, list)
+    assert isinstance(tokenizer.all_special_tokens, list)
+    assert tokenizer.get_vocab()
+    assert params._text_len_check(tokenizer, "hello") == "hello"
