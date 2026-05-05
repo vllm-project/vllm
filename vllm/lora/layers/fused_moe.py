@@ -335,10 +335,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def quant_method(self):
         return self.base_layer.quant_method
 
-    @property
-    def is_internal_router(self) -> bool:
-        return self.base_layer.is_internal_router
-
     @classmethod
     def can_replace_layer(
         cls,

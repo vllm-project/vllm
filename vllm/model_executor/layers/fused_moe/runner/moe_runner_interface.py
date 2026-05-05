@@ -31,10 +31,6 @@ class MoERunnerInterface(PluggableLayer, ABC):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    @abstractmethod
-    def is_internal_router(self) -> bool:
-        raise NotImplementedError
-
     @property
     @abstractmethod
     def shared_experts(self) -> SharedExperts | None:

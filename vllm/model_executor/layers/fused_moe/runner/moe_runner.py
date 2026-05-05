@@ -265,9 +265,6 @@ class MoERunner(MoERunnerInterface):
             self._shared_experts._quant_method = quant_method
         self._quant_method = quant_method
 
-    def is_internal_router(self) -> bool:
-        return self.gate is not None
-
     def apply_routed_input_transform(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor | None]:

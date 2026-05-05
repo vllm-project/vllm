@@ -682,11 +682,6 @@ class FusedMoE(PluggableLayer):
     def use_ep(self):
         return self.moe_parallel_config.use_ep
 
-    @property
-    def is_internal_router(self) -> bool:
-        # By default, router/gate is called before FusedMoE forward pass
-        return self.runner.is_internal_router()
-
     def _maybe_init_expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
