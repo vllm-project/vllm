@@ -21,7 +21,7 @@ from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     KVOutputAggregator,
-    TpKVTopology,
+    TransferTopology,
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
@@ -463,19 +463,20 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         test_shape = self.attn_backends[0].get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
-        self.kv_topo = TpKVTopology(
+        self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
+            tp_size=self.world_size,
+            block_size=self.block_size,
             engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
+            is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
             tensor_shape=test_shape,
         )
 
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
+            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
         )
 
     def _nixl_handshake(
@@ -496,7 +497,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Adjust remote block length metadata to satisfy heterogeneous TP
         # invariants enforced during handshake validation.
         remote_block_lens = list(self.block_len_per_layer)
-        tp_ratio = self.kv_topo.tp_ratio(remote_tp_size)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         if remote_tp_size > self.world_size:
             # P TP > D TP case, block_len of remote is smaller
             remote_block_lens = [
@@ -731,8 +732,9 @@ class TestNixlHandshake:
             assert set(remote_agents.keys()) == set(range(tp_ratio))
 
             remote_engine_id = worker.REMOTE_ENGINE_ID
-            assert worker._tp_size[remote_engine_id] == remote_tp_size
-            assert -tp_ratio == worker.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
+            remote_info = worker.transfer_topo.get_engine_info(remote_engine_id)
+            assert remote_info.remote_tp_size == remote_tp_size
+            assert -tp_ratio == worker.transfer_topo.tp_ratio(remote_tp_size)
             # ensure src_xfer_handles_by_tp_ratio is populated with tpratio chunks
             assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
             assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
@@ -796,7 +798,7 @@ class TestNixlHandshake:
             (conn_p0.connector_worker, conn_p1.connector_worker)
         ):
             worker.world_size = p_tp_size
-            worker.kv_topo.remote_tp_size = {worker.engine_id: p_tp_size}
+            worker.transfer_topo.tp_size = p_tp_size
             worker.tp_rank = rank
             worker.use_mla = True
 
@@ -2337,7 +2339,7 @@ def test_compatibility_hash_validation(
         remote_hash = compute_nixl_compatibility_hash(
             remote_vllm_config,
             decode_worker.backend_name,
-            decode_worker.kv_topo.cross_layers_blocks,
+            decode_worker.transfer_topo.cross_layers_blocks,
         )
 
     prefill_block_size = config_overrides.get("block_size", 16)
@@ -2424,12 +2426,13 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     test_shape = backend.get_kv_cache_shape(
         num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
     )
-    decode_worker.kv_topo = TpKVTopology(
+    decode_worker.transfer_topo = TransferTopology(
         tp_rank=decode_worker.tp_rank,
+        tp_size=decode_worker.world_size,
+        block_size=decode_worker.block_size,
         engine_id=decode_worker.engine_id,
-        remote_tp_size=decode_worker._tp_size,  # shared state
-        remote_block_size=decode_worker._block_size,  # shared state
         is_mla=decode_worker.use_mla,
+        is_mamba=False,
         total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
         attn_backends=[backend],
         tensor_shape=test_shape,
@@ -2438,7 +2441,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     decode_worker.compat_hash = compute_nixl_compatibility_hash(
         decode_worker.vllm_config,
         decode_worker.backend_name,
-        decode_worker.kv_topo.cross_layers_blocks,
+        decode_worker.transfer_topo.cross_layers_blocks,
     )
 
     if error_scenario == "handshake_decode_error":
@@ -2475,4 +2478,123 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 port=1234,
                 remote_tp_size=1,
                 expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            )
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_mla_broadcast_notif_uses_remote_request_id(
+        self, default_vllm_config, dist_init
+    ):
+        """MLA + remote TP > local TP: the broadcast notification sent to
+        non-read prefill ranks must be keyed by the prefill-side request
+        id (``meta.remote.request_id``), not the local decode request id.
+
+        Prefill ranks key ``_reqs_to_send`` by their own request id, so a
+        broadcast keyed by the decode id is rejected in
+        ``_get_new_notifs`` with "Potentially invalid KV blocks for
+        unrecognized request" and the blocks only release via the abort
+        timeout. See ``_read_blocks_for_req`` in
+        ``vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py``.
+        """
+        decode_tp_size = 1
+        prefill_tp_size = 4
+
+        vllm_config = create_vllm_config()
+        vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
+
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id, hand_shake_latency=0
+        )
+        worker = connector.connector_worker
+
+        # Force the MLA path; only `self.use_mla` gates the branches we
+        # exercise inside `_read_blocks_for_req`.
+        worker.use_mla = True
+
+        # Manually register the remote (P) engine and pre-populate the
+        # per-rank state the handshake would normally fill in. The real
+        # `_nixl_handshake` is unnecessary here — we only need
+        # `transfer_topo` to know `remote_tp_size`, and `_remote_agents`
+        # / `dst_xfer_side_handles` to be keyed by remote rank.
+        remote_engine_id = "remote_engine"
+        worker.transfer_topo.register_remote_engine(
+            remote_engine_id=remote_engine_id,
+            remote_tp_size=prefill_tp_size,
+            remote_block_size=worker.block_size,
+            remote_block_len=worker.block_size * 4096,
+            remote_physical_blocks_per_logical=1,
+            local_block_len=worker.block_size * 4096,
+        )
+        worker._remote_agents[remote_engine_id] = {
+            rank: f"agent_p{rank}" for rank in range(prefill_tp_size)
+        }
+        worker.dst_xfer_side_handles = {
+            remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+        }
+        # Sanity: D TP=1, P TP=4 => tp_ratio = -4 (P > D).
+        assert worker.transfer_topo.tp_ratio(prefill_tp_size) == -prefill_tp_size
+
+        # Distinct ids on each side — that's the whole point of the bug.
+        decode_req_id = "decode-req-AAAA"
+        prefill_req_id = "prefill-req-BBBB"
+        assert decode_req_id != prefill_req_id
+
+        metadata = NixlConnectorMetadata()
+        metadata.add_new_req_to_recv(
+            request_id=decode_req_id,
+            local_block_ids=([0, 1, 2],),
+            kv_transfer_params={
+                "remote_block_ids": ([10, 11, 12],),
+                "remote_engine_id": remote_engine_id,
+                "remote_request_id": prefill_req_id,
+                "remote_host": "localhost",
+                "remote_port": 1234,
+                "remote_tp_size": prefill_tp_size,
+            },
+        )
+        meta = metadata.reqs_to_recv[decode_req_id]
+
+        # Capture broadcast send_notif calls; stub `_read_blocks` so we
+        # don't need a working xfer path. Real `_read_blocks` emits its
+        # auto-notif via `make_prepped_xfer`, not via `send_notif`, so
+        # any captured `send_notif` here is a broadcast.
+        send_notif_calls: list[tuple[str, bytes]] = []
+        worker.nixl_wrapper.send_notif = (  # type: ignore[method-assign]
+            lambda agent_name, notif_msg: send_notif_calls.append(
+                (agent_name, notif_msg)
+            )
+        )
+        worker._read_blocks = MagicMock()  # type: ignore[method-assign]
+
+        worker._read_blocks_for_req(decode_req_id, meta)
+
+        # MLA: read once from rank 0 and broadcast to the other ranks.
+        worker._read_blocks.assert_called_once()
+        assert worker._read_blocks.call_args.kwargs["remote_rank"] == 0
+        assert (
+            worker._read_blocks.call_args.kwargs["remote_request_id"] == prefill_req_id
+        )
+
+        # Broadcast goes to ranks {1, 2, 3} only, never to the read target.
+        expected_recipients = {
+            worker._remote_agents[remote_engine_id][r]
+            for r in range(1, prefill_tp_size)
+        }
+        assert {agent for agent, _ in send_notif_calls} == expected_recipients
+
+        # Every broadcast notif must be keyed by the prefill request id.
+        # Pre-fix this used the *decode* request id, which prefill ranks
+        # didn't recognize.
+        expected_notif = f"{prefill_req_id}:{decode_tp_size}".encode()
+        bad_notif = f"{decode_req_id}:{decode_tp_size}".encode()
+        for agent, notif in send_notif_calls:
+            assert notif == expected_notif, (
+                f"Broadcast notif to {agent!r} must use prefill_req_id; "
+                f"got {notif!r} (expected {expected_notif!r}, "
+                f"buggy form would be {bad_notif!r})"
             )

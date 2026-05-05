@@ -13,12 +13,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 
 
-def make_num_tokens_across_dp(dp_size: int, num_tokens: int) -> torch.Tensor | None:
-    if dp_size == 1:
-        return None
-    return torch.full((dp_size,), num_tokens, dtype=torch.int32, device="cpu")
-
-
 def sync_cudagraph_and_dp_padding(
     cudagraph_manager: CudaGraphManager | None,
     desired_batch_desc: BatchExecutionDescriptor,
