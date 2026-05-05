@@ -228,11 +228,35 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
     )
 
 
-def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
+def _get_priority_backends(
+    config: FusedMoEConfig | None = None,
+) -> list[Mxfp4MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
-    Only includes BF16 backends. MXFP8 backends are selected via env vars.
     """
+    # DeepSeek-V4 special case handling
+    if config is not None and config.routing_method == RoutingMethodType.DeepseekV4:
+        # DeepSeek-V4 on ROCm is more accurate with the unfused Triton MXFP4 path
+        # than the default AITER path. Prefer Triton-unfused for this routing mode,
+        # while keeping AITER as a fallback if Triton-unfused rejects the config.
+        if current_platform.is_rocm():
+            return [
+                Mxfp4MoeBackend.TRITON_UNFUSED,
+                Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            ]
+        # Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
+        # TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
+        # backend-level ``is_supported_config`` check filters by device capability).
+        return [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.DEEPGEMM_MXFP4,
+            # TRITON_UNFUSED has bug with MTP support
+            # TODO re-enable after kernel is fixed
+            # TRITON_UNFUSED
+            Mxfp4MoeBackend.MARLIN,
+            Mxfp4MoeBackend.BATCHED_MARLIN,
+        ]
+
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
@@ -246,26 +270,6 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
         Mxfp4MoeBackend.EMULATION,
-    ]
-    return _AVAILABLE_BACKENDS
-
-
-def _get_priority_backends() -> list[Mxfp4MoeBackend]:
-    """
-    Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
-    TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
-    backend-level ``is_supported_config`` check filters by device capability).
-    """
-    if current_platform.is_rocm():
-        return [Mxfp4MoeBackend.AITER_MXFP4_BF16]
-    _AVAILABLE_BACKENDS = [
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.DEEPGEMM_MXFP4,
-        # TRITON_UNFUSED has bug with MTP support
-        # TODO re-enable after kernel is fixed
-        # TRITON_UNFUSED
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -384,7 +388,7 @@ def select_mxfp4_moe_backend(
         )
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends_for_gpt_oss()
+    AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
@@ -484,100 +488,6 @@ def select_mxfp4_moe_backend(
         )
 
     return Mxfp4MoeBackend.NONE, None
-
-
-def select_deepseek_v4_mxfp4_moe_backend(
-    config: FusedMoEConfig,
-) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
-    """
-    Select the MXFP4 MoE backend with MXFP8 activation as top priority.
-    Falls back through BF16 and other backends.
-    """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
-    # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
-    # falling back to the auto priority list.
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        requested_backend = map_mxfp4_backend(runner_backend)
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == Mxfp4MoeBackend.MARLIN
-        ):
-            requested_backend = Mxfp4MoeBackend.BATCHED_MARLIN
-        return _return_or_raise(
-            requested_backend,
-            config,
-            kMxfp4Static,
-            _backend_activation_key(requested_backend),
-            activation_format,
-        )
-
-    # DeepSeek-V4 on ROCm is more accurate with the unfused Triton MXFP4 path
-    # than the default AITER path. Prefer Triton-unfused for this routing mode,
-    # while keeping AITER as a fallback if Triton-unfused rejects the config.
-    if (
-        current_platform.is_rocm()
-        and config.routing_method == RoutingMethodType.DeepseekV4
-    ):
-        priority_backends = [
-            Mxfp4MoeBackend.TRITON_UNFUSED,
-            Mxfp4MoeBackend.AITER_MXFP4_BF16,
-        ]
-    else:
-        priority_backends = _get_priority_backends()
-
-    # Iterate priority backends: TRTLLM MXFP8, then Triton.
-    for backend in priority_backends:
-        activation_key = _backend_activation_key(backend)
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
-
-    raise NotImplementedError(
-        "No MXFP4 MoE backend supports the deployment configuration."
-    )
 
 
 def mxfp4_round_up_hidden_size_and_intermediate_size(
