@@ -119,6 +119,7 @@ MoEBackend = Literal[
     "flashinfer_cutedsl",
     "marlin",
     "humming",
+    "triton_unfused",
     "aiter",
     "emulation",
 ]
@@ -150,6 +151,7 @@ class KernelConfig:
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
+    - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.

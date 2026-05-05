@@ -300,6 +300,7 @@ class DeepseekCompressor(nn.Module):
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
         state_width = state_cache.shape[-1] // 2
+        pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
 
         # Store the KV and score (with fused APE addition) in the state.
         # NOTE: PDL is disabled — both this kernel and _fused_kernel below
@@ -324,7 +325,7 @@ class DeepseekCompressor(nn.Module):
             TRITON_BLOCK_SIZE=triton.next_power_of_2(kv.shape[-1]),
             STATE_WIDTH=state_width,
             COMPRESS_RATIO=self.compress_ratio,
-            launch_pdl=False,
+            **pdl_kwargs,
         )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
@@ -373,7 +374,7 @@ class DeepseekCompressor(nn.Module):
             SCALE_DIM=self._scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
             num_warps=self._num_warps,
-            launch_pdl=False,
+            **pdl_kwargs,
         )
 
 

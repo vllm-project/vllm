@@ -167,8 +167,12 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         )
 
         # Three aux streams shared across all MTP layers, mirroring
-        # DeepseekV4Model.
-        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # DeepseekV4Model. ROCm runs the same work serially for now.
+        aux_stream_list = (
+            None
+            if current_platform.is_rocm()
+            else [torch.cuda.Stream() for _ in range(3)]
+        )
 
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
