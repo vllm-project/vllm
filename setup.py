@@ -969,6 +969,14 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if req.startswith("flashinfer-python") and cuda_major == "13":
+                # Activate FI's `[cu13]` extra on cu13 builds (cu13 deps for
+                # the SM100 GDN kernel). Mirrors the Dockerfile cu13 path.
+                req = req.replace(
+                    "flashinfer-python",
+                    "flashinfer-python[cu13]",
+                    1,
+                )
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
