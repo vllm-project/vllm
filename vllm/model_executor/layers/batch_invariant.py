@@ -969,6 +969,19 @@ def enable_batch_invariant_mode():
     _original_torch_bmm = torch.bmm
     torch.bmm = bmm_batch_invariant
 
+    # XPU: register batch-invariant overrides for ops verified to work on
+    # Intel GPUs.  matmul_kernel_persistent is broken on XPU due to
+    # tl.range(..., flatten=True), so mm/addmm/matmul/linear are NOT
+    # registered here.
+    if current_platform.is_xpu():
+        _batch_invariant_LIB.impl(
+            "aten::_log_softmax", _log_softmax_batch_invariant, "XPU"
+        )
+        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "XPU")
+        _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "XPU")
+        _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "XPU")
+        _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "XPU")
+
     _original_bf16_reduction_precision = (
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
     )

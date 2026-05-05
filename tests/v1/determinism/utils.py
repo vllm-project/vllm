@@ -11,6 +11,7 @@ from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 skip_unsupported = pytest.mark.skipif(
@@ -18,6 +19,11 @@ skip_unsupported = pytest.mark.skipif(
     # Supports testing on Ampere and Ada Lovelace devices.
     # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
     reason="Requires CUDA and >= Ampere (SM80)",
+)
+
+skip_unsupported_xpu = pytest.mark.skipif(
+    not (current_platform.is_xpu() and HAS_TRITON),
+    reason="Requires Intel XPU device with Triton support",
 )
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"

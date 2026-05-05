@@ -22,6 +22,13 @@ Batch invariance currently requires NVIDIA GPUs with compute capability 9.0 or h
 - **H-series**: H100, H200
 - **B-series**: B100, B200
 
+### Intel XPU (Experimental)
+
+Partial batch invariance is supported on Intel XPU devices with Triton support.
+The following ops are overridden: `bmm`, `log_softmax`, `softmax`, `mean`.
+Note that `mm`/`matmul`/`linear` overrides are not yet available on XPU due to
+a Triton limitation (`tl.range(..., flatten=True)` is unsupported).
+
 ## Enabling Batch Invariance
 
 Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environment variable to `1`:
