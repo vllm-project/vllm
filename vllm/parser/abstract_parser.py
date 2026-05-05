@@ -648,15 +648,29 @@ class DelegatingParser(Parser):
         return state.reasoning_ended
 
     def _expect_streamed_thinking_blocks(self) -> bool:
-        """True when chat template kwargs say the model emits thinking in
-        outputs (``thinking=True`` or ``enable_thinking=True``).  When
-        kwargs are missing, falls back to the reasoning parser: any
-        ``reasoning_start_str`` implies streamed thinking blocks
-        (DeepSeek / R1 / Qwen3-thinking, but *not* Identity).
+        """Return True when the model is expected to emit thinking tokens.
 
-        An explicit ``thinking=False`` / ``enable_thinking=False``
-        overrides the fallback so Qwen3-thinking-disabled + tools can
-        still use ``is_reasoning_end(prompt)``.
+        Decision matrix::
+
+            thinking=True  / enable_thinking=True  -> True
+            thinking=False / enable_thinking=False -> False  (explicit, beats fallback)
+            key absent, reasoning_parser has reasoning_start_str  -> True
+                (DeepSeek / R1 / Qwen3-thinking)
+            key absent, IdentityReasoningParser (reasoning_start_str=None) -> False
+            no reasoning_parser                                    -> False
+
+        Two-stage logic:
+
+        1. **Explicit kwargs** – ``_chat_template_kwargs`` may be flat
+           ``{"thinking": True}`` or nested ``{"chat_template_kwargs": {...}}``;
+           both shapes are handled.  An explicit ``False`` overrides the
+           fallback, so Qwen3-thinking-disabled + tools keeps the
+           ``is_reasoning_end(prompt)`` shortcut.
+
+        2. **Reasoning-parser fallback** – when kwargs are absent or the key
+           is not present, the presence of ``reasoning_start_str`` (e.g.
+           ``"<think>"``) is a reliable signal that the model was configured
+           to emit streamed thinking blocks.
         """
         # 1. Respect explicit kwargs (handle both flat and nested shapes).
         kwargs = getattr(self, "_chat_template_kwargs", None) or {}
