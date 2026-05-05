@@ -475,6 +475,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # block cache hit yet.
         block_sizes = [spec.block_size for spec, _, _ in attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
+        for manager in self.single_type_managers:
+            manager.cache_alignment_tokens = self.lcm_block_size
 
         # Attention-group indices (into ``self.attention_groups``) that
         # contain at least one EAGLE/MTP KV cache group.
