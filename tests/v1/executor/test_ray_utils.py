@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import numpy as np
 
+from vllm.v1.executor import ray_utils
 from vllm.v1.executor.ray_utils import detach_zero_copy_from_model_runner_output
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, ModelRunnerOutput
 
@@ -52,3 +55,46 @@ def test_detach_zero_copy_from_model_runner_output_copies_only_numpy_views():
     assert detached_logprobs.sampled_token_ranks.flags.writeable
     assert detached_logprobs.cu_num_generated_tokens is cu_num_generated_tokens
     assert output.prompt_logprobs_dict["req-0"] is prompt_logprobs
+
+
+def test_cluster_device_warning_uses_ray_cluster_resources(monkeypatch):
+    warnings = []
+
+    monkeypatch.setattr(
+        ray_utils,
+        "ray",
+        SimpleNamespace(cluster_resources=lambda: {"GPU": 2}),
+    )
+    monkeypatch.setattr(
+        ray_utils.logger,
+        "warning",
+        lambda *args, **kwargs: warnings.append(args),
+    )
+
+    ray_utils._warn_if_insufficient_cluster_devices(
+        SimpleNamespace(world_size=2), "GPU"
+    )
+
+    assert warnings == []
+
+
+def test_cluster_device_warning_reports_cluster_shortage(monkeypatch):
+    warnings = []
+
+    monkeypatch.setattr(
+        ray_utils,
+        "ray",
+        SimpleNamespace(cluster_resources=lambda: {"GPU": 1}),
+    )
+    monkeypatch.setattr(
+        ray_utils.logger,
+        "warning",
+        lambda *args, **kwargs: warnings.append(args),
+    )
+
+    ray_utils._warn_if_insufficient_cluster_devices(
+        SimpleNamespace(world_size=2), "GPU"
+    )
+
+    assert len(warnings) == 1
+    assert "distributed world size" in warnings[0][0]

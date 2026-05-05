@@ -273,6 +273,22 @@ def assert_ray_available():
         )
 
 
+def _warn_if_insufficient_cluster_devices(
+    parallel_config: ParallelConfig, device_str: str
+) -> None:
+    num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
+    if parallel_config.world_size > num_devices_in_cluster:
+        logger.warning(
+            "The requested distributed world size (%d) exceeds the total "
+            "number of available %ss (%d) in the Ray cluster. This may result "
+            "in Ray placement group allocation failures. Check `ray status` "
+            "and `ray list nodes`, or reduce tensor/pipeline parallel size.",
+            parallel_config.world_size,
+            device_str,
+            num_devices_in_cluster,
+        )
+
+
 def _verify_bundles(
     placement_group: "PlacementGroup",
     parallel_config: ParallelConfig,
@@ -549,21 +565,6 @@ def initialize_ray_cluster(
     if os.environ.get("RAY_USAGE_STATS_ENABLED", "0") != "1":
         os.environ["RAY_USAGE_STATS_ENABLED"] = "0"
 
-    # Prevalidate GPU requirements before Ray processing
-    if current_platform.is_cuda() and parallel_config.world_size > 1:
-        available_gpus = current_platform.device_count()
-        if parallel_config.world_size > available_gpus:
-            logger.warning(
-                "Tensor parallel size (%d) exceeds available GPUs (%d). "
-                "This may result in Ray placement group allocation failures. "
-                "Consider reducing tensor_parallel_size to %d or less, "
-                "or ensure your Ray cluster has %d GPUs available.",
-                parallel_config.world_size,
-                available_gpus,
-                available_gpus,
-                parallel_config.world_size,
-            )
-
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
     elif current_platform.is_rocm() or current_platform.is_xpu():
@@ -588,6 +589,9 @@ def initialize_ray_cluster(
         raise ValueError(
             f"current platform {current_platform.device_name} does not support ray."
         )
+
+    if parallel_config.world_size > 1:
+        _warn_if_insufficient_cluster_devices(parallel_config, device_str)
 
     # Create or get the placement group for worker processes
     if parallel_config.placement_group:
@@ -619,17 +623,6 @@ def initialize_ray_cluster(
             )
     else:
         logger.info("No current placement group found. Creating a new placement group.")
-        num_devices_in_cluster = ray.cluster_resources().get(device_str, 0)
-        # Log a warning message and delay resource allocation failure response.
-        # Avoid immediate rejection to allow user-initiated placement group
-        # created and wait cluster to be ready
-        if parallel_config.world_size > num_devices_in_cluster:
-            logger.warning(
-                "The number of required %ss exceeds the total "
-                "number of available %ss in the placement group.",
-                device_str,
-                device_str,
-            )
         # Create a new placement group
         placement_group_specs: list[dict[str, float]] = [
             {device_str: 1.0} for _ in range(parallel_config.world_size)
