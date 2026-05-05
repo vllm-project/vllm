@@ -5,25 +5,14 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-    swizzle_mxfp4_scales,
-)
+from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils_fp4 import (
-    apply_mxfp4_flashinfer_linear,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    apply_fp4_marlin_linear,
-    prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 
 __all__ = ["CompressedTensorsW4A4Mxfp4"]
 
@@ -46,10 +35,7 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
 
     def __init__(self):
         self.group_size = 32
-        p = current_platform
-        self.use_flashinfer = (
-            p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer()
-        )
+        self.kernel = init_mxfp4_linear_kernel()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -99,16 +85,7 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
-
-        if self.use_flashinfer:
-            N, scale_K = layer.weight_scale.shape
-            K = scale_K * self.group_size
-            layer.weight_scale = Parameter(
-                swizzle_mxfp4_scales(layer.weight_scale.data, N, K).reshape(N, -1),
-                requires_grad=False,
-            )
-        else:
-            prepare_fp4_layer_for_marlin(layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -116,21 +93,4 @@ class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_flashinfer:
-            return apply_mxfp4_flashinfer_linear(
-                input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                size_n=layer.output_size_per_partition,
-                bias=bias,
-            )
-        return apply_fp4_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            weight_global_scale=None,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias,
-        )
+        return self.kernel.apply_weights(layer, x, bias)
