@@ -282,6 +282,7 @@ class RMSNormGated(CustomOp):
     def forward_native(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
         return self.forward_static(
             x,
             z,

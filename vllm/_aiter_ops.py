@@ -923,6 +923,7 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
     activation: str,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused gated-RMSNorm + FP8 group quantization via aiter Triton kernel."""
     from aiter.ops.triton.quant import fused_rms_gated_fp8_group_quant
 
     return fused_rms_gated_fp8_group_quant(
@@ -1546,6 +1547,9 @@ class rocm_aiter_ops:
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
             import aiter.ops.triton.gated_delta_net  # noqa: F401
+            from aiter.ops.triton.quant import (  # noqa: F401
+                fused_rms_gated_fp8_group_quant,
+            )
 
             return True
         except (ImportError, ModuleNotFoundError):
@@ -1763,6 +1767,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def get_fused_rms_gated_fp8_group_quant_op() -> OpOverload:
+        """Return the fused gated-RMSNorm + FP8 group quant custom op."""
         return torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant.default
 
     @staticmethod

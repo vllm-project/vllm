@@ -21,7 +21,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..fx_utils import is_func
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
     VllmFusionPatternMatcherPass,
@@ -29,8 +28,8 @@ from ..vllm_inductor_pass import (
     VllmPatternMatcherPass,
     VllmPatternReplacement,
     _fx_view_to_reshape,
+    fold_consecutive_reshapes,
 )
-from .act_quant_fusion import ActivationQuantPattern
 from .matcher_utils import (
     MatcherQuantFP8,
     MatcherRMSNormGated,
@@ -42,33 +41,6 @@ from .rms_quant_fusion import (
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
-
-
-def _fold_consecutive_reshapes(gm: fx.GraphModule) -> None:
-    """Fold consecutive reshape ops into a single reshape.
-
-    ``make_fx`` faithfully records every view/reshape the Python code performs,
-    so patterns like ``x.reshape(a, b).reshape(c, d)`` produce two reshape
-    nodes.  Inductor's own optimisation would fold these, but
-    ``pm.register_replacement``'s ``trace_fn`` runs before Inductor, so we
-    must fold them ourselves for the pattern to match the compiled graph.
-
-    When reshape(A, shape1) feeds only into reshape(result, shape2),
-    the first reshape is redundant -- replace with reshape(A, shape2).
-    """
-    aten_reshape = torch.ops.aten.reshape.default
-    for node in list(gm.graph.nodes):
-        if not is_func(node, aten_reshape):
-            continue
-        inp = node.args[0]
-        if not isinstance(inp, fx.Node) or not is_func(inp, aten_reshape):
-            continue
-        if len(inp.users) != 1:
-            continue
-        original_input = inp.args[0]
-        node.args = (original_input, node.args[1])
-        inp.replace_all_uses_with(original_input)
-        gm.graph.erase_node(inp)
 
 
 class AiterRMSNormQuantPattern:
@@ -425,7 +397,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         def trace_fn(*args, **kwargs):
             gm = pm.fwd_only(*args, **kwargs)
             _fx_view_to_reshape(gm)
-            _fold_consecutive_reshapes(gm)
+            fold_consecutive_reshapes(gm)
             return gm
 
         pm.register_replacement(
@@ -468,12 +440,12 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
-            #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
+            # Group quant patterns only work with the aiter quant op
+            # (kFp8Dynamic128Sym is not in QUANT_OPS on ROCm).
             AiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
 
-            # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
             AiterFusedAddRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
