@@ -3,6 +3,8 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
+from collections import defaultdict
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -377,6 +379,114 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     #   region2: [1001, 1002], region3: [1101, 1102]
     expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
+
+
+def _make_fake_read_blocks_worker():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    class FakeNixlWrapper:
+        def __init__(self):
+            self.local_descs = None
+            self.remote_descs = None
+
+        def make_prepped_xfer(
+            self,
+            xfer_type,
+            local_xfer_side_handle,
+            local_block_descs_ids,
+            remote_xfer_side_handle,
+            remote_block_descs_ids,
+            notif_msg=None,
+        ):
+            self.local_descs = local_block_descs_ids
+            self.remote_descs = remote_block_descs_ids
+            return 1
+
+        def transfer(self, handle):
+            return "PROC"
+
+    class FakeTransferTopo:
+        def get_engine_info(self, engine_id):
+            return SimpleNamespace(remote_block_size=16)
+
+        def block_size_ratio(self, remote_block_size):
+            return 1
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker.transfer_topo = FakeTransferTopo()
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+    worker.engine_id = "local-engine"
+    worker.world_size = 1
+    worker.num_regions = 2
+    worker.dst_num_blocks = {"local-engine": 100, "remote-engine": 100}
+    worker._has_mamba = True
+    worker._is_mamba_group = [False, True]
+    worker._physical_blocks_per_logical = {
+        "local-engine": 1,
+        "remote-engine": 1,
+    }
+    worker.block_len_per_layer = [100]
+    worker.nixl_wrapper = FakeNixlWrapper()
+    worker._recving_transfers = defaultdict(list)
+    return worker
+
+
+@pytest.mark.cpu_test
+def test_read_blocks_trims_mamba_remote_prefix_padding():
+    """Hybrid prefix hits can leave leading null blocks in remote Mamba groups.
+
+    The transfer descriptor lists must still have the same length after trimming
+    remote groups down to the local transfer slots.
+    """
+    worker = _make_fake_read_blocks_worker()
+    worker._read_blocks(
+        local_block_ids=([16], [17]),
+        remote_block_ids=([0, 18], [0, 19]),
+        dst_engine_id="remote-engine",
+        request_id="decode-req",
+        remote_request_id="prefill-req",
+        remote_rank=0,
+        local_xfer_side_handle=10,
+        remote_xfer_side_handle=20,
+    )
+
+    assert list(worker.nixl_wrapper.local_descs) == [
+        16,
+        116,
+        217,
+        317,
+        417,
+        517,
+    ]
+    assert list(worker.nixl_wrapper.remote_descs) == [
+        18,
+        118,
+        219,
+        319,
+        419,
+        519,
+    ]
+
+
+@pytest.mark.cpu_test
+def test_read_blocks_drops_remote_group_when_no_local_slots():
+    """Avoid keeping a remote group accidentally via Python's ``[-0:]``."""
+    worker = _make_fake_read_blocks_worker()
+    worker._read_blocks(
+        local_block_ids=([16], []),
+        remote_block_ids=([0, 18], [0]),
+        dst_engine_id="remote-engine",
+        request_id="decode-req",
+        remote_request_id="prefill-req",
+        remote_rank=0,
+        local_xfer_side_handle=10,
+        remote_xfer_side_handle=20,
+    )
+
+    assert list(worker.nixl_wrapper.local_descs) == [16, 116]
+    assert list(worker.nixl_wrapper.remote_descs) == [18, 118]
 
 
 @pytest.mark.cpu_test

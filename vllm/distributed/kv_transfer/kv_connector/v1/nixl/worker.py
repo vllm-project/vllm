@@ -2065,13 +2065,15 @@ class NixlConnectorWorker:
         for i, remote_group in enumerate(remote_block_ids):
             num_remote_blocks = len(remote_group)
             num_local_blocks = len(local_block_ids[i])
-            if not self._is_mamba_group[i]:
-                assert num_local_blocks <= num_remote_blocks
-            # Partial prefix cache hit: just read uncomputed blocks.
-            # Skip mamba groups — their blocks represent full state (conv+ssm),
-            # not per-token data, so trimming would corrupt the transfer.
-            if num_local_blocks < num_remote_blocks and not self._is_mamba_group[i]:
-                remote_block_ids[i] = remote_group[-num_local_blocks:]
+            assert num_local_blocks <= num_remote_blocks
+            # Partial prefix cache hit: just read uncomputed blocks. With HMA,
+            # remote groups can include leading null/prefix-cached blocks while
+            # local groups contain only newly allocated transfer slots. This also
+            # applies to Mamba align-mode state blocks.
+            if num_local_blocks < num_remote_blocks:
+                remote_block_ids[i] = (
+                    remote_group[-num_local_blocks:] if num_local_blocks else []
+                )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
