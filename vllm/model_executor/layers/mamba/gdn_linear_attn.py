@@ -76,8 +76,7 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``,
-        ``nvidia-cutlass-dsl-libs-cu13`` installed, ``cuda_runtime >= 13``.
+      - Blackwell (SM10.x) with ``head_k_dim == 128``.
     """
     if backend not in ["flashinfer", "auto"]:
         return False
@@ -87,11 +86,7 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
         return True  # Hopper — no further constraints.
     if not current_platform.is_device_capability_family(100):
         return False  # Neither Hopper nor Blackwell.
-    if head_k_dim != 128:
-        return False
-    if current_platform.get_cuda_runtime_major() < 13:
-        return False
-    return current_platform.has_cutlass_dsl_cu13()
+    return head_k_dim == 128
 
 
 def _log_gdn_backend_decision(
@@ -102,18 +97,15 @@ def _log_gdn_backend_decision(
     platform = "cuda" if is_cuda else current_platform.device_name
     cuda_runtime = torch.version.cuda or "n/a"
     device_cap = str(current_platform.get_device_capability()) if is_cuda else "n/a"
-    cutlass_dsl_cu13_installed = current_platform.has_cutlass_dsl_cu13()
     logger.info_once(
         "GDN prefill backend inputs:\n"
         "  requested=%s\n"
         "  platform=%s, cuda_runtime=%s, device_capability=%s\n"
-        "  nvidia_cutlass_dsl_libs_cu13_installed=%s\n"
         "  head_k_dim=%s",
         backend,
         platform,
         cuda_runtime,
         device_cap,
-        cutlass_dsl_cu13_installed,
         head_k_dim,
         scope="local",
     )
