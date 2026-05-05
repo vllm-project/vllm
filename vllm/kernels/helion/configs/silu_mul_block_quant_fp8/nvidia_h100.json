@@ -1,0 +1,4267 @@
+{
+  "hidden_size_2048_group_size_64_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "first"
+    ],
+    "num_warps": 32,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 4,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      2
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_64_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "persistent_interleaved",
+    "num_sm_multiplier": 1
+  },
+  "hidden_size_2048_group_size_128_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      64
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_multi_buffers": [
+      false
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "persistent_interleaved",
+    "num_sm_multiplier": 1
+  },
+  "hidden_size_2048_group_size_128_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "persistent_blocked",
+    "num_sm_multiplier": 1
+  },
+  "hidden_size_2048_group_size_128_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 4,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "first"
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_2048_group_size_128_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      16
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "first",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 4,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      2
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "last",
+      "last"
+    ],
+    "num_warps": 2,
+    "num_stages": 1,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_64_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      "first"
+    ],
+    "num_warps": 32,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "persistent_blocked",
+    "num_sm_multiplier": 1
+  },
+  "hidden_size_4096_group_size_128_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      16
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_multi_buffers": [
+      false
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "persistent_blocked",
+    "num_sm_multiplier": 1,
+    "maxnreg": 64
+  },
+  "hidden_size_4096_group_size_128_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 5,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "",
+      "first"
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_4096_group_size_128_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      null
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 6,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      "first"
+    ],
+    "num_warps": 2,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "last"
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 4,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_64_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      16
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 32,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      16
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "first",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 5,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      "first"
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_8192_group_size_128_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "first"
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "last",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "first",
+      "first"
+    ],
+    "num_warps": 1,
+    "num_stages": 4,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "last",
+      "",
+      "first"
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      2
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_64_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_1": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      1024
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 8,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_2": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 16,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_4": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_8": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_16": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_32": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_64": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 2,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_128": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_256": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      256
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 4,
+    "num_stages": 6,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "tensor_descriptor",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_512": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      512
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      ""
+    ],
+    "num_warps": 4,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_1024": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      2048
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "first",
+      "",
+      ""
+    ],
+    "num_warps": 1,
+    "num_stages": 2,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "tensor_descriptor"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_2048": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        0,
+        1
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      128
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 1,
+    "num_stages": 3,
+    "indexing": [
+      "pointer",
+      "tensor_descriptor",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  },
+  "hidden_size_16384_group_size_128_num_tokens_4096": {
+    "block_sizes": [],
+    "loop_orders": [
+      [
+        1,
+        0
+      ]
+    ],
+    "l2_groupings": [
+      1
+    ],
+    "reduction_loops": [
+      4096
+    ],
+    "range_unroll_factors": [
+      0
+    ],
+    "range_warp_specializes": [],
+    "range_num_stages": [],
+    "range_multi_buffers": [
+      null
+    ],
+    "range_flattens": [
+      null
+    ],
+    "load_eviction_policies": [
+      "",
+      "",
+      "last"
+    ],
+    "num_warps": 1,
+    "num_stages": 1,
+    "indexing": [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer"
+    ],
+    "pid_type": "flat"
+  }
+}
