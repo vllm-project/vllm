@@ -1350,7 +1350,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
-        kv_connector_extra_config={"initial_kv_lease": timeout},
+        kv_connector_extra_config={"kv_lease_duration": timeout},
     )
     llm_kwargs = {
         "model": model_name,

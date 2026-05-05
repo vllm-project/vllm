@@ -214,11 +214,11 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
-        self._lease_extension: int = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "heartbeat_lease_extension", 20
-            )
+        kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config(
+            "kv_lease_duration", 30
         )
+        # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
+        self._lease_extension = kv_lease_duration * 2 // 3
 
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager

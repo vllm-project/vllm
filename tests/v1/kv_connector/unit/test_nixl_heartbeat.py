@@ -14,8 +14,8 @@ from .utils import create_request, make_nixl_scheduler
 _ENGINE_A = "my-engine-id"
 
 
-def _sched(heartbeat_interval: int = 5):
-    return make_nixl_scheduler(heartbeat=True, heartbeat_interval=heartbeat_interval)
+def _sched(kv_lease_duration: int = 30):
+    return make_nixl_scheduler(heartbeat=True, kv_lease_duration=kv_lease_duration)
 
 
 def _req(request_id: int = 1):
@@ -96,7 +96,8 @@ def test_stop_heartbeat_partial_and_full():
 
 
 def test_build_connector_meta_heartbeat_throttling():
-    s = _sched(heartbeat_interval=5)
+    # kv_lease_duration=30 => _heartbeat_interval = 30 // 6 = 5
+    s = _sched(kv_lease_duration=30)
     s.on_new_request(_req(1))
 
     # Ensure the first call triggers by placing last_heartbeat far in the past.

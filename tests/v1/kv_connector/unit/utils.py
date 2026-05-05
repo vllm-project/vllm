@@ -482,7 +482,7 @@ def make_nixl_scheduler(
     has_mamba: bool = False,
     is_hma_required: bool = False,
     heartbeat: bool = False,
-    heartbeat_interval: int = 5,
+    kv_lease_duration: int = 30,
 ):
     """Create a NixlConnectorScheduler via __new__ (skipping __init__).
 
@@ -501,7 +501,8 @@ def make_nixl_scheduler(
         sched._heartbeat_by_engine = {}
         sched._heartbeat_req_engine = {}
         sched._last_heartbeat_time = 0.0
-        sched._heartbeat_interval = heartbeat_interval
+        sched._kv_lease_duration = kv_lease_duration
+        sched._heartbeat_interval = kv_lease_duration // 6
         # Fields touched by build_connector_meta / request_finished:
         sched._reqs_need_recv = {}
         sched._reqs_need_send = {}
@@ -513,6 +514,5 @@ def make_nixl_scheduler(
         sched.side_channel_host = "localhost"
         sched.side_channel_port = 5555
         sched.blocks_per_sw = []
-        sched._initial_kv_lease = 20
         sched.is_bidirectional_kv_xfer_enabled = False
     return sched

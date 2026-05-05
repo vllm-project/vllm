@@ -67,14 +67,13 @@ class NixlConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_index
         )
         assert vllm_config.kv_transfer_config is not None
-        self._heartbeat_interval: int = (
+        self._kv_lease_duration: int = (
             vllm_config.kv_transfer_config.get_from_extra_config(
-                "heartbeat_interval", 5
+                "kv_lease_duration", 30
             )
         )
-        self._initial_kv_lease: int = (
-            vllm_config.kv_transfer_config.get_from_extra_config("initial_kv_lease", 20)
-        )
+        # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
+        self._heartbeat_interval = self._kv_lease_duration // 6
         if current_platform.device_type == "cpu":
             self.use_host_buffer = False
         else:
@@ -635,7 +634,7 @@ class NixlConnectorScheduler:
         remote_num_tokens = 0
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            request_kv_blocks_ttl = self._initial_kv_lease
+            request_kv_blocks_ttl = self._kv_lease_duration
             if is_d_node:
                 # For blocks pinned on D, use a simpler timeout for now instead of a
                 # lease mechanism as turn2 request is client-driven.
