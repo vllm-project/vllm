@@ -95,17 +95,19 @@ class P2pNcclEngine:
                 cudaStream_t,
                 ncclDataTypeEnum,
             )
+
             self._NCCLLibrary = NCCLLibrary
             self._buffer_type = buffer_type
             self._cudaStream_t = cudaStream_t
             self._ncclDataTypeEnum = ncclDataTypeEnum
             self.nccl = NCCLLibrary(library_path)
         else:
-            import nccl.core as nccl
             import nccl.bindings as nccl_bindings
+            import nccl.core as nccl
+
             self._nccl = nccl
             self._nccl_bindings = nccl_bindings
-            self.nccl = None  # Not used in nccl4py mode
+            self.nccl = None  # type: ignore[assignment]  # Not used in nccl4py mode
 
         if not hostname:
             hostname = get_ip()

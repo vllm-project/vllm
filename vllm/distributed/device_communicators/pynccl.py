@@ -418,9 +418,7 @@ class PyNcclCommunicator:
         from nccl import bindings as nccl_bindings
 
         # winFlags=1 for CollSymmetric (matches WindowFlag.CollSymmetric)
-        handle = nccl_bindings.comm_window_register(
-            self.comm.ptr, ptr, size, 1
-        )
+        handle = nccl_bindings.comm_window_register(self.comm.ptr, ptr, size, 1)
         if handle != 0:
             # Store as tuple (comm_ptr, window_handle) for deregistration
             self._registered_windows.append((self.comm.ptr, handle))
@@ -506,7 +504,9 @@ if envs.VLLM_USE_LEGACY_NCCL:
             if self.rank == 0:
                 self.unique_id = self.nccl.ncclGetUniqueId()
                 logger.info_once(
-                    "vLLM is using nccl==%s (legacy)", self.nccl.ncclGetVersion(), scope="local"
+                    "vLLM is using nccl==%s (legacy)",
+                    self.nccl.ncclGetVersion(),
+                    scope="local",
                 )
             else:
                 self.unique_id = ncclUniqueId()
@@ -732,10 +732,12 @@ if envs.VLLM_USE_LEGACY_NCCL:
             )
 
         def register_comm_window_raw(self, ptr: int, size: int):
-            return self.nccl.ncclCommWindowRegister(self.comm, buffer_type(ptr), size, 1)
+            return self.nccl.ncclCommWindowRegister(
+                self.comm, buffer_type(ptr), size, 1
+            )
 
         def deregister_comm_window(self, window):
             return self.nccl.ncclCommWindowDeregister(self.comm, window)
 
     # Replace PyNcclCommunicator with legacy version
-    PyNcclCommunicator = PyNcclCommunicatorLegacy
+    PyNcclCommunicator = PyNcclCommunicatorLegacy  # type: ignore[misc,assignment]
