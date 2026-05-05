@@ -389,7 +389,7 @@ class ExaoneMoeModel(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXXXXX
+                if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -151,6 +152,7 @@ def FusedMoE(
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
+    routed_experts_args: dict[str, Any] | None = None,
 ) -> MoERunner:
     # TODO update comment
     """FusedMoE layer builder for MoE models.
@@ -327,6 +329,7 @@ def FusedMoE(
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
         activation=moe_activation,
+        **routed_experts_args if routed_experts_args is not None else {},
     )
 
     runner = MoERunner(

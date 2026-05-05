@@ -575,7 +575,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 if weight_name not in name:
                     continue
 
-                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXX
+                if "mlp.experts" in name:
                     continue
 
                 name = name.replace(weight_name, param_name)

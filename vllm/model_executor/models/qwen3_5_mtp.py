@@ -231,7 +231,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
                 if weight_name not in name:
                     continue
 
-                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXXXXXXX
+                if "mlp.experts" in name:
                     continue
 
                 name = name.replace(weight_name, param_name)

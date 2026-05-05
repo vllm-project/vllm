@@ -1099,7 +1099,7 @@ class BailingMoeV25Model(nn.Module):
                 continue
 
             # Handle expert weights
-            if "mlp.experts" in norm_name:  # XXXXXXXXXXXXXXXXXXXX
+            if "mlp.experts" in norm_name:
                 # Expert bias
                 if (
                     "mlp.experts.e_score_correction_bias" in norm_name

@@ -579,7 +579,7 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
                 # name will be updated to mlp.experts[0].gate_up_proj, which
                 # will then be updated below in expert_params_mapping
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if "mlp.experts" in name:  # XXXXXXXXXXXXXXXXXXXXXXXX
+                if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
 
