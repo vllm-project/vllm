@@ -46,6 +46,14 @@ def sparse_indexer_max_logits_bytes(is_sm12x: bool | None = None) -> int:
     return default_mb * 1024 * 1024
 
 
+def _uses_deep_gemm_scheduler_metadata() -> bool:
+    return (
+        current_platform.is_cuda()
+        and has_deep_gemm()
+        and not current_platform.is_device_capability_family(120)
+    )
+
+
 @triton.jit
 def _prepare_uniform_decode_kernel(
     seq_lens_ptr,
@@ -623,8 +631,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and has_deep_gemm():
+            if _uses_deep_gemm_scheduler_metadata():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,

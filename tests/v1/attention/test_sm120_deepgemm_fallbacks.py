@@ -12,6 +12,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla import indexer as mla_indexer
 
 
 def test_decode_logits_width_uses_active_context_bound():
@@ -48,6 +49,119 @@ def test_non_sm120_cuda_sparse_indexer_still_requires_deep_gemm(monkeypatch):
     )
 
     assert _sparse_indexer_requires_deep_gemm() is True
+
+
+def test_sm120_paged_mqa_metadata_uses_backend_impl(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+    lazy_init_calls = []
+    monkeypatch.setattr(
+        deep_gemm_utils, "_lazy_init", lambda: lazy_init_calls.append(1)
+    )
+    expected = torch.tensor([[1, 2]], dtype=torch.int32)
+
+    def fake_deep_gemm_metadata(context_lens, block_size, num_sms):
+        assert context_lens.shape == (2, 1)
+        assert block_size == 256
+        assert num_sms == 4
+        return expected
+
+    monkeypatch.setattr(
+        deep_gemm_utils,
+        "_get_paged_mqa_logits_metadata_impl",
+        fake_deep_gemm_metadata,
+    )
+    context_lens = torch.tensor([[1], [3]], dtype=torch.int32)
+
+    metadata = deep_gemm_utils.get_paged_mqa_logits_metadata(
+        context_lens, block_size=256, num_sms=4
+    )
+
+    assert metadata is expected
+    assert lazy_init_calls == [1]
+
+
+def test_sm120_mla_indexer_skips_deep_gemm_scheduler_metadata(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+    monkeypatch.setattr(mla_indexer, "has_deep_gemm", lambda: True)
+
+    assert not mla_indexer._uses_deep_gemm_scheduler_metadata()
+
+
+def test_cuda_mla_indexer_uses_deep_gemm_scheduler_metadata_off_sm12x(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda capability: False,
+    )
+    monkeypatch.setattr(mla_indexer, "has_deep_gemm", lambda: True)
+
+    assert mla_indexer._uses_deep_gemm_scheduler_metadata()
+
+
+def test_sm120_fp8_mqa_fallbacks_do_not_initialize_deep_gemm(monkeypatch):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda capability: capability == 120,
+    )
+
+    def fail_lazy_init():
+        raise AssertionError("SM120 FP8 MQA should not initialize DeepGEMM")
+
+    monkeypatch.setattr(deep_gemm_utils, "_lazy_init", fail_lazy_init)
+
+    mqa_result = torch.empty(1)
+    paged_result = torch.empty(1)
+    calls = []
+
+    def fake_mqa_fallback(*args, **kwargs):
+        calls.append("mqa")
+        return mqa_result
+
+    def fake_paged_fallback(*args, **kwargs):
+        calls.append("paged")
+        return paged_result
+
+    monkeypatch.setattr(deep_gemm_utils, "_fp8_mqa_logits_sm12x", fake_mqa_fallback)
+    monkeypatch.setattr(
+        deep_gemm_utils, "_fp8_paged_mqa_logits_sm12x", fake_paged_fallback
+    )
+
+    assert (
+        deep_gemm_utils.fp8_fp4_mqa_logits(
+            (torch.empty(1, 1, 1), None),
+            (torch.empty(1, 1), torch.empty(1)),
+            torch.empty(1, 1),
+            torch.empty(1, dtype=torch.int32),
+            torch.empty(1, dtype=torch.int32),
+            clean_logits=False,
+        )
+        is mqa_result
+    )
+    assert (
+        deep_gemm_utils.fp8_fp4_paged_mqa_logits(
+            (torch.empty(1, 1, 1, 1), None),
+            torch.empty(1, 1, 1, 5, dtype=torch.uint8),
+            torch.empty(1, 1),
+            torch.empty(1, 1, dtype=torch.int32),
+            torch.empty(1, 1, dtype=torch.int32),
+            torch.empty(1, dtype=torch.int32),
+            max_model_len=1,
+            clean_logits=False,
+        )
+        is paged_result
+    )
+    assert calls == ["mqa", "paged"]
 
 
 @pytest.mark.skipif(

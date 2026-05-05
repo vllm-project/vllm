@@ -547,7 +547,6 @@ def fp8_fp4_mqa_topk_indices(
     topk_indices: torch.Tensor,
 ) -> bool:
     """Write SM120 FP8 MQA top-k indices without materializing full logits."""
-    _lazy_init()
     if not (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(120)
@@ -618,11 +617,11 @@ def fp8_fp4_mqa_logits(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
-    _lazy_init()
     if current_platform.is_device_capability_family(120) and q[1] is None:
         return _fp8_mqa_logits_sm12x(
             q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
         )
+    _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
     return _fp8_fp4_mqa_logits_impl(
@@ -762,7 +761,6 @@ def fp8_fp4_paged_mqa_topk_indices(
     topk_indices: torch.Tensor,
 ) -> bool:
     """Write SM120 FP8 paged MQA top-k indices without full logits."""
-    _lazy_init()
     q_values, q_scale = q
     if not (
         current_platform.is_cuda()
@@ -905,11 +903,11 @@ def fp8_fp4_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
-    _lazy_init()
     if current_platform.is_device_capability_family(120) and q[1] is None:
         return _fp8_paged_mqa_logits_sm12x(
             q, kv_cache, weights, context_lens, block_tables, max_model_len
         )
+    _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
     return _fp8_fp4_paged_mqa_logits_impl(
@@ -984,9 +982,9 @@ def tf32_hc_prenorm_gemm(
 
     See the caller function for shape requirement
     """
-    _lazy_init()
     if current_platform.is_device_capability_family(120):
         return _tf32_hc_prenorm_gemm_sm12x(x, fn, out, sqrsum, num_split)
+    _lazy_init()
     if _tf32_hc_prenorm_gemm_impl is None:
         return _missing()
     return _tf32_hc_prenorm_gemm_impl(
