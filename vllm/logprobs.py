@@ -195,11 +195,10 @@ def append_logprobs_for_next_position(
             token_ids = token_ids[:n]
             logprobs = logprobs[:n]
         if isinstance(decoded_tokens, list):
-            if len(decoded_tokens) > n:
-                decoded_tokens = decoded_tokens[:n]
+            decoded_tokens = decoded_tokens[:n]
         else:
-            decoded_tokens = [None] * n
-        ranks_list: list[int | None] = [rank, *range(1, n)]
+            decoded_tokens = list(itertools.islice(decoded_tokens, n))
+        ranks_list: list[int | None] = [rank, *range(1, n)] if n > 0 else []
         request_logprobs.append_fast(
             token_ids, logprobs, ranks_list, decoded_tokens
         )

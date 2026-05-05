@@ -169,6 +169,38 @@ class TestAppendLogprobsForNextPosition:
         assert len(item) == 4
         assert item[50].logprob == -1.0
 
+    def test_flat_empty_token_ids(self):
+        flat = create_sample_logprobs(flat_logprobs=True)
+
+        append_logprobs_for_next_position(
+            flat, [], [], [], rank=1, num_logprobs=5
+        )
+
+        assert len(flat) == 1
+        assert len(flat.token_ids) == 0
+        assert len(flat.ranks) == 0
+        assert flat.start_indices == [0]
+        assert flat.end_indices == [0]
+
+    def test_flat_generator_decoded_tokens(self):
+        flat = create_sample_logprobs(flat_logprobs=True)
+
+        def decoded_gen():
+            yield from ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+
+        append_logprobs_for_next_position(
+            flat,
+            list(range(100, 106)),
+            [-0.1 * i for i in range(6)],
+            decoded_gen(),
+            rank=2,
+            num_logprobs=3,
+        )
+
+        assert len(flat) == 1
+        assert len(flat.token_ids) == 4
+        assert flat.decoded_tokens == ["alpha", "beta", "gamma", "delta"]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
