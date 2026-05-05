@@ -152,11 +152,6 @@ def maybe_flashinfer_bf16_unquantized_gemm(
             )
         return None
 
-    # Keep the default rollout scoped to Blackwell unless the user explicitly
-    # forces a FlashInfer BF16 backend.
-    if not is_forced_backend and not current_platform.is_device_capability_family(100):
-        return None
-
     if (
         flashinfer_backend in FLASHINFER_BF16_GEMM_BACKENDS_WITHOUT_BIAS
         and bias is not None
