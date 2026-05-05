@@ -448,3 +448,137 @@ direct_register_custom_op(
     mutates_args=[],
     fake_impl=_mhc_post_fake,
 )
+
+
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    },
+)
+def hc_head_fuse_tilelang(
+    residual,
+    fn,
+    hc_scale,
+    hc_base,
+    out,
+    hidden_size: int,
+    rms_eps: float,
+    hc_eps: float,
+    hc_mult: int = 4,
+    n_thr: int = 128,
+    h_blk: int = 1024,
+):
+    """Two-pass fused kernel for hc_head.
+
+    Pass 1: accumulate per-token squared sum and hc_mult dot-products
+            (projections onto fn rows) using cross-thread reducers.
+    Pass 2: apply sigmoid-gated weighted sum of residual channels to output.
+
+    Avoids materialising mixes / rsqrt / pre tensors to global memory.
+    """
+    num_tokens = T.dynamic("num_tokens")
+    hc_dim = hc_mult * hidden_size
+    h_block = math.gcd(h_blk, hidden_size)
+    n_h = hidden_size // h_block
+
+    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
+    fn: T.Tensor[[hc_mult, hc_dim], T.float32]  # type: ignore[no-redef,valid-type]
+    hc_scale: T.Tensor[[1], T.float32]  # type: ignore[no-redef,valid-type]
+    hc_base: T.Tensor[[hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
+    out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
+
+    with T.Kernel(num_tokens, threads=n_thr) as i:
+        T.pdl_sync()
+
+        # ------------------------------------------------------------------
+        # Pass 1 – for each residual channel m_c and h_block:
+        #   • accumulate squared sum (for RMS norm denominator)
+        #   • accumulate hc_mult dot-products with fn rows
+        # ------------------------------------------------------------------
+        sqrsum_r = T.alloc_reducer((1,), T.float32, replication="all")
+        mixes_r = T.alloc_reducer((hc_mult,), T.float32, replication="all")
+        T.fill(sqrsum_r, 0.0)
+        T.fill(mixes_r, 0.0)
+
+        for m_c in T.serial(hc_mult):
+            for i_h in T.serial(n_h):
+                x_local = T.alloc_fragment(h_block, T.float32)
+                T.copy(residual[i, m_c, i_h * h_block], x_local)
+
+                for k in T.Parallel(h_block):
+                    sqrsum_r[0] += x_local[k] * x_local[k]
+
+                for m_m in T.unroll(hc_mult):
+                    fn_local = T.alloc_fragment(h_block, T.float32)
+                    T.copy(fn[m_m, m_c * hidden_size + i_h * h_block], fn_local)
+                    for k in T.Parallel(h_block):
+                        mixes_r[m_m] += x_local[k] * fn_local[k]
+
+        T.finalize_reducer(sqrsum_r)
+        T.finalize_reducer(mixes_r)
+
+        # ------------------------------------------------------------------
+        # Compute pre_mix = sigmoid(mix * rsqrt * scale + base) + eps
+        # ------------------------------------------------------------------
+        pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
+        rsqrt_val = T.alloc_fragment(1, T.float32)
+        rsqrt_val[0] = T.rsqrt(sqrsum_r[0] / hc_dim + rms_eps)
+        for m in T.Parallel(hc_mult):
+            pre_mix_shared[m] = (
+                T.sigmoid(mixes_r[m] * rsqrt_val[0] * hc_scale[0] + hc_base[m]) + hc_eps
+            )
+
+        # ------------------------------------------------------------------
+        # Pass 2 – apply_mix: pipelined weighted sum over residual channels
+        # ------------------------------------------------------------------
+        for i0_h in T.Pipelined(n_h, num_stages=2):
+            xs = T.alloc_shared((hc_mult, h_block), T.bfloat16)
+            xl = T.alloc_fragment((hc_mult, h_block), T.float32)
+            T.copy(residual[i, 0, i0_h * h_block], xs, disable_tma=True)
+            T.copy(xs, xl)
+
+            ol = T.alloc_fragment(h_block, T.float32)
+            T.clear(ol)
+            for i_hc in T.serial(hc_mult):
+                pre = pre_mix_shared[i_hc]
+                for i1_h in T.Parallel(h_block):
+                    ol[i1_h] += pre * xl[i_hc, i1_h]
+
+            T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
+
+        T.pdl_trigger()
+
+
+def _hc_head_fused_kernel(
+    hs_flat: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    out: torch.Tensor,
+    hidden_size: int,
+    rms_eps: float,
+    hc_eps: float,
+    hc_mult: int,
+) -> None:
+    """Fill pre-allocated `out` (T, H) in-place with the hc_head result."""
+    if hs_flat.shape[0] > 0:
+        hc_head_fuse_tilelang(
+            hs_flat,
+            fn,
+            hc_scale,
+            hc_base,
+            out,
+            hidden_size,
+            rms_eps,
+            hc_eps,
+            hc_mult,
+        )
+
+
+direct_register_custom_op(
+    op_name="hc_head_fused_kernel",
+    op_func=_hc_head_fused_kernel,
+    mutates_args=["out"],
+)

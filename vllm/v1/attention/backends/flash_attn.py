@@ -11,7 +11,10 @@ import torch
 
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -747,6 +750,23 @@ class FlashAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
+        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+        fixed_k = canonicalize_singleton_dim_strides(key_cache)
+        fixed_v = canonicalize_singleton_dim_strides(value_cache)
+        if fixed_k is not key_cache or fixed_v is not value_cache:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashAttention): "
+                "shape=%s, key strides before=%s after=%s, "
+                "value strides before=%s after=%s",
+                key_cache.shape,
+                key_cache.stride(),
+                fixed_k.stride(),
+                value_cache.stride(),
+                fixed_v.stride(),
+            )
+        key_cache, value_cache = fixed_k, fixed_v
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
@@ -861,6 +881,8 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
+        # Scatter write into the KV cache using slot_mapping indices.
+        # No TMA kernel is invoked here, so stride canonicalization is not needed.
         key_cache, value_cache = kv_cache.unbind(0)
 
         # Reshape the input keys and values and store them in the cache.
