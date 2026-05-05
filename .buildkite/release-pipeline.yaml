@@ -420,15 +420,13 @@ steps:
           DOCKERHUB_USERNAME: "vllmbot"
 
       - label: ":microscope: Trigger perf-eval for nightly image"
-        depends_on:
-          - publish-nightly-image-dockerhub
         if: build.env("NIGHTLY") == "1"
         trigger: "perf-eval"
         async: true
         build:
           branch: "main"
           commit: "HEAD"
-          message: "Evaluate vLLM nightly ${BUILDKITE_COMMIT}"
+          message: "Run vLLM nightly ${BUILDKITE_COMMIT}"
           env:
             TRIGGER_MODE: "nightly"
             VLLM_COMMIT: "${BUILDKITE_COMMIT}"
