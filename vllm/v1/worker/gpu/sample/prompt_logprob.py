@@ -55,10 +55,8 @@ class PromptLogprobsWorker:
 
         num_prompt_logprobs = self.num_prompt_logprobs[idx_mapping_np]
         prompt_lens = prompt_lens[idx_mapping_np]
-        # NOTE(woosuk): -1 because the last prompt token's hidden state is not
-        # needed for prompt logprobs.
         computed_prefill = num_computed_prefill_tokens[idx_mapping_np]
-        includes_prompt = computed_prefill < prompt_lens - 1
+        includes_prompt = computed_prefill < prompt_lens
         # NOTE(woosuk): If the request was resumed after preemption, its prompt
         # logprobs must have been computed before preemption. Skip.
         resumed_after_prompt = prompt_lens < prefill_lens[idx_mapping_np]

@@ -24,6 +24,24 @@ from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
+
+def _get_num_experts_per_tok(hf_config) -> int:
+    """Resolve the per-token expert count from the HF config.
+
+    Different model families store this under different attribute names
+    (e.g. ``num_experts_per_tok`` for DeepSeek, ``top_k_experts`` for Gemma 4).
+    """
+    val = getattr(hf_config, "num_experts_per_tok", None)
+    if val is None:
+        val = getattr(hf_config, "top_k_experts", None)
+    if val is None:
+        raise ValueError(
+            "Cannot determine num_experts_per_tok: HF config has neither "
+            "'num_experts_per_tok' nor 'top_k_experts'"
+        )
+    return val
+
+
 # Constants
 _TMP_DIR = tempfile.gettempdir()
 _LOCK_FILE_PREFIX = os.path.join(_TMP_DIR, "vllm_routed_experts")
@@ -127,7 +145,7 @@ class RoutedExpertsCapturer:
 
         hf_config = vllm_config.model_config.hf_text_config
         num_layers = hf_config.num_hidden_layers
-        num_experts_per_tok = hf_config.num_experts_per_tok
+        num_experts_per_tok = _get_num_experts_per_tok(hf_config)
 
         # Initialize device buffer
         self._device_buffer = torch.zeros(
@@ -300,7 +318,7 @@ class RoutedExpertsReader:
         shape = (
             max_num_kv_tokens,
             hf_config.num_hidden_layers,
-            hf_config.num_experts_per_tok,
+            _get_num_experts_per_tok(hf_config),
         )
 
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank

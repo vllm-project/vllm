@@ -84,6 +84,10 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _remap_gemma4_expert_weight_name(name: str) -> str:
+    return re.sub(r"(?<!\.moe)\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+
+
 @triton.jit
 def _gemma4_routing_kernel(
     gating_ptr,
@@ -356,7 +360,7 @@ class Gemma4MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             custom_routing_function=routing_function,
-            activation="gelu",
+            activation="gelu_tanh",
         )
 
     def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:
@@ -1650,7 +1654,7 @@ class Gemma4ForCausalLM(
                 # Remap individual 2D expert weights:
                 # .experts.{id}.{proj} → .moe.experts.{id}.{proj}
                 # (This handles per-expert 2D quantized weights)
-                name = re.sub(r"\.experts\.(\d+)\.", r".moe.experts.\1.", name)
+                name = _remap_gemma4_expert_weight_name(name)
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for
