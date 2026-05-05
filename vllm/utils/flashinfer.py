@@ -800,7 +800,7 @@ def flashinfer_bf16_mm(
 
     `a` is expected to be row-major [M, K] and `b` column-major [K, N].
     PDL is enabled for auto/cudnn/tgv dispatch and disabled for explicit
-    CUTLASS because FlashInfer rejects PDL for that backend.
+    CUTLASS/cuBLASLt because FlashInfer rejects PDL for those backends.
     """
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[0]
@@ -809,7 +809,7 @@ def flashinfer_bf16_mm(
     if bias is not None:
         assert bias.dtype == torch.bfloat16 and bias.device.type == "cuda"
 
-    pdl = backend != "cutlass"
+    pdl = backend not in ("cutlass", "cublaslt")
     return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl, backend)
 
 
