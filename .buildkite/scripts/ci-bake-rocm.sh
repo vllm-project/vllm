@@ -19,6 +19,7 @@ IMAGE_EXISTED_BEFORE_BUILD=0
 TARGET=""
 CI_HCL_PATH=""
 CI_BASE_LABEL_OVERRIDE_PATH=""
+CSRC_CACHE_OVERRIDE_PATH=""
 SCRIPT_TMP_DIR=""
 BAKE_CONFIG_FILE=""
 BAKE_FILES=()
@@ -111,6 +112,27 @@ get_buildkite_target_repo_slug() {
     parse_repo_slug "${BUILDKITE_REPO:-}"
 }
 
+get_buildkite_target_repo_url() {
+    local repo_url="${BUILDKITE_REPO:-}"
+
+    if [[ -n "${repo_url}" ]] && is_url_like "${repo_url}"; then
+        printf '%s\n' "${repo_url}"
+        return 0
+    fi
+
+    printf 'https://github.com/%s.git\n' "${DEFAULT_REPO_SLUG}"
+}
+
+git_fetch_for_cache() {
+    local timeout_secs="${ROCM_CACHE_GIT_FETCH_TIMEOUT:-60}"
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${timeout_secs}s" git fetch "$@" 2>/dev/null
+    else
+        git fetch "$@" 2>/dev/null
+    fi
+}
+
 compute_content_hash() {
     local path
     local file
@@ -130,10 +152,73 @@ compute_content_hash() {
     done | sha256sum | cut -d' ' -f1
 }
 
+hash_dockerfile_stages() {
+    local dockerfile="$1"
+    local stages="$2"
+
+    awk -v wanted_stages="${stages}" '
+        BEGIN {
+            split(wanted_stages, stage_list, /[[:space:]]+/)
+            for (idx in stage_list) {
+                if (stage_list[idx] != "") {
+                    wanted[stage_list[idx]] = 1
+                }
+            }
+            emit = 1
+        }
+        $1 == "FROM" {
+            stage = ""
+            for (idx = 1; idx <= NF; idx++) {
+                if (tolower($idx) == "as" && idx < NF) {
+                    stage = $(idx + 1)
+                }
+            }
+            emit = (stage in wanted)
+        }
+        emit {
+            print
+        }
+    ' "${dockerfile}"
+}
+
 compute_ci_base_content_hash() {
     local -a content_paths=()
+    local dockerfile="${CI_BASE_DOCKERFILE:-}"
+    local stages="${CI_BASE_DOCKERFILE_STAGES:-}"
+
     read -r -a content_paths <<< "${CI_BASE_CONTENT_FILES}"
-    compute_content_hash "${content_paths[@]}"
+
+    if [[ -z "${dockerfile}" || -z "${stages}" ]]; then
+        compute_content_hash "${content_paths[@]}"
+        return 0
+    fi
+
+    {
+        printf 'content-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
+        printf 'dockerfile:%s\n' "${dockerfile}"
+        printf 'dockerfile-stages:%s\n' "${stages}"
+        if [[ -f "${dockerfile}" ]]; then
+            hash_dockerfile_stages "${dockerfile}" "${stages}"
+        else
+            printf 'missing:%s\n' "${dockerfile}"
+        fi
+    } | sha256sum | cut -d' ' -f1
+}
+
+extract_dockerfile_arg_default() {
+    local dockerfile="$1"
+    local arg_name="$2"
+
+    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+        "${dockerfile}" | head -1
+}
+
+resolve_image_digest() {
+    local image_ref="$1"
+
+    docker buildx imagetools inspect "${image_ref}" 2>/dev/null \
+        | sed -n -E 's/^Digest:[[:space:]]+//p' \
+        | head -1
 }
 
 is_ci_base_target() {
@@ -332,6 +417,7 @@ init_config() {
     SCRIPT_TMP_DIR=$(mktemp -d -t ci-bake-rocm.XXXXXX)
     CI_HCL_PATH="${SCRIPT_TMP_DIR}/ci.hcl"
     CI_BASE_LABEL_OVERRIDE_PATH="${SCRIPT_TMP_DIR}/ci-base-label-override.hcl"
+    CSRC_CACHE_OVERRIDE_PATH="${SCRIPT_TMP_DIR}/rocm-csrc-cache-override.hcl"
     BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
 }
 
@@ -475,10 +561,15 @@ setup_builder() {
 
 prepare_git_cache_metadata() {
     local cache_branch_name=""
+    local cache_base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
+    local target_repo_slug=""
+    local target_repo_url=""
+    local merge_base_ref=""
 
-    if git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
+    if [[ -z "${PARENT_COMMIT:-}" || -z "${VLLM_MERGE_BASE_COMMIT:-}" ]] \
+        && git rev-parse --is-shallow-repository 2>/dev/null | grep -q "true"; then
         echo "Shallow clone detected - deepening for cache key computation"
-        git fetch --deepen=1 origin 2>/dev/null || true
+        git_fetch_for_cache --deepen=1 origin || true
     fi
 
     if [[ -z "${PARENT_COMMIT:-}" ]]; then
@@ -495,6 +586,10 @@ prepare_git_cache_metadata() {
 
     if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
         cache_branch_name=$(select_cache_branch_name)
+        if [[ -z "${cache_branch_name}" && "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
+            cache_branch_name="pr-${BUILDKITE_PULL_REQUEST}"
+            echo "Using pull request number for ROCm branch cache tag: ${cache_branch_name}"
+        fi
     fi
 
     if [[ -z "${ROCM_CACHE_BRANCH_TAG:-}" && -n "${cache_branch_name}" ]]; then
@@ -513,29 +608,32 @@ prepare_git_cache_metadata() {
     if [[ -z "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" \
           && -n "${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-}" \
           && "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]]; then
-        local source_repo_slug=""
-        local target_repo_slug=""
-        source_repo_slug=$(get_buildkite_repo_slug)
         target_repo_slug=$(get_buildkite_target_repo_slug)
-        if [[ "${source_repo_slug}" != "${target_repo_slug}" ]]; then
-            ROCM_CACHE_UPSTREAM_BRANCH_TAG=$(
-                compose_cache_branch_tag "${target_repo_slug}" "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}"
-            )
-            export ROCM_CACHE_UPSTREAM_BRANCH_TAG
-            echo "Computed ROCm upstream branch cache tag: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
-        fi
+        ROCM_CACHE_UPSTREAM_BRANCH_TAG=$(
+            compose_cache_branch_tag "${target_repo_slug}" "${BUILDKITE_PULL_REQUEST_BASE_BRANCH}"
+        )
+        export ROCM_CACHE_UPSTREAM_BRANCH_TAG
+        echo "Computed ROCm upstream branch cache tag: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
     elif [[ -n "${ROCM_CACHE_UPSTREAM_BRANCH_TAG:-}" ]]; then
         echo "Using provided ROCM_CACHE_UPSTREAM_BRANCH_TAG: ${ROCM_CACHE_UPSTREAM_BRANCH_TAG}"
     fi
 
     if [[ -z "${VLLM_MERGE_BASE_COMMIT:-}" ]]; then
-        git fetch --depth=1 origin main 2>/dev/null || true
-        VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD origin/main 2>/dev/null || echo "")
+        target_repo_url=$(get_buildkite_target_repo_url)
+        merge_base_ref="refs/remotes/vllm-cache-upstream/${cache_base_branch}"
+        git_fetch_for_cache --no-tags --depth=200 "${target_repo_url}" \
+            "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
+        VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${merge_base_ref}" 2>/dev/null || echo "")
+        if [[ -z "${VLLM_MERGE_BASE_COMMIT}" ]]; then
+            git_fetch_for_cache --no-tags --deepen=1000 "${target_repo_url}" \
+                "+refs/heads/${cache_base_branch}:${merge_base_ref}" 2>/dev/null || true
+            VLLM_MERGE_BASE_COMMIT=$(git merge-base HEAD "${merge_base_ref}" 2>/dev/null || echo "")
+        fi
         if [[ -n "${VLLM_MERGE_BASE_COMMIT}" ]]; then
             export VLLM_MERGE_BASE_COMMIT
             echo "Computed merge base commit for cache fallback: ${VLLM_MERGE_BASE_COMMIT}"
         else
-            echo "Could not determine merge base"
+            echo "Could not determine merge base with ${cache_base_branch}"
         fi
     else
         echo "Using provided VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
@@ -581,6 +679,115 @@ EOF
 
     BAKE_FILES+=(-f "${CI_BASE_LABEL_OVERRIDE_PATH}")
     echo "Appended ci_base content-hash label override for targets: ${ci_base_targets[*]}"
+}
+
+uses_rocm_csrc_cache() {
+    case "${TARGET}" in
+        csrc-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+compute_rocm_csrc_content_hash() {
+    local bake_dir=""
+    local dockerfile_rocm=""
+    local base_image_ref=""
+    local base_image_digest=""
+    local -a content_paths=(
+        "requirements/common.txt"
+        "requirements/rocm.txt"
+        "setup.py"
+        "CMakeLists.txt"
+        "cmake"
+        "csrc"
+        "vllm/envs.py"
+        "vllm/__init__.py"
+    )
+
+    bake_dir=$(dirname "${VLLM_BAKE_FILE}")
+    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    base_image_ref="${BASE_IMAGE:-}"
+    if [[ -z "${base_image_ref}" && -f "${dockerfile_rocm}" ]]; then
+        base_image_ref=$(extract_dockerfile_arg_default "${dockerfile_rocm}" "BASE_IMAGE")
+    fi
+    if [[ -n "${base_image_ref}" ]]; then
+        base_image_digest=$(resolve_image_digest "${base_image_ref}")
+    fi
+
+    {
+        printf 'pytorch-rocm-arch:%s\n' "${PYTORCH_ROCM_ARCH:-}"
+        printf 'base-image:%s\n' "${base_image_ref:-unknown}"
+        printf 'base-image-digest:%s\n' "${base_image_digest:-unknown}"
+        printf 'csrc-input-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
+        printf 'dockerfile:%s\n' "${dockerfile_rocm}"
+        printf 'dockerfile-stages:base csrc-build\n'
+        if [[ -f "${dockerfile_rocm}" ]]; then
+            hash_dockerfile_stages "${dockerfile_rocm}" "base csrc-build"
+        else
+            printf 'missing:%s\n' "${dockerfile_rocm}"
+        fi
+    } | sha256sum | cut -d' ' -f1
+}
+
+compute_rocm_csrc_content_hash_if_needed() {
+    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+
+    if [[ "${ROCM_CSRC_CONTENT_CACHE:-1}" == "0" ]] || ! uses_rocm_csrc_cache; then
+        return 0
+    fi
+
+    ROCM_CSRC_CONTENT_HASH=$(compute_rocm_csrc_content_hash)
+    ROCM_CSRC_CONTENT_CACHE_REF="${cache_repo}:csrc-rocm-input-${ROCM_CSRC_CONTENT_HASH}"
+    export ROCM_CSRC_CONTENT_HASH
+    export ROCM_CSRC_CONTENT_CACHE_REF
+    echo "ROCm csrc content cache ref: ${ROCM_CSRC_CONTENT_CACHE_REF}"
+}
+
+write_rocm_csrc_content_cache_override() {
+    local export_wheel_cache_to=""
+
+    if [[ -z "${ROCM_CSRC_CONTENT_CACHE_REF:-}" ]]; then
+        return 0
+    fi
+
+    if [[ "${TARGET}" == "test-rocm-ci-with-wheel" ]]; then
+        export_wheel_cache_to="
+  cache-to = []"
+    fi
+
+    cat > "${CSRC_CACHE_OVERRIDE_PATH}" <<EOF
+target "csrc-rocm-ci" {
+  cache-from = concat(
+    get_cache_from_rocm_csrc(),
+    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"],
+  )
+  cache-to = concat(
+    get_cache_to_rocm_csrc(),
+    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=min,ignore-error=true"],
+  )
+}
+
+target "test-rocm-ci" {
+  cache-from = concat(
+    get_cache_from_rocm(),
+    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"],
+  )
+}
+
+target "export-wheel-rocm" {
+  cache-from = concat(
+    get_cache_from_rocm(),
+    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"],
+  )${export_wheel_cache_to}
+}
+EOF
+
+    BAKE_FILES+=(-f "${CSRC_CACHE_OVERRIDE_PATH}")
+    echo "Appended ROCm csrc content-addressed cache override"
 }
 
 extract_dependency_pins() {
@@ -857,6 +1064,8 @@ main() {
     prepare_git_cache_metadata
     write_ci_base_label_override
     extract_dependency_pins
+    compute_rocm_csrc_content_hash_if_needed
+    write_rocm_csrc_content_cache_override
     resolve_ci_base_dependency_targets
     print_bake_config
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then

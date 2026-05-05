@@ -10,7 +10,6 @@ steps:
     device: amd_cpu
     no_plugin: true
     commands:
-      - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base not found yet, building it now"
       - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
     env:
       DOCKER_BUILDKIT: "1"
@@ -21,7 +20,9 @@ steps:
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       REMOTE_VLLM: "1"
       VLLM_BRANCH: "$BUILDKITE_COMMIT"
-      CI_BASE_CONTENT_FILES: "requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tests/vllm_test_utils"
+      CI_BASE_CONTENT_FILES: "requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tests/vllm_test_utils"
+      CI_BASE_DOCKERFILE: "docker/Dockerfile.rocm"
+      CI_BASE_DOCKERFILE_STAGES: "base build_rixl build_rocshmem build_deepep mori_base ci_base"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -36,8 +37,13 @@ steps:
     device: amd_cpu
     no_plugin: true
     commands:
-      - docker pull "rocm/vllm-dev:ci_base" || echo "ci_base pull failed, continuing with ci-bake-rocm.sh"
-      - bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+      - |
+        if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
+          echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
+          IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
+        else
+          bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+        fi
     env:
       DOCKER_BUILDKIT: "1"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
