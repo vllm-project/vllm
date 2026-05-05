@@ -1007,6 +1007,243 @@ void launch_gemm_q4_wmma_v3(const T* a, const uint32_t* b_q_weight,
 }
 
 // ===========================================================================
+// V4 kernel: 4 waves per block, 64M × 32N tile, double-buffered LDS.
+//
+// Builds on v3 by doubling the N-tile from 16 → 32. Each wave now issues
+// 2 wmmas per K-iter (one for cols 0-15, one for cols 16-31, sharing the
+// same a_frag). With 4 waves × 2 wmmas = 8 wmmas in flight per K-iter,
+// the wmma pipeline gets ~2× more in-flight work than v3 — targeting the
+// remaining wmma issue gap on Qwen-class shapes (gate/up, down) where v3
+// plateaus at ~22 TFLOPS effective.
+//
+// Costs:
+//   * LDS B-tile doubles (2 × 16K × 32N × sizeof(T) = 2048 B for fp16/bf16).
+//   * Dequant doubles (32 N-cols × 2 K-octets = 64 slots/K-tile). Distributed
+//     across waves 0-1: wave 0 dequants n=[0..15], wave 1 dequants n=[16..31].
+//     Waves 2-3 idle on dequant but do wmma work.
+//   * Per-wave registers: 2 × v8fp32 accumulator (16 fp32 = 32 VGPRs) plus
+//     b_frag0 + b_frag1 (32 VGPRs total). Within budget.
+//
+// Mapping invariant (wave-id → output tile slice):
+//   * Wave w produces M rows [m_tile + 16w .. m_tile + 16w + 15]
+//   * c_acc0 holds N cols [n_tile + 0 .. n_tile + 15]
+//   * c_acc1 holds N cols [n_tile + 16 .. n_tile + 31]
+// ===========================================================================
+
+template <typename T>
+__global__ void gemm_q4_wmma_kernel_v4(
+    const T* __restrict__ a, const uint32_t* __restrict__ b_q,
+    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
+    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
+    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
+  using E = typename WmmaNative<T>::elem;
+  using V16 = typename WmmaNative<T>::v16;
+
+  const int m_tile = blockIdx.y * 64;
+  const int n_tile = blockIdx.x * 32;  // 32-col stride per block (was 16 in v3)
+  if (m_tile >= size_m || n_tile >= size_n) return;
+
+  const int tid = threadIdx.x;   // 0..127
+  const int wave_id = tid >> 5;  // 0..3
+  const int lane = tid & 31;
+  const int lane_lo = lane & 15;
+  const int lane_hi = lane >> 4;
+
+  // Two accumulators per wave: c_acc0 covers cols [n_tile..n_tile+15],
+  // c_acc1 covers cols [n_tile+16..n_tile+31].
+  v8fp32 c_acc0 = {0, 0, 0, 0, 0, 0, 0, 0};
+  v8fp32 c_acc1 = {0, 0, 0, 0, 0, 0, 0, 0};
+
+  const int groupsize = size_k / groups;
+
+  const int k_per_split = size_k / gridDim.z;
+  const int k_start = blockIdx.z * k_per_split;
+  const int k_end = k_start + k_per_split;
+
+  // Doubled LDS B-tile: [buf][k][n_in_tile=0..31].
+  __shared__ T b_lds[2][16][32];
+
+  // Dequant: 64 slots per K-tile (32 N-cols × 2 K-octets). Distributed
+  // across waves 0,1: wave w handles n_in_tile in [16w..16w+15], k_oct in
+  // {0,1}. Each dequanting wave has 32 lanes for 32 dequant slots — perfect
+  // mapping, identical layout to v2/v3 dequant per wave.
+  auto dequant_into = [&](int buf, int k_tile) {
+    if (wave_id >= 2) return;
+
+    const int my_n_local = lane_lo;             // 0..15 (within wave's N-half)
+    const int my_n_in_tile = wave_id * 16 + my_n_local;  // 0..31 (in 32N tile)
+    const int my_k_octet = lane_hi;
+    const int actual_n = n_tile + my_n_in_tile;
+
+    if (actual_n >= size_n) return;
+
+    const int qk_row = (k_tile / 8) + my_k_octet;
+    const uint32_t qa = b_q[qk_row * size_n + actual_n];
+
+    const int g = k_tile / groupsize;
+    const int qz_idx = g * (size_n / 8) + actual_n / 8;
+    const int qz_shift = (actual_n & 7) * 4;
+    const uint32_t zero_v =
+        ((b_qzeros[qz_idx] >> qz_shift) & 0xF) + (uint32_t)zero_offset;
+    const T scale_t = b_scales[g * size_n + actual_n];
+
+    const int k_base = my_k_octet * 8;
+
+    if constexpr (std::is_same<T, half>::value) {
+      half2 z_prep, y_prep;
+      prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
+      half2 dq[4];
+      dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
+      b_lds[buf][k_base + 0][my_n_in_tile] = __low2half(dq[0]);
+      b_lds[buf][k_base + 1][my_n_in_tile] = __high2half(dq[0]);
+      b_lds[buf][k_base + 2][my_n_in_tile] = __low2half(dq[1]);
+      b_lds[buf][k_base + 3][my_n_in_tile] = __high2half(dq[1]);
+      b_lds[buf][k_base + 4][my_n_in_tile] = __low2half(dq[2]);
+      b_lds[buf][k_base + 5][my_n_in_tile] = __high2half(dq[2]);
+      b_lds[buf][k_base + 6][my_n_in_tile] = __low2half(dq[3]);
+      b_lds[buf][k_base + 7][my_n_in_tile] = __high2half(dq[3]);
+    } else {
+      bf162_t z_b, y_b;
+      prep_zero_scale_bf16_precise(zero_v, scale_t, z_b, y_b);
+      bf162_t dq[4];
+      dequant_4bit_8_bf16_precise(qa, dq, z_b, y_b);
+      b_lds[buf][k_base + 0][my_n_in_tile] = dq[0].x;
+      b_lds[buf][k_base + 1][my_n_in_tile] = dq[0].y;
+      b_lds[buf][k_base + 2][my_n_in_tile] = dq[1].x;
+      b_lds[buf][k_base + 3][my_n_in_tile] = dq[1].y;
+      b_lds[buf][k_base + 4][my_n_in_tile] = dq[2].x;
+      b_lds[buf][k_base + 5][my_n_in_tile] = dq[2].y;
+      b_lds[buf][k_base + 6][my_n_in_tile] = dq[3].x;
+      b_lds[buf][k_base + 7][my_n_in_tile] = dq[3].y;
+    }
+  };
+
+  dequant_into(0, k_start);
+  __syncthreads();
+
+  int cur_buf = 0;
+  for (int k_tile = k_start; k_tile < k_end; k_tile += 16) {
+    const int next_buf = 1 - cur_buf;
+    const int k_next = k_tile + 16;
+
+    if (k_next < k_end) {
+      dequant_into(next_buf, k_next);
+    }
+
+    // Load A: each wave loads its 16M slice, shared across both wmmas.
+    const int m_row = m_tile + wave_id * 16 + lane_lo;
+    V16 a_frag, b_frag0, b_frag1;
+    if (m_row < size_m) {
+      const T* a_row = a + m_row * size_k;
+      if (b_q_perm) {
+  #pragma unroll
+        for (int i = 0; i < 16; i++) {
+          T v = a_row[b_q_perm[k_tile + i]];
+          a_frag[i] = bitcast_elem<T, E>(v);
+        }
+      } else {
+        static_assert(sizeof(a_frag) == 32, "V16 must be 32 bytes");
+        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
+      }
+    } else {
+  #pragma unroll
+      for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
+    }
+
+    // Load B for cols [0..15] and cols [16..31]. Both halves of the 32N tile.
+  #pragma unroll
+    for (int i = 0; i < 16; i++) {
+      b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo]);
+      b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 16]);
+    }
+
+    // Two wmmas per wave per K-iter, sharing a_frag.
+    c_acc0 = wmma_mma(a_frag, b_frag0, c_acc0);
+    c_acc1 = wmma_mma(a_frag, b_frag1, c_acc1);
+
+    __syncthreads();
+    cur_buf = next_buf;
+  }
+
+  // ---- Store C ----
+  // Each wave owns 16M rows × 32N cols. c_acc0 → cols [n_tile..n_tile+15],
+  // c_acc1 → cols [n_tile+16..n_tile+31].
+  const int m_tile_wave = m_tile + wave_id * 16;
+
+  // Helper: store one v8fp32 accumulator's 8 outputs (covers 16 N-cols at
+  // n_base via lane_lo + interleaved M rows m_tile_wave + 2i + lane_hi).
+  auto store_acc = [&](const v8fp32& acc, int n_base) {
+    if (gridDim.z > 1) {
+      const bool is_even_lane = (lane_lo & 1) == 0;
+      const int out_n_pair = n_base + lane_lo;
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        float other_f = __shfl_xor(acc[i], 1);
+        if (!is_even_lane) continue;
+
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m >= size_m || out_n_pair >= size_n) continue;
+
+        T* dst = c + out_m * size_n + out_n_pair;
+        if constexpr (std::is_same<T, half>::value) {
+          half2 packed =
+              __halves2half2(__float2half_rn(acc[i]), __float2half_rn(other_f));
+          atomic_add_pk_f16(reinterpret_cast<half2*>(dst), packed);
+        } else {
+          bf162_t packed;
+          packed.x = __float2bfloat16(acc[i]);
+          packed.y = __float2bfloat16(other_f);
+          atomic_add_pk_bf16(reinterpret_cast<bf162_t*>(dst), packed);
+        }
+      }
+    } else {
+      const int out_n = n_base + lane_lo;
+      if (out_n >= size_n) return;
+  #pragma unroll
+      for (int i = 0; i < 8; i++) {
+        const int out_m = m_tile_wave + 2 * i + lane_hi;
+        if (out_m < size_m) {
+          T* dst = c + out_m * size_n + out_n;
+          if constexpr (std::is_same<T, half>::value) {
+            *dst = __float2half_rn(acc[i]);
+          } else {
+            *dst = __float2bfloat16(acc[i]);
+          }
+        }
+      }
+    }
+  };
+
+  store_acc(c_acc0, n_tile);
+  store_acc(c_acc1, n_tile + 16);
+}
+
+template <typename T>
+void launch_gemm_q4_wmma_v4(const T* a, const uint32_t* b_q_weight,
+                            const uint32_t* b_qzeros, const T* b_scales,
+                            const int* b_q_perm, T* c, int size_m, int size_n,
+                            int size_k, int groups, int zero_offset,
+                            cudaStream_t stream) {
+  // Fall back to v3 when M < 64 (small-M decode/prefill stays on the
+  // narrower 64M × 16N path) or when N < 32 (tile would waste a wave on
+  // out-of-range cols).
+  if (size_m < 64 || size_n < 32) {
+    launch_gemm_q4_wmma_v3<T>(a, b_q_weight, b_qzeros, b_scales, b_q_perm, c,
+                              size_m, size_n, size_k, groups, zero_offset,
+                              stream);
+    return;
+  }
+
+  // 4 waves per block (128 threads), 64M × 32N tile per block.
+  const int k_split = compute_wmma_k_split(size_k);
+  dim3 block(128);
+  dim3 grid((size_n + 31) / 32, (size_m + 63) / 64, k_split);
+  gemm_q4_wmma_kernel_v4<T><<<grid, block, 0, stream>>>(
+      a, b_q_weight, b_qzeros, b_scales, c, size_m, size_n, size_k, groups,
+      zero_offset, b_q_perm);
+}
+
+// ===========================================================================
 // Layout probe kernel — diagnostic only.
 // Takes fp16 A[16,16] and B[16,16] directly (no dequant). Loads them into
 // the WMMA fragments under one of several layout hypotheses, runs WMMA, and
@@ -1280,19 +1517,20 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
 
   const int zero_offset = use_v2_format ? 0 : 1;
 
-  // launch_gemm_q4_wmma_v3 dispatches: M >= 64 → v3 (4 waves, 64M × 16N tile),
-  // 32 <= M < 64 → v2 (2 waves, 32M × 16N), M < 32 → v1 (1 wave, 16M × 16N).
-  // v3 targets the prefill plateau by doubling resident waves to keep the
-  // wmma pipeline closer to full.
+  // launch_gemm_q4_wmma_v4 dispatches:
+  //   M >= 64 && N >= 32 → v4 (4 waves, 64M × 32N tile, 2 wmma/wave/K-iter)
+  //   M >= 64 && N <  32 → v3 (4 waves, 64M × 16N)
+  //   32 <= M < 64       → v2 (2 waves, 32M × 16N)
+  //   M < 32             → v1 (1 wave, 16M × 16N)
 #if defined(USE_ROCM)
   if (a.scalar_type() == torch::kHalf) {
-    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v3<half>(
+    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v4<half>(
         (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
         (const uint32_t*)b_qzeros.data_ptr(), (const half*)b_scales.data_ptr(),
         g_idx_ptr, (half*)c.data_ptr(), size_m, size_n, size_k, groups,
         zero_offset, stream);
   } else {
-    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v3<
+    vllm::gptq_rdna3_wmma::launch_gemm_q4_wmma_v4<
         vllm::gptq_rdna3_wmma::bf16_t>(
         (const vllm::gptq_rdna3_wmma::bf16_t*)a.data_ptr(),
         (const uint32_t*)b_q_weight.data_ptr(),
