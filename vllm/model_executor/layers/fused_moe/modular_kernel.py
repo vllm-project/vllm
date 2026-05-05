@@ -10,6 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -1215,6 +1216,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        output_alias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1242,6 +1244,21 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+
+        # If caller's output buffer already matches fused_out shape/dtype, alias
+        # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
+        # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
+        # double-copy MoE write-back path).
+        if (
+            rocm_aiter_ops.is_fused_moe_enabled()
+            and rocm_aiter_ops.is_aiter_enabled()
+            and output_alias is not None
+            and output_alias.shape == fused_out.shape
+            and output_alias.dtype == fused_out.dtype
+            and output_alias.device == fused_out.device
+            and output_alias.is_contiguous()
+        ):
+            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,
@@ -1403,6 +1420,7 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            output_alias=output,
         )
 
         return self._finalize(

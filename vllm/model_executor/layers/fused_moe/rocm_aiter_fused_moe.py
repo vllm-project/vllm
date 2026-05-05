@@ -438,4 +438,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
         )
-        output.copy_(result)
+        # avoid redundant copy when output is a view of the result
+        if (
+            output.shape == result.shape
+            and output.dtype == result.dtype
+            and output.device == result.device
+            and output.is_contiguous()
+        ):
+            output.data = result
+        else:
+            output.copy_(result)
