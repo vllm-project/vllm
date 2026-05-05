@@ -71,6 +71,7 @@ class Scheduler(SchedulerInterface):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
+        hash_block_size: int | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -222,16 +223,19 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
+        if hash_block_size is None:
+            hash_block_size = block_size
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
-            hash_block_size=self.block_size,
+            hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
         )
         # Bind GPU block pool to the KV connector. This must happen after
@@ -737,20 +741,6 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                if (
-                    self.scheduler_reserve_full_isl
-                    and not self.kv_cache_manager.can_fit_full_sequence(
-                        request,
-                        num_new_computed_tokens=num_new_local_computed_tokens,
-                        new_computed_blocks=new_computed_blocks,
-                        num_external_computed_tokens=num_external_computed_tokens,
-                        num_encoder_tokens=num_encoder_tokens,
-                    )
-                ):
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
-                    break
-
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -760,6 +750,7 @@ class Scheduler(SchedulerInterface):
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
+                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
                 )
 
                 if new_blocks is None:
@@ -1444,7 +1435,7 @@ class Scheduler(SchedulerInterface):
             # Extract sample logprobs if needed.
             if (
                 request.sampling_params is not None
-                and request.sampling_params.logprobs is not None
+                and request.sampling_params.num_logprobs is not None
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
@@ -2018,7 +2009,7 @@ class Scheduler(SchedulerInterface):
         # the connector.
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
-            total_computed_tokens=request.num_tokens,
+            total_computed_tokens=request.num_computed_tokens,
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
