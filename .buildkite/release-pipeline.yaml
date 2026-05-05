@@ -441,7 +441,7 @@ steps:
       - block: "Publish release images to DockerHub"
         key: block-publish-release-images
         depends_on:
-          - annotate-release-workflow
+          - create-multi-arch-manifest
           - create-multi-arch-manifest-cuda-12-9
           - create-multi-arch-manifest-ubuntu2404
           - create-multi-arch-manifest-cuda-12-9-ubuntu2404
@@ -460,7 +460,7 @@ steps:
       - label: "Publish release images to DockerHub"
         depends_on:
           - block-publish-release-images
-        id: publish-release-images-dockerhub
+        key: publish-release-images-dockerhub
         agents:
           queue: small_cpu_queue_release
         commands:
