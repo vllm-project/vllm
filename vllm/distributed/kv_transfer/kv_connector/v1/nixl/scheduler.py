@@ -152,22 +152,21 @@ class NixlConnectorScheduler:
                 "bidirectional_kv_xfer", False
             )
         )
+        self.decoder_kv_blocks_ttl = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "decoder_kv_blocks_ttl", 480
+            )
+        )
 
         if self.is_bidirectional_kv_xfer_enabled and self.kv_recompute_threshold > 0:
             logger.info(
                 "Bidirectional KV transfer is enabled and the kv "
-                "recompute threshold is set to %d tokens",
+                "recompute threshold is set to %d tokens. Note that KV blocks lease "
+                "renewal is not supported to extend TTL of blocks on D. Using a "
+                "default TTL of %d seconds for decoder KV blocks.",
                 self.kv_recompute_threshold,
+                self.decoder_kv_blocks_ttl,
             )
-        elif self.is_bidirectional_kv_xfer_enabled and self._initial_kv_lease < 480:
-            logger.info(
-                "Bidirectional KV transfer is enabled but KV blocks lease renewal is "
-                "not supported to extend TTL of blocks on D.Extending initial kv lease"
-                " from %d seconds to %d seconds.",
-                self._initial_kv_lease,
-                480,
-            )
-            self._initial_kv_lease = 480
 
     def shutdown(self):
         self._stop_event.set()
@@ -636,14 +635,19 @@ class NixlConnectorScheduler:
         remote_num_tokens = 0
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
+            request_kv_blocks_ttl = self._initial_kv_lease
+            if is_d_node:
+                # For blocks pinned on D, use a simpler timeout for now instead of a
+                # lease mechanism as turn2 request is client-driven.
+                request_kv_blocks_ttl = self.decoder_kv_blocks_ttl
             logger.debug(
                 "NIXLConnector request_finished(%s) waiting for %d seconds "
                 "for remote decode to fetch blocks or extend the lease",
                 request.request_id,
-                self._initial_kv_lease,
+                request_kv_blocks_ttl,
             )
             self._reqs_need_send[request.request_id] = (
-                time.perf_counter() + self._initial_kv_lease
+                time.perf_counter() + request_kv_blocks_ttl
             )
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty

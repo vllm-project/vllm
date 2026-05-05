@@ -219,9 +219,6 @@ class NixlConnectorWorker:
                 "heartbeat_lease_extension", 20
             )
         )
-        self._initial_kv_lease: int = (
-            vllm_config.kv_transfer_config.get_from_extra_config("initial_kv_lease", 20)
-        )
 
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager

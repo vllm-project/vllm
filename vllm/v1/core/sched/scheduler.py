@@ -2153,11 +2153,6 @@ class Scheduler(SchedulerInterface):
                 - blocks_to_evict (set[int]): Block IDs to evict from cache,
                 including invalid blocks and downstream dependent blocks.
         """
-        #  Request-level handling
-        # request-fails=>do some policy retry, compute locally
-        #  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        #  [[0, 1, 2, _, 4, 5, 6, 7, 8, 9]]
-        #  SW[ __________[11, 12, 13]]
         affected_req_ids: set[str] = set()
         total_affected_tokens = 0
         blocks_to_evict: set[int] = set()
