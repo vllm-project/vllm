@@ -454,6 +454,30 @@ def render_for_completion(messages: list[Message]) -> list[int]:
     return token_ids
 
 
+def get_stop_tokens_for_assistant_actions() -> list[int]:
+    return get_encoding().stop_tokens_for_assistant_actions()
+
+
+def get_harmony_request_default_sampling_params(
+    default_sampling_params: dict[str, Any],
+    ignore_eos: bool,
+) -> dict[str, Any]:
+    """Add Harmony EOS-like stop tokens only when EOS stopping is enabled."""
+    if ignore_eos:
+        return default_sampling_params
+
+    request_default_sampling_params = dict(default_sampling_params)
+    stop_token_ids = list(request_default_sampling_params.get("stop_token_ids") or ())
+    # Harmony assistant action tokens are alternate EOS tokens for GPT-OSS.
+    # They should follow the same rule as generation-config EOS IDs: ignore_eos
+    # means these EOS-like tokens do not stop generation.
+    stop_token_ids.extend(get_stop_tokens_for_assistant_actions())
+    request_default_sampling_params["stop_token_ids"] = list(
+        dict.fromkeys(stop_token_ids)
+    )
+    return request_default_sampling_params
+
+
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
 

@@ -7,11 +7,13 @@ from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.parser import harmony_utils
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     create_tool_definition,
     extract_function_from_recipient,
     get_encoding,
+    get_harmony_request_default_sampling_params,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
@@ -250,6 +252,46 @@ class TestExtractFunctionFromRecipient:
     )
     def test_dotted_function_name_extraction(self, recipient, expected):
         assert extract_function_from_recipient(recipient) == expected
+
+
+def test_harmony_default_stop_tokens_respect_ignore_eos(monkeypatch):
+    def get_stop_tokens():
+        return [200002, 200012]
+
+    monkeypatch.setattr(
+        harmony_utils, "get_stop_tokens_for_assistant_actions", get_stop_tokens
+    )
+    default_sampling_params = {"temperature": 0.0, "stop_token_ids": [123]}
+
+    request_defaults = get_harmony_request_default_sampling_params(
+        default_sampling_params, ignore_eos=True
+    )
+
+    # Harmony action tokens are EOS-like. If EOS is ignored, adding them as
+    # request stop tokens would make ignore_eos ineffective for GPT-OSS.
+    assert request_defaults is default_sampling_params
+    assert request_defaults["stop_token_ids"] == [123]
+
+
+def test_harmony_default_stop_tokens_added_when_eos_is_active(monkeypatch):
+    def get_stop_tokens():
+        return [200002, 200012]
+
+    monkeypatch.setattr(
+        harmony_utils, "get_stop_tokens_for_assistant_actions", get_stop_tokens
+    )
+    default_sampling_params = {"temperature": 0.0, "stop_token_ids": [123, 200002]}
+
+    request_defaults = get_harmony_request_default_sampling_params(
+        default_sampling_params, ignore_eos=False
+    )
+
+    # Normal GPT-OSS requests should still stop on Harmony assistant actions.
+    # The helper returns request-local defaults so shared server defaults are
+    # not mutated across requests with different ignore_eos values.
+    assert request_defaults is not default_sampling_params
+    assert request_defaults["stop_token_ids"] == [123, 200002, 200012]
+    assert default_sampling_params["stop_token_ids"] == [123, 200002]
 
 
 class TestCommonParseInputToHarmonyMessage:

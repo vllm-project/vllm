@@ -53,6 +53,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_harmony_request_default_sampling_params,
     get_streamable_parser_for_assistant,
     parse_chat_output,
 )
@@ -156,6 +157,7 @@ class OpenAIServingChat(OpenAIServing):
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
+
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
@@ -279,6 +281,11 @@ class OpenAIServingChat(OpenAIServing):
             sub_request_id = (
                 request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
             )
+            default_sampling_params = self.default_sampling_params
+            if self.use_harmony:
+                default_sampling_params = get_harmony_request_default_sampling_params(
+                    self.default_sampling_params, request.ignore_eos
+                )
 
             max_tokens = get_max_tokens(
                 max_model_len,
@@ -286,7 +293,7 @@ class OpenAIServingChat(OpenAIServing):
                 if request.max_completion_tokens is not None
                 else request.max_tokens,
                 self._extract_prompt_len(engine_input),
-                self.default_sampling_params,
+                default_sampling_params,
                 self.override_max_tokens,
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
@@ -294,12 +301,12 @@ class OpenAIServingChat(OpenAIServing):
             sampling_params: SamplingParams | BeamSearchParams
             if request.use_beam_search:
                 sampling_params = request.to_beam_search_params(
-                    max_tokens, self.default_sampling_params
+                    max_tokens, default_sampling_params
                 )
             else:
                 sampling_params = request.to_sampling_params(
                     max_tokens,
-                    self.default_sampling_params,
+                    default_sampling_params,
                 )
 
             self._log_inputs(
