@@ -217,6 +217,7 @@ async def send_request(
     min_tokens: int | None = None,
     max_tokens: int | None = None,
     timeout_sec: int = 120,
+    conversation_id: str | None = None,
 ) -> ServerResponse:
     payload = {
         "model": model,
@@ -224,6 +225,9 @@ async def send_request(
         "seed": 0,
         "temperature": 0.0,
     }
+
+    if conversation_id is not None:
+        payload["conversation_id"] = conversation_id
 
     if stream:
         payload["stream"] = True
@@ -419,6 +423,7 @@ async def send_turn(
         min_tokens,
         max_tokens,
         req_args.timeout_sec,
+        conversation_id=conv_id,
     )
 
     if response.valid is False:
@@ -1468,6 +1473,12 @@ async def main() -> None:
         "(for example: --warmup-percentages=0%%,50%%)",
     )
 
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code when loading the tokenizer.",
+    )
+
     args = parser.parse_args()
 
     logger.info(args)
@@ -1510,7 +1521,9 @@ async def main() -> None:
     np.random.seed(args.seed)
 
     logger.info("Loading tokenizer")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=args.trust_remote_code
+    )
 
     await get_server_info(args.url)
 
