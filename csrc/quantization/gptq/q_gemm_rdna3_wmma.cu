@@ -199,6 +199,47 @@ __host__ __device__ static inline int compute_wmma_k_split(int size_k) {
   return 1;
 }
 
+// M-and-N-aware K-split heuristic for the v3/v4/v5 launchers.
+//
+// The original `compute_wmma_k_split` was K-only and always returns 4 for
+// Qwen-class K, which over-subscribes wave slots and pays the atomic CAS
+// epilogue once-per-K-segment per output cell. With v3/v4/v5's larger
+// tiles (64M × 16/32/64N) and 4 resident waves per block, the no-split
+// grid is often already well-saturated on gfx1100's 96 CUs / 3072 wave
+// slots — adding gridDim.z just adds atomic overhead.
+//
+// Heuristic: compute the no-split block count gridDim.x × gridDim.y, then
+// pick the smallest K_SPLIT that brings total waves to at least
+// ~2× over-subscription (~6000 waves for our 3072 slots, i.e. 1500 blocks
+// at 4 waves/block). Above that threshold, K_SPLIT=1 — direct write, no
+// atomic.
+//
+// Args:
+//   size_m, size_n, size_k     — GEMM dims
+//   m_tile, n_tile             — block-level M and N tile (64×16 for v3,
+//                                64×32 for v4, 64×64 for v5)
+//
+// Returns: gridDim.z divisor (1, 2, or 4), respecting K-divisibility.
+__host__ __device__ static inline int compute_wmma_k_split_mn(int size_m,
+                                                              int size_n,
+                                                              int size_k,
+                                                              int m_tile,
+                                                              int n_tile) {
+  const int blocks_xy = ((size_n + n_tile - 1) / n_tile) *
+                        ((size_m + m_tile - 1) / m_tile);
+  // Target: enough blocks to keep ~2× oversubscription on 96 CUs / 3072
+  // wave slots at 4 waves/block ⇒ ~1500 blocks no-split.
+  constexpr int kTargetBlocksXY = 1500;
+  if (blocks_xy >= kTargetBlocksXY) return 1;
+  if (blocks_xy * 2 >= kTargetBlocksXY && size_k >= 512 && size_k % 32 == 0)
+    return 2;
+  if (blocks_xy * 4 >= kTargetBlocksXY && size_k >= 1024 && size_k % 64 == 0)
+    return 4;
+  // Fall back to the K-only heuristic when blocks are very few (small
+  // models with small N): K-split is the only way to add parallelism.
+  return compute_wmma_k_split(size_k);
+}
+
 // Native AMDGPU vector types expected by the WMMA built-ins.
 using v16fp16 = _Float16 __attribute__((ext_vector_type(16)));
 using v16bf16 = __bf16 __attribute__((ext_vector_type(16)));
@@ -998,7 +1039,7 @@ void launch_gemm_q4_wmma_v3(const T* a, const uint32_t* b_q_weight,
   }
 
   // 4 waves per block (128 threads), 64M × 16N tile per block.
-  const int k_split = compute_wmma_k_split(size_k);
+  const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 16);
   dim3 block(128);
   dim3 grid((size_n + 15) / 16, (size_m + 63) / 64, k_split);
   gemm_q4_wmma_kernel_v3<T><<<grid, block, 0, stream>>>(
@@ -1241,7 +1282,7 @@ void launch_gemm_q4_wmma_v4(const T* a, const uint32_t* b_q_weight,
   }
 
   // 4 waves per block (128 threads), 64M × 32N tile per block.
-  const int k_split = compute_wmma_k_split(size_k);
+  const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 32);
   dim3 block(128);
   dim3 grid((size_n + 31) / 32, (size_m + 63) / 64, k_split);
   gemm_q4_wmma_kernel_v4<T><<<grid, block, 0, stream>>>(
@@ -1474,7 +1515,7 @@ void launch_gemm_q4_wmma_v5(const T* a, const uint32_t* b_q_weight,
   }
 
   // 4 waves per block (128 threads), 64M × 64N tile per block.
-  const int k_split = compute_wmma_k_split(size_k);
+  const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 64, 64);
   dim3 block(128);
   dim3 grid((size_n + 63) / 64, (size_m + 63) / 64, k_split);
   gemm_q4_wmma_kernel_v5<T><<<grid, block, 0, stream>>>(
