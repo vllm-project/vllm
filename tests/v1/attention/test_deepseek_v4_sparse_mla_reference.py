@@ -874,6 +874,64 @@ def _write_fp8_ds_mla_token(
     return torch.cat([expected_nope, rope.float()]).to(torch.bfloat16)
 
 
+def _materialize_global_fp8_ds_mla_slots(
+    k_cache: torch.Tensor,
+    slot_ids: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    gathered = torch.zeros(
+        *slot_ids.shape,
+        512,
+        dtype=torch.bfloat16,
+        device=k_cache.device,
+    )
+    for token_idx, row in enumerate(slot_ids.detach().cpu().tolist()):
+        for candidate_idx, slot in enumerate(row):
+            if slot >= 0:
+                gathered[token_idx, candidate_idx] = _write_fp8_ds_mla_token(
+                    k_cache,
+                    slot,
+                    block_size,
+                )
+    return gathered
+
+
+def _materialize_paged_fp8_ds_mla_window(
+    k_cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    gather_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    seq_lens_cpu = seq_lens.detach().cpu().tolist()
+    gather_lens_cpu = gather_lens.detach().cpu().tolist()
+    block_table_cpu = block_table.detach().cpu().tolist()
+    max_gather_len = max(gather_lens_cpu)
+    gathered = torch.zeros(
+        len(seq_lens_cpu),
+        max_gather_len,
+        512,
+        dtype=torch.bfloat16,
+        device=k_cache.device,
+    )
+    for token_idx, (seq_len, gather_len) in enumerate(
+        zip(seq_lens_cpu, gather_lens_cpu)
+    ):
+        start_pos = seq_len - gather_len
+        for gather_idx in range(gather_len):
+            logical_pos = start_pos + gather_idx
+            logical_block = logical_pos // block_size
+            block_offset = logical_pos % block_size
+            physical_block = block_table_cpu[token_idx][logical_block]
+            physical_slot = physical_block * block_size + block_offset
+            gathered[token_idx, gather_idx] = _write_fp8_ds_mla_token(
+                k_cache,
+                physical_slot,
+                block_size,
+            )
+    return gathered
+
+
 def test_reference_attention_no_sink_matches_logsumexp() -> None:
     torch.manual_seed(0)
     scale = 0.25
@@ -2097,6 +2155,105 @@ def test_triton_fp8ds_global_paged_attention_with_sink_direct_matches_state_path
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
+def test_global_paged_decode_matches_dense_golden_long_offsets() -> None:
+    torch.manual_seed(71)
+    compressed_block_size = 4
+    swa_block_size = 4
+    compressed_cache = torch.zeros(
+        8,
+        compressed_block_size,
+        _TOKEN_DATA_SIZE + _SCALE_DIM,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    swa_cache = torch.zeros(
+        8,
+        swa_block_size,
+        _TOKEN_DATA_SIZE + _SCALE_DIM,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    compressed_slot_ids = torch.tensor(
+        [
+            [0, 5, -1, 11, 17, 2],
+            [23, -1, 8, 0, 19, 31],
+            [4, -1, -1, 6, 7, 12],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    topk_lens = torch.tensor([5, 6, 0], dtype=torch.int32, device="cuda")
+    seq_lens = torch.tensor([17, 30, 7], dtype=torch.int32, device="cuda")
+    gather_lens = torch.tensor([5, 6, 4], dtype=torch.int32, device="cuda")
+    block_table = torch.tensor(
+        [
+            [4, 0, 6, 1, 3, 5, 2, 7],
+            [7, 2, 4, 0, 6, 1, 5, 3],
+            [1, 3, 0, 2, 4, 5, 6, 7],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    q = torch.randn(3, 1, 8, 512, device="cuda", dtype=torch.bfloat16)
+    active_heads = 5
+    sink = torch.linspace(-0.75, 0.75, active_heads, device="cuda")
+    scale = 0.0625
+
+    compressed_kv = _materialize_global_fp8_ds_mla_slots(
+        compressed_cache,
+        compressed_slot_ids,
+        compressed_block_size,
+    )
+    swa_kv = _materialize_paged_fp8_ds_mla_window(
+        swa_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        swa_block_size,
+    )
+    compressed_offsets = torch.arange(
+        compressed_slot_ids.shape[1],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    swa_offsets = torch.arange(swa_kv.shape[1], device="cuda", dtype=torch.int32)
+    compressed_valid = (compressed_offsets[None, :] < topk_lens[:, None]) & (
+        compressed_slot_ids >= 0
+    )
+    swa_valid = swa_offsets[None, :] < gather_lens[:, None]
+    expected = _golden_sink_attention(
+        q[:, 0, :active_heads],
+        torch.cat([compressed_kv, swa_kv], dim=1),
+        torch.cat([compressed_valid, swa_valid], dim=1),
+        scale,
+        sink,
+    ).to(torch.bfloat16)
+
+    actual = torch.empty(3, active_heads, 512, device="cuda", dtype=torch.bfloat16)
+    fp8ds_global_paged_sparse_mla_attention_with_sink_multihead(
+        q=q,
+        compressed_k_cache=compressed_cache,
+        slot_ids=compressed_slot_ids,
+        topk_lens=topk_lens,
+        compressed_block_size=compressed_block_size,
+        swa_k_cache=swa_cache,
+        seq_lens=seq_lens,
+        gather_lens=gather_lens,
+        block_table=block_table,
+        swa_block_size=swa_block_size,
+        num_compressed_candidates=compressed_slot_ids.shape[1],
+        num_swa_candidates=swa_kv.shape[1],
+        scale=scale,
+        attn_sink=sink,
+        output=actual,
+        head_block_size=2,
+        num_heads=active_heads,
+    )
+
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
 def test_matmul_sparse_mla_attention_with_sink_matches_reference() -> None:
     torch.manual_seed(41)
     q = torch.randn(2, 1, 5, 512, device="cuda", dtype=torch.bfloat16)
@@ -2131,6 +2288,130 @@ def test_matmul_sparse_mla_attention_with_sink_matches_reference() -> None:
         sink,
         actual,
         num_heads=5,
+    )
+
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
+def test_mtp_matmul_global_slots_decode_matches_dense_golden_long_offsets() -> None:
+    torch.manual_seed(73)
+    compressed_block_size = 4
+    swa_block_size = 4
+    compressed_cache = torch.zeros(
+        8,
+        compressed_block_size,
+        _TOKEN_DATA_SIZE + _SCALE_DIM,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    swa_cache = torch.zeros(
+        8,
+        swa_block_size,
+        _TOKEN_DATA_SIZE + _SCALE_DIM,
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    compressed_slot_ids = torch.tensor(
+        [
+            [0, 5, -1, 11, 17, 2],
+            [23, -1, 8, 0, 19, 31],
+            [4, -1, -1, 6, 7, 12],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    topk_lens = torch.tensor([5, 6, 0], dtype=torch.int32, device="cuda")
+    swa_slot_ids = torch.tensor(
+        [
+            [3, 4, 13, 14, 15],
+            [28, 29, 30, 31, -1],
+            [7, 6, 5, -1, -1],
+        ],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    swa_lens = torch.tensor([5, 4, 3], dtype=torch.int32, device="cuda")
+    q = torch.randn(3, 1, 8, 512, device="cuda", dtype=torch.bfloat16)
+    active_heads = 5
+    sink = torch.linspace(-0.5, 0.5, active_heads, device="cuda")
+    scale = 0.0625
+
+    compressed_kv = _materialize_global_fp8_ds_mla_slots(
+        compressed_cache,
+        compressed_slot_ids,
+        compressed_block_size,
+    )
+    swa_kv = _materialize_global_fp8_ds_mla_slots(
+        swa_cache,
+        swa_slot_ids,
+        swa_block_size,
+    )
+    combined_kv = torch.empty(
+        3,
+        compressed_slot_ids.shape[1] + swa_slot_ids.shape[1],
+        512,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    dequantize_global_slots_k_cache(
+        combined_kv[:, : compressed_slot_ids.shape[1]],
+        compressed_cache,
+        compressed_slot_ids,
+        compressed_block_size,
+    )
+    dequantize_global_slots_k_cache(
+        combined_kv[:, compressed_slot_ids.shape[1] :],
+        swa_cache,
+        swa_slot_ids,
+        swa_block_size,
+    )
+    valid_tokens = torch.empty(
+        combined_kv.shape[:2],
+        dtype=torch.bool,
+        device="cuda",
+    )
+    build_combined_sparse_mla_decode_valid_mask(
+        valid_tokens,
+        compressed_slot_ids,
+        topk_lens,
+        swa_lens,
+    )
+
+    compressed_offsets = torch.arange(
+        compressed_slot_ids.shape[1],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    swa_offsets = torch.arange(swa_slot_ids.shape[1], device="cuda", dtype=torch.int32)
+    compressed_valid = (compressed_offsets[None, :] < topk_lens[:, None]) & (
+        compressed_slot_ids >= 0
+    )
+    swa_valid = swa_offsets[None, :] < swa_lens[:, None]
+    expected_kv = torch.cat([compressed_kv, swa_kv], dim=1)
+    expected_valid = torch.cat([compressed_valid, swa_valid], dim=1)
+    expected = _golden_sink_attention(
+        q[:, 0, :active_heads],
+        expected_kv,
+        expected_valid,
+        scale,
+        sink,
+    ).to(torch.bfloat16)
+
+    torch.testing.assert_close(combined_kv.float(), expected_kv.float(), rtol=0, atol=0)
+    torch.testing.assert_close(valid_tokens, expected_valid)
+
+    actual = torch.empty_like(expected)
+    matmul_sparse_mla_attention_with_sink(
+        q,
+        combined_kv,
+        valid_tokens,
+        scale,
+        sink,
+        actual,
+        num_heads=active_heads,
+        value_block_size=512,
+        candidate_block_size=128,
     )
 
     torch.testing.assert_close(actual.float(), expected.float(), rtol=2e-2, atol=2e-2)
