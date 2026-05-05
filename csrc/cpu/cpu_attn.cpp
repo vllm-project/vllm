@@ -29,6 +29,8 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::NEON;
   } else if (isa_hint == "vxe") {
     isa = cpu_attention::ISA::VXE;
+  } else if (isa_hint == "vsx") {
+    isa = cpu_attention::ISA::VSX;
   } else {
     TORCH_CHECK(false, "Unsupported CPU attention ISA hint: " + isa_hint);
   }
@@ -129,6 +131,8 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::NEON;
     } else if (isa == "vxe") {
       return cpu_attention::ISA::VXE;
+    } else if (isa == "vsx") {
+      return cpu_attention::ISA::VSX;
     } else {
       TORCH_CHECK(false, "Invalid ISA type: " + isa);
     }
