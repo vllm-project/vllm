@@ -910,6 +910,15 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             size = size | {"shortest_edge": override_min_pixels}
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             size = size | {"longest_edge": override_max_pixels}
+        elif (
+            auto_max_pixels := self._get_auto_max_pixels_from_default_budget(
+                size=size,
+                patch_size=patch_size,
+                merge_size=merge_size,
+                mm_kwargs=mm_kwargs,
+            )
+        ) is not None:
+            size = size | {"longest_edge": auto_max_pixels}
 
         if do_resize:
             if is_video:

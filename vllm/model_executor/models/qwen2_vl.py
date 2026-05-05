@@ -826,6 +826,34 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
         return {"image": max_image_tokens, "video": max_video_tokens}
 
+    def _get_auto_max_pixels_from_default_budget(
+        self,
+        *,
+        size: Mapping[str, object],
+        patch_size: int,
+        merge_size: int,
+        mm_kwargs: Mapping[str, object],
+    ) -> int | None:
+        if mm_kwargs.get("max_pixels") is not None or mm_kwargs.get("size") is not None:
+            return None
+
+        # ``min_pixels`` is only a quality floor, not a high-resolution opt-in.
+        # Keep applying the automatic cap, clamped above the floor below.
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        token_budget = mm_config.default_mm_token_budget
+        if token_budget is None or token_budget <= 0:
+            return None
+
+        shortest_edge = size.get("shortest_edge")
+        longest_edge = size.get("longest_edge")
+        if shortest_edge is None or longest_edge is None:
+            return None
+
+        auto_max_pixels = token_budget * (patch_size * merge_size) ** 2
+        auto_max_pixels = max(auto_max_pixels, int(shortest_edge))
+        auto_max_pixels = min(auto_max_pixels, int(longest_edge))
+        return auto_max_pixels
+
     def _get_vision_info(
         self,
         *,
@@ -850,6 +878,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
             size = size | {"shortest_edge": override_min_pixels}
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             size = size | {"longest_edge": override_max_pixels}
+        elif (
+            auto_max_pixels := self._get_auto_max_pixels_from_default_budget(
+                size=size,
+                patch_size=patch_size,
+                merge_size=merge_size,
+                mm_kwargs=mm_kwargs,
+            )
+        ) is not None:
+            size = size | {"longest_edge": auto_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
@@ -943,6 +980,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 size = size | {"shortest_edge": override_min_pixels}
             if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
                 size = size | {"longest_edge": override_max_pixels}
+            elif (
+                auto_max_pixels := self._get_auto_max_pixels_from_default_budget(
+                    size=size,
+                    patch_size=patch_size,
+                    merge_size=merge_size,
+                    mm_kwargs=mm_kwargs,
+                )
+            ) is not None:
+                size = size | {"longest_edge": auto_max_pixels}
 
             max_pixels = size["longest_edge"]
 
