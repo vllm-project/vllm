@@ -112,8 +112,8 @@ QUANT_ALGOS = [
     "FP8_PB_WO",
     # NVFP4 W4A4 (4-bit float weights AND 4-bit float activations).
     "NVFP4",
-    # NVFP4 W4A16 (4-bit float weights, fp16/bf16 activations).
-    "NVFP4_W4A16",
+    # W4A16 NVFP4 (4-bit float weights, fp16/bf16 activations).
+    "W4A16_NVFP4",
     # MXFP8
     "MXFP8",
     # MIXED_PRECISION,
@@ -1030,15 +1030,15 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
         # Select LinearMethod implementation based on quant_algo (FP8 pattern).
         # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
-        # NVFP4_W4A16   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
         if quant_method == "NVFP4":
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
-        elif quant_method == "NVFP4_W4A16":
+        elif quant_method == "W4A16_NVFP4":
             self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
         else:
             raise ValueError(
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
-                "Supported: NVFP4 / NVFP4_W4A16."
+                "Supported: NVFP4 / W4A16_NVFP4."
             )
 
     def get_name(self) -> QuantizationMethods:
@@ -1280,7 +1280,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         del input_size, output_size
         if not self.quant_config.is_checkpoint_nvfp4_serialized:
             raise ValueError(
-                "NVFP4_W4A16 quantization was selected; "
+                "W4A16_NVFP4 quantization was selected; "
                 "dynamic quantization is not supported."
             )
         output_size_per_partition = sum(output_partition_sizes)
@@ -1351,7 +1351,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
 
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(
-                "In NVFP4_W4A16 linear, the global weight scale "
+                "In W4A16_NVFP4 linear, the global weight scale "
                 "(weight_scale_2) differs across fused parallel layers "
                 "(e.g. q/k/v_proj). This will likely reduce accuracy. "
                 "Consider a checkpoint with a shared global scale."
