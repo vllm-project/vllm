@@ -30,6 +30,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -619,6 +620,18 @@ def run_attention_backend(
             kv_b_proj=mock_kv_b_proj,
             q_scale=q_scale,
             k_scale=k_scale,
+        )
+
+        # Attach prefill backend (normally created by MLAAttention.__init__)
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        mock_layer.prefill_backend = prefill_backend_cls(
+            num_heads=num_heads,
+            scale=scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            vllm_config=vllm_config,
         )
 
         # Populate static_forward_context with mock attention layers
