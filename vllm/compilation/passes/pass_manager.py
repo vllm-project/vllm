@@ -20,6 +20,7 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
     from .fusion.allreduce_rms_fusion import (
+        AllReduceFusionPass,
         RocmAiterAllReduceFusionPass,
     )
     from .fusion.rocm_aiter_fusion import (
@@ -116,8 +117,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
-        self.clone_elimination(graph)
-        VllmInductorPass.dump_prefix += 1
 
         # clean up after lowering again
         self.post_cleanup(graph)
@@ -143,10 +142,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [AsyncTPPass(config)]
 
             if self.pass_config.fuse_allreduce_rms:
-                if rocm_aiter_ops.is_enabled():
-                    self.passes += [RocmAiterAllReduceFusionPass(config)]
-                else:
-                    self.passes += [AllReduceFusionPass(config)]
+                # RocmAiterAllReduceFusionPass is disabled: it corrupts HIP
+                # graph replay when sparse MLA attention (nhead=32) is active.
+                self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.fuse_minimax_qk_norm:
                 self.passes += [MiniMaxQKNormPass(config)]
