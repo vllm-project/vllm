@@ -235,9 +235,15 @@ def test_prefill_with_context(dtype: torch.dtype, bs: int):
         f"LSE shape mismatch: trtllm={tuple(lse_ref.shape)} "
         f"tokenspeed={tuple(lse_ts.shape)}"
     )
+    # Log-base normalization: trtllm returns LSE in log2, tokenspeed and
+    # vLLM's merge_attn_states (triton_merge_attn_states.py:138) both use
+    # natural-log. Convert trtllm's log2 LSE to natural log before
+    # comparison, otherwise we'd be comparing different bases (factor ln 2).
+    import math
+
     torch.testing.assert_close(
         lse_ts.to(torch.float32),
-        lse_ref.to(torch.float32),
+        lse_ref.to(torch.float32) * math.log(2),
         atol=5e-3,
         rtol=5e-3,
     )
