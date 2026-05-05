@@ -718,9 +718,10 @@ class RocmPlatform(Platform):
         ):
             compilation_config.custom_ops.append("+grouped_topk")
 
-        # Default dispatch to rocm's sparse_attn_indexer implementation
+        # Default dispatch to rocm's AITER sparse_attn_indexer implementation
         if (
-            "+sparse_attn_indexer" not in compilation_config.custom_ops
+            rocm_aiter_ops.is_enabled()
+            and "+sparse_attn_indexer" not in compilation_config.custom_ops
             and "-sparse_attn_indexer" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+sparse_attn_indexer")
