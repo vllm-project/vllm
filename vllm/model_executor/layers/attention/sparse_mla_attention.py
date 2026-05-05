@@ -11,11 +11,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
     SparseMLAAttentionImpl,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -89,7 +89,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_query_lens_cpu,
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
 
-        return self.metadata_cls(
+        return self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
@@ -317,13 +317,13 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 "On SM90, all tokens are routed through forward_mqa."
             )
 
-        assert not attn_metadata.has_context, (
+        assert not attn_metadata.has_context, (  # type: ignore[attr-defined]
             "forward_mha currently requires pure prefill (no cached context)"
         )
 
-        cu_seqlens = attn_metadata.prefill_query_start_loc
-        max_seq_len = attn_metadata.prefill_max_query_len
-        num_decode_tokens = attn_metadata.num_decode_tokens
+        cu_seqlens = attn_metadata.prefill_query_start_loc  # type: ignore[attr-defined]
+        max_seq_len = attn_metadata.prefill_max_query_len  # type: ignore[attr-defined]
+        num_decode_tokens = attn_metadata.num_decode_tokens  # type: ignore[attr-defined]
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
@@ -357,7 +357,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 dense_mask_to_block_sparse,
             )
 
-            prefill_query_lens_cpu = attn_metadata.prefill_query_lens_cpu
+            prefill_query_lens_cpu = attn_metadata.prefill_query_lens_cpu  # type: ignore[attr-defined]
             assert prefill_query_lens_cpu is not None
             q_lens = prefill_query_lens_cpu.tolist()
             num_prefills = len(q_lens)
