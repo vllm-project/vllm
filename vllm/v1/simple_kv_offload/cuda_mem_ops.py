@@ -15,7 +15,7 @@ logger = init_logger(__name__)
 
 
 def pin_tensor(tensor: torch.Tensor) -> None:
-    """Pin a CPU tensor via cudaHostRegister / hipHostRegister.
+    """Pin a CPU tensor via cudaHostRegister.
 
     This bypasses PyTorch's CUDACachingHostAllocator which rounds
     every ``pin_memory=True`` allocation up to the next power of 2
@@ -26,8 +26,6 @@ def pin_tensor(tensor: torch.Tensor) -> None:
         raise RuntimeError(f"cudaHostRegister failed: {err}")
 
 
-# NOTE: ``CUmemcpyAttributes`` and ``hipMemcpyAttributes`` share the same
-# layout, so a single ctypes struct definition works for both.
 class _CUmemLocation(ctypes.Structure):
     _fields_ = [("type", ctypes.c_uint), ("id", ctypes.c_int)]
 
@@ -64,7 +62,7 @@ def _resolve_batch_memcpy():
     * CUDA: ``cuMemcpyBatchAsync`` via ``cuGetProcAddress`` (uses
       srcAccessOrder=STREAM via one attributes entry).
     * ROCm: ``hipMemcpyBatchAsync`` from libamdhip64 (ROCm 7.1+). ROCm
-      7.2.1 rejects any call with ``numAttrs > 0``
+      7.2.1 or 7.2.2 rejects any call with ``numAttrs > 0``
       (see ROCm/clr @ rocm-7.2.1 hipamd/src/hip_memory.cpp:2819-2822), so
       we call with ``numAttrs=0``.
 
@@ -109,13 +107,13 @@ class BatchMemcpyParams(NamedTuple):
     bpb: np.ndarray  # [num_layers] uint64 — bytes per block
     num_layers: int
     # CUDA only: one attributes entry with srcAccessOrder=ANY. Unused on
-    # ROCm because the current runtime rejects numAttrs > 0.
+    # ROCm (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
     attrs: _CUmemcpyAttributes
     attrs_idx: ctypes.c_size_t
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
     # cuMemcpyBatchAsync() with fail_idx for backward compatibility
     fail_idx: ctypes.c_size_t
-    stream_handle: int  # raw cudaStream_t / CUstream / hipStream_t
+    stream_handle: int  # raw cudaStream_t / CUstream
 
 
 def build_params(
@@ -178,7 +176,7 @@ def copy_blocks(
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
 
-    # ROCm 7.2.1 rejects any call with numAttrs>0 (hipMemcpyBatchAsync
+    # ROCm 7.2.1/7.2.2 rejects any call with numAttrs>0 (hipMemcpyBatchAsync
     # hipamd/src/hip_memory.cpp:2819-2822); CUDA uses one attrs entry so
     # srcAccessOrder is honored. attrs / attrsIdxs are ignored when
     # numAttrs==0, so we pass the same values from both paths.
