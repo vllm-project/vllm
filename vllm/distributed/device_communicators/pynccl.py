@@ -116,6 +116,7 @@ class PyNcclCommunicator:
             self.world_size = group.world_size
 
         self.group = group
+        self._registered_windows: list = []
 
         # if world_size == 1, no need to create communicator
         if self.world_size == 1 or envs.VLLM_DISABLE_PYNCCL:
@@ -192,9 +193,6 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
-
-        # Track registered windows for cleanup
-        self._registered_windows: list = []
 
     def all_reduce(
         self,
@@ -454,13 +452,14 @@ class PyNcclCommunicator:
             try:
                 self.deregister_comm_window(window)
             except Exception:
-                # Log errors during cleanup, but don't raise exceptions
-                # from __del__ as it can cause issues during interpreter shutdown
-                logger.warning(
-                    "Error deregistering NCCL window during cleanup: %s",
-                    window,
-                    exc_info=True,
-                )
+                try:
+                    logger.warning(
+                        "Error deregistering NCCL window during cleanup: %s",
+                        window,
+                        exc_info=True,
+                    )
+                except Exception:
+                    pass
 
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:

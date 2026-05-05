@@ -302,12 +302,8 @@ Error executing method 'init_device'. This might cause deadlock in distributed e
 Traceback (most recent call last):
 ...
    File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl.py", line 99, in __init__
-     self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
-                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 277, in ncclCommInitRank
-     self.NCCL_CHECK(self._funcs["ncclCommInitRank"](ctypes.byref(comm),
-   File "/usr/local/lib/python3.12/dist-packages/vllm/distributed/device_communicators/pynccl_wrapper.py", line 256, in NCCL_CHECK
-     raise RuntimeError(f"NCCL error: {error_str}")
+     self.comm = nccl.Communicator.init(
+                 ^^^^^^^^^^^^^^^^^^^^^^^
  RuntimeError: NCCL error: unhandled system error (run with NCCL_DEBUG=INFO for details)
 ...
 ```

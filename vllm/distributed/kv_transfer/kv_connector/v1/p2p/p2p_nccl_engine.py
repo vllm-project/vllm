@@ -104,7 +104,7 @@ class P2pNcclEngine:
                 self._use_legacy = True
 
         if self._use_legacy:
-            from vllm.distributed.device_communicators.pynccl_wrapper import (
+            from vllm.distributed.device_communicators.pynccl_wrapper_legacy import (
                 NCCLLibrary,
                 buffer_type,
                 cudaStream_t,
