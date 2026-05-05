@@ -226,6 +226,7 @@ class StaticSinkAttention(Attention, CustomOp):
             sink_len=self.sink_len,
             dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            cache_layout_id=self.attn_backend.get_kv_cache_layout_id(),
         )
 
 

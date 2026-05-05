@@ -552,6 +552,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                cache_layout_id=self.attn_backend.get_kv_cache_layout_id(),
                 sliding_window=self.sliding_window,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):
@@ -570,6 +571,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 tq_slot_size=tq_config.slot_size_aligned,
+                cache_layout_id=self.attn_backend.get_kv_cache_layout_id(),
             )
         else:
             return FullAttentionSpec(
@@ -579,6 +581,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                cache_layout_id=self.attn_backend.get_kv_cache_layout_id(),
             )
 
 

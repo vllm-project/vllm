@@ -109,6 +109,7 @@ def new_kv_cache_spec(
     head_size=64,
     dtype=torch.float32,
     page_size_padded=None,
+    cache_layout_id=None,
     sliding_window=None,
     attention_chunk_size=None,
 ):
@@ -118,6 +119,7 @@ def new_kv_cache_spec(
         head_size=head_size,
         dtype=dtype,
         page_size_padded=page_size_padded,
+        cache_layout_id=cache_layout_id,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
     )
@@ -129,6 +131,7 @@ def new_sliding_window_spec(
     head_size=64,
     dtype=torch.float32,
     page_size_padded=None,
+    cache_layout_id=None,
     sliding_window=1,
 ):
     return SlidingWindowSpec(
@@ -137,6 +140,7 @@ def new_sliding_window_spec(
         head_size=head_size,
         dtype=dtype,
         page_size_padded=page_size_padded,
+        cache_layout_id=cache_layout_id,
         sliding_window=sliding_window,
     )
 
@@ -147,6 +151,7 @@ def new_chunked_local_attention_spec(
     head_size=64,
     dtype=torch.float32,
     page_size_padded=None,
+    cache_layout_id=None,
     attention_chunk_size=4,
 ):
     return ChunkedLocalAttentionSpec(
@@ -155,6 +160,7 @@ def new_chunked_local_attention_spec(
         head_size=head_size,
         dtype=dtype,
         page_size_padded=page_size_padded,
+        cache_layout_id=cache_layout_id,
         attention_chunk_size=attention_chunk_size,
     )
 
@@ -1771,9 +1777,30 @@ def test_get_kv_cache_config_one_worker():
     )
 
 
-def test_kv_cache_tensor_sharing_requires_uniform_block_size():
+def test_kv_cache_tensor_sharing_requires_uniform_cache_layout_id():
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+
+    def assert_shared_tensors_have_uniform_cache_layout_id(
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        layer_to_layout = {
+            layer_name: (
+                group.kv_cache_spec.block_size,
+                getattr(group.kv_cache_spec, "cache_layout_id", None),
+            )
+            for group in kv_cache_config.kv_cache_groups
+            for layer_name in group.layer_names
+        }
+        for tensor in kv_cache_config.kv_cache_tensors:
+            layer_layouts = {
+                layer_name: layer_to_layout[layer_name]
+                for layer_name in tensor.shared_by
+            }
+            assert len(set(layer_layouts.values())) == 1, (
+                "Layers sharing one raw KV cache tensor must use the same "
+                f"cache layout. Got {layer_layouts}."
+            )
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     kv_cache_specs_hybrid = {
@@ -1784,22 +1811,23 @@ def test_kv_cache_tensor_sharing_requires_uniform_block_size():
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
     )[0]
 
-    # These layers have equal page_size_bytes after block-size alignment, but
-    # their slot IDs are still computed with different block sizes.
-    layer_to_block_size = {
-        layer_name: group.kv_cache_spec.block_size
-        for group in kv_cache_config_hybrid.kv_cache_groups
-        for layer_name in group.layer_names
+    # Do not share tensors across different block sizes.
+    assert_shared_tensors_have_uniform_cache_layout_id(kv_cache_config_hybrid)
+
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(
+            head_size=64, cache_layout_id=("test", "layout_a")
+        ),
+        "layer_2": new_sliding_window_spec(
+            head_size=64, cache_layout_id=("test", "layout_b")
+        ),
     }
-    for tensor in kv_cache_config_hybrid.kv_cache_tensors:
-        layer_block_sizes = {
-            layer_name: layer_to_block_size[layer_name]
-            for layer_name in tensor.shared_by
-        }
-        assert len(set(layer_block_sizes.values())) == 1, (
-            "Layers sharing one raw KV cache tensor must use the same block size. "
-            f"Got {layer_block_sizes}."
-        )
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
+    )[0]
+
+    # Do not share tensors across different cache layouts.
+    assert_shared_tensors_have_uniform_cache_layout_id(kv_cache_config_hybrid)
 
 
 def test_get_kv_cache_configs_attention_free():

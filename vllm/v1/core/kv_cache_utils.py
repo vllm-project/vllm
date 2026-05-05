@@ -1228,6 +1228,64 @@ def _get_kv_cache_config_deepseek_v4(
     return num_blocks, kv_cache_tensors
 
 
+def _build_uniform_page_size_kv_cache_tensor_specs(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    """Build KV cache tensor specs for groups with uniform page size.
+
+    Groups may share a raw tensor only within the same compatibility bucket:
+    same manager block size and same backend KV cache layout.
+
+    Within each bucket, create group_size memory pools, each shared by one
+    layer from each group. For example, for groups (full.0, full.1),
+    (sw.0, sw.2), and (sw.1, padding), group_size is 2:
+
+      full.0, sw.0, sw.1 share one raw tensor
+      full.1, sw.2       share another raw tensor
+
+    Layers from different groups have different block tables, so they use
+    different logical blocks inside the shared raw tensor.
+    """
+    page_size = get_uniform_page_size(
+        [group.kv_cache_spec for group in kv_cache_groups]
+    )
+    compatible_groups: dict[tuple[int, Any], list[KVCacheGroupSpec]] = defaultdict(
+        list
+    )
+    for group in kv_cache_groups:
+        compatible_groups[
+            (
+                group.kv_cache_spec.block_size,
+                getattr(group.kv_cache_spec, "cache_layout_id", None),
+            )
+        ].append(group)
+
+    tensor_group_size = sum(
+        max(len(group.layer_names) for group in groups)
+        for groups in compatible_groups.values()
+    )
+    assert tensor_group_size > 0, "tensor_group_size must be greater than 0"
+    num_blocks = get_num_blocks(
+        vllm_config, tensor_group_size, available_memory, page_size
+    )
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for groups in compatible_groups.values():
+        group_size = max(len(group.layer_names) for group in groups)
+        for i in range(group_size):
+            shared_by = []
+            for group in groups:
+                if i < len(group.layer_names):
+                    shared_by.append(group.layer_names[i])
+            kv_cache_tensors.append(
+                KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
+            )
+
+    return num_blocks, kv_cache_tensors
+
+
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1282,66 +1340,14 @@ def get_kv_cache_config_from_groups(
             vllm_config, kv_cache_groups, available_memory
         )
     else:
-        # General case:
-        # When all groups have the same block size, we will have group_size
-        # memory pools, each shared by one layer from each group. As layers of
-        # different groups have different block table, they will use different
-        # parts of the shared Tensor.
-        # The memory layout for 3 groups (full.0, full.1), (sw.0, sw.2),
-        # (sw.1, padding) will be: (group_size = 2)
-        # full.0, sw.0, sw.1: share a Tensor with size=available_memory//2
-        # full.1, sw.2: share another Tensor with size=available_memory//2
-        page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
+        # General case: build raw tensor pools for groups with a uniform page
+        # size. A pool can only be shared by layers with compatible slot
+        # mapping and backend KV cache layout.
+        num_blocks, kv_cache_tensors = (
+            _build_uniform_page_size_kv_cache_tensor_specs(
+                vllm_config, kv_cache_groups, available_memory
+            )
         )
-        groups_by_block_size: dict[int, list[KVCacheGroupSpec]] = defaultdict(list)
-        for group in kv_cache_groups:
-            groups_by_block_size[group.kv_cache_spec.block_size].append(group)
-
-        if len(groups_by_block_size) > 1:
-            # A shared raw KV tensor is indexed by slot IDs, not page-byte
-            # offsets. Since slot = block_id * block_size + offset, groups
-            # with different block sizes can map distinct blocks to the same
-            # slot even when page_size_bytes matches (e.g., 2 * 16 == 1 * 32).
-            # Split them so each shared tensor has one slot namespace.
-            tensor_group_size = sum(
-                max(len(group.layer_names) for group in groups)
-                for groups in groups_by_block_size.values()
-            )
-            assert tensor_group_size > 0, "tensor_group_size must be greater than 0"
-            num_blocks = get_num_blocks(
-                vllm_config, tensor_group_size, available_memory, page_size
-            )
-            kv_cache_tensors = []
-            for groups in groups_by_block_size.values():
-                group_size = max(len(group.layer_names) for group in groups)
-                for i in range(group_size):
-                    shared_by = []
-                    for group in groups:
-                        if i < len(group.layer_names):
-                            shared_by.append(group.layer_names[i])
-                    kv_cache_tensors.append(
-                        KVCacheTensor(
-                            size=page_size * num_blocks,
-                            shared_by=shared_by,
-                        )
-                    )
-        else:
-            group_size = max(len(group.layer_names) for group in kv_cache_groups)
-
-            assert group_size > 0, "group_size must be greater than 0"
-            num_blocks = get_num_blocks(
-                vllm_config, group_size, available_memory, page_size
-            )
-            kv_cache_tensors = []
-            for i in range(group_size):
-                shared_by = []
-                for j in range(len(kv_cache_groups)):
-                    if i < len(kv_cache_groups[j].layer_names):
-                        shared_by.append(kv_cache_groups[j].layer_names[i])
-                kv_cache_tensors.append(
-                    KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
-                )
 
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -1414,6 +1420,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     alignment=spec.alignment,
                     compress_ratio=spec.compress_ratio,
                     model_version=spec.model_version,
+                    cache_layout_id=spec.cache_layout_id,
                 )
             elif isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1425,6 +1432,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     kv_quant_mode=spec.kv_quant_mode,
                     sliding_window=spec.sliding_window,
                     page_size_padded=spec.page_size_padded,
+                    cache_layout_id=spec.cache_layout_id,
                 )
             elif isinstance(spec, ChunkedLocalAttentionSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1434,6 +1442,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     dtype=spec.dtype,
                     attention_chunk_size=spec.attention_chunk_size,
                     page_size_padded=spec.page_size_padded,
+                    cache_layout_id=spec.cache_layout_id,
                 )
 
     if not (

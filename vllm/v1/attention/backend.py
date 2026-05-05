@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
@@ -149,6 +150,15 @@ class AttentionBackend(ABC):
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:
         return (cls.__module__, cls.__qualname__)
+
+    @classmethod
+    def get_kv_cache_layout_id(cls) -> Hashable:
+        """Return the physical KV cache layout identifier for this backend.
+
+        Backends may return the same layout id only when they interpret a raw
+        KV cache tensor with the same physical memory layout.
+        """
+        return cls.full_cls_name()
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:

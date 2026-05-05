@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Hashable
 from dataclasses import dataclass, fields, replace
 from enum import IntEnum
 from math import prod
@@ -133,6 +134,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    cache_layout_id: Hashable | None = None
 
     @property
     def page_size_bytes(self) -> int:
@@ -244,6 +246,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            cache_layout_id=specs[0].cache_layout_id,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -376,6 +379,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            cache_layout_id=specs[0].cache_layout_id,
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
@@ -520,6 +524,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            cache_layout_id=specs[0].cache_layout_id,
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
@@ -611,6 +616,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            cache_layout_id=specs[0].cache_layout_id,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
