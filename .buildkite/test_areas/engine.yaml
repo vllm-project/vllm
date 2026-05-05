@@ -13,8 +13,9 @@ steps:
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
+  - tests/test_jit_monitor.py
   commands:
-  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
 
 - label: Engine (1 GPU)
   key: engine-1-gpu
