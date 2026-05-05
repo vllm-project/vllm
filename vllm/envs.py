@@ -173,6 +173,9 @@ if TYPE_CHECKING:
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
+    VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP: bool = True
+    VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES: list[int] | None = None
+    VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -301,6 +304,13 @@ def maybe_convert_int(value: str | None) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def maybe_convert_int_list(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    values = [int(item.strip()) for item in value.split(",") if item.strip()]
+    return values or None
 
 
 def maybe_convert_bool(value: str | None) -> bool | None:
@@ -1393,6 +1403,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
+    ),
+    # DeepSeek V4 mHC / hc_head TileLang kernels JIT on first use. Enable
+    # startup warmup by default to avoid first-request latency spikes; set to
+    # 0 to keep the old lazy-JIT behavior.
+    "VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP", "1"))
+    ),
+    "VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES": lambda: maybe_convert_int_list(
+        os.getenv("VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES")
+    ),
+    "VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP", "1"))
     ),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
