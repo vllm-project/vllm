@@ -34,6 +34,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
         )
+        assert self.base_layer.quant_method.moe_quant_config is not None, (
+            "Fused MoE LoRA requires the base layer to have a moe_quant_config."
+        )
         assert not self.base_layer.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )

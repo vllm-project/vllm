@@ -25,11 +25,7 @@ import regex as re
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
-SEPARATE_GROUPS = [
-    "tests",
-    # v0 related
-    "vllm/lora",
-]
+SEPARATE_GROUPS = ["tests"]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
