@@ -238,9 +238,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
-    yarn_get_mscale,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
@@ -262,7 +259,10 @@ from vllm.v1.attention.backend import (
     MLAAttentionImpl,
     SparseMLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill import (
+    MLAPrefillBackend,
+    get_mla_prefill_backend,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -454,20 +454,32 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        self.prefill_backend = prefill_backend_cls(
+            num_heads=self.num_heads,
+            scale=self.scale,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            vllm_config=vllm_config,
+        )
 
         self.kv_cache = torch.tensor([])
 
         self.use_sparse = use_sparse
 
-        vllm_config = get_current_vllm_config_or_none()
+        _vllm_config = get_current_vllm_config_or_none()
         self.dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+            _vllm_config is not None
+            and _vllm_config.parallel_config.decode_context_parallel_size > 1
+            and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
         # Initialize q/k/v range constants.
@@ -1330,35 +1342,6 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
     )
 
 
-def get_mla_prefill_scale(model_config: ModelConfig) -> float:
-    hf_text_config = model_config.hf_text_config
-    mla_dims = get_mla_dims(model_config)
-    qk_head_dim = mla_dims.qk_nope_head_dim + mla_dims.qk_rope_head_dim
-    scale = qk_head_dim**-0.5
-
-    # Deepseek V4 disables YaRN mscale for attention; Deepseek V2/V3 applies
-    # the same mscale correction when constructing the MLA attention module.
-    if hasattr(hf_text_config, "compress_ratios"):
-        return scale
-
-    rope_parameters = getattr(hf_text_config, "rope_parameters", None)
-    if rope_parameters is None:
-        rope_parameters = getattr(hf_text_config, "rope_scaling", None)
-
-    if rope_parameters is None:
-        return scale
-
-    rope_type = rope_parameters.get("rope_type", rope_parameters.get("type"))
-    apply_yarn_scaling = rope_parameters.get("apply_yarn_scaling", True)
-    if rope_type != "default" and apply_yarn_scaling:
-        mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
-        scaling_factor = rope_parameters["factor"]
-        mscale = yarn_get_mscale(float(scaling_factor), float(mscale_all_dim))
-        scale *= mscale * mscale
-
-    return scale
-
-
 @functools.cache
 def backend_supports_prefill_query_quantization() -> bool:
     """Check if the selected MLA prefill backend supports query quantization.
@@ -1554,20 +1537,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 device=device,
             )
 
-        from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
-        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-        self._prefill_backend = prefill_backend_cls(
-            num_heads=self.num_heads,
-            scale=get_mla_prefill_scale(self.model_config),
-            kv_lora_rank=self.mla_dims.kv_lora_rank,
-            qk_nope_head_dim=self.mla_dims.qk_nope_head_dim,
-            qk_rope_head_dim=self.mla_dims.qk_rope_head_dim,
-            v_head_dim=self.mla_dims.v_head_dim,
-            vllm_config=vllm_config,
-            device=device,
-            layer_names=layer_names,
-        )
+        self._prefill_backend = self.compilation_config.static_forward_context[
+            layer_names[0]
+        ].prefill_backend
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(

@@ -9,6 +9,7 @@ import torch
 import vllm.envs as envs
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 from vllm.v1.attention.backends.utils import (
+    PerLayerParameters,
     get_per_layer_parameters,
     infer_global_hyperparameters,
 )
@@ -62,8 +63,6 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         qk_rope_head_dim: int,
         v_head_dim: int,
         vllm_config: "VllmConfig",
-        device: torch.device,
-        layer_names: list[str] | None = None,
     ) -> None:
         super().__init__(
             num_heads=num_heads,
@@ -73,25 +72,11 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
-            device=device,
-            layer_names=layer_names,
         )
 
         self._prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
-        if layer_names is None:
-            raise ValueError(
-                "FlashInferPrefillBackend requires layer_names to "
-                "initialize global hyperparameters."
-            )
-
-        from vllm.model_executor.layers.attention.mla_attention import (
-            MLACommonImpl,
-        )
-
-        self._global_hyperparameters = infer_global_hyperparameters(
-            get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)  # type: ignore[type-abstract]
-        )
+        self._global_hyperparameters: PerLayerParameters | None = None
 
     def _ensure_chunks(
         self,
@@ -106,10 +91,36 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
                     )
                 )
 
+    def _resolve_global_hyperparameters(self) -> PerLayerParameters:
+        if self._global_hyperparameters is not None:
+            return self._global_hyperparameters
+
+        from vllm.model_executor.layers.attention.mla_attention import (
+            MLAAttention,
+            MLACommonImpl,
+        )
+
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        layer_names = [
+            name
+            for name, layer in forward_context.items()
+            if isinstance(layer, MLAAttention)
+        ]
+
+        self._global_hyperparameters = infer_global_hyperparameters(
+            get_per_layer_parameters(
+                self.vllm_config,
+                layer_names,
+                MLACommonImpl,  # type: ignore[type-abstract]
+            )
+        )
+        return self._global_hyperparameters
+
     def prepare_metadata(
         self,
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
+        global_hyperparameters = self._resolve_global_hyperparameters()
         qo_indptr = prefill_metadata.query_start_loc
         has_context = prefill_metadata.chunked_context is not None
         (workspace_buffer,) = current_workspace_manager().get_simultaneous(
@@ -144,9 +155,9 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
             head_dim_qk=head_dim_qk,
             head_dim_vo=head_dim_vo,
             causal=True,
-            sm_scale=self._global_hyperparameters.sm_scale,
-            window_left=self._global_hyperparameters.window_left,
-            logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
+            sm_scale=global_hyperparameters.sm_scale,
+            window_left=global_hyperparameters.window_left,
+            logits_soft_cap=global_hyperparameters.logits_soft_cap,
             q_data_type=prefill_metadata.q_data_type,
             o_data_type=prefill_metadata.output_dtype,
         )
@@ -165,9 +176,9 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
                     head_dim_qk=head_dim_qk,
                     head_dim_vo=head_dim_vo,
                     causal=False,
-                    sm_scale=self._global_hyperparameters.sm_scale,
-                    window_left=self._global_hyperparameters.window_left,
-                    logits_soft_cap=self._global_hyperparameters.logits_soft_cap,
+                    sm_scale=global_hyperparameters.sm_scale,
+                    window_left=global_hyperparameters.window_left,
+                    logits_soft_cap=global_hyperparameters.logits_soft_cap,
                     q_data_type=prefill_metadata.q_data_type,
                     o_data_type=prefill_metadata.output_dtype,
                 )
