@@ -159,11 +159,13 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
-    o = (
-        core_attn_out[: v.numel()].view(*v.shape)
-        if core_attn_out is not None
-        else torch.empty_like(v)
-    )
+    if core_attn_out is not None:
+        assert core_attn_out.numel() >= v.numel(), (
+            f"core_attn_out too small: {core_attn_out.numel()} < {v.numel()}"
+        )
+        o = core_attn_out[: v.numel()].view(*v.shape)
+    else:
+        o = torch.empty_like(v)
 
     def grid(meta):
         return (triton.cdiv(V, meta["BV"]), NT, B * H)

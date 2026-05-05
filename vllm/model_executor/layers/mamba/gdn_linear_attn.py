@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
-from typing import Any
-
 import torch
 from einops import rearrange
 from torch import nn
@@ -71,32 +69,17 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
-GDN_AITER_TRITON_AVAILABLE = False
-gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule: Any = None
-gdn_aiter_causal_conv1d_update_single_token: Any = None
-gdn_aiter_fused_reshape_causal_conv1d_update_single_token: Any = None
+GDN_AITER_TRITON_AVAILABLE = (
+    rocm_aiter_ops.is_enabled() and rocm_aiter_ops.are_gdn_triton_kernels_available()
+)
 
-if rocm_aiter_ops.is_enabled() and rocm_aiter_ops.are_gdn_triton_kernels_available():
+if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.causal_conv1d_update_single_token import (
-        causal_conv1d_update_single_token as _gdn_aiter_causal_conv1d_update_single_token,  # noqa: E501
-    )
-    from aiter.ops.triton.causal_conv1d_update_single_token import (
-        fused_reshape_causal_conv1d_update_single_token as _gdn_aiter_fused_reshape_causal_conv1d_update_single_token,  # noqa: E501
+        fused_reshape_causal_conv1d_update_single_token as gdn_aiter_fused_reshape_causal_conv1d_update_single_token,  # noqa: E501
     )
     from aiter.ops.triton.gated_delta_net import (
-        fused_rearrange_sigmoid_gated_delta_rule as _gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
+        fused_rearrange_sigmoid_gated_delta_rule as gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule,  # noqa: E501
     )
-
-    gdn_aiter_causal_conv1d_update_single_token = (
-        _gdn_aiter_causal_conv1d_update_single_token
-    )
-    gdn_aiter_fused_reshape_causal_conv1d_update_single_token = (
-        _gdn_aiter_fused_reshape_causal_conv1d_update_single_token
-    )
-    gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule = (
-        _gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule
-    )
-    GDN_AITER_TRITON_AVAILABLE = True
 
 logger = init_logger(__name__)
 
@@ -339,6 +322,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # we need to create qkvz_proj adaptively here.
         # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
         # in_proj_qkv and in_proj_z are created separately instead.
+        self.has_lora_projections = not create_in_proj_qkvz
         if create_in_proj_qkvz:
             self.in_proj_qkvz = self.create_qkvz_proj(
                 hidden_size=self.hidden_size,
@@ -610,6 +594,13 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             dim=-1,
         )
 
+        # The split above produces non-contiguous views into the interleaved
+        # buffer.  Concatenating everything into a single flat tensor forces a
+        # contiguous copy, then slicing back out gives contiguous q/k/v/z/b/a
+        # tensors that downstream kernels require.  Doing this in one cat+slice
+        # keeps torch.compile in a single Triton graph instead of emitting
+        # separate copy kernels per tensor.  The original code used
+        # rearrange(...).contiguous() on each tensor individually.
         fused = torch.cat(
             [
                 mixed_qkv_logical.reshape(-1),
@@ -647,6 +638,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
     @torch.compile(fullgraph=True)
     def rearrange_mixed_qkv(self, mixed_qkv):
+        """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
+
+        The original code used ``rearrange(x, "l (h d) -> 1 l h d", d=...)``
+        followed by ``.contiguous()`` on each tensor.  This version flattens
+        all three splits into a single buffer via ``torch.cat`` so that
+        torch.compile emits one Triton copy kernel instead of three separate
+        contiguous() calls.
+        """
         if mixed_qkv is None:
             return None, None, None
 
@@ -655,15 +654,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         k_dim = self.key_dim // self.tp_size
         v_dim = self.value_dim // self.tp_size
 
-        # 1. Create the non-contiguous 2D views
         query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
 
-        # 2. Flatten and concatenate to force a single triton graph.
         fused = torch.cat(
             [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
         )
 
-        # 3. Slice the single buffer.
         q_size = seq_len * q_dim
         k_size = seq_len * k_dim
 
@@ -671,7 +667,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         k_contig = fused[q_size : q_size + k_size]
         v_contig = fused[q_size + k_size :]
 
-        # 4. Zero cost reshape
         query = q_contig.view(1, seq_len, -1, self.head_k_dim)
         key = k_contig.view(1, seq_len, -1, self.head_k_dim)
         value = v_contig.view(1, seq_len, -1, self.head_v_dim)
@@ -700,7 +695,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Fast path for with Triton decode kernels for part 1&2
         # ============================================================
-        if not hasattr(self, "in_proj_qkv") and GDN_AITER_TRITON_AVAILABLE:
+        if not self.has_lora_projections and GDN_AITER_TRITON_AVAILABLE:
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
@@ -721,14 +716,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 projected_states_ba,
                 z,
                 core_attn_out,
-                True,
-                self.prefix,
+                fast_kernel=True,
+                layer_name=_encode_layer_name(self.prefix),
             )
         else:
             # ============================================================
             # Part 1: Input Projection
             # ============================================================
-            if hasattr(self, "in_proj_qkv"):
+            if self.has_lora_projections:
                 # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
                 mixed_qkv, _ = self.in_proj_qkv(hidden_states)
                 ba, _ = self.in_proj_ba(hidden_states)
@@ -776,8 +771,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 b,
                 a,
                 core_attn_out,
-                False,
-                _encode_layer_name(self.prefix),
+                fast_kernel=False,
+                layer_name=_encode_layer_name(self.prefix),
             )
 
         # ============================================================
@@ -806,7 +801,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """
         num_tokens = hidden_states.size(0)
 
-        assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on XPU."
+        assert not self.has_lora_projections, "lora isn't supported on XPU."
 
         # ============================================================
         # Part 1: Input Projection
@@ -1006,6 +1001,26 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         core_attn_out: torch.Tensor,
         fast_kernel: bool,
     ):
+        """Core conv1d + recurrent attention, dispatched by ``fast_kernel``.
+
+        The parameter semantics depend on ``fast_kernel``:
+
+        When ``fast_kernel=False`` (standard path):
+            qkv_or_qkvz: packed [q, k, v] projection  (num_tokens, qkv_dim)
+            b_or_ba:      beta gating vector           (num_tokens, num_heads)
+            a_or_z_out:   alpha gating vector           (num_tokens, num_heads)
+
+        When ``fast_kernel=True`` (AITER Triton fast path):
+            qkv_or_qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
+            b_or_ba:      packed [b, a] gating vectors   (num_tokens, 2*num_heads)
+            a_or_z_out:   **output** buffer for z         (num_tokens, num_heads,
+                          head_dim); mutated in-place by the fused kernel.
+
+        Args:
+            core_attn_out: Pre-allocated output buffer for attention results.
+            fast_kernel: If True, use fused AITER Triton decode kernels that
+                consume the packed qkvz/ba layout directly.
+        """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
@@ -1298,13 +1313,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ):
-        has_initial_state = attn_metadata.has_initial_state
-        spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
-        spec_sequence_masks = attn_metadata.spec_sequence_masks
-        spec_token_indx = attn_metadata.spec_token_indx
-        non_spec_token_indx = attn_metadata.non_spec_token_indx
-        spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
@@ -1315,8 +1324,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else self_kv_cache[0].transpose(-1, -2)
         )
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -1326,7 +1333,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         mixed_qkv_non_spec, b, a = (
             gdn_aiter_fused_reshape_causal_conv1d_update_single_token(
                 qkvz,
-                num_actual_tokens,
+                attn_metadata.num_actual_tokens,
                 self.num_k_heads // self.tp_size,
                 self.num_v_heads // self.tp_size,
                 self.head_k_dim,
@@ -1346,32 +1353,23 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         )
 
         # 2. Recurrent attention
-
-        core_attn_out_spec, last_recurrent_state = None, None
-
-        core_attn_out_non_spec, last_recurrent_state = (
-            gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule(
-                A_log=self.A_log,
-                a=a,
-                b=b,
-                dt_bias=self.dt_bias,
-                qkv=mixed_qkv_non_spec,
-                key_dim=self.key_dim // self.tp_size,
-                value_dim=self.value_dim // self.tp_size,
-                head_k_dim=self.head_k_dim,
-                head_v_dim=self.head_v_dim,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
-                use_qk_l2norm_in_kernel=True,
-                core_attn_out=core_attn_out.reshape(-1),
-            )
+        gdn_aiter_fused_rearrange_sigmoid_gated_delta_rule(
+            A_log=self.A_log,
+            a=a,
+            b=b,
+            dt_bias=self.dt_bias,
+            qkv=mixed_qkv_non_spec,
+            key_dim=self.key_dim // self.tp_size,
+            value_dim=self.value_dim // self.tp_size,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            initial_state=ssm_state,
+            inplace_final_state=True,
+            cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+            ssm_state_indices=non_spec_state_indices_tensor,
+            use_qk_l2norm_in_kernel=True,
+            core_attn_out=core_attn_out.reshape(-1),
         )
-
-        return
 
     def _forward_core_decode_non_spec(
         self,
@@ -1436,10 +1434,15 @@ def gdn_attention_core(
     fast_kernel: bool,
     layer_name: LayerNameType,
 ) -> None:
-    """
-    Custom op for the core attention computation.
-    Only handles the convolution + recurrent attention part.
-    Input/output projections are handled outside this op.
+    """Custom op wrapping GatedDeltaNetAttention._forward_core.
+
+    Handles conv1d + recurrent attention only; input/output projections
+    are performed by the caller.  See ``_forward_core`` for the
+    ``fast_kernel``-dependent parameter semantics.
+
+    ``a_or_z_out`` and ``core_attn_out`` are mutated in-place.
+    ``a_or_z_out`` is only written when ``fast_kernel=True`` (it serves
+    as the z output buffer); when ``fast_kernel=False`` it is read-only.
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()

@@ -127,6 +127,9 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         if core_attn_out is not None:
+            assert not torch.is_grad_enabled(), (
+                "core_attn_out buffer reuse is only supported for inference"
+            )
             assert q.dtype == o.dtype, "Incompatible dtype for inplace computation"
         return o.to(q.dtype), final_state
 
