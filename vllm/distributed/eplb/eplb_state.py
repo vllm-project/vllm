@@ -750,8 +750,26 @@ class EplbState:
             assert stats_path is not None
             path = Path(stats_path)
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Write the one-shot meta record only if the file is empty;
+            # otherwise we are reopening after an elastic rebuild (close()
+            # + new EplbState) and the meta record is already at the top.
+            write_meta = not path.exists() or path.stat().st_size == 0
             self._expert_load_stats_file = open(path, "a")  # noqa: SIM115
             logger.info("EPLB expert-load stats -> %s", path)
+            if write_meta:
+                meta = {
+                    "record_type": "eplb_load_meta",
+                    "version": 1,
+                    "model": eplb_model_state.model_name,
+                    "num_ranks": num_tokens_per_rank.shape[1],
+                    "num_groups": eplb_model_state.model.num_expert_groups,
+                    "num_nodes": get_node_count(),
+                    "num_layers": num_tokens_per_rank.shape[0],
+                    "num_redundant_experts": (
+                        self.parallel_config.eplb_config.num_redundant_experts
+                    ),
+                }
+                self._expert_load_stats_file.write(json.dumps(meta) + "\n")
 
         num_ranks = num_tokens_per_rank.shape[1]
         num_physical = expert_load_pass.shape[1]

@@ -20,8 +20,15 @@ class _Parser(argparse.ArgumentParser):
         self.exit(2, f"\nerror: {message}\n")
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    records = []
+def _load_jsonl(
+    path: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Parse the stats JSONL. Strict format: line 1 is the single
+    `eplb_load_meta` record; every subsequent non-empty line is an
+    `eplb_load_stats` record. Anything else (zero or two metas, stats
+    before meta, unknown record types) is treated as a corrupted file."""
+    meta: dict[str, Any] | None = None
+    stats: list[dict[str, Any]] = []
     with open(path) as f:
         for line_no, line in enumerate(f, start=1):
             line = line.strip()
@@ -31,29 +38,35 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
                 record = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"{path}:{line_no}: invalid JSON: {exc}") from exc
-            if record.get("record_type") == "eplb_load_stats":
-                records.append(record)
-    if not records:
-        raise ValueError(f"{path} does not contain eplb_load_stats records.")
-    return records
-
-
-def _filter_records(
-    records: list[dict[str, Any]],
-    start_step: int | None,
-    end_step: int | None,
-) -> list[dict[str, Any]]:
-    filtered = []
-    for record in records:
-        step = int(record["step"])
-        if start_step is not None and step < start_step:
-            continue
-        if end_step is not None and step > end_step:
-            continue
-        filtered.append(record)
-    if not filtered:
-        raise ValueError("Step filters removed all eplb_load_stats records.")
-    return filtered
+            record_type = record.get("record_type")
+            if record_type == "eplb_load_meta":
+                if meta is not None:
+                    raise ValueError(
+                        f"{path}:{line_no}: second eplb_load_meta record "
+                        "found; the file must contain exactly one."
+                    )
+                if stats:
+                    raise ValueError(
+                        f"{path}:{line_no}: eplb_load_meta must precede all "
+                        "eplb_load_stats records."
+                    )
+                meta = record
+            elif record_type == "eplb_load_stats":
+                if meta is None:
+                    raise ValueError(
+                        f"{path}:{line_no}: eplb_load_stats found before "
+                        "eplb_load_meta."
+                    )
+                stats.append(record)
+            else:
+                raise ValueError(
+                    f"{path}:{line_no}: unexpected record_type {record_type!r}."
+                )
+    if meta is None:
+        raise ValueError(f"{path}: no eplb_load_meta record found.")
+    if not stats:
+        raise ValueError(f"{path}: no eplb_load_stats records found.")
+    return meta, stats
 
 
 def _record_logical_load(record: dict[str, Any]) -> torch.Tensor:
@@ -183,30 +196,17 @@ def main() -> None:
     parser.add_argument("--stats-path", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--num-redundant-experts", type=int, required=True)
-    parser.add_argument("--start-step", type=int, default=None)
-    parser.add_argument("--end-step", type=int, default=None)
-    parser.add_argument(
-        "--num-ranks",
-        type=int,
-        default=None,
-        help="Number of EP ranks. Defaults to the num_ranks field in the stats.",
-    )
-    parser.add_argument("--num-groups", type=int, default=1)
-    parser.add_argument("--num-nodes", type=int, default=1)
     args = parser.parse_args()
 
     if args.num_redundant_experts < 0:
         parser.error("--num-redundant-experts must be non-negative.")
-    if args.num_nodes <= 0 or args.num_groups <= 0:
-        parser.error("--num-nodes and --num-groups must be positive.")
 
-    records = _filter_records(
-        _load_jsonl(args.stats_path), args.start_step, args.end_step
-    )
+    meta, records = _load_jsonl(args.stats_path)
+    num_ranks = int(meta["num_ranks"])
+    num_groups = int(meta["num_groups"])
+    num_nodes = int(meta["num_nodes"])
+
     logical_load = aggregate_logical_load(records)
-    num_ranks = args.num_ranks or int(records[0]["num_ranks"])
-    if num_ranks <= 0:
-        parser.error("--num-ranks must be positive.")
 
     before_mapping = _initial_mapping(
         logical_load.shape[0], logical_load.shape[1], args.num_redundant_experts
@@ -215,8 +215,8 @@ def main() -> None:
         logical_load,
         args.num_redundant_experts,
         num_ranks,
-        args.num_groups,
-        args.num_nodes,
+        num_groups,
+        num_nodes,
     )
     before = _imbalance(_rank_load_for_mapping(logical_load, before_mapping, num_ranks))
     after = _imbalance(_rank_load_for_mapping(logical_load, after_mapping, num_ranks))
@@ -230,7 +230,8 @@ def main() -> None:
     print(
         f"Generated mapping for {logical_load.shape[0]} layers, "
         f"{logical_load.shape[1]} logical experts, "
-        f"{after_mapping.shape[1]} physical slots, {num_ranks} ranks"
+        f"{after_mapping.shape[1]} physical slots, {num_ranks} ranks, "
+        f"{num_groups} groups, {num_nodes} nodes"
     )
     print(f"Imbalance before: {before:.4f}x")
     print(f"Imbalance after:  {after:.4f}x")
