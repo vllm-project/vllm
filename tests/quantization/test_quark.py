@@ -230,8 +230,6 @@ WIKITEXT_ACCURACY_CONFIGS = [
         model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6,
     ),
-    # This one raises `RuntimeError: wrong! device_gemm with the specified compilation
-    # parameters does not support this GEMM problem` on MI355X.
     AccuracyTestConfig(
         model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4", excepted_value=12.4
     ),
@@ -285,7 +283,6 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
     if device_count < tp_size:
         pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
 
-    # model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
     # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
     expected_value = 11.2391
 
