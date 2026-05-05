@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.v1.utils import record_function_or_nullcontext
 
 
 class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
@@ -333,37 +334,45 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
             from vllm._custom_ops import fused_moe_wvSplitK_int4_gemm
 
             # GEMM 1 (HIP wvSplitK decode path)
-            fused_moe_wvSplitK_int4_gemm(
-                gemm1_in,
-                w1,
-                self.w1_scale,
-                gemm1_out,
-                expert_ids,
-                block_size_m,
-                self._cu_count,
-                self._group_size,
-                self.quant_config.w1_zp,
-                sorted_token_ids if scattered else None,
-                top_k_num,
-            )
+            with record_function_or_nullcontext(
+                f"fused_moe_wvsplitk_int4 {num_tokens}x{N}x{K} "
+                f"E={global_num_experts} top_k={top_k_num}"
+            ):
+                fused_moe_wvSplitK_int4_gemm(
+                    gemm1_in,
+                    w1,
+                    self.w1_scale,
+                    gemm1_out,
+                    expert_ids,
+                    block_size_m,
+                    self._cu_count,
+                    self._group_size,
+                    self.quant_config.w1_zp,
+                    sorted_token_ids if scattered else None,
+                    top_k_num,
+                )
 
             # Activation
             apply_moe_activation(activation, act_out, gemm1_out)
 
             # GEMM 2 (HIP wvSplitK decode path)
-            fused_moe_wvSplitK_int4_gemm(
-                act_out,
-                w2,
-                self.w2_scale,
-                gemm2_out,
-                expert_ids,
-                block_size_m,
-                self._cu_count,
-                self._group_size,
-                self.quant_config.w2_zp,
-                sorted_token_ids if scattered else None,
-                1,
-            )
+            with record_function_or_nullcontext(
+                f"fused_moe_wvsplitk_int4 {num_tokens}x{K}x{activation_out_dim} "
+                f"E={global_num_experts} top_k={top_k_num}"
+            ):
+                fused_moe_wvSplitK_int4_gemm(
+                    act_out,
+                    w2,
+                    self.w2_scale,
+                    gemm2_out,
+                    expert_ids,
+                    block_size_m,
+                    self._cu_count,
+                    self._group_size,
+                    self.quant_config.w2_zp,
+                    sorted_token_ids if scattered else None,
+                    1,
+                )
 
         # ---- Reduce via moe_unpermute ----
         if scattered or use_triton:
