@@ -6,6 +6,7 @@ Run `pytest tests/kernels/quantization/test_marlin_gemm.py`.
 """
 
 import itertools
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MIN_THREAD_N,
+    check_marlin_supports_layer,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -691,6 +693,26 @@ def test_marlin_gemm_sub_tile_n_pad(orig_n):
 
     max_diff = compute_max_diff(output, output_ref)
     assert max_diff < 0.04
+
+
+def test_marlin_supports_layer_uses_padded_output_n():
+    layer = SimpleNamespace(
+        input_size=2048,
+        input_size_per_partition=2048,
+        output_size=64,
+        output_size_per_partition=32,
+    )
+
+    assert check_marlin_supports_layer(layer, group_size=128)
+
+    unsupported_input_layer = SimpleNamespace(
+        input_size=2048,
+        input_size_per_partition=96,
+        output_size=64,
+        output_size_per_partition=32,
+    )
+
+    assert not check_marlin_supports_layer(unsupported_input_layer, group_size=128)
 
 
 def _noop_weight_loader(*args, **kwargs):
