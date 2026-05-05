@@ -144,6 +144,101 @@ def test_wo_a_output_allocation_uses_workspace_outside_compile(monkeypatch) -> N
     assert output.dtype == torch.bfloat16
 
 
+def test_dummy_attention_impl_reserves_prefill_workspace(monkeypatch) -> None:
+    class FakeMLAAttn:
+        def __init__(self) -> None:
+            self.reserved = False
+
+        def _reserve_prefill_workspace(self) -> None:
+            self.reserved = True
+
+        def __call__(self, *args, **kwargs) -> None:
+            raise AssertionError("dummy run must not execute real attention")
+
+    mla_attn = FakeMLAAttn()
+    layer = object.__new__(
+        deepseek_v4_attention_module.DeepseekV4MultiHeadLatentAttentionWrapper
+    )
+    layer.q_lora_rank = 2
+    layer.head_dim = 4
+    layer.n_local_heads = 2
+    layer.padded_heads = 64
+    layer.indexer = None
+    layer.compressor = None
+    layer.wq_b = lambda qr: torch.ones(qr.shape[0], 8)
+    layer.q_norm = SimpleNamespace(weight=SimpleNamespace(data=torch.empty(0)))
+    layer.kv_norm = SimpleNamespace(weight=SimpleNamespace(data=torch.empty(0)))
+    layer.eps = 1e-6
+    layer.mla_attn = mla_attn
+    layer.attn_gemm_parallel_execute = lambda hidden_states: (
+        torch.zeros(hidden_states.shape[0], 6),
+        None,
+        None,
+        None,
+    )
+    layer._fused_qnorm_rope_kv_insert = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata=None),
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "fused_q_kv_rmsnorm",
+        lambda qr, kv, *args, **kwargs: (qr, kv),
+    )
+
+    out = torch.ones((3, 64, 4))
+    layer.attention_impl(
+        hidden_states=torch.zeros((3, 6)),
+        positions=torch.arange(3),
+        out=out,
+    )
+
+    assert mla_attn.reserved is True
+    assert torch.count_nonzero(out) == 0
+
+
+def test_prefill_workspace_reservation_specs_match_forward_prefill_bounds(
+    monkeypatch,
+) -> None:
+    attn = SimpleNamespace(
+        max_model_len=16_384,
+        max_num_batched_tokens=8192,
+        compress_ratio=4,
+        window_size=128,
+        head_dim=512,
+        num_heads=64,
+        topk_indices_buffer=torch.empty((8192, 2048), dtype=torch.int32),
+        indexer=None,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "is_triton_sparse_mla_enabled_for_platform",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        deepseek_v4_attention_module,
+        "triton_sparse_mla_query_chunk_size",
+        lambda: 256,
+    )
+
+    specs = (
+        deepseek_v4_attention_module.DeepseekV4MLAAttention.
+        _prefill_workspace_reservation_specs(attn)
+    )
+
+    assert specs == (
+        ((4, 12_415, 512), torch.bfloat16),
+        ((8192, 2176), torch.int32),
+        ((8192,), torch.int32),
+        ((256, 64), torch.float32),
+        ((256, 64), torch.float32),
+        ((256, 64, 512), torch.float32),
+    )
+
+
 def test_triton_sparse_mla_default_topk_chunk_size(monkeypatch) -> None:
     monkeypatch.delenv("VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE", raising=False)
 

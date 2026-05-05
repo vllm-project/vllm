@@ -84,6 +84,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_mla_env import (
     disable_triton_sparse_mla_cudagraphs_if_enabled,
     is_triton_sparse_mla_enabled,
+    is_triton_sparse_mla_enabled_for_platform,
     triton_sparse_mla_matmul_decode_enabled,
     triton_sparse_mla_query_chunk_size,
     triton_sparse_mla_topk_chunk_size,
@@ -126,6 +127,21 @@ def _sparse_mla_prefill_workspace_bounds(
 
     compressed_region_size = int((seq_lens_cpu // compress_ratio).max().item())
     return compressed_region_size, compressed_region_size + max_gather_len
+
+
+def _sparse_mla_prefill_gather_len_upper_bound(
+    *,
+    max_model_len: int,
+    max_num_batched_tokens: int,
+    window_size: int,
+) -> tuple[int, int]:
+    max_query_chunk_tokens = max(1, min(max_model_len, max_num_batched_tokens))
+    max_prefix_len = max(max_model_len - max_query_chunk_tokens, 0)
+    max_gather_len = max_query_chunk_tokens + min(
+        max_prefix_len,
+        max(window_size - 1, 0),
+    )
+    return max_query_chunk_tokens, max_gather_len
 
 
 def _deepseek_v4_fp8_einsum_config(
@@ -176,6 +192,7 @@ def _allocate_deepseek_v4_wo_a_output(
 # workspace allocated at _forward_prefill (and the matching profile-time
 # reservation in attention_impl's dummy-run branch).
 PREFILL_CHUNK_SIZE = 4
+_DEFAULT_SPARSE_MLA_TOPK_TOKENS = 2048
 
 
 @dataclass
@@ -589,6 +606,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Handle dummy run (no metadata).
         if not isinstance(attn_metadata, dict):
             out.zero_()
+            self.mla_attn._reserve_prefill_workspace()
             return
 
         # Pad q to FlashMLA-required head count (64 or 128)
@@ -869,6 +887,73 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             compilation_config.static_forward_context[prefix] = self
 
         self.kv_cache = torch.tensor([])
+
+    def _prefill_workspace_topk_bound(self) -> int:
+        if self.compress_ratio <= 1:
+            return 0
+        if (
+            self.topk_indices_buffer is not None
+            and self.topk_indices_buffer.ndim > 0
+            and self.topk_indices_buffer.shape[-1] > 0
+        ):
+            return int(self.topk_indices_buffer.shape[-1])
+        indexer_topk = getattr(self.indexer, "topk_tokens", None)
+        if indexer_topk is not None:
+            return int(indexer_topk)
+        return _DEFAULT_SPARSE_MLA_TOPK_TOKENS
+
+    def _prefill_workspace_reservation_specs(
+        self,
+    ) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+        max_model_len = max(1, int(self.max_model_len))
+        max_num_batched_tokens = max(1, int(self.max_num_batched_tokens))
+        window_size = max(1, int(self.window_size))
+        compress_ratio = max(1, int(self.compress_ratio))
+        head_dim = int(self.head_dim)
+        num_heads = int(self.num_heads)
+
+        max_query_chunk_tokens, max_gather_len = (
+            _sparse_mla_prefill_gather_len_upper_bound(
+                max_model_len=max_model_len,
+                max_num_batched_tokens=max_num_batched_tokens,
+                window_size=window_size,
+            )
+        )
+        if compress_ratio <= 1:
+            m_bound = max_gather_len
+        else:
+            compressed_region_size = max_model_len // compress_ratio
+            m_bound = compressed_region_size + max_gather_len
+
+        combined_topk = sparse_prefill_combined_topk_size(
+            DeepseekV4MLAAttention._prefill_workspace_topk_bound(self),
+            window_size,
+        )
+        specs: list[tuple[tuple[int, ...], torch.dtype]] = [
+            ((PREFILL_CHUNK_SIZE, m_bound, head_dim), torch.bfloat16),
+            ((max_query_chunk_tokens, combined_topk), torch.int32),
+            ((max_query_chunk_tokens,), torch.int32),
+        ]
+        if is_triton_sparse_mla_enabled_for_platform():
+            query_chunk_size = min(
+                max_query_chunk_tokens,
+                triton_sparse_mla_query_chunk_size(),
+            )
+            specs.extend(
+                [
+                    ((query_chunk_size, num_heads), torch.float32),
+                    ((query_chunk_size, num_heads), torch.float32),
+                    ((query_chunk_size, num_heads, head_dim), torch.float32),
+                ]
+            )
+        return tuple(specs)
+
+    def _reserve_prefill_workspace(self) -> None:
+        try:
+            workspace_manager = current_workspace_manager()
+        except AssertionError:
+            return
+        workspace_manager.get_simultaneous(*self._prefill_workspace_reservation_specs())
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return DeepseekV4FlashMLASparseBackend
