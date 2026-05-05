@@ -73,8 +73,7 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        m = A.shape[0]
-        A_2d = A.reshape(m, A.shape[-1])
+        A_2d = A.reshape(-1, A.shape[-1])
         out = torch._scaled_mm(
             A_2d,
             B,
