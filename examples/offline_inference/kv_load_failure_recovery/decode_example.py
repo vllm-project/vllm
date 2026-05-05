@@ -66,6 +66,7 @@ def main():
         max_num_batched_tokens=64,
         max_num_seqs=16,
         kv_transfer_config=ktc,
+        async_scheduling=args.async_load,
     )
 
     outputs = llm.generate(prompts, sampling_params)
