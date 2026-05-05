@@ -4,7 +4,6 @@
 
 import threading
 import time
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -176,26 +175,7 @@ class NixlConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
-    # ------------------------------------------------------------------
-    # Queue observation callbacks (scheduler-driven heartbeats)
-    # ------------------------------------------------------------------
-
-    def get_queue_callbacks(
-        self,
-    ) -> tuple[
-        Callable[["Request"], None] | None,
-        Callable[["Request"], None] | None,
-    ]:
-        """Return callbacks to observe scheduler WAITING queues.
-
-        When a D-side request enters the WAITING queue with
-        ``do_remote_prefill=True``, we start tracking it so that
-        ``build_connector_meta`` can package periodic heartbeats to
-        keep the P-side KV blocks alive.
-        """
-        return self._on_waiting_add, self._on_waiting_remove
-
-    def _on_waiting_add(self, request: "Request") -> None:
+    def on_new_request(self, request: "Request") -> None:
         """Track a request that may need heartbeats."""
         params = request.kv_transfer_params
         # NOTE (NickLucche) This excludes request meant for P, ie heartbeats are
@@ -225,12 +205,6 @@ class NixlConnectorScheduler:
                 remote_engine_id,
                 remote_request_id,
             )
-
-    def _on_waiting_remove(self, request: "Request") -> None:
-        """No-op: heartbeats must continue while the request is in
-        ``WAITING_FOR_REMOTE_KVS`` (transfer in-flight).  Cleanup
-        happens in ``update_connector_output`` (transfer done) or
-        ``request_finished`` (abort)."""
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""

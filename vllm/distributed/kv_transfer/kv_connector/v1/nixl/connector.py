@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NixlConnector – thin facade that delegates to scheduler / worker."""
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -158,14 +157,9 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
-    def get_queue_callbacks(
-        self,
-    ) -> tuple[
-        Callable[["Request"], None] | None,
-        Callable[["Request"], None] | None,
-    ]:
+    def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_queue_callbacks()
+        self.connector_scheduler.on_new_request(request)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None
