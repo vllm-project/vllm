@@ -51,6 +51,8 @@ def make_request(tools=None) -> MagicMock:
 # Shorthand for the DSML tokens used throughout
 FC_START = "<｜DSML｜function_calls>"
 FC_END = "</｜DSML｜function_calls>"
+UTC_START = "<｜DSML｜_tool_calls>"
+UTC_END = "</｜DSML｜_tool_calls>"
 INV_START = '<｜DSML｜invoke name="'
 INV_END = "</｜DSML｜invoke>"
 PARAM_START = '<｜DSML｜parameter name="'
@@ -63,6 +65,16 @@ def build_tool_call(func_name: str, params: dict[str, str]) -> str:
         f'{PARAM_START}{k}" string="true">{v}{PARAM_END}' for k, v in params.items()
     )
     return f'{FC_START}\n{INV_START}{func_name}">\n{param_strs}\n{INV_END}\n{FC_END}'
+
+
+def build_tool_call_with_wrapper(
+    start_tag: str, end_tag: str, func_name: str, params: dict[str, str]
+) -> str:
+    """Build a complete tool call with explicit wrapper tags."""
+    param_strs = "".join(
+        f'{PARAM_START}{k}" string="true">{v}{PARAM_END}' for k, v in params.items()
+    )
+    return f'{start_tag}\n{INV_START}{func_name}">\n{param_strs}\n{INV_END}\n{end_tag}'
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +223,22 @@ class TestExtractToolCalls:
         assert args == {"enabled": True, "count": 42}
         assert isinstance(args["enabled"], bool)
         assert isinstance(args["count"], int)
+
+    def test_alias_wrapper_non_streaming(self, parser):
+        """Alias wrappers like ``_tool_calls`` should be parsed as tools."""
+        model_output = build_tool_call_with_wrapper(
+            UTC_START,
+            UTC_END,
+            "read",
+            {"path": "/app/skills/weather/SKILL.md"},
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "read"
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "path": "/app/skills/weather/SKILL.md"
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -559,6 +587,24 @@ class TestExtractToolCallsStreaming:
         deltas = self._stream_chunked(parser, full_text, chunk_size=3)
         content = "".join(d.content for d in deltas if d.content is not None)
         assert content == full_text
+
+    def test_alias_wrapper_streaming_no_dsml_leak(self, parser):
+        """Alias wrapper should emit tool_calls, not DSML fragments in content."""
+        full_text = (
+            "让我先加载 weather 技能，然后帮你查！\n\n"
+            + build_tool_call_with_wrapper(
+                UTC_START,
+                UTC_END,
+                "read",
+                {"path": "/app/skills/weather/SKILL.md"},
+            )
+        )
+        deltas = self._stream_chunked(parser, full_text, chunk_size=4)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == "让我先加载 weather 技能，然后帮你查！\n\n"
+        assert "DSML" not in content
+        args_str = self._reconstruct_args(deltas)
+        assert json.loads(args_str) == {"path": "/app/skills/weather/SKILL.md"}
 
 
 class TestDelimiterPreservation:

@@ -48,6 +48,11 @@ class DeepSeekV32ToolParser(ToolParser):
 
     tool_call_start_token: str = "<｜DSML｜function_calls>"
     tool_call_end_token: str = "</｜DSML｜function_calls>"
+    _fallback_tool_call_start_tokens: tuple[str, ...] = (
+        "<｜DSML｜tool_calls>",
+        "<｜DSML｜_tool_calls>",
+        "<｜DSML｜function_calls>",
+    )
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -58,11 +63,12 @@ class DeepSeekV32ToolParser(ToolParser):
         self.current_tool_index: int = 0
         self._sent_content_idx: int = 0
 
-        # Regex patterns for complete parsing
+        # Regex patterns for complete parsing. Accept both legacy and alias
+        # wrappers because some deployments emit ``_tool_calls`` variants.
+        self._tool_call_start_tokens = self._build_tool_call_start_tokens()
         self.tool_call_complete_regex = re.compile(
-            re.escape(self.tool_call_start_token)
-            + r"(.*?)"
-            + re.escape(self.tool_call_end_token),
+            r"<｜DSML｜(?:function_calls|_?tool_calls)>(.*?)"
+            r"</\s*｜DSML｜(?:function_calls|_?tool_calls)>",
             re.DOTALL,
         )
         self.invoke_complete_regex = re.compile(
@@ -100,6 +106,26 @@ class DeepSeekV32ToolParser(ToolParser):
     def _generate_tool_call_id(self) -> str:
         """Generate a unique tool call ID."""
         return f"call_{uuid.uuid4().hex[:24]}"
+
+    def _build_tool_call_start_tokens(self) -> tuple[str, ...]:
+        """Start-tag variants to detect in streaming/non-streaming text."""
+        candidates = [
+            self.tool_call_start_token,
+            *self._fallback_tool_call_start_tokens,
+        ]
+        ordered_unique: list[str] = []
+        for token in candidates:
+            if token not in ordered_unique:
+                ordered_unique.append(token)
+        return tuple(ordered_unique)
+
+    def _find_first_tool_call_start(self, text: str) -> int:
+        """Return the left-most DSML tool-call wrapper start index."""
+        positions = [text.find(token) for token in self._tool_call_start_tokens]
+        valid_positions = [pos for pos in positions if pos >= 0]
+        if not valid_positions:
+            return -1
+        return min(valid_positions)
 
     def _parse_invoke_params(self, invoke_str: str) -> dict:
         param_dict = dict()
@@ -175,8 +201,8 @@ class DeepSeekV32ToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from complete model output (non-streaming)."""
-        # Quick check
-        if self.tool_call_start_token not in model_output:
+        first_tool_idx = self._find_first_tool_call_start(model_output)
+        if first_tool_idx == -1:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
@@ -208,7 +234,6 @@ class DeepSeekV32ToolParser(ToolParser):
                 )
 
             # Extract content before first tool call
-            first_tool_idx = model_output.find(self.tool_call_start_token)
             content = model_output[:first_tool_idx] if first_tool_idx > 0 else None
 
             return ExtractedToolCallInformation(
@@ -275,11 +300,17 @@ class DeepSeekV32ToolParser(ToolParser):
         Holds back any suffix that could be a partial start marker
         so that split markers are never leaked as content.
         """
-        if self.tool_call_start_token not in current_text:
-            overlap = partial_tag_overlap(current_text, self.tool_call_start_token)
+        first_tool_idx = self._find_first_tool_call_start(current_text)
+        if first_tool_idx == -1:
+            overlap = max(
+                partial_tag_overlap(current_text, start_token)
+                for start_token in self._tool_call_start_tokens
+            )
+            # Keep back generic DSML prefix to avoid leaking unknown wrappers.
+            overlap = max(overlap, partial_tag_overlap(current_text, "<｜DSML｜"))
             sendable_idx = len(current_text) - overlap
         else:
-            sendable_idx = current_text.index(self.tool_call_start_token)
+            sendable_idx = first_tool_idx
 
         if sendable_idx > self._sent_content_idx:
             content = current_text[self._sent_content_idx : sendable_idx]
