@@ -8,8 +8,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
 import torch
-from nccl.core.interop.torch import _to_nccl_dtype
-from nccl.core.typing import NcclInvalid
 from torch.distributed import (
     P2POp,
     ProcessGroup,
@@ -223,9 +221,12 @@ def create_eplb_communicator(
 
         def _dtype_supported(dtype: torch.dtype) -> bool:
             try:
+                from nccl.core.interop.torch import _to_nccl_dtype
+                from nccl.core.typing import NcclInvalid
+
                 _to_nccl_dtype(dtype)
                 return True
-            except NcclInvalid:
+            except (ImportError, NcclInvalid):
                 return False
 
         unsupported_dtypes = sorted(
