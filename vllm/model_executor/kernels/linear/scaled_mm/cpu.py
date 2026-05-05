@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
+from vllm.model_executor.layers.quantization.utils.zentorch import has_zentorch_op
 from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -26,22 +27,6 @@ from .ScaledMMLinearKernel import (
 
 logger = init_logger(__name__)
 
-_ZENTORCH_DYNAMIC_QLINEAR: bool | None = None
-
-
-def _is_zentorch_dynamic_qlinear_available() -> bool:
-    """Check if zentorch_dynamic_qlinear op is available on a Zen CPU."""
-    global _ZENTORCH_DYNAMIC_QLINEAR
-    if _ZENTORCH_DYNAMIC_QLINEAR is not None:
-        return _ZENTORCH_DYNAMIC_QLINEAR
-
-    _ZENTORCH_DYNAMIC_QLINEAR = (
-        current_platform.is_zen_cpu()
-        and hasattr(torch.ops, "zentorch")
-        and hasattr(torch.ops.zentorch, "zentorch_dynamic_qlinear")
-    )
-    return _ZENTORCH_DYNAMIC_QLINEAR
-
 
 class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
@@ -56,15 +41,40 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
+    # ------------------------------------------------------------------
+    # zentorch fast path (Zen CPU, dynamic-symmetric W8A8)
+    # ------------------------------------------------------------------
+
+    def _zentorch_w8a8_eligible(self, layer: torch.nn.Module) -> bool:
+        """Eligibility predicate for the zentorch dynamic-symmetric W8A8 path.
+
+        Constraints (any failure -> oneDNN/sgl fallback, ``layer`` untouched):
+          * Zen CPU + ``zentorch_dynamic_qlinear`` registered.
+          * Dynamic activation scheme (``not is_static_input_scheme``).
+          * Symmetric activations (``input_symmetric``).
+          * Weight scale shape can be reduced to ``(N,)``: either already
+            channelwise, or fused-module per-tensor (which we expand to
+            per-channel via ``convert_to_channelwise``). Non-fused per-tensor
+            cannot be reduced and is rejected.
+        """
+        if not has_zentorch_op("zentorch_dynamic_qlinear"):
+            return False
+        if self.config.is_static_input_scheme:
+            return False
+        if not self.config.input_symmetric:
+            return False
+
+        is_fused = len(layer.logical_widths) > 1
+        if not self.config.is_channelwise and not is_fused:
+            # Non-fused per-tensor: would produce a 0-d scale after squeeze.
+            return False
+        return True
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # zentorch path: dynamic-symmetric W8A8 on AMD Zen CPUs
-        if (
-            _is_zentorch_dynamic_qlinear_available()
-            and not self.config.is_static_input_scheme
-            and self.config.input_symmetric
-        ):
+        if self._zentorch_w8a8_eligible(layer):
+            self._process_weights_for_zentorch(layer)
             self.linear_method = self._apply_weights_zentorch
-            self.process_weights_for_zentorch(layer)
             return
 
         w_q_name, _, _, _, _ = self.layer_param_names
@@ -83,15 +93,17 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             self.linear_method = self._apply_weights_onednn
             self.process_weights_for_onednn(layer)
 
-    def process_weights_for_zentorch(self, layer: torch.nn.Module) -> None:
-        """Prepare weights for zentorch_dynamic_qlinear.
+    def _process_weights_for_zentorch(self, layer: torch.nn.Module) -> None:
+        """Prepare weights for ``zentorch_dynamic_qlinear``.
 
-        Keeps weight in [N, K] layout and converts scales to bf16.
-        For fused modules (QKV, MLP) with per-tensor scales, expands
-        to per-channel so the scale shape matches the weight's N dim.
+        Keeps weight in [N, K] layout and converts the per-channel scale to
+        bf16 with shape (N,). For fused modules (QKV, MLP) with per-tensor
+        weight scales, scales are first expanded to per-channel so the shape
+        matches the weight's N dim.
         """
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
         weight = getattr(layer, w_q_name)
+        n = weight.shape[0]
         replace_parameter(
             layer,
             w_q_name,
@@ -102,12 +114,22 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         is_fused_module = len(layer.logical_widths) > 1
         if is_fused_module and not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
-        ws = weight_scale.data.squeeze().to(torch.bfloat16).contiguous()
+
+        ws = weight_scale.data
+        if ws.dim() == 2 and ws.shape[-1] == 1:
+            ws = ws.squeeze(-1)
+        ws = ws.to(torch.bfloat16).contiguous()
+        assert ws.shape == (n,), (
+            f"[zen_cpu] expected weight scale shape ({n},), got {tuple(ws.shape)}"
+        )
+
         replace_parameter(
             layer,
             w_s_name,
             torch.nn.Parameter(ws, requires_grad=False),
         )
+        layer._zentorch_kind = "compressed_tensors_w8a8"
+        layer._zentorch_processed_weights = True
         logger.info_once(
             "[zen_cpu] Using zentorch_dynamic_qlinear for W8A8 (dynamic-symmetric)"
         )
@@ -124,6 +146,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             getattr(layer, w_q_name),
             getattr(layer, w_s_name),
             bias,
+            zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
         )
 
     def process_weights_for_onednn(self, layer: torch.nn.Module) -> None:
