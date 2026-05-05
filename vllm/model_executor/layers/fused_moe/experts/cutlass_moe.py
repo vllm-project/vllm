@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_unpermute,
@@ -665,7 +668,7 @@ def run_cutlass_moe_fp4(
     return
 
 
-class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
+class CutlassExpertsFp4(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
