@@ -33,7 +33,7 @@ steps:
     - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       depends_on:
       - image-build-amd
 
