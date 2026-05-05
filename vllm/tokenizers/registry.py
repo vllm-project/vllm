@@ -4,7 +4,7 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import huggingface_hub
 from typing_extensions import TypeVar, assert_never
@@ -231,7 +231,7 @@ def get_tokenizer(
     # Some models have an incorrect tokenizer_class on the hub.
     # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
     model_type = getattr(config, "model_type", None) if config else None
-    tokenizer_cls_: type[TokenizerLike]
+    tokenizer_cls_: type[Any]
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
         from .hf import CachedTokenizersBackend
 

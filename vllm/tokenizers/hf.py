@@ -3,7 +3,7 @@
 import contextlib
 import copy
 from pathlib import Path
-from typing import TypeAlias
+from typing import Any, TypeAlias, cast
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from transformers.tokenization_utils_tokenizers import TokenizersBackend
@@ -81,7 +81,7 @@ class CachedHfTokenizer(TokenizerLike):
         revision: str | None = None,
         download_dir: str | None = None,
         **kwargs,
-    ) -> HfTokenizer:
+    ) -> TokenizerLike:
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
@@ -118,12 +118,12 @@ class CachedHfTokenizer(TokenizerLike):
         if isinstance(encoder_config, dict) and encoder_config.get(
             "do_lower_case", False
         ):
-            special_tokens_map = {
+            special_tokens_map: dict[str, Any] = {
                 k: v.lower() for k, v in tokenizer.special_tokens_map.items()
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        return get_cached_tokenizer(tokenizer)
+        return cast(TokenizerLike, get_cached_tokenizer(tokenizer))
 
 
 class CachedTokenizersBackend(TokenizerLike):
@@ -136,13 +136,16 @@ class CachedTokenizersBackend(TokenizerLike):
         revision: str | None = None,
         download_dir: str | None = None,
         **kwargs,
-    ) -> HfTokenizer:
+    ) -> TokenizerLike:
+        tokenizer_kwargs = kwargs.copy()
+        if revision is not None:
+            tokenizer_kwargs["revision"] = revision
+
         tokenizer = TokenizersBackend.from_pretrained(
             path_or_repo_id,
             *args,
             trust_remote_code=trust_remote_code,
-            revision=revision,
             cache_dir=download_dir,
-            **kwargs,
+            **tokenizer_kwargs,
         )
-        return get_cached_tokenizer(tokenizer)
+        return cast(TokenizerLike, get_cached_tokenizer(tokenizer))
