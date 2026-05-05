@@ -273,6 +273,11 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        default_sampling_params = self.default_sampling_params
+        if self.use_harmony:
+            default_sampling_params = get_harmony_request_default_sampling_params(
+                self.default_sampling_params, request.ignore_eos
+            )
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
 
@@ -281,11 +286,6 @@ class OpenAIServingChat(OpenAIServing):
             sub_request_id = (
                 request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
             )
-            default_sampling_params = self.default_sampling_params
-            if self.use_harmony:
-                default_sampling_params = get_harmony_request_default_sampling_params(
-                    self.default_sampling_params, request.ignore_eos
-                )
 
             max_tokens = get_max_tokens(
                 max_model_len,

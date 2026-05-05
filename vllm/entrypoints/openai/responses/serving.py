@@ -417,16 +417,15 @@ class OpenAIServingResponses(OpenAIServing):
             available_tools = []
         tokenizer = self.renderer.get_tokenizer()
 
+        default_sampling_params = self.default_sampling_params
+        if self.use_harmony:
+            default_sampling_params = get_harmony_request_default_sampling_params(
+                self.default_sampling_params, request.ignore_eos
+            )
         for engine_input in engine_inputs:
             maybe_error = self._validate_generator_input(engine_input)
             if maybe_error is not None:
                 return maybe_error
-
-            default_sampling_params = self.default_sampling_params
-            if self.use_harmony:
-                default_sampling_params = get_harmony_request_default_sampling_params(
-                    self.default_sampling_params, request.ignore_eos
-                )
 
             default_max_tokens = get_max_tokens(
                 max_model_len,
