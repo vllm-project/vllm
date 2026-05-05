@@ -4,7 +4,7 @@ import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import huggingface_hub
 from typing_extensions import TypeVar, assert_never
@@ -33,10 +33,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-# Model types whose hub tokenizer_class is incorrect and should be overridden with
-# TokenizersBackend (the generic fast tokenizer). Adding a model type here is always a
-# temporary workaround and better long term solutions are:
-# - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
+# Model types whose hub tokenizer_class is incorrect and should be loaded
+# through TokenizersBackend (the generic fast tokenizer). vLLM wraps that
+# backend with get_cached_tokenizer so the result still satisfies TokenizerLike.
+# Adding a model type here is always a temporary workaround and better long term
+# solutions are:
+# - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers
+#   (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
 _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
 
@@ -228,14 +231,15 @@ def get_tokenizer(
     # Some models have an incorrect tokenizer_class on the hub.
     # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
     model_type = getattr(config, "model_type", None) if config else None
+    tokenizer_cls_: type[Any]
     if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
-        from transformers.tokenization_utils_tokenizers import TokenizersBackend
+        from .hf import CachedTokenizersBackend
 
         logger.debug(
             "Overriding tokenizer_class to TokenizersBackend for model_type=%r",
             model_type,
         )
-        tokenizer_cls_ = TokenizersBackend
+        tokenizer_cls_ = CachedTokenizersBackend
     elif tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:
