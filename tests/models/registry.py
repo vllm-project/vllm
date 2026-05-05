@@ -1141,30 +1141,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
         max_model_len=4096,
-        # NemotronH layers are constructed via `hybrid_override_pattern`:
+        # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,  # Trigger image dynamic res
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                # Trigger conv3d:
-                video_temporal_patch_size=2,
-            ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
+            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
     ),
-    # NemotronH_Nano_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2
-    # Use the same registry test as NemotronH_Nano_VL_V2 above
     "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
         max_model_len=4096,
+        # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
             "vision_config": PretrainedConfig(
@@ -1174,35 +1161,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                     "model": "vit_huge_patch16_224",
                 },
                 video_temporal_patch_size=2,
+                # TODO(nhaber): This is `true` in the official `config.json`,
+                # but this causes a processor exception in the tests due to a known bug
+                # with mixed-resolution video when `true`. To be resolved.
+                video_maintain_aspect_ratio=False,
             ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
+            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
     ),
-    # NemotronH_Super_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2 as well
-    # Use the same registry test as NemotronH_Nano_VL_V2 above
     "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
-        max_model_len=4096,
-        use_original_num_layers=True,
-        hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                video_temporal_patch_size=2,
-            ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
-        },
-        trust_remote_code=True,
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",

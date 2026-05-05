@@ -22,6 +22,7 @@ from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    get_mla_prefill_scale,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
@@ -785,7 +786,8 @@ def test_backend_correctness(
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
     )
-    scale = 1.0 / (total_head_size**0.5)
+    decode_scale = 1.0 / (total_head_size**0.5)
+    prefill_scale = get_mla_prefill_scale(vllm_config.model_config)
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -902,7 +904,7 @@ def test_backend_correctness(
         v_sdpa_in = v_mqa.unsqueeze(0).transpose(1, 2)
 
         sdpa_out_i_decode = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=decode_scale
         )
         sdpa_out_i_decode = sdpa_out_i_decode.transpose(1, 2).squeeze(
             0
@@ -938,7 +940,7 @@ def test_backend_correctness(
 
         # Single attention call with custom mask
         sdpa_out_i_prefill = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=prefill_scale
         )
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)
