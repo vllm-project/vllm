@@ -401,6 +401,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
+        shared_experts: torch.nn.Module | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -413,7 +414,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
+        self.shared_experts = shared_experts
         weight_attrs = {"weight_loader": self.weight_loader}
         self.w13_weight = nn.Parameter(
             torch.zeros(
@@ -619,6 +620,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             activation_clamp,
             fast_math,
         )
+
         return y
 
     def _run_mega_moe(
@@ -681,6 +683,9 @@ def _deepseek_v4_mega_moe_experts_op(
         activation_clamp,
         fast_math,
     )
+    if self.shared_experts is not None:
+        shared_output = self.shared_experts(hidden_states)
+        out += shared_output
 
 
 def _deepseek_v4_mega_moe_experts_op_fake(
@@ -819,6 +824,7 @@ class DeepseekV4MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            shared_experts=self.shared_experts,
             prefix=f"{prefix}.experts",
         )
 
@@ -887,10 +893,6 @@ class DeepseekV4MoE(nn.Module):
             topk_ids,
             activation_clamp=activation_clamp,
         )
-
-        if self.shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
-            final_hidden_states += shared_output
 
         return final_hidden_states.view(org_shape)
 
