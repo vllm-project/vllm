@@ -4,7 +4,6 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
-from types import SimpleNamespace
 from typing import Annotated, Literal
 
 import pytest
@@ -14,7 +13,6 @@ from vllm.config import AttentionConfig, CompilationConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
-    _get_turboquant_boundary_skip_layers,
     contains_type,
     get_kwargs,
     get_type,
@@ -46,29 +44,6 @@ def test_optional_type():
     optional_type_func = optional_type(int)
     assert optional_type_func("None") is None
     assert optional_type_func("42") == 42
-
-
-def test_turboquant_boundary_skip_layers_dense_model():
-    model_config = SimpleNamespace(
-        is_hybrid=False,
-        hf_text_config=SimpleNamespace(num_hidden_layers=32),
-    )
-
-    assert _get_turboquant_boundary_skip_layers(model_config) == [
-        "0",
-        "1",
-        "30",
-        "31",
-    ]
-
-
-def test_turboquant_boundary_skip_layers_hybrid_model():
-    model_config = SimpleNamespace(
-        is_hybrid=True,
-        hf_text_config=SimpleNamespace(num_hidden_layers=64),
-    )
-
-    assert _get_turboquant_boundary_skip_layers(model_config) == []
 
 
 @pytest.mark.parametrize(
@@ -358,8 +333,6 @@ def test_attention_config():
             "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
-            "--attention-config.use_cudnn_prefill",
-            "true",
             "--attention-config.use_trtllm_ragged_deepseek_prefill",
             "true",
             "--attention-config.use_trtllm_attention",
@@ -377,7 +350,6 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
-    assert engine_args.attention_config.use_cudnn_prefill is True
     assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
     assert engine_args.attention_config.use_trtllm_attention is True
     assert engine_args.attention_config.disable_flashinfer_prefill is True
