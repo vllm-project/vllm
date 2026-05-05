@@ -122,7 +122,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1 if current_platform.is_rocm() else 64]
+        return [1, 64] if current_platform.is_rocm() else [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -303,7 +303,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 device=self.device,
             )
         self.arange_buffer = torch.arange(
-            scheduler_config.max_num_seqs * next_n,
+            max(
+                scheduler_config.max_num_seqs * next_n,
+                scheduler_config.max_num_batched_tokens,
+            ),
             dtype=torch.int32,
             device=self.device,
         )
