@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -64,6 +65,26 @@ class Lfm2ToolParser(ToolParser):
                 "tokenizer!"
             )
 
+        # Trailing content already emitted to the client. Used by the
+        # streaming path to suppress LFM2's frequent echo of the tool
+        # call body after the first <|tool_call_end|> while still
+        # allowing legitimate post-call prose through.
+        self._trailing_emitted: str = ""
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = super().adjust_request(request)
+        if request.tools and request.tool_choice != "none":
+            # The <|tool_call_start|>/<|tool_call_end|> sentinels are
+            # registered as special tokens in the LFM2/LFM2.5 tokenizer.
+            # With the default ``skip_special_tokens=True`` they are
+            # stripped from the decoded text before reaching this parser,
+            # so the tool block becomes invisible. Force the engine to
+            # preserve them when tool calling is enabled.
+            request.skip_special_tokens = False
+        return request
+
     # Rename for readability. This is NOT a tool id.
     @property
     def current_tool_index(self) -> int:
@@ -74,7 +95,18 @@ class Lfm2ToolParser(ToolParser):
         self.current_tool_id = value
 
     @staticmethod
-    def _extract_tool_call_text(model_output: str) -> tuple[str | None, str | None]:
+    def _strip_echo(raw_after: str) -> str:
+        """Drop any orphan <|tool_call_end|> (and the preceding text) from
+        trailing content. LFM2 occasionally echoes the call body after the
+        first end token and caps it with a second end token; everything
+        through the last such orphan is model garbage, not user content."""
+        last_orphan = raw_after.rfind(TOOL_CALL_END)
+        if last_orphan != -1:
+            return raw_after[last_orphan + len(TOOL_CALL_END) :]
+        return raw_after
+
+    @classmethod
+    def _extract_tool_call_text(cls, model_output: str) -> tuple[str | None, str | None]:
         """Extract the pythonic call text and surrounding content.
 
         Returns (tool_text, content) where tool_text is the text between
@@ -94,7 +126,9 @@ class Lfm2ToolParser(ToolParser):
 
         tool_text = model_output[start_idx + len(TOOL_CALL_START) : end_idx]
         content_before = model_output[:start_idx].strip()
-        content_after = model_output[end_idx + len(TOOL_CALL_END) :].strip()
+        content_after = cls._strip_echo(
+            model_output[end_idx + len(TOOL_CALL_END) :]
+        ).strip()
 
         content_parts = []
         if content_before:
@@ -170,18 +204,54 @@ class Lfm2ToolParser(ToolParser):
         if TOOL_CALL_START not in current_text:
             return DeltaMessage(content=delta_text)
 
-        # If the tool call end token appeared and tools were already parsed,
-        # stream any remaining content after the end token.
-        if TOOL_CALL_END in current_text and self.prev_tool_call_arr:
-            after_end = current_text.split(TOOL_CALL_END, 1)[1]
-            prev_after_end = (
-                previous_text.split(TOOL_CALL_END, 1)[1]
-                if TOOL_CALL_END in previous_text
-                else ""
-            )
-            new_content = after_end[len(prev_after_end) :]
-            if new_content:
-                return DeltaMessage(content=new_content)
+        # Compute leading content (before <|tool_call_start|>) that arrived
+        # in this delta and hasn't been streamed yet. Without this, when the
+        # prefix and the start token land in the same delta the prefix is
+        # silently dropped — token-by-token streaming masked the bug because
+        # the prefix tokens always arrived in earlier deltas.
+        leading_content = ""
+        if TOOL_CALL_START not in previous_text:
+            start_idx = current_text.find(TOOL_CALL_START)
+            # previous_text contained no start token, so it has already been
+            # streamed via the no-start-token branch above.
+            leading_content = current_text[len(previous_text) : start_idx]
+
+        has_end_in_current = TOOL_CALL_END in current_text
+        has_end_in_previous = TOOL_CALL_END in previous_text
+
+        # Compute trailing content (after <|tool_call_end|>) not yet
+        # streamed. LFM2 frequently echoes the tool call body again
+        # after the first end token, capped with a second end token.
+        # Suppress that echo:
+        #   - If a second <|tool_call_end|> has appeared, treat
+        #     everything through the last one as garbage.
+        #   - If the trailing starts with `[` or `<` (potential echo
+        #     body or another sentinel) and no second end token has
+        #     arrived yet, buffer it instead of emitting.
+        trailing_content = ""
+        if has_end_in_current:
+            end_idx = current_text.find(TOOL_CALL_END) + len(TOOL_CALL_END)
+            full_trailing = current_text[end_idx:]
+            stripped_trailing = self._strip_echo(full_trailing)
+            if stripped_trailing == full_trailing:
+                # No second end token yet — possibly mid-echo.
+                lstripped = full_trailing.lstrip()
+                if lstripped.startswith("[") or lstripped.startswith("<"):
+                    # Suspect echo; hold off until resolved.
+                    final_trailing = self._trailing_emitted
+                else:
+                    final_trailing = full_trailing
+            else:
+                final_trailing = stripped_trailing
+            if final_trailing.startswith(self._trailing_emitted):
+                trailing_content = final_trailing[len(self._trailing_emitted) :]
+            self._trailing_emitted = final_trailing
+
+        # If tools were already parsed in a prior delta, just stream any
+        # newly arrived trailing content.
+        if has_end_in_current and self.prev_tool_call_arr and has_end_in_previous:
+            if trailing_content:
+                return DeltaMessage(content=trailing_content)
             return DeltaMessage(content="")
 
         # Extract the pythonic text between start and end tokens.
@@ -190,10 +260,18 @@ class Lfm2ToolParser(ToolParser):
         if TOOL_CALL_END in tool_text:
             tool_text = tool_text.split(TOOL_CALL_END, 1)[0]
 
+        def _content_only_or_none() -> DeltaMessage | None:
+            """Return a content-only delta if any content arrived in this
+            chunk, otherwise None. Used on incremental-parse failure paths
+            so leading/trailing content is never silently dropped.
+            """
+            combined = leading_content + trailing_content
+            return DeltaMessage(content=combined) if combined else None
+
         try:
             valid_and_added_text = make_valid_python(tool_text)
             if valid_and_added_text is None:
-                return None
+                return _content_only_or_none()
             valid_text, added_text = valid_and_added_text
 
             module = ast.parse(valid_text)
@@ -244,8 +322,13 @@ class Lfm2ToolParser(ToolParser):
             if tool_deltas and not self.prev_tool_call_arr:
                 self.prev_tool_call_arr = [{"arguments": {}}]
 
-            if tool_deltas:
-                return DeltaMessage(tool_calls=tool_deltas)
+            combined_content = leading_content + trailing_content
+
+            if tool_deltas or combined_content:
+                return DeltaMessage(
+                    content=combined_content if combined_content else None,
+                    tool_calls=tool_deltas,
+                )
             elif not added_text and self.current_tool_id > 0:
                 return DeltaMessage(content="")
             else:
@@ -255,4 +338,4 @@ class Lfm2ToolParser(ToolParser):
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction error"
             )
-            return None
+            return _content_only_or_none()

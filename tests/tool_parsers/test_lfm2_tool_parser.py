@@ -61,6 +61,19 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
 )
+DOTTED_NAME_FUNCTION_OUTPUT = (
+    "grocery.orderIngredients("
+    "ingredientList=[{'name': 'Lasagna noodles', 'amount': 250, 'unit': 'g'}], "
+    "deliveryAddress='845 Willow Lane, Springfield, IL 62704')"
+)
+DOTTED_NAME_FUNCTION_CALL = FunctionCall(
+    name="grocery.orderIngredients",
+    arguments=(
+        '{"ingredientList": ['
+        '{"name": "Lasagna noodles", "amount": 250, "unit": "g"}], '
+        '"deliveryAddress": "845 Willow Lane, Springfield, IL 62704"}'
+    ),
+)
 
 
 @pytest.fixture(scope="module")
@@ -199,6 +212,21 @@ TEST_CASES = [
         "Checking the current status of candidate ID 12345.",
         id="content_after_tool_call_nonstreaming",
     ),
+    # Dotted / class-method function names: grocery.orderIngredients(...)
+    pytest.param(
+        True,
+        _wrap(DOTTED_NAME_FUNCTION_OUTPUT),
+        [DOTTED_NAME_FUNCTION_CALL],
+        None,
+        id="dotted_name_streaming",
+    ),
+    pytest.param(
+        False,
+        _wrap(DOTTED_NAME_FUNCTION_OUTPUT),
+        [DOTTED_NAME_FUNCTION_CALL],
+        None,
+        id="dotted_name_nonstreaming",
+    ),
 ]
 
 
@@ -243,6 +271,188 @@ def test_streaming_tool_call_with_large_steps(lfm2_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
     assert reconstructor.tool_calls[1].function == PARAMETERLESS_FUNCTION_CALL
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
+
+
+def test_streaming_full_block_and_trailing_in_single_delta(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """The entire <|tool_call_start|>[...]<|tool_call_end|> block plus
+    trailing assistant text arrive in one delta. Trailing content must
+    still be emitted — not silently dropped."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    full_text = (
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}\nDone."
+    )
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    assert "Done." in reconstructor.other_content
+
+
+def test_streaming_leading_content_and_full_block_in_single_delta(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """Leading assistant text plus the entire tool block arrive in one
+    delta. Leading content must be emitted — not silently dropped."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    full_text = (
+        "Let me check. "
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+    )
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    assert "Let me check." in reconstructor.other_content
+
+
+def test_streaming_leading_block_and_trailing_in_single_delta(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """Leading text + complete tool block + trailing text in one delta.
+    Both leading and trailing content must be preserved."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    full_text = (
+        "Let me check. "
+        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}\nDone."
+    )
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
+    assert "Let me check." in reconstructor.other_content
+    assert "Done." in reconstructor.other_content
+
+
+def test_echoed_tool_call_body_not_leaked_to_content(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """LFM2 sometimes emits the tool call body again after the first
+    <|tool_call_end|>, capped with a second <|tool_call_end|>. The
+    echoed body must not surface as assistant content — neither in
+    streaming nor non-streaming paths."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    body = (
+        "[grocery.orderIngredients("
+        "ingredientList=[{'name': 'apple', 'quantity': '2'}], "
+        "deliveryAddress='123 Main St')]"
+    )
+    model_output = (
+        f"{TOOL_CALL_START}{body}{TOOL_CALL_END}{body}{TOOL_CALL_END}"
+    )
+
+    # Non-streaming
+    content_ns, tool_calls_ns = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+    assert len(tool_calls_ns) == 1
+    assert tool_calls_ns[0].function.name == "grocery.orderIngredients"
+    assert content_ns in (None, "")
+
+    # Streaming: re-fetch a fresh parser since state was mutated above.
+    tool_parser2: ToolParser = ToolParserManager.get_tool_parser("lfm2")(
+        lfm2_tokenizer
+    )
+    content_s, tool_calls_s = run_tool_extraction(
+        tool_parser2, model_output, streaming=True
+    )
+    assert len(tool_calls_s) == 1
+    assert tool_calls_s[0].function.name == "grocery.orderIngredients"
+    # Echoed body must not leak as content.
+    assert content_s in (None, "")
+    assert "grocery.orderIngredients" not in (content_s or "")
+    assert TOOL_CALL_END not in (content_s or "")
+
+
+def test_streaming_char_by_char_multi_dict_list(lfm2_tokenizer: TokenizerLike):
+    """Stream a tool call containing a list of multiple dicts one
+    character at a time. Every prefix lands in some partial-parse state
+    (mid-key, mid-value, open quote inside dict, empty dict, etc.). The
+    parser must not raise — incomplete prefixes should silently wait for
+    more text instead of logging exceptions."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    full_text = (
+        f"{TOOL_CALL_START}[grocery.orderIngredients("
+        "ingredientList=["
+        "{\"name\": \"apple\", \"quantity\": \"2\"}, "
+        "{\"name\": \"bread\", \"quantity\": \"1\"}"
+        f"])]{TOOL_CALL_END}"
+    )
+    deltas = [c for c in full_text]
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "grocery.orderIngredients"
+    import json
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args == {
+        "ingredientList": [
+            {"name": "apple", "quantity": "2"},
+            {"name": "bread", "quantity": "1"},
+        ]
+    }
+
+
+def test_streaming_dotted_name_in_single_delta(lfm2_tokenizer: TokenizerLike):
+    """A pythonic call with a dotted/attribute function name (e.g.
+    ``domain.method(arg=...)``) must be parsed correctly in streaming mode
+    just as in non-streaming mode."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+    full_text = (
+        f"{TOOL_CALL_START}[{DOTTED_NAME_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+    )
+
+    reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == DOTTED_NAME_FUNCTION_CALL
+
+
+def test_adjust_request_disables_skip_special_tokens(
+    lfm2_tokenizer: TokenizerLike,
+):
+    """When tools are present, the parser must force
+    ``skip_special_tokens=False`` so the engine does not strip the
+    <|tool_call_start|>/<|tool_call_end|> sentinels before they reach the
+    parser."""
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+
+    request_with_tools = ChatCompletionRequest(
+        messages=[],
+        model="test-model",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    },
+                },
+            }
+        ],
+    )
+    assert request_with_tools.skip_special_tokens is True
+    adjusted = tool_parser.adjust_request(request_with_tools)
+    assert adjusted.skip_special_tokens is False
+
+    # No tools → no override; default behaviour preserved.
+    request_no_tools = ChatCompletionRequest(messages=[], model="test-model")
+    assert request_no_tools.skip_special_tokens is True
+    adjusted_no_tools = tool_parser.adjust_request(request_no_tools)
+    assert adjusted_no_tools.skip_special_tokens is True
 
 
 @pytest.mark.parametrize("streaming", [False])
