@@ -83,7 +83,8 @@ class TestSiluAndMul:
                 assert isinstance(
                     ir.ops.silu_and_mul.dispatch(x), ir.op.IrOpImplCompiledWrapper
                 ), (
-                    "When `set_priority` with compile=True, the implementation is expected to be wrapped with compile."
+                    "When `set_priority` with compile=True, \
+                    the implementation is expected to be wrapped with compile."
                 )
         torch.testing.assert_close(out_dispatched, out_impl, rtol=0.0, atol=0.0)
 
