@@ -1,21 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Mistral Parser - A unified parser for Mistral models.
-
-This parser combines MistralReasoningParser and MistralToolParser into a
-single unified interface.  Unlike ``_WrappedParser``, it **always**
-instantiates ``MistralToolParser`` even when no tools are provided, because
-the Mistral grammar path (``_grammar_from_tool_parser``) requires a live
-tool-parser instance for streaming extraction.
-"""
+from typing import Any
 
 from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning import ReasoningParser
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import Tool
+from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
 logger = init_logger(__name__)
@@ -35,8 +27,23 @@ class MistralParser(DelegatingParser):
     """
 
     # Any reasoning parser is supported.
-    reasoning_parser_cls: type[ReasoningParser] | None = None
-    tool_parser_cls: type[MistralToolParser] = MistralToolParser
+    tool_parser_cls = MistralToolParser
+
+    @classmethod
+    def specialize(
+        cls,
+        reasoning_parser_cls: type[ReasoningParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
+        **kwargs: Any,
+    ) -> tuple[bool, dict[str, Any]]:
+        # Requires MistralToolParser but flexible reasoning parser
+        if tool_parser_cls is None or not issubclass(
+            tool_parser_cls, MistralToolParser
+        ):
+            return False, {}
+        return True, {
+            "reasoning_parser_cls": reasoning_parser_cls,
+        }
 
     def __init__(
         self,

@@ -7,6 +7,7 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
+from typing import Any
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -89,6 +90,22 @@ class Parser:
     # Subclasses should override these if they use specific parser classes
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
+
+    @classmethod
+    @abstractmethod
+    def specialize(
+        cls,
+        reasoning_parser_cls: type[ReasoningParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
+        **kwargs: Any,
+    ) -> tuple[bool, dict[str, Any]]:
+        """
+        Specialize the parser to use specific reasoning and tool parsers.
+        Returns:
+            A tuple of (success, kwargs) where success is a boolean indicating
+            whether the specialization was successful and kwargs is a dictionary
+            of keyword arguments to pass to the parser's __init__ method.
+        """
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         """
@@ -326,6 +343,12 @@ class Parser:
         """
 
 
+def issubclass_or_both_none(sub: type | None, parent: type | None) -> bool:
+    if parent is None:
+        return sub is None
+    return sub is not None and issubclass(sub, parent)
+
+
 class DelegatingParser(Parser):
     """
     A Parser implementation that delegates to separate ReasoningParser and
@@ -339,6 +362,20 @@ class DelegatingParser(Parser):
     If either parser is None, the corresponding methods will return default
     values (no reasoning extraction, no tool calls).
     """
+
+    @classmethod
+    def specialize(
+        cls,
+        reasoning_parser_cls: type[ReasoningParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
+        **kwargs: Any,
+    ) -> tuple[bool, dict[str, Any]]:
+        # Check the provided parser classes match the overridden class attributes
+        if issubclass_or_both_none(
+            reasoning_parser_cls, cls.reasoning_parser_cls
+        ) and issubclass_or_both_none(tool_parser_cls, cls.tool_parser_cls):
+            return True, {}
+        return False, {}
 
     def extract_reasoning(
         self,
@@ -733,8 +770,17 @@ class _WrappedParser(DelegatingParser):
         parser = _WrappedParser(tokenizer)
     """
 
-    reasoning_parser_cls: type[ReasoningParser] | None = None
-    tool_parser_cls: type[ToolParser] | None = None
+    @classmethod
+    def specialize(
+        cls,
+        reasoning_parser_cls: type[ReasoningParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
+        **kwargs: Any,
+    ) -> tuple[bool, dict[str, Any]]:
+        return True, {
+            "reasoning_parser_cls": reasoning_parser_cls,
+            "tool_parser_cls": tool_parser_cls,
+        }
 
     def __init__(
         self, tokenizer: TokenizerLike, tools: list[Tool] | None = None, **kwargs

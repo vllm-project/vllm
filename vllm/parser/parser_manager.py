@@ -269,65 +269,39 @@ class ParserManager:
         if reasoning_parser_cls is None and tool_parser_cls is None:
             return None
 
-        # Try specializing a specific reasoning and tool parsers.
+        # Try specializing a unified parser.
         for name in [tool_parser_name, reasoning_parser_name]:
             if not name:
                 continue
 
             try:
-                parser = cls.get_parser_internal(name)
+                parser_cls = cls.get_parser_internal(name)
             except KeyError:
                 continue
 
-            if (
-                parser.reasoning_parser_cls is not None
-                and parser.reasoning_parser_cls != reasoning_parser_cls
-            ):
-                logger.warning(
-                    "Unified parser '%s' isn't used due to unsupported "
-                    "reasoning parser: expected %s but got %s",
-                    name,
-                    parser.reasoning_parser_cls,
-                    reasoning_parser_cls,
-                )
+            success, kwargs = parser_cls.specialize(
+                reasoning_parser_cls, tool_parser_cls
+            )
+            if not success:
                 continue
 
-            if (
-                parser.tool_parser_cls is not None
-                and parser.tool_parser_cls != tool_parser_cls
-            ):
-                logger.warning(
-                    "Unified parser '%s' isn't used due to unsupported "
-                    "tool parser: expected %s but got %s",
-                    name,
-                    parser.tool_parser_cls,
-                    tool_parser_cls,
-                )
-                continue
+            # Dynamically create subclass with specialized class variables
+            # Set the class-level attributes on the specialized parser class
+            return type(
+                f"{parser_cls}_{reasoning_parser_cls}_{tool_parser_cls}",
+                (parser_cls,),
+                kwargs,
+            )
 
-            if parser.reasoning_parser_cls is None:
-                logger.info(
-                    "Specializing unified parser '%s''s reasoning parser to %s",
-                    name,
-                    reasoning_parser_cls,
-                )
-                parser.reasoning_parser_cls = reasoning_parser_cls
-
-            if parser.tool_parser_cls is None:
-                logger.info(
-                    "Specializing unified parser '%s''s tool parser to %s",
-                    name,
-                    tool_parser_cls,
-                )
-                parser.tool_parser_cls = tool_parser_cls
-
-            return parser
-
-        # Fallback: Create a DelegatingParser with the individual parser classes
-        # Set the class-level attributes on the imported _WrappedParser
+        # Fallback: Specialize a _WrappedParser with the individual parser classes
         from vllm.parser.abstract_parser import _WrappedParser
 
-        _WrappedParser.reasoning_parser_cls = reasoning_parser_cls
-        _WrappedParser.tool_parser_cls = tool_parser_cls
-
-        return _WrappedParser
+        success, kwargs = _WrappedParser.specialize(
+            reasoning_parser_cls, tool_parser_cls
+        )
+        assert success
+        return type(
+            f"_WrappedParser_{reasoning_parser_cls}_{tool_parser_cls}",
+            (_WrappedParser,),
+            kwargs,
+        )
