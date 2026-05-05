@@ -158,11 +158,7 @@ class OpenAIServingChat(OpenAIServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-        self.use_harmony = getattr(
-            self.model_config.hf_config,
-            "use_harmony",
-            self.model_config.hf_config.model_type == "gpt_oss",
-        )
+        self.use_harmony = self.model_config.use_harmony
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []

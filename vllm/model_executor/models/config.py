@@ -150,6 +150,9 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                 "gpt_oss_mxfp4"
             )
 
+        if model_config.use_harmony is None:
+            model_config.use_harmony = True
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config

@@ -306,6 +306,10 @@ class ModelConfig:
     handles async tokenization, chat template rendering, and multimodal
     preprocessing."""
 
+    use_harmony: bool | None = None
+    """Specifying whether to use the OpenAI Harmony message rendering. By default
+    set to True when using a gpt_oss model"""
+
     # Pooler config
     pooler_config: PoolerConfig | None = None
     """Pooler config which controls the behaviour of output pooling in pooling
