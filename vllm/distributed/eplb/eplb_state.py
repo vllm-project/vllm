@@ -26,6 +26,7 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import hashlib
 import io
 import json
 import threading
@@ -41,6 +42,7 @@ from vllm.distributed.parallel_state import (
     get_ep_group,
     get_eplb_group,
     get_node_count,
+    get_world_group,
     in_the_same_node_as,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -350,22 +352,47 @@ class EplbState:
                     )
                 )
 
+    def _assert_initial_mapping_file_consistent_across_ranks(
+        self, mapping_path: str, raw_bytes: bytes
+    ) -> None:
+        # Hash the raw file bytes (not parsed fields) so any future schema
+        # additions are covered automatically; \r\n vs \n divergence is a
+        # legitimate failure too — the file is supposed to be byte-identical.
+        world = get_world_group()
+        if world.world_size == 1:
+            return
+        digest = hashlib.sha256(raw_bytes).digest()
+        local = torch.frombuffer(bytearray(digest), dtype=torch.uint8).clone()
+        gathered = [torch.empty_like(local) for _ in range(world.world_size)]
+        torch.distributed.all_gather(gathered, local, group=world.cpu_group)
+        ref = gathered[0]
+        bad = [r for r, g in enumerate(gathered) if not torch.equal(g, ref)]
+        if bad:
+            raise RuntimeError(
+                f"initial_mapping_path {mapping_path!r}: file contents differ "
+                f"across ranks (rank 0 vs ranks {bad}). The file must be "
+                f"byte-identical on every host."
+            )
+
     def _load_initial_mapping_record(self, mapping_path: str) -> dict:
         """Load the last eplb_initial_mapping record from a JSONL file."""
+        raw_bytes = Path(mapping_path).read_bytes()
+        self._assert_initial_mapping_file_consistent_across_ranks(
+            mapping_path, raw_bytes
+        )
         selected_record: dict | None = None
-        with open(mapping_path) as f:
-            for line_no, line in enumerate(f, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(
-                        f"{mapping_path}:{line_no}: invalid JSON: {exc}"
-                    ) from exc
-                if record.get("record_type") == "eplb_initial_mapping":
-                    selected_record = record
+        for line_no, line in enumerate(raw_bytes.decode().splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{mapping_path}:{line_no}: invalid JSON: {exc}"
+                ) from exc
+            if record.get("record_type") == "eplb_initial_mapping":
+                selected_record = record
 
         if selected_record is None:
             raise ValueError(
