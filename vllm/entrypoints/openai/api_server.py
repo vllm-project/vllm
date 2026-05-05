@@ -220,6 +220,12 @@ def build_app(
 
         elastic_ep_attach_router(app)
 
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            register_generative_scoring_api_router,
+        )
+
+        register_generative_scoring_api_router(app)
+
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
             attach_router as attach_render_router,
@@ -242,16 +248,9 @@ def build_app(
         register_realtime_api_router(app)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import register_pooling_api_routers
+        from vllm.entrypoints.pooling.factories import register_pooling_api_routers
 
         register_pooling_api_routers(app, supported_tasks, model_config)
-
-    if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            register_generative_scoring_api_router,
-        )
-
-        register_generative_scoring_api_router(app)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -322,6 +321,21 @@ async def init_app_state(
     supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
+
+    # Propagate enable_in_reasoning to the API-server process. The engine core
+    # runs in a separate process, so the contextvar that backs
+    # `get_current_vllm_config_or_none()` is None on this stack. Tool parsers
+    # call `get_enable_structured_outputs_in_reasoning()` during request
+    # handling and need to see the real flag, otherwise they silently fall
+    # back to False and mismatch the engine-side bitmask gating.
+    from vllm.tool_parsers.structural_tag_registry import (
+        set_enable_structured_outputs_in_reasoning,
+    )
+
+    set_enable_structured_outputs_in_reasoning(
+        vllm_config.structured_outputs_config.enable_in_reasoning
+    )
+
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
@@ -401,6 +415,12 @@ async def init_app_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            init_generative_scoring_state,
+        )
+
+        await init_generative_scoring_state(engine_client, state, args, request_logger)
+
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
             init_transcription_state,
@@ -416,16 +436,9 @@ async def init_app_state(
         init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import init_pooling_state
+        from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
-
-    if "generate" in supported_tasks:
-        from vllm.entrypoints.openai.generative_scoring.api_router import (
-            init_generative_scoring_state,
-        )
-
-        await init_generative_scoring_state(engine_client, state, args, request_logger)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

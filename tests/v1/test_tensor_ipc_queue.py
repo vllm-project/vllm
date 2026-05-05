@@ -14,12 +14,15 @@ import pytest
 import torch
 import torch.multiprocessing as torch_mp
 
+from vllm.platforms import current_platform
 from vllm.v1.engine.tensor_ipc import (
     TensorIpcData,
     TensorIpcReceiver,
     TensorIpcSender,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -53,7 +56,7 @@ def encoder_process(
         encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
         if torch.cuda.is_available():
-            device = "cuda:0"
+            device = f"{DEVICE_TYPE}:0"
             tensor = torch.randn(
                 *tensor_data["shape"], dtype=tensor_data["dtype"], device=device
             )
@@ -384,7 +387,7 @@ def mixed_tensor_encoder_process(
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
-        cuda_tensor = torch.randn(4, 5, device="cuda:0")
+        cuda_tensor = torch.randn(4, 5, device=f"{DEVICE_TYPE}:0")
 
         # Manually send via IPC to test the mechanism
         cuda_tensor_shared = cuda_tensor.share_memory_()
@@ -651,7 +654,7 @@ def test_ipc_disabled_mode():
 
     # If CUDA is available, test with CUDA tensor too
     if torch.cuda.is_available():
-        cuda_tensor = torch.randn(4, 5, device="cuda:0")
+        cuda_tensor = torch.randn(4, 5, device=f"{DEVICE_TYPE}:0")
         encoded_cuda = encoder.encode({"cuda_tensor": cuda_tensor})
         assert len(encoded_cuda) > 0
         assert tensor_queues[0].empty(), (

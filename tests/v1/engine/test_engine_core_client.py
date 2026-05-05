@@ -937,6 +937,13 @@ async def test_engine_core_client_future_utility_async(
 
 
 @pytest.mark.parametrize(
+    "model_name,num_groups",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", 1),
+        ("google/gemma-3-1b-it", 7),
+    ],
+)
+@pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
     indirect=["publisher_config"],
@@ -944,12 +951,14 @@ async def test_engine_core_client_future_utility_async(
 def test_kv_cache_events(
     multiprocessing_mode: bool,
     publisher_config,
+    model_name: str,
+    num_groups: int,
 ):
     block_size = 16
     num_blocks = 2
 
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
         block_size=block_size,
@@ -985,26 +994,29 @@ def test_kv_cache_events(
         assert result is not None, "No message received"
 
         seq, received = result
-
         assert seq == 0, "Sequence number mismatch"
-        assert len(received.events) == 1, "We should have exactly one BlockStored event"
-        event = received.events[0]
-        assert isinstance(event, BlockStored), "We should have a BlockStored event"
-        assert len(event.block_hashes) == num_blocks, (
-            "We should have a BlockStored event with 2 block_hashes"
+        assert len(received.events) == num_groups, (
+            f"Expected {num_groups} BlockStored event(s), got {len(received.events)}"
         )
-        assert event.block_size == block_size, (
-            "Block size should be the same as the block size"
-        )
-        assert event.parent_block_hash is None, "Parent block hash should be None"
-        assert event.lora_id is None, "Lora id should be None"
-        assert event.lora_name is None, "Lora name should be None"
-        assert len(event.token_ids) == num_blocks * block_size, (
-            "Token ids should be the same as the custom tokens"
-        )
-        assert event.token_ids == custom_tokens, (
-            "Token ids should be the same as the custom tokens"
-        )
+
+        for index, event in enumerate(received.events):
+            assert isinstance(event, BlockStored), "We should have a BlockStored event"
+            assert len(event.block_hashes) == num_blocks, (
+                "We should have a BlockStored event with 2 block_hashes"
+            )
+            assert event.block_size == block_size, (
+                "Block size should be the same as the block size"
+            )
+            assert event.parent_block_hash is None, "Parent block hash should be None"
+            assert event.lora_id is None, "Lora id should be None"
+            assert event.lora_name is None, "Lora name should be None"
+            assert len(event.token_ids) == num_blocks * block_size, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.token_ids == custom_tokens, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.group_idx == index
     finally:
         client.shutdown()
         subscriber.close()

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.tokenizers import get_tokenizer
 
 parser_name = "step3p5"
 start_token = "<think>"
@@ -16,7 +16,7 @@ REASONING_MODEL_NAME = "stepfun-ai/Step-3.5-Flash"
 
 @pytest.fixture(scope="module")
 def step3p5_tokenizer():
-    return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
+    return get_tokenizer(tokenizer_name=REASONING_MODEL_NAME)
 
 
 SIMPLE_REASONING = {

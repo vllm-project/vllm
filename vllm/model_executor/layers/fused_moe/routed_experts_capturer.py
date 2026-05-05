@@ -24,6 +24,24 @@ from vllm.platforms import current_platform
 
 logger = logging.getLogger(__name__)
 
+
+def _get_num_experts_per_tok(hf_config) -> int:
+    """Resolve the per-token expert count from the HF config.
+
+    Different model families store this under different attribute names
+    (e.g. ``num_experts_per_tok`` for DeepSeek, ``top_k_experts`` for Gemma 4).
+    """
+    val = getattr(hf_config, "num_experts_per_tok", None)
+    if val is None:
+        val = getattr(hf_config, "top_k_experts", None)
+    if val is None:
+        raise ValueError(
+            "Cannot determine num_experts_per_tok: HF config has neither "
+            "'num_experts_per_tok' nor 'top_k_experts'"
+        )
+    return val
+
+
 # Constants
 _TMP_DIR = tempfile.gettempdir()
 _LOCK_FILE_PREFIX = os.path.join(_TMP_DIR, "vllm_routed_experts")
@@ -127,7 +145,7 @@ class RoutedExpertsCapturer:
 
         hf_config = vllm_config.model_config.hf_text_config
         num_layers = hf_config.num_hidden_layers
-        num_experts_per_tok = hf_config.num_experts_per_tok
+        num_experts_per_tok = _get_num_experts_per_tok(hf_config)
 
         # Initialize device buffer
         self._device_buffer = torch.zeros(
@@ -176,11 +194,27 @@ class RoutedExpertsCapturer:
             end_loc = topk_ids.shape[0]
             token_num_per_dp = topk_ids.shape[0]
         else:  # multi dp
-            token_num_per_dp = ctx.dp_metadata.num_tokens_across_dp_cpu[self.dp_rank]
-            cumsum = torch.cumsum(ctx.dp_metadata.num_tokens_across_dp_cpu, dim=0)
-            assert cumsum[-1] == topk_ids.shape[0]
-            end_loc = cumsum[self.dp_rank]
-            start_loc = end_loc - token_num_per_dp
+            num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
+            token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
+            total = int(num_tokens_dp.sum().item())
+            n = topk_ids.shape[0]
+
+            if n == total:
+                # Naive dispatch: all DP ranks' tokens concatenated before routing.
+                cumsum = torch.cumsum(num_tokens_dp, dim=0)
+                end_loc = int(cumsum[self.dp_rank].item())
+                start_loc = end_loc - token_num_per_dp
+            elif n == token_num_per_dp:
+                # Modular-kernel path: DP combine happens inside quant_method.apply;
+                # select_experts only sees this rank's tokens.
+                start_loc = 0
+                end_loc = token_num_per_dp
+            else:
+                raise AssertionError(
+                    "RoutedExpertsCapturer: unexpected topk_ids batch dim "
+                    f"{n} (expected {total} or {token_num_per_dp} "
+                    f"for dp_rank={self.dp_rank})"
+                )
 
         if layer_id >= self._device_buffer.shape[1]:
             return
@@ -284,7 +318,7 @@ class RoutedExpertsReader:
         shape = (
             max_num_kv_tokens,
             hf_config.num_hidden_layers,
-            hf_config.num_experts_per_tok,
+            _get_num_experts_per_tok(hf_config),
         )
 
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
