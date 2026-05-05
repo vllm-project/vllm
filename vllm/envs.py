@@ -782,9 +782,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # When True and distributed_executor_backend="ray", use RayExecutorV2
     # (MQ-based) instead of RayDistributedExecutor (compiled-graph backend).
-    # TODO (jeffreywang): Enabled by default in vLLM 0.20.0.
     "VLLM_USE_RAY_V2_EXECUTOR_BACKEND": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "0"))
+        int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "1"))
     ),
     # Use dedicated multiprocess context for workers.
     # Both spawn and fork work
