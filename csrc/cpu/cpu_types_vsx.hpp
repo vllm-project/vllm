@@ -9,6 +9,7 @@
 
 namespace vec_op {
 
+// FP8 tag types for tag dispatch (see cpu_attn_vec.hpp)
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
 
