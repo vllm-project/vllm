@@ -872,25 +872,31 @@ class RoutedExperts(torch.nn.Module):
         """
         Create expert parameter mapping for weight loading with redundant experts.
 
-        In the returned mapping:
-        - `expert_id` is the physical expert id
-        - `weight_name` contains the weight name of the logical expert
-        So that we map the expert id to logical in `weight_name`
+        This mapping handles the physical-to-logical expert ID conversion needed
+        when loading weights with EPLB redundant experts.
 
         Args:
             model: The model containing the MoE layer
-            ckpt_gate_proj_name: Checkpoint parameter name for gate projection
-            ckpt_down_proj_name: Checkpoint parameter name for down projection
-            ckpt_up_proj_name: Checkpoint parameter name for up projection
-            num_experts: Number of logical experts
-            num_redundant_experts: Number of redundant experts for EPLB
+            ckpt_gate_proj_name: Name of gate projection in checkpoint
+            ckpt_down_proj_name: Name of down projection in checkpoint
+            ckpt_up_proj_name: Name of up projection in checkpoint
+            num_experts: Number of logical (non-redundant) experts
+            num_redundant_experts: Number of redundant experts
 
         Returns:
-            List of (param_name, weight_name, expert_id, shard_id) tuples
+            List of tuples (param_name, weight_name, expert_id, shard_id)
+            where:
+            - param_name: Parameter name in the layer
+            - weight_name: Weight name in checkpoint
+            - expert_id: Physical expert ID
+            - shard_id: Shard identifier (w1, w2, w3)
         """
         num_physical_experts = num_experts + num_redundant_experts
 
-        # Build initial physical-to-logical mapping
+        # In the returned mapping:
+        # - `expert_id` is the physical expert id
+        # - `weight_name` contains the weight name of the logical expert
+        # So that we should map the expert id to logical in `weight_name`
         physical_to_logical_map = (
             EplbState.build_initial_global_physical_to_logical_map(
                 num_experts, num_redundant_experts
@@ -906,10 +912,10 @@ class RoutedExperts(torch.nn.Module):
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                f".experts.routed_experts.{base_layer}w13_"
+                f"experts.routed_experts.{base_layer}w13_"
                 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else f".experts.routed_experts.{base_layer}w2_",
-                f".experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
+                else f"experts.routed_experts.{base_layer}w2_",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
                 expert_id,
                 shard_id,
             )

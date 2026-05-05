@@ -13,7 +13,7 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 
 
 class EplbManager:
@@ -166,71 +166,4 @@ class EplbManager:
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
             and not name.startswith("shared_experts._layer")
-        ]
-
-    @staticmethod
-    def make_expert_params_mapping(
-        model: torch.nn.Module,
-        ckpt_gate_proj_name: str,
-        ckpt_down_proj_name: str,
-        ckpt_up_proj_name: str,
-        num_experts: int,
-        num_redundant_experts: int = 0,
-    ) -> list[tuple[str, str, int, str]]:
-        """
-        Create expert parameter mapping for weight loading with redundant experts.
-
-        This mapping handles the physical-to-logical expert ID conversion needed
-        when loading weights with EPLB redundant experts.
-
-        Args:
-            model: The model containing the MoE layer
-            ckpt_gate_proj_name: Name of gate projection in checkpoint
-            ckpt_down_proj_name: Name of down projection in checkpoint
-            ckpt_up_proj_name: Name of up projection in checkpoint
-            num_experts: Number of logical (non-redundant) experts
-            num_redundant_experts: Number of redundant experts
-
-        Returns:
-            List of tuples (param_name, weight_name, expert_id, shard_id)
-            where:
-            - param_name: Parameter name in the layer
-            - weight_name: Weight name in checkpoint
-            - expert_id: Physical expert ID
-            - shard_id: Shard identifier (w1, w2, w3)
-        """
-        num_physical_experts = num_experts + num_redundant_experts
-
-        # In the returned mapping:
-        # - `expert_id` is the physical expert id
-        # - `weight_name` contains the weight name of the logical expert
-        # So that we should map the expert id to logical in `weight_name`
-        physical_to_logical_map = (
-            EplbState.build_initial_global_physical_to_logical_map(
-                num_experts, num_redundant_experts
-            )
-        )
-
-        base_layer = (
-            "base_layer."
-            if any(".base_layer." in name for name, _ in model.named_parameters())
-            else ""
-        )
-
-        return [
-            # (param_name, weight_name, expert_id, shard_id)
-            (
-                f"experts.{base_layer}w13_"
-                if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else f"experts.{base_layer}w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
-                expert_id,
-                shard_id,
-            )
-            for expert_id in range(num_physical_experts)
-            for shard_id, weight_name in [
-                ("w1", ckpt_gate_proj_name),
-                ("w2", ckpt_down_proj_name),
-                ("w3", ckpt_up_proj_name),
-            ]
         ]
