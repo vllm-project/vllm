@@ -392,8 +392,10 @@ def _resample_kernel(
         temp_ptr,
         seed_ptr,
         pos_ptr,
-        None,
-        0,
+        None,  # processed_logits_ptr
+        0,  # processed_logits_stride
+        None,  # processed_logits_col_ptr
+        vocab_size,
         APPLY_TEMPERATURE=False,
     )
     token_id = block_idx * BLOCK_SIZE + idx
