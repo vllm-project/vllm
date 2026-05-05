@@ -29,6 +29,41 @@ def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
     return fake_logits
 
 
+def test_sampler_workspace_reused_for_float32_cast():
+    sampler = Sampler()
+    logits = torch.arange(8, dtype=torch.float16).reshape(2, 4)
+    workspace = torch.empty((3, 4), dtype=torch.float32)
+    sampler.sampler_workspace = workspace
+
+    logits_fp32 = sampler._convert_logits_to_float32(logits)
+
+    assert logits_fp32.data_ptr() == workspace.data_ptr()
+    torch.testing.assert_close(logits_fp32, logits.to(torch.float32))
+
+
+def test_sampler_workspace_falls_back_when_too_small():
+    sampler = Sampler()
+    logits = torch.arange(8, dtype=torch.float16).reshape(2, 4)
+    sampler.sampler_workspace = torch.empty((1, 4), dtype=torch.float32)
+
+    logits_fp32 = sampler._convert_logits_to_float32(logits)
+
+    assert logits_fp32.shape == logits.shape
+    assert logits_fp32.dtype == torch.float32
+    assert logits_fp32.data_ptr() != sampler.sampler_workspace.data_ptr()
+    torch.testing.assert_close(logits_fp32, logits.to(torch.float32))
+
+
+def test_sampler_workspace_leaves_float32_logits_in_place():
+    sampler = Sampler()
+    logits = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    sampler.sampler_workspace = torch.empty((2, 4), dtype=torch.float32)
+
+    logits_fp32 = sampler._convert_logits_to_float32(logits)
+
+    assert logits_fp32 is logits
+
+
 def _create_penalty_tensor(
     batch_size: int, penalty_value: float, device: torch.device
 ) -> torch.Tensor:

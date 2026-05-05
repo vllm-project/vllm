@@ -63,7 +63,26 @@ class Sampler(nn.Module):
         self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
         self.pin_memory = is_pin_memory_available()
         self.logprobs_mode = logprobs_mode
-        self.sampler_workspace = None
+        self.sampler_workspace: torch.Tensor | None = None
+
+    def _convert_logits_to_float32(self, logits: torch.Tensor) -> torch.Tensor:
+        """Convert logits to float32, reusing a profiled workspace if possible."""
+        if logits.dtype == torch.float32:
+            return logits
+
+        workspace = self.sampler_workspace
+        if (
+            workspace is not None
+            and workspace.dtype == torch.float32
+            and workspace.device == logits.device
+            and workspace.shape[0] >= logits.shape[0]
+            and workspace.shape[1] == logits.shape[1]
+        ):
+            logits_fp32 = workspace[: logits.shape[0]]
+            logits_fp32.copy_(logits)
+            return logits_fp32
+
+        return logits.to(torch.float32)
 
     def forward(
         self,
@@ -87,12 +106,10 @@ class Sampler(nn.Module):
                 else:
                     raw_logprobs = logits.to(torch.float32)
 
-        # We gracefully exploit PyTorch's in-place casting via copy_() using our
-        # permanently pre-allocated 150MB Float32 workspace bounds to max_num_seqs.
-        # This natively eliminates the memory spike from dynamic floats.
-        logits_fp32 = self.sampler_workspace[: logits.size(0)]
-        logits_fp32.copy_(logits)
-        logits = logits_fp32
+        # Use float32 for the logits. The model runner preallocates this
+        # workspace during memory profiling so the common sampler cast is
+        # accounted for in KV-cache sizing.
+        logits = self._convert_logits_to_float32(logits)
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
