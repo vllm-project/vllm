@@ -151,6 +151,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
 | `expert_load_stats_path` | Path to write expert-load statistics as JSONL for offline mapping generation | `null` |
+| `expert_load_stats_interval` | Interval (in EPLB steps) for writing stats when `expert_load_stats_path` is set; smaller values cost throughput | `16` |
 | `initial_mapping_path` | Path to a JSONL file containing an `eplb_initial_mapping` record | `null` |
 | `disable_online_rebalancing` | Disable runtime EPLB rearrangement after applying the initial mapping | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |

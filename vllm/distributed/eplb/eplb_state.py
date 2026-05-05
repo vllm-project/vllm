@@ -859,8 +859,10 @@ class EplbState:
                         - self.expert_rearrangement_step,
                     )
 
+        cfg = self.parallel_config.eplb_config
         should_write_load_stats = (
-            self.parallel_config.eplb_config.expert_load_stats_path is not None
+            cfg.expert_load_stats_path is not None
+            and self.expert_rearrangement_step % cfg.expert_load_stats_interval == 0
         )
         if should_write_load_stats:
             expert_load_pass_list = self._sync_load_pass()

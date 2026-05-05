@@ -82,6 +82,12 @@ class EPLBConfig:
     When set to a file path, EPLB logs expert-load statistics as JSONL.
     These records can be used to generate an offline static EPLB mapping.
     """
+    expert_load_stats_interval: int = Field(default=16, gt=0)
+    """
+    Interval (in EPLB steps) for writing expert-load statistics when
+    `expert_load_stats_path` is set. Each write triggers a CPU sync and
+    disk I/O, so a small value (e.g. 1) materially impacts throughput.
+    """
     initial_mapping_path: str | None = None
     """
     Path to a JSONL file with an eplb_initial_mapping record containing
