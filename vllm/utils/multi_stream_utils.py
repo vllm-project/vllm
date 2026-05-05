@@ -64,6 +64,7 @@ def execute_in_parallel(
     start_event: torch.cuda.Event,
     done_events: list[torch.cuda.Event],
     aux_streams: list[torch.cuda.Stream] | None = None,
+    enable: bool = False,
 ) -> tuple[Any, list[Any]]:
     """Run default_fn on the current stream and aux_fns concurrently on
     aux_streams.
@@ -74,8 +75,9 @@ def execute_in_parallel(
 
     start_event fans out from the current stream to every launched aux stream;
     done_events[i] is recorded after aux_fns[i] so the current stream joins
-    before returning. When aux_streams is None, all aux_fns run sequentially
-    on the current stream.
+    before returning. Falls back to sequential execution on the current stream
+    when aux_streams is None or enable is False; in that case default_fn runs
+    first, then aux_fns in order.
 
     Args:
         default_fn: Callable for the default (current) stream.
@@ -86,13 +88,17 @@ def execute_in_parallel(
             corresponding aux_fn. Length must match aux_fns.
         aux_streams: Per-aux CUDA streams. Length must match aux_fns.
             Multi-stream is disabled when None.
+        enable: Opt-in switch for the multi-stream path. Defaults to False,
+            so callers that pass aux_streams must also pass enable=True
+            (typically gated by an env var) to actually overlap. When False,
+            execution falls back to sequential on the current stream.
 
     Returns:
         Tuple of (default_result, aux_results) where aux_results[i] is the
         result of aux_fns[i] (or None when skipped).
     """
     aux_results: list[Any]
-    if aux_streams is None:
+    if aux_streams is None or not enable:
         default_result = default_fn()
         aux_results = [fn() if fn is not None else None for fn in aux_fns]
         return default_result, aux_results
