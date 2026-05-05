@@ -1475,6 +1475,12 @@ async def main() -> None:
         "(for example: --warmup-percentages=0%%,50%%)",
     )
 
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code when loading the tokenizer.",
+    )
+
     args = parser.parse_args()
 
     logger.info(args)
@@ -1517,7 +1523,9 @@ async def main() -> None:
     np.random.seed(args.seed)
 
     logger.info("Loading tokenizer")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=args.trust_remote_code
+    )
 
     await get_server_info(args.url)
 
