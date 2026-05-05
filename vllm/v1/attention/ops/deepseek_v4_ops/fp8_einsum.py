@@ -14,7 +14,7 @@ def _upcast_e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
 
 
 @triton.jit
-def _deepseek_v4_sm12_fp8_einsum_kernel(
+def _deepseek_v4_sm12x_fp8_einsum_kernel(
     a_ptr,
     a_scale_ptr,
     b_ptr,
@@ -68,8 +68,7 @@ def _deepseek_v4_sm12_fp8_einsum_kernel(
             + group * b_stride_group
             + out_offsets[None, :] * b_stride_out
             + hidden[:, None] * b_stride_hidden,
-            mask=(out_offsets[None, :] < out_rank)
-            & (hidden[:, None] < hidden_size),
+            mask=(out_offsets[None, :] < out_rank) & (hidden[:, None] < hidden_size),
             other=0.0,
         )
         raw = tl.dot(a, b, out_dtype=tl.float32)
@@ -98,12 +97,11 @@ def _deepseek_v4_sm12_fp8_einsum_kernel(
         + group * out_stride_group
         + out_offsets[None, :] * out_stride_rank,
         accum,
-        mask=(token_offsets[:, None] < num_tokens)
-        & (out_offsets[None, :] < out_rank),
+        mask=(token_offsets[:, None] < num_tokens) & (out_offsets[None, :] < out_rank),
     )
 
 
-def deepseek_v4_sm12_fp8_einsum(
+def deepseek_v4_sm12x_fp8_einsum(
     a: torch.Tensor,
     a_scale: torch.Tensor,
     b: torch.Tensor,
@@ -144,7 +142,7 @@ def deepseek_v4_sm12_fp8_einsum(
         triton.cdiv(out_rank, block_out),
         num_groups,
     )
-    _deepseek_v4_sm12_fp8_einsum_kernel[grid](
+    _deepseek_v4_sm12x_fp8_einsum_kernel[grid](
         a,
         a_scale,
         b,

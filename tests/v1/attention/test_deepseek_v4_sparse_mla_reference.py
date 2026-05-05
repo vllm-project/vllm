@@ -64,8 +64,9 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     dequantize_combined_sparse_mla_decode_kv,
     dequantize_global_slots_k_cache,
 )
+from vllm.v1.attention.ops.deepseek_v4_ops import fp8_einsum as fp8_einsum_module
 from vllm.v1.attention.ops.deepseek_v4_ops.fp8_einsum import (
-    deepseek_v4_sm12_fp8_einsum,
+    deepseek_v4_sm12x_fp8_einsum,
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec, SlidingWindowMLASpec
 
@@ -224,10 +225,8 @@ def test_prefill_workspace_reservation_specs_match_forward_prefill_bounds(
         lambda: 256,
     )
 
-    specs = (
-        deepseek_v4_attention_module.DeepseekV4MLAAttention.
-        _prefill_workspace_reservation_specs(attn)
-    )
+    attention_cls = deepseek_v4_attention_module.DeepseekV4MLAAttention
+    specs = attention_cls._prefill_workspace_reservation_specs(attn)
 
     assert specs == (
         ((4, 12_415, 512), torch.bfloat16),
@@ -487,9 +486,15 @@ def test_deepseek_v4_fp8_einsum_config_for_sm12x(
     )
 
 
+def test_deepseek_v4_fp8_einsum_uses_sm12x_names() -> None:
+    assert hasattr(fp8_einsum_module, "_deepseek_v4_sm12x_fp8_einsum_kernel")
+    assert hasattr(fp8_einsum_module, "deepseek_v4_sm12x_fp8_einsum")
+    assert not hasattr(fp8_einsum_module, "_deepseek_v4_sm12_fp8_einsum_kernel")
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
 @pytest.mark.parametrize("use_e8m0_scale", [False, True])
-def test_deepseek_v4_sm12_triton_fp8_einsum_matches_deepgemm_reference(
+def test_deepseek_v4_sm12x_triton_fp8_einsum_matches_deepgemm_reference(
     use_e8m0_scale: bool,
 ) -> None:
     if use_e8m0_scale and not hasattr(torch, "float8_e8m0fnu"):
@@ -602,7 +607,7 @@ def test_deepseek_v4_fp8_einsum_slices_full_group_weight_for_tp(
     )
     monkeypatch.setattr(
         deepseek_v4_attention_module,
-        "deepseek_v4_sm12_fp8_einsum",
+        "deepseek_v4_sm12x_fp8_einsum",
         fake_sm12_fp8_einsum,
     )
 
@@ -644,7 +649,7 @@ def test_deepseek_v4_fp8_einsum_slices_full_group_weight_for_tp(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
-def test_deepseek_v4_sm12_triton_fp8_einsum_primitive_matches_reference() -> None:
+def test_deepseek_v4_sm12x_triton_fp8_einsum_primitive_matches_reference() -> None:
     torch.manual_seed(0)
     num_tokens = 17
     num_groups = 4
@@ -684,14 +689,14 @@ def test_deepseek_v4_sm12_triton_fp8_einsum_primitive_matches_reference() -> Non
     actual = torch.empty_like(expected)
 
     fp8_einsum("bhr,hdr->bhd", (a, a_scale), (b, b_scale), expected, recipe=recipe)
-    deepseek_v4_sm12_fp8_einsum(a, a_scale, b, b_scale, actual)
+    deepseek_v4_sm12x_fp8_einsum(a, a_scale, b, b_scale, actual)
 
     _assert_fp8_einsum_close(actual, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA only")
 @pytest.mark.parametrize("num_groups", [1, 2, 4])
-def test_deepseek_v4_sm12_triton_fp8_einsum_supports_tp_local_group_counts(
+def test_deepseek_v4_sm12x_triton_fp8_einsum_supports_tp_local_group_counts(
     num_groups: int,
 ) -> None:
     torch.manual_seed(18 + num_groups)
@@ -732,7 +737,7 @@ def test_deepseek_v4_sm12_triton_fp8_einsum_supports_tp_local_group_counts(
     actual = torch.empty_like(expected)
 
     fp8_einsum("bhr,hdr->bhd", (a, a_scale), (b, b_scale), expected, recipe=recipe)
-    deepseek_v4_sm12_fp8_einsum(a, a_scale, b, b_scale, actual)
+    deepseek_v4_sm12x_fp8_einsum(a, a_scale, b, b_scale, actual)
 
     _assert_fp8_einsum_close(actual, expected)
 

@@ -32,7 +32,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     sparse_prefill_combined_topk_size,
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.fp8_einsum import (
-    deepseek_v4_sm12_fp8_einsum,
+    deepseek_v4_sm12x_fp8_einsum,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_forward_decode_fallback,
@@ -152,7 +152,7 @@ def _deepseek_v4_fp8_einsum_config(
     return (1, 128, 128), False
 
 
-def _use_deepseek_v4_sm12_triton_fp8_einsum(
+def _use_deepseek_v4_sm12x_triton_fp8_einsum(
     equation: str,
     recipe: list[int],
     b_scale: torch.Tensor,
@@ -750,8 +750,8 @@ def deepseek_v4_fp8_einsum(
             if b_groups != num_groups:
                 b_scale = b_scale.narrow(0, group_start, num_groups)
 
-        if _use_deepseek_v4_sm12_triton_fp8_einsum(equation, recipe, b_scale):
-            deepseek_v4_sm12_fp8_einsum(a, a_scale, b, b_scale, out)
+        if _use_deepseek_v4_sm12x_triton_fp8_einsum(equation, recipe, b_scale):
+            deepseek_v4_sm12x_fp8_einsum(a, a_scale, b, b_scale, out)
             return
 
     fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
