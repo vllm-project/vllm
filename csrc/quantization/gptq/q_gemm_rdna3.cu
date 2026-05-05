@@ -277,31 +277,38 @@ __global__ void gemm_q4_kernel_rdna3(
   // For M_COUNT > 1 with size_m not a multiple of M_COUNT, slots past size_m
   // are zero-padded so the dot product contribution is 0 (we then skip the
   // atomic write for those rows below).
+  //
+  // M=1 fast path: skip LDS staging + __syncthreads entirely. All 256 threads
+  // read the SAME 8-element A window per inner step (a_off is uniform across
+  // the block), so the cache-line broadcast through L1 makes global reads as
+  // cheap as LDS reads. Measured: ~1% on 4B b=1, ~6% on 27B b=1 in=128.
   static_assert(BLOCK_KN_SIZE == THREADS_X,
                 "BLOCK_KN_SIZE must equal THREADS_X (1 K element per thread)");
-  if (offset_k + t < end_k) {
+  constexpr bool USE_LDS_A = (M_COUNT > 1);
+  if constexpr (USE_LDS_A) {
+    if (offset_k + t < end_k) {
 #pragma unroll
-    for (int m = 0; m < M_COUNT; ++m) {
-      T av;
-      if (offset_m + m < size_m) {
-        const T* a_row = a + (offset_m + m) * size_k;
-        if (b_q_perm)
-          av = a_row[b_q_perm[offset_k + t]];
-        else
-          av = a_row[offset_k + t];
-      } else {
-        av = tzero<T>();  // zero-pad invalid M rows
+      for (int m = 0; m < M_COUNT; ++m) {
+        T av;
+        if (offset_m + m < size_m) {
+          const T* a_row = a + (offset_m + m) * size_k;
+          if (b_q_perm)
+            av = a_row[b_q_perm[offset_k + t]];
+          else
+            av = a_row[offset_k + t];
+        } else {
+          av = tzero<T>();  // zero-pad invalid M rows
+        }
+        block_a[m][t] = av;
       }
-      block_a[m][t] = av;
     }
-  }
 
-  // Threads beyond the right edge of N have nothing to do. Note: we must NOT
-  // return before __syncthreads() if any thread in the block participates in
-  // the LDS load above — but here all THREADS_X (=256) threads always do,
-  // regardless of whether their `n` is in bounds. The early return below is
-  // safe because the LDS load doesn't depend on `n`, only on `t`/`offset_k`.
-  __syncthreads();
+    // Threads beyond the right edge of N have nothing to do. Note: we must NOT
+    // return before __syncthreads() if any thread in the block participates in
+    // the LDS load above — but here all THREADS_X (=256) threads always do,
+    // regardless of whether their `n` is in bounds.
+    __syncthreads();
+  }
   if (n >= size_n) return;
 
   // Group bookkeeping. We require size_k % groups == 0 (groupsize divides K).
@@ -430,10 +437,12 @@ __global__ void gemm_q4_kernel_rdna3(
         // Load 8 bf16 activations as 4 uint32s (= 4 bf16x2 pairs) into a
         // fp32-aliased union. Storing as uint32 keeps the IR-level type
         // opaque so the inner v_dot2 cannot be folded to fp32 widening.
+        //
+        // A is read direct from global (no LDS staging — see USE_LDS_A above).
         pack4 a_pack;
         {
           const uint32_t* a_words =
-              reinterpret_cast<const uint32_t*>(&block_a[0][a_off]);
+              reinterpret_cast<const uint32_t*>(a + offset_k + a_off);
           a_pack.u[0] = a_words[0];
           a_pack.u[1] = a_words[1];
           a_pack.u[2] = a_words[2];
