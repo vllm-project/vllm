@@ -846,7 +846,6 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
-        self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
         # Get the attention backend from the first layer
@@ -889,9 +888,6 @@ class MooncakeConnectorWorker:
                 kernel_block_size,
             )
             assert self.block_size > kernel_block_size
-            self._physical_blocks_per_logical_kv_block = (
-                self.block_size // kernel_block_size
-            )
             self.block_size = kernel_block_size
 
     def __del__(self):

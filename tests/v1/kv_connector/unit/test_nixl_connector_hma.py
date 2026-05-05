@@ -128,7 +128,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
         TPMapping,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.transfer_plan import (
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
     compute_tp_mapping,
 )
