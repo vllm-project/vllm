@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable
 from enum import Enum
-from typing import Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
 from torch.nn.parameter import UninitializedParameter
@@ -14,6 +14,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -30,6 +31,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
+
+
 logger = init_logger(__name__)
 
 
@@ -40,7 +45,8 @@ class FusedMoeWeightScaleSupported(Enum):
     BLOCK = "block"
 
 
-class RoutedExperts(torch.nn.Module):
+@PluggableLayer.register("routed_experts")
+class RoutedExperts(PluggableLayer):
     """
     Container for routed expert weights and execution logic.
 
@@ -926,15 +932,47 @@ class RoutedExperts(torch.nn.Module):
     # Execution
     #
 
-    # TODO: split/overload this
-    def forward(
+    def forward_modular(
         self,
         x: torch.Tensor,
-        topk_weights: torch.Tensor | None = None,
-        topk_ids: torch.Tensor | None = None,
-        router_logits: torch.Tensor | None = None,
-        shared_experts: torch.nn.Module | None = None,  # SharedExperts
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Execute routed experts using the quantization method's apply function.
+
+        This is called by the runner after router selection (for modular kernels)
+        quant_method.apply() which accesses the weights on this RoutedExperts
+        instance.
+
+        Args:
+            x: Input tensor after any transforms
+            topk_weights: Routing weights from router (for modular kernels)
+            topk_ids: Selected expert IDs from router (for modular kernels)
+            shared_experts: The shared experts (if any)
+            shared_experts_input: Input for shared experts (if any)
+
+        Returns:
+            Output tensor from routed experts
+        """
+        assert not self.quant_method.is_monolithic
+
+        # Modular kernels use pre-computed routing
+        return self.quant_method.apply(
+            layer=self,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
+
+    def forward_monolithic(
+        self,
+        x: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
@@ -947,36 +985,28 @@ class RoutedExperts(torch.nn.Module):
 
         Args:
             x: Input tensor after any transforms
-            topk_weights: Routing weights from router (for modular kernels)
-            topk_ids: Selected expert IDs from router (for modular kernels)
             router_logits: Router logits (for monolithic kernels)
-            shared_experts: The shared experts (if any)
-            shared_experts_input: Input for shared experts (if any)
+            input_ids: input ids for DeepSeek V4
 
         Returns:
             Output tensor from routed experts
         """
-        quant_method = self.quant_method
+        assert self.quant_method.is_monolithic
 
-        if quant_method.is_monolithic:
-            assert shared_experts is None
-            # Monolithic kernels handle routing internally
-            return quant_method.apply_monolithic(
-                layer=self,  # Pass RoutedExperts as layer
-                x=x,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
-        else:
-            # Modular kernels use pre-computed routing
-            return quant_method.apply(
-                layer=self,  # Pass RoutedExperts as layer
-                x=x,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts=shared_experts,
-                shared_experts_input=shared_experts_input,
-            )
+        # Monolithic kernels handle routing internally
+        return self.quant_method.apply_monolithic(
+            layer=self,
+            x=x,
+            router_logits=router_logits,
+            input_ids=input_ids,
+        )
+
+    def forward(
+        self,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        raise AssertionError("Call forward_modular or forward_monolithic instead.")
 
 
 # Mark the RoutedExperts weight_loader as supporting MoE-specific parameters
