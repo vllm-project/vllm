@@ -603,7 +603,7 @@ class Step3VLForConditionalGeneration(
             modalities=["image"],
             input_key_by_modality={"image": "pixel_values"},
             buffer_keys=[],
-            out_hidden_size=self.config.vison_config.output_hidden_size,
+            out_hidden_size=self.config.vision_config.output_hidden_size,
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:

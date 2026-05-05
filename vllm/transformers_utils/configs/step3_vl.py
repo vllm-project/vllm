@@ -18,6 +18,7 @@ class Step3VisionEncoderConfig(PretrainedConfig):
         num_channels=3,
         image_size=728,
         patch_size=14,
+        patch_image_size=504,
         hidden_act="quick_gelu",
         layer_norm_eps=1e-5,
         **kwargs,
@@ -30,6 +31,7 @@ class Step3VisionEncoderConfig(PretrainedConfig):
         self.num_channels = num_channels
         self.patch_size = patch_size
         self.image_size = image_size
+        self.patch_image_size = patch_image_size
         self.layer_norm_eps = layer_norm_eps
         self.hidden_act = hidden_act
         super().__init__(**kwargs)
