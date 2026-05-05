@@ -13,11 +13,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.model_executor.layers.utils import cublas_gemm_bf16_bf16_fp32
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.deepseek_v4_ops import (
@@ -349,8 +349,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return cublas_gemm_bf16_bf16_fp32(
-                    hidden_states, compressor.fused_wkv_wgate.weight
+                return torch.mm(
+                    hidden_states,
+                    compressor.fused_wkv_wgate.weight.T,
+                    out_dtype=torch.float32,
                 )
 
             aux_fns[0] = compressor_kv_score
@@ -364,8 +366,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
-                return cublas_gemm_bf16_bf16_fp32(
-                    hidden_states, indexer.compressor.fused_wkv_wgate.weight
+                return torch.mm(
+                    hidden_states,
+                    indexer.compressor.fused_wkv_wgate.weight.T,
+                    out_dtype=torch.float32,
                 )
 
             aux_fns[1] = indexer_weights_proj
@@ -382,6 +386,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.ln_events[0],
             self.ln_events[1:4],
             self.aux_stream_list[:3],
+            enable=hidden_states.shape[0]
+            <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
         )
 
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
@@ -1052,7 +1058,7 @@ class DeepseekV4Indexer(nn.Module):
         self.compress_ratio = compress_ratio
         self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
         logger.info_once(
-            "Using %s indexer cache for Lighening Indexer.",
+            "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",
         )
 
