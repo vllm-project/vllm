@@ -44,10 +44,8 @@ if ROCM_AVAILABLE:
     ROCM_AITER_AVAILABLE = rocm_aiter_ops.is_enabled()
 
     if ROCM_AITER_AVAILABLE:
-        from aiter.ops.quant import per_1x32_f4_quant
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
-        from aiter.utility.fp4_utils import e8m0_to_f32, mxfp4_to_f32
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
@@ -219,17 +217,6 @@ def reference_moe(
     expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
     expert_indices = experts.indices
     t = hidden_states.clone()
-    if act_type == "mxfp4":
-        t_2d = t.to(torch.bfloat16).reshape(-1, t.shape[-1])
-        t_q, t_s = per_1x32_f4_quant(t_2d)
-        t_dq = mxfp4_to_f32(t_q)
-        s_dq = e8m0_to_f32(t_s)
-        D = t_dq.shape[-1]
-        t = (
-            (t_dq.view(-1, D // 32, 32) * s_dq.view(-1, D // 32, 1))
-            .view(-1, D)
-            .reshape(t.shape)
-        )
     # MLP #1
     mlp1_weight = w13[expert_indices, ...]
     mlp1_bias = bias13[expert_indices, ...]
@@ -255,18 +242,6 @@ def reference_moe(
             t.to(torch.bfloat16), is_sf_swizzled_layout=False
         )
         t = mxfp8_dequantize(t_quantized, t_scale)
-    elif act_type == "mxfp4":
-        orig_shape = t.shape
-        t_2d = t.to(torch.bfloat16).reshape(-1, t.shape[-1])
-        t_q, t_s = per_1x32_f4_quant(t_2d)
-        t_dq = mxfp4_to_f32(t_q)
-        s_dq = e8m0_to_f32(t_s)
-        D = t_dq.shape[-1]
-        t = (
-            (t_dq.view(-1, D // 32, 32) * s_dq.view(-1, D // 32, 1))
-            .view(-1, D)
-            .reshape(orig_shape)
-        )
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
     mlp2_bias = bias2[expert_indices, ...]
@@ -1255,23 +1230,15 @@ ROCM_BACKEND_CONFIGS = {
     },
     "AITER_MXFP4_BF16": {
         "activation": "SILU",
-        "rtol": 2.0,
-        "percent": 0.65,
+        "rtol": 1.0,
+        "percent": 0.7,
         "requires_aiter": True,
         "requires_gfx950": True,
     },
     "AITER_MXFP4_FP8": {
         "activation": "SWIGLUOAI",
-        "rtol": 1.0,
+        "rtol": 0.5,
         "percent": 0.9,
-        "requires_aiter": True,
-        "requires_gfx950": True,
-    },
-    "AITER_MXFP4_MXFP4": {
-        "activation": "SILU",
-        "act_type": "mxfp4",
-        "rtol": 1.0,
-        "percent": 0.85,
         "requires_aiter": True,
         "requires_gfx950": True,
     },
@@ -1300,7 +1267,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
-    - convert_gpt_oss_weight_to_mxfp4_moe_kernel_format() converts weights without error
+    - convert_to_mxfp4_moe_kernel_format() converts weights without error
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1320,7 +1287,7 @@ def test_rocm_mxfp4_moe_oracle(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+        convert_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
     )
@@ -1418,16 +1385,9 @@ def test_rocm_mxfp4_moe_oracle(
     layer.w13_input_scale = w13_input_scale
     layer.w2_input_scale = w2_input_scale
 
-    # Save copies for reference computation before oracle conversion
-    # (conversion modifies tensors in-place via .data assignments)
-    w13_quant_ref = w13_quant.clone()
-    w2_quant_ref = w2_quant.clone()
-    w13_scale_ref = w13_scale.clone()
-    w2_scale_ref = w2_scale.clone()
-
     # Convert weights using oracle
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+        convert_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,  # type: ignore[arg-type]
             w13_weight=w13_quant,
@@ -1509,40 +1469,13 @@ def test_rocm_mxfp4_moe_oracle(
     # Verify output has reasonable magnitude (not all zeros)
     assert out.abs().max() > 0.01, "Output is effectively zero"
 
-    # Dequantize weights for reference computation (use pre-conversion clones)
-    act_type = config.get("act_type", "bf16")
-    if act_type in {"mxfp4", "bf16"}:
-        # W4A4: use AITER's mxfp4_to_f32/e8m0_to_f32 to match torch_moe_stage1/stage2
-        E_w = w13_quant_ref.shape[0]
-        N_w = w13_quant_ref.shape[1]
-        K_w = w13_quant_ref.shape[2]
-        w13_vals = mxfp4_to_f32(w13_quant_ref.reshape(E_w * N_w, K_w))
-        w13_s = e8m0_to_f32(w13_scale_ref.reshape(E_w * N_w, -1))
-        D13 = w13_vals.shape[-1]
-        w13_dq = (
-            (w13_vals.view(-1, D13 // 32, 32) * w13_s.view(-1, D13 // 32, 1))
-            .view(E_w * N_w, D13)
-            .reshape(E_w, N_w, D13)
-        )
-
-        E_w2 = w2_quant_ref.shape[0]
-        N_w2 = w2_quant_ref.shape[1]
-        K_w2 = w2_quant_ref.shape[2]
-        w2_vals = mxfp4_to_f32(w2_quant_ref.reshape(E_w2 * N_w2, K_w2))
-        w2_s = e8m0_to_f32(w2_scale_ref.reshape(E_w2 * N_w2, -1))
-        D2 = w2_vals.shape[-1]
-        w2_dq = (
-            (w2_vals.view(-1, D2 // 32, 32) * w2_s.view(-1, D2 // 32, 1))
-            .view(E_w2 * N_w2, D2)
-            .reshape(E_w2, N_w2, D2)
-        )
-    else:
-        w13_dq = upcast_from_mxfp(
-            w13_quant_ref.view(torch.uint8), w13_scale_ref, torch.bfloat16, axis=-1
-        )
-        w2_dq = upcast_from_mxfp(
-            w2_quant_ref.view(torch.uint8), w2_scale_ref, torch.bfloat16, axis=-1
-        )
+    # Dequantize weights for reference computation
+    w13_dq = upcast_from_mxfp(
+        w13_quant.view(torch.uint8), w13_scale, torch.bfloat16, axis=-1
+    )
+    w2_dq = upcast_from_mxfp(
+        w2_quant.view(torch.uint8), w2_scale, torch.bfloat16, axis=-1
+    )
 
     # Determine activation type and layout
     # SWIGLUOAI uses interleaved layout (gate/up alternating)
@@ -1553,27 +1486,19 @@ def test_rocm_mxfp4_moe_oracle(
     else:
         act_name = "relu2"
 
-    # W4A4 kernel does not apply bias (only W4A16 does)
-    if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-        ref_w13_bias = torch.zeros_like(w13_bias)
-        ref_w2_bias = torch.zeros_like(w2_bias)
-    else:
-        ref_w13_bias = w13_bias
-        ref_w2_bias = w2_bias
-
     ref = reference_moe(
         router_logits,
         topk,
         num_experts,
         x.to(torch.float32),
         w13_dq.to(torch.float32),
-        ref_w13_bias.to(torch.float32),
+        w13_bias.to(torch.float32),
         w2_dq.to(torch.float32),
-        ref_w2_bias.to(torch.float32),
+        w2_bias.to(torch.float32),
         alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
         beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
         limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
-        act_type=act_type,
+        act_type="bf16",
         activation=act_name,
         use_interleaved_layout=use_interleaved,
     )
