@@ -57,7 +57,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
-    compute_physical_blocks_per_logical,
     derive_mamba_conv_split,
 )
 from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
@@ -948,6 +947,9 @@ class NixlConnectorWorker:
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
             attn_backend_name=self.backend_name,
+            physical_blocks_per_logical_kv_block=(
+                self._physical_blocks_per_logical_kv_block
+            ),
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1245,12 +1247,7 @@ class NixlConnectorWorker:
         assert self.transfer_topo is not None
         transfer_topo = self.transfer_topo
         physical_blocks_per_logical = (
-            compute_physical_blocks_per_logical(
-                nixl_agent_meta.ssm_sizes,
-                nixl_agent_meta.block_lens[0],
-            )
-            if self._has_mamba
-            else 1
+            nixl_agent_meta.physical_blocks_per_logical_kv_block
         )
         transfer_info = EngineTransferInfo(
             remote_tp_size=remote_tp_size,
