@@ -109,36 +109,60 @@ __forceinline__ __device__ void dequant_4bit_8_fp16_precise(uint32_t qa,
   dq[3] = __hmul2(__hsub2(q3.h2, z_prep), y_prep);
 }
 
-__forceinline__ __device__ void prep_zero_scale_bf16_precise(uint32_t zero,
-                                                             bf16_t scale,
-                                                             bf162_t& z_prep,
-                                                             bf162_t& y_prep) {
-  union {
-    uint16_t u;
-    bf16_t h;
-  } zu;
-  zu.u = (uint16_t)(0x4300 | zero);
-  z_prep = __bfloat162bfloat162(zu.h);
-  y_prep = __bfloat162bfloat162(scale);
+// fp32 prep for the bf16→bf16 fp32-internal dequant. Returns:
+//   z_prep = -(128 + zero) * scale   (folded bias for FMA)
+//   y_prep = scale
+// Per-element FMA `q*y_prep + z_prep` then yields scale * (nibble - zero).
+__forceinline__ __device__ void prep_zero_scale_bf16_f32(uint32_t zero,
+                                                         bf16_t scale,
+                                                         float& z_prep,
+                                                         float& y_prep) {
+  float scale_f = __bfloat162float(scale);
+  z_prep = -(128.0f + (float)zero) * scale_f;
+  y_prep = scale_f;
 }
 
-__forceinline__ __device__ void dequant_4bit_8_bf16_precise(uint32_t qa,
-                                                            bf162_t (&dq)[4],
-                                                            bf162_t z_prep,
-                                                            bf162_t y_prep) {
+// 4-bit GPTQ dequant for the bf16 WMMA path: 8 nibbles per int32 in qa,
+// outputs bf162_t dq[4]. Implementation rationale:
+//
+// gfx11 has no v_pk_fma_bf16, so __hmul2/__hsub2 on bf16 lower to a
+// widen-fp32-op-narrow chain that hipcc decorates with NaN canonicalisation
+// (28 extra VALU ops per call observed in the v5 ISA dump: v_cmp_u_f32 +
+// v_cndmask_b32 around every bf16 sub/mul). Doing the math in fp32 directly
+// — bit-cast widening (`__uint_as_float((bf16_bits) << 16)` is just a shift,
+// no NaN canon), one fused FMA per element, single `__float2bfloat16` narrow
+// at the end — eliminates the canon and is also strictly more precise (one
+// rounding step instead of two).
+//
+// Inputs match prep_zero_scale_bf16_f32:
+//   z_prep = -(128 + zero) * scale   (folded bias for FMA)
+//   y_prep = scale
+// Per-element FMA `q*y_prep + z_prep` then yields scale * (nibble - zero).
+__forceinline__ __device__ void dequant_4bit_8_bf16_to_bf16(
+    uint32_t qa, bf162_t (&dq)[4], float z_prep, float y_prep) {
   const uint32_t c0 = 0x43004300;
-  union {
-    uint32_t u;
-    bf162_t b2;
-  } q0, q1, q2, q3;
-  q0.u = ((qa >> 0) & 0x000F000F) | c0;
-  q1.u = ((qa >> 4) & 0x000F000F) | c0;
-  q2.u = ((qa >> 8) & 0x000F000F) | c0;
-  q3.u = ((qa >> 12) & 0x000F000F) | c0;
-  dq[0] = __hmul2(__hsub2(q0.b2, z_prep), y_prep);
-  dq[1] = __hmul2(__hsub2(q1.b2, z_prep), y_prep);
-  dq[2] = __hmul2(__hsub2(q2.b2, z_prep), y_prep);
-  dq[3] = __hmul2(__hsub2(q3.b2, z_prep), y_prep);
+  const uint32_t q0 = ((qa >> 0) & 0x000F000F) | c0;
+  const uint32_t q1 = ((qa >> 4) & 0x000F000F) | c0;
+  const uint32_t q2 = ((qa >> 8) & 0x000F000F) | c0;
+  const uint32_t q3 = ((qa >> 12) & 0x000F000F) | c0;
+  // bf16(128+nibble) bits → fp32 via left-shift by 16 (zero-extends mantissa).
+  const float q0x = __uint_as_float((q0 & 0xFFFFu) << 16);
+  const float q0y = __uint_as_float(q0 & 0xFFFF0000u);
+  const float q1x = __uint_as_float((q1 & 0xFFFFu) << 16);
+  const float q1y = __uint_as_float(q1 & 0xFFFF0000u);
+  const float q2x = __uint_as_float((q2 & 0xFFFFu) << 16);
+  const float q2y = __uint_as_float(q2 & 0xFFFF0000u);
+  const float q3x = __uint_as_float((q3 & 0xFFFFu) << 16);
+  const float q3y = __uint_as_float(q3 & 0xFFFF0000u);
+  // r = q*scale + (-(128+zero)*scale) = (nibble - zero)*scale, then narrow.
+  dq[0].x = __float2bfloat16(__fmaf_rn(q0x, y_prep, z_prep));
+  dq[0].y = __float2bfloat16(__fmaf_rn(q0y, y_prep, z_prep));
+  dq[1].x = __float2bfloat16(__fmaf_rn(q1x, y_prep, z_prep));
+  dq[1].y = __float2bfloat16(__fmaf_rn(q1y, y_prep, z_prep));
+  dq[2].x = __float2bfloat16(__fmaf_rn(q2x, y_prep, z_prep));
+  dq[2].y = __float2bfloat16(__fmaf_rn(q2y, y_prep, z_prep));
+  dq[3].x = __float2bfloat16(__fmaf_rn(q3x, y_prep, z_prep));
+  dq[3].y = __float2bfloat16(__fmaf_rn(q3y, y_prep, z_prep));
 }
 
 // ---------------------------------------------------------------------------
@@ -391,10 +415,10 @@ __global__ void gemm_q4_wmma_kernel(
         b_lds[k_base + 6][my_n] = __low2half(dq[3]);
         b_lds[k_base + 7][my_n] = __high2half(dq[3]);
       } else {
-        bf162_t z_b, y_b;
-        prep_zero_scale_bf16_precise(zero_v, scale_t, z_b, y_b);
+        float z_f, y_f;
+        prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
         bf162_t dq[4];
-        dequant_4bit_8_bf16_precise(qa, dq, z_b, y_b);
+        dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
         b_lds[k_base + 0][my_n] = dq[0].x;
         b_lds[k_base + 1][my_n] = dq[0].y;
         b_lds[k_base + 2][my_n] = dq[1].x;
@@ -660,10 +684,10 @@ __global__ void gemm_q4_wmma_kernel_v2(
       b_lds[buf][k_base + 6][my_n] = __low2half(dq[3]);
       b_lds[buf][k_base + 7][my_n] = __high2half(dq[3]);
     } else {
-      bf162_t z_b, y_b;
-      prep_zero_scale_bf16_precise(zero_v, scale_t, z_b, y_b);
+      float z_f, y_f;
+      prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
       bf162_t dq[4];
-      dequant_4bit_8_bf16_precise(qa, dq, z_b, y_b);
+      dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
       b_lds[buf][k_base + 0][my_n] = dq[0].x;
       b_lds[buf][k_base + 1][my_n] = dq[0].y;
       b_lds[buf][k_base + 2][my_n] = dq[1].x;
@@ -910,10 +934,10 @@ __global__ void gemm_q4_wmma_kernel_v3(
       b_lds[buf][k_base + 6][my_n] = __low2half(dq[3]);
       b_lds[buf][k_base + 7][my_n] = __high2half(dq[3]);
     } else {
-      bf162_t z_b, y_b;
-      prep_zero_scale_bf16_precise(zero_v, scale_t, z_b, y_b);
+      float z_f, y_f;
+      prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
       bf162_t dq[4];
-      dequant_4bit_8_bf16_precise(qa, dq, z_b, y_b);
+      dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
       b_lds[buf][k_base + 0][my_n] = dq[0].x;
       b_lds[buf][k_base + 1][my_n] = dq[0].y;
       b_lds[buf][k_base + 2][my_n] = dq[1].x;
@@ -1148,10 +1172,10 @@ __global__ void gemm_q4_wmma_kernel_v4(
       b_lds[buf][k_base + 6][my_n_in_tile] = __low2half(dq[3]);
       b_lds[buf][k_base + 7][my_n_in_tile] = __high2half(dq[3]);
     } else {
-      bf162_t z_b, y_b;
-      prep_zero_scale_bf16_precise(zero_v, scale_t, z_b, y_b);
+      float z_f, y_f;
+      prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
       bf162_t dq[4];
-      dequant_4bit_8_bf16_precise(qa, dq, z_b, y_b);
+      dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
       b_lds[buf][k_base + 0][my_n_in_tile] = dq[0].x;
       b_lds[buf][k_base + 1][my_n_in_tile] = dq[0].y;
       b_lds[buf][k_base + 2][my_n_in_tile] = dq[1].x;
@@ -1382,10 +1406,10 @@ __global__ void gemm_q4_wmma_kernel_v5(
       b_lds[buf][k_base + 6][my_n_in_tile] = __low2half(dq[3]);
       b_lds[buf][k_base + 7][my_n_in_tile] = __high2half(dq[3]);
     } else {
-      bf162_t z_b, y_b;
-      prep_zero_scale_bf16_precise(zero_v, scale_t, z_b, y_b);
+      float z_f, y_f;
+      prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
       bf162_t dq[4];
-      dequant_4bit_8_bf16_precise(qa, dq, z_b, y_b);
+      dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
       b_lds[buf][k_base + 0][my_n_in_tile] = dq[0].x;
       b_lds[buf][k_base + 1][my_n_in_tile] = dq[0].y;
       b_lds[buf][k_base + 2][my_n_in_tile] = dq[1].x;
