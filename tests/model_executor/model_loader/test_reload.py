@@ -59,6 +59,34 @@ def test_reload_lifecycle():
         assert tensor.__dict__ == materialized_tensor.__dict__
 
 
+def test_materialize_layer_preserves_non_meta_tensors():
+    """Ensure that materialize_layer does not overwrite non meta tensors."""
+    layer = torch.nn.Linear(2, 3, bias=True)
+
+    # Create a non meta bias tensor and meta weight, which can happen with FP8
+    bias_values = torch.ones(3)
+    layer.bias.data.copy_(bias_values)
+    layer.weight = torch.nn.Parameter(layer.weight.data.to("meta"))
+
+    assert layer.weight.is_meta
+    assert not layer.bias.is_meta
+
+    # materialize the layer weights after the bias is initialized
+    info = LayerReloadingInfo(
+        restore_metadata=({}, {}),
+        restore_device=torch.device("cpu"),
+    )
+    materialize_layer(layer, info)
+
+    # Ensure the weight materialized off meta
+    assert not layer.weight.is_meta
+    assert layer.weight.device.type == "cpu"
+
+    # Ensure that the bias is (still) not meta and values are unchanged
+    assert not layer.bias.is_meta
+    assert torch.equal(layer.bias.data, bias_values)
+
+
 def test_model_cleanup(dist_init, default_vllm_config):
     layer = QKVParallelLinear(2, 3, 4)
     assert layer.weight.weight_loader.__self__ is layer
@@ -162,6 +190,34 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+    if not current_platform.supports_fp8():
+        pytest.skip(reason="Requires FP8 support")
+
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
+    with vllm_runner(
+        model_name=model,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
+
+    assert reloaded_perp < 10
 
 
 @pytest.mark.parametrize(

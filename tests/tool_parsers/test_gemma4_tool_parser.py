@@ -85,6 +85,14 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_null_value(self):
+        # Bare `null` must parse as None (Python), not the string "null".
+        # Without this, tool_choice=auto would emit `{"param": "null"}`
+        # instead of `{"param": null}` for nullable tool parameters.
+        result = _parse_gemma4_args("param:null")
+        assert result == {"param": None}
+        assert json.dumps(result) == '{"param": null}'
+
     def test_mixed_types(self):
         result = _parse_gemma4_args(
             'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
@@ -113,6 +121,19 @@ class TestParseGemma4Args:
         """Key with no value after colon."""
         result = _parse_gemma4_args("key:")
         assert result == {"key": ""}
+
+    def test_empty_value_partial_withheld(self):
+        """Key with no value is withheld in partial mode to avoid premature emission."""
+        result = _parse_gemma4_args("key:", partial=True)
+        assert result == {}
+        # also with a space after the colon
+        result = _parse_gemma4_args("key: ", partial=True)
+        assert result == {}
+
+    def test_empty_value_after_other_keys_partial_withheld(self):
+        """Trailing key with no value is withheld; earlier keys are kept."""
+        result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
+        assert result == {"name": "test"}
 
 
 class TestParseGemma4Array:
@@ -636,3 +657,30 @@ class TestStreamingExtraction:
             '    <meta charset="UTF-8">\n'
             '    <meta name="viewport" content="width=device-width">\n'
         )
+
+    def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
+        """Trailing bare boolean must not be streamed twice."""
+        chunks = [
+            "<|tool_call>",
+            "call:Edit{",
+            'file_path:<|"|>src/env.py<|"|>,',
+            'old_string:<|"|>old_val<|"|>,',
+            'new_string:<|"|>new_val<|"|>,',
+            "replace_all:",
+            "false}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+
+        parsed_args = json.loads(args_text)
+        assert parsed_args == {
+            "file_path": "src/env.py",
+            "old_string": "old_val",
+            "new_string": "new_val",
+            "replace_all": False,
+        }
+
+        assert args_text.count("replace_all") == 1

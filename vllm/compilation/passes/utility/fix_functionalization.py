@@ -168,6 +168,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                     "cos_sin_cache",
                     "is_neox",
                     "position_ids",
+                    "forced_token_heads_per_warp",
                 )
                 self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             elif (

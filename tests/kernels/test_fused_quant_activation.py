@@ -7,6 +7,7 @@ import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float16]
 QUANT_DTYPES = [current_platform.fp8_dtype()]
@@ -49,9 +50,7 @@ def test_silu_and_mul(
     seed: int,
     device: str,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     layer = SiluAndMul()

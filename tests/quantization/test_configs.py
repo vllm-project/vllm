@@ -54,13 +54,13 @@ MODEL_ARG_EXPTYPES = [
     (
         "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
         None,
-        "awq_marlin" if current_platform.is_cuda() else "awq",
+        "awq_marlin" if current_platform.is_cuda_alike() else "awq",
     ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
     (
         "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
         "marlin",
-        "awq_marlin" if current_platform.is_cuda() else "ERROR",
+        "awq_marlin" if current_platform.is_cuda_alike() else "ERROR",
     ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
