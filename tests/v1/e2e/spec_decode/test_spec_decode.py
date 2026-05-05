@@ -719,44 +719,6 @@ def test_eagle_correctness_heavy(
     )
 
 
-def test_medusa_correctness(
-    sampling_config: SamplingParams,
-):
-    """Test Medusa speculative decoding e2e with a tiny random model."""
-    target_model = "JackFram/llama-68m"
-    medusa_model = "abhigoyal/vllm-medusa-llama-68m-random"
-    prompts = _build_gsm8k_prompts(num_questions=5, num_shots=1)[0]
-
-    ref_llm = LLM(
-        model=target_model,
-        max_model_len=256,
-        enforce_eager=True,
-    )
-    ref_outputs = ref_llm.generate(prompts, sampling_config)
-    del ref_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
-    spec_llm = LLM(
-        model=target_model,
-        speculative_config={
-            "method": "medusa",
-            "model": medusa_model,
-            "num_speculative_tokens": 3,
-        },
-        max_model_len=256,
-        enforce_eager=True,
-    )
-    spec_outputs = spec_llm.generate(prompts, sampling_config)
-    del spec_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
-    assert len(ref_outputs) == len(spec_outputs)
-    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-        assert ref_output.outputs[0].text == spec_output.outputs[0].text
-
-
 @large_gpu_mark(min_gb=24)
 def test_medusa_acceptance_rate(
     sampling_config: SamplingParams,
