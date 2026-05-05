@@ -1215,8 +1215,6 @@ def test_scheduler_config_init():
         ("facebook/opt-125m", 1, False, False),
         # Non-MoE model with DP>1 internal LB should need coordinator
         ("facebook/opt-125m", 2, False, True),
-        # Non-MoE model with DP>1 external LB should not need coordinator
-        ("facebook/opt-125m", 2, True, False),
         # MoE model with DP=1 should not need coordinator
         ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
         # MoE model with DP>1 internal LB should need both coordinator

@@ -60,15 +60,6 @@ __device__ __forceinline__ float toFloat(T value) {
   }
 }
 
-#define FINAL_MASK 0xffffffff
-template <typename T>
-__inline__ __device__ T warpReduceSum(T val) {
-#pragma unroll
-  for (int mask = 16; mask > 0; mask >>= 1)
-    val += __shfl_xor_sync(FINAL_MASK, val, mask, 32);
-  return val;
-}
-
 // ====================== TopK softplus_sqrt things
 // ===============================
 
@@ -272,8 +263,14 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
       }
     }
     // Compute per-thread scale (using warp reduction when renormalizing).
+    // THREADS_PER_ROW-parameterized butterfly works for both warp sizes (32
+    // on CUDA, 64 on ROCm CDNA) and any THREADS_PER_ROW the dispatch picks.
     if (renormalize) {
-      selected_sum = warpReduceSum(selected_sum);
+#pragma unroll
+      for (int mask = THREADS_PER_ROW / 2; mask > 0; mask /= 2) {
+        selected_sum +=
+            VLLM_SHFL_XOR_SYNC_WIDTH(selected_sum, mask, THREADS_PER_ROW);
+      }
     }
     float scale = static_cast<float>(routed_scaling_factor);
     if (renormalize) {
@@ -544,7 +541,6 @@ void topkGatingSoftplusSqrtKernelLauncher(
     const IndType* tid2eid, cudaStream_t stream) {
   static constexpr int WARPS_PER_TB = 4;
   static constexpr int BYTES_PER_LDG_POWER_OF_2 = 16;
-#ifndef USE_ROCM
   // for bfloat16 dtype, we need 4 bytes loading to make sure num_experts
   // elements can be loaded by a warp
   static constexpr int BYTES_PER_LDG_MULTIPLE_64 =
@@ -552,6 +548,19 @@ void topkGatingSoftplusSqrtKernelLauncher(
        std::is_same_v<InputType, __half>)
           ? 4
           : 8;
+  // Narrower LDG (ELTS_PER_LDG=1) used by 192/320/448/576 on ROCm WARP_SIZE=64
+  // where ELTS_PER_LDG=2 fails the EXPERTS%(ELTS_PER_LDG*WARP_SIZE)==0 check.
+  // On CUDA WARP_SIZE=32 the wider LDG already aligns, so the alias collapses
+  // back to BYTES_PER_LDG_MULTIPLE_64 — no behavioral change for CUDA.
+#ifdef USE_ROCM
+  static constexpr int BYTES_PER_LDG_MULTIPLE_64_NARROW =
+      (std::is_same_v<InputType, __nv_bfloat16> ||
+       std::is_same_v<InputType, __half>)
+          ? 2
+          : 4;
+#else
+  static constexpr int BYTES_PER_LDG_MULTIPLE_64_NARROW =
+      BYTES_PER_LDG_MULTIPLE_64;
 #endif
   switch (num_experts) {
     case 1:
@@ -584,27 +593,29 @@ void topkGatingSoftplusSqrtKernelLauncher(
     case 512:
       LAUNCH_SOFTPLUS_SQRT(512, WARPS_PER_TB, BYTES_PER_LDG_POWER_OF_2);
       break;
-      // (CUDA only) support multiples of 64 when num_experts is not power of 2.
-      // ROCm uses WARP_SIZE 64 so 8 bytes loading won't fit for some of
-      // num_experts, alternatively we can test 4 bytes loading and enable it in
-      // future.
-#ifndef USE_ROCM
+      // Multiples of 64 that are not powers of 2. The kernel requires
+      // EXPERTS % (ELTS_PER_LDG * WARP_SIZE) == 0. With ELTS_PER_LDG=2
+      // (BYTES_PER_LDG_MULTIPLE_64), this holds for all five values on CUDA
+      // WARP_SIZE=32 but only for 384 on ROCm WARP_SIZE=64. The other four
+      // use BYTES_PER_LDG_MULTIPLE_64_NARROW (ELTS_PER_LDG=1), which
+      // satisfies the assertion for any multiple of 64 on either backend;
+      // on CUDA the narrow alias collapses back to the wider load, so CUDA
+      // behavior is unchanged.
     case 192:
-      LAUNCH_SOFTPLUS_SQRT(192, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_SOFTPLUS_SQRT(192, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64_NARROW);
       break;
     case 320:
-      LAUNCH_SOFTPLUS_SQRT(320, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_SOFTPLUS_SQRT(320, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64_NARROW);
       break;
     case 384:
       LAUNCH_SOFTPLUS_SQRT(384, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
       break;
     case 448:
-      LAUNCH_SOFTPLUS_SQRT(448, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_SOFTPLUS_SQRT(448, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64_NARROW);
       break;
     case 576:
-      LAUNCH_SOFTPLUS_SQRT(576, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64);
+      LAUNCH_SOFTPLUS_SQRT(576, WARPS_PER_TB, BYTES_PER_LDG_MULTIPLE_64_NARROW);
       break;
-#endif
     default: {
       TORCH_CHECK(false, "Unsupported expert number: ", num_experts);
     }
