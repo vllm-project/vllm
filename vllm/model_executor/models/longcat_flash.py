@@ -479,7 +479,7 @@ class FlashModel(nn.Module):
         super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         self.config = config
-        self.quant_config = quant_config
+        self.quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
 

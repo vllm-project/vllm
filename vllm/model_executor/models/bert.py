@@ -126,16 +126,11 @@ class BertEncoder(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
         self.layer = nn.ModuleList(
             [
                 BertLayer(
                     config=config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    model_config=model_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.layer.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
