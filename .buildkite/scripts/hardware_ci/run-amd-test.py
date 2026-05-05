@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from textwrap import dedent
 
 log = logging.getLogger("amd-test")
 
@@ -26,6 +26,22 @@ JUNIT_CONTAINER_PATH = "/tmp/vllm-results.xml"
 ARTIFACT_MOUNT = "/tmp/vllm-rocm-install"
 DEFAULT_ARTIFACT_GLOB = "artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz"
 WORKSPACE = "/vllm-workspace"
+ARTIFACT_WORKSPACE_PATHS = (
+    "tests",
+    "examples",
+    "benchmarks",
+    "requirements",
+    "docker",
+    ".buildkite",
+    "pyproject.toml",
+)
+ENV_PASSTHROUGH = (
+    "HF_TOKEN",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "BUILDKITE_PARALLEL_JOB",
+    "BUILDKITE_PARALLEL_JOB_COUNT",
+)
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -48,102 +64,31 @@ def run_command(
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def _short_output(output: str | None, limit: int = 500) -> str:
-    text = (output or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "...<truncated>"
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def _load_json_stdout(
-    result: subprocess.CompletedProcess[str], description: str
-) -> Any:
-    stdout = result.stdout.strip()
-    if not stdout:
-        stderr = _short_output(result.stderr)
-        message = f"{description} returned empty stdout"
-        if stderr:
-            message += f"; stderr: {stderr}"
-        raise RuntimeError(message)
+def command_output(result: subprocess.CompletedProcess[str]) -> str:
+    return result.stderr.strip() or result.stdout.strip()
+
+
+def render_group_id() -> str:
     try:
-        return json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        message = f"{description} returned non-JSON stdout: {_short_output(stdout)!r}"
-        stderr = _short_output(result.stderr)
-        if stderr:
-            message += f"; stderr: {stderr!r}"
-        raise RuntimeError(message) from exc
+        return str(grp.getgrnam("render").gr_gid)
+    except KeyError as err:
+        raise RuntimeError("render group not found") from err
 
 
-def gpu_snapshot() -> list[dict[str, Any]]:
-    result = run_command(["amd-smi", "metric", "--mem-usage", "--json"], timeout=30)
-    if result.returncode != 0:
-        output = _short_output(result.stderr or result.stdout)
-        raise RuntimeError(f"amd-smi metric failed: {output}")
-
-    payload = _load_json_stdout(result, "amd-smi metric --mem-usage --json")
-    if isinstance(payload, dict):
-        entries = payload.get("gpu_data", [])
-    elif isinstance(payload, list):
-        entries = payload
-    else:
-        raise RuntimeError(
-            f"Unexpected amd-smi JSON payload type: {type(payload).__name__}"
-        )
-
-    snapshot = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise RuntimeError(
-                f"Unexpected amd-smi GPU entry type: {type(entry).__name__}"
-            )
-        mem = entry.get("mem_usage", {})
-        snapshot.append(
-            {
-                "gpu": entry.get("gpu"),
-                "used_mib": mem.get("used_vram", {}).get("value"),
-                "total_mib": mem.get("total_vram", {}).get("value"),
-            }
-        )
-    return snapshot
+def docker_env_args(*envs: str) -> list[str]:
+    return [arg for env in envs for arg in ("-e", env)]
 
 
-def _count_gpu_entries(payload: Any) -> int:
-    if isinstance(payload, list):
-        return len(payload)
-    if not isinstance(payload, dict):
-        return 0
-
-    for key in ("gpu_data", "gpus", "GPUs", "devices"):
-        value = payload.get(key)
-        if isinstance(value, list):
-            return len(value)
-        if isinstance(value, dict):
-            return len(value)
-
-    return sum(1 for value in payload.values() if isinstance(value, dict))
-
-
-def amd_smi_list_gpu_count() -> int:
-    result = run_command(["amd-smi", "list", "--json"], timeout=30)
-    if result.returncode == 0:
-        try:
-            count = _count_gpu_entries(_load_json_stdout(result, "amd-smi list --json"))
-            if count:
-                return count
-        except RuntimeError as exc:
-            log.warning("amd-smi list --json was not usable: %s", exc)
-
-    result = run_command(["amd-smi", "list"], timeout=30)
-    if result.returncode != 0:
-        output = _short_output(result.stderr or result.stdout)
-        raise RuntimeError(f"amd-smi list failed: {output}")
-
-    return sum(
-        1
-        for line in result.stdout.splitlines()
-        if line.strip().lower().startswith("gpu")
-    )
+def docker_device_args(devices: list[str] | tuple[str, ...]) -> list[str]:
+    args = ["--device", "/dev/kfd"]
+    args.extend(arg for device in devices for arg in ("--device", device))
+    if Path("/dev/infiniband").exists():
+        args.extend(["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"])
+    return args
 
 
 def make_results_dir(artifact_mode: bool) -> Path:
@@ -191,7 +136,6 @@ class RunRequest:
     results_dir: Path
     hf_cache: Path
     timeout_s: int
-    watchdog_interval_s: int
     render_devices: tuple[str, ...]
     artifact_mode: bool
     fallback_image: str | None
@@ -241,7 +185,6 @@ class RunRequest:
             results_dir=make_results_dir(artifact_mode),
             hf_cache=hf_cache,
             timeout_s=int(os.environ.get("CONTAINER_TIMEOUT_S", "10200")),
-            watchdog_interval_s=int(os.environ.get("WATCHDOG_INTERVAL_S", "15")),
             render_devices=tuple(
                 token
                 for token in os.environ.get(
@@ -303,12 +246,11 @@ class RunRequest:
     @staticmethod
     def _resolve_node_commands() -> tuple[str, ...]:
         count = int(os.environ.get("VLLM_NODE_COMMAND_COUNT", "0"))
-        commands = []
-        for idx in range(count):
-            command = os.environ.get(f"VLLM_NODE_COMMAND_{idx}")
-            if command:
-                commands.append(command)
-        return tuple(commands)
+        return tuple(
+            command
+            for idx in range(count)
+            if (command := os.environ.get(f"VLLM_NODE_COMMAND_{idx}"))
+        )
 
     def bash_command(self) -> str:
         return (
@@ -318,37 +260,43 @@ class RunRequest:
         )
 
     def setup_command(self) -> str:
-        return f"""
-set -euo pipefail
-if [ ! -d "{ARTIFACT_MOUNT}" ]; then
-  echo "ROCm artifact directory not mounted at {ARTIFACT_MOUNT}" >&2
-  exit 1
-fi
-wheel="$(find "{ARTIFACT_MOUNT}" -maxdepth 1 -name '*.whl' | head -1)"
-if [ -z "${{wheel}}" ]; then
-  echo "No vLLM wheel found in {ARTIFACT_MOUNT}" >&2
-  exit 1
-fi
-uv pip install --system --no-deps "${{wheel}}"
-rm -rf "{WORKSPACE}"
-mkdir -p "{WORKSPACE}"
-for path in tests examples benchmarks requirements docker .buildkite pyproject.toml; do
-  if [ -e "{ARTIFACT_MOUNT}/${{path}}" ]; then
-    cp -a "{ARTIFACT_MOUNT}/${{path}}" "{WORKSPACE}/"
-  fi
-done
-python3 - <<'PY'
-import pathlib
-import shutil
-import sysconfig
+        script = f"""
+        import pathlib
+        import subprocess
+        import sys
+        import sysconfig
 
-src = pathlib.Path("{ARTIFACT_MOUNT}") / "vllm_v1"
-if src.exists():
-    site = pathlib.Path(sysconfig.get_paths()["purelib"])
-    dst = site / "vllm" / "v1"
-    shutil.copytree(src, dst, dirs_exist_ok=True)
-PY
-"""
+        artifact_mount = pathlib.Path({ARTIFACT_MOUNT!r})
+        workspace = pathlib.Path({WORKSPACE!r})
+        workspace_paths = {ARTIFACT_WORKSPACE_PATHS!r}
+
+        def run(*cmd: str) -> None:
+            subprocess.run(cmd, check=True)
+
+        if not artifact_mount.is_dir():
+            sys.exit(f"ROCm artifact directory not mounted at {{artifact_mount}}")
+
+        wheels = sorted(artifact_mount.glob("*.whl"))
+        if not wheels:
+            sys.exit(f"No vLLM wheel found in {{artifact_mount}}")
+
+        run("uv", "pip", "install", "--system", "--no-deps", str(wheels[0]))
+        run("rm", "-rf", str(workspace))
+        workspace.mkdir(parents=True)
+
+        for relative_path in workspace_paths:
+            src = artifact_mount / relative_path
+            if src.exists():
+                run("cp", "-a", str(src), str(workspace))
+
+        v1_src = artifact_mount / "vllm_v1"
+        if v1_src.exists():
+            site_packages = pathlib.Path(sysconfig.get_paths()["purelib"])
+            v1_dst = site_packages / "vllm" / "v1"
+            v1_dst.parent.mkdir(parents=True, exist_ok=True)
+            run("cp", "-a", f"{{v1_src}}/.", str(v1_dst))
+        """
+        return f"python3 - <<'PY'\n{dedent(script).strip()}\nPY\n"
 
 
 @dataclass
@@ -373,8 +321,9 @@ def copy_artifact_to_container(artifact_dir: Path, container_name: str) -> None:
         timeout=600,
     )
     if result.returncode != 0:
-        output = result.stderr.strip() or result.stdout.strip()
-        raise RuntimeError(f"copy ROCm artifact into {container_name} failed: {output}")
+        raise RuntimeError(
+            f"copy ROCm artifact into {container_name} failed: {command_output(result)}"
+        )
 
 
 class ArtifactPackage:
@@ -383,10 +332,7 @@ class ArtifactPackage:
         self.download_dir = request.results_dir / "downloaded-artifacts"
         self.install_dir = request.results_dir / "vllm-rocm-install"
 
-    def prepare(self) -> Path | None:
-        if not self.request.artifact_mode:
-            return None
-
+    def prepare(self) -> Path:
         archive = self._find_local_archive()
         if archive is None:
             archive = self._download_archive()
@@ -421,10 +367,7 @@ class ArtifactPackage:
             timeout=600,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                "artifact download failed: "
-                f"{result.stderr.strip() or result.stdout.strip()}"
-            )
+            raise RuntimeError(f"artifact download failed: {command_output(result)}")
 
         matches = sorted(self.download_dir.rglob("vllm-rocm-install.tar.gz"))
         if not matches:
@@ -474,14 +417,6 @@ class ArtifactPackage:
 
 
 class ContainerRunner:
-    _ENV_PASSTHROUGH = [
-        "HF_TOKEN",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SECRET_ACCESS_KEY",
-        "BUILDKITE_PARALLEL_JOB",
-        "BUILDKITE_PARALLEL_JOB_COUNT",
-    ]
-
     def __init__(self, request: RunRequest, artifact_dir: Path | None) -> None:
         self.request = request
         self.artifact_dir = artifact_dir
@@ -497,14 +432,14 @@ class ContainerRunner:
         try:
             create = run_command(self._build_cmd(), timeout=120)
             if create.returncode != 0:
-                raise RuntimeError(f"docker create failed: {create.stderr.strip()}")
+                raise RuntimeError(f"docker create failed: {command_output(create)}")
             self._created = True
             if self.artifact_dir is not None:
                 copy_artifact_to_container(self.artifact_dir, self.container_name)
 
             start = run_command(["docker", "start", self.container_name], timeout=120)
             if start.returncode != 0:
-                raise RuntimeError(f"docker start failed: {start.stderr.strip()}")
+                raise RuntimeError(f"docker start failed: {command_output(start)}")
         except Exception:
             self._cleanup()
             raise
@@ -522,7 +457,7 @@ class ContainerRunner:
                 timeout=self.request.timeout_s,
             )
             if wait.returncode != 0:
-                log.error("docker wait failed: %s", wait.stderr.strip())
+                log.error("docker wait failed: %s", command_output(wait))
             else:
                 try:
                     exit_code = int(wait.stdout.strip())
@@ -549,39 +484,26 @@ class ContainerRunner:
         )
 
     def _build_cmd(self) -> list[str]:
-        try:
-            render_gid = str(grp.getgrnam("render").gr_gid)
-        except KeyError as err:
-            raise RuntimeError("render group not found") from err
-
-        cmd = ["docker", "create", "--device", "/dev/kfd"]
-        for device in self.request.render_devices:
-            cmd.extend(["--device", device])
-        if Path("/dev/infiniband").exists():
-            cmd.extend(["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"])
-
-        cmd.extend(["--network=host", "--shm-size=16gb", "--group-add", render_gid])
-        for env_name in self._ENV_PASSTHROUGH:
-            cmd.extend(["-e", env_name])
-        cmd.extend(
-            [
-                "-e",
-                f"HF_HOME={HF_MOUNT}",
-                "-e",
-                "PYTHONPATH=..",
-                "-v",
-                f"{self.request.hf_cache}:{HF_MOUNT}",
-                "--name",
-                self.container_name,
-                self.request.image,
-                "/bin/bash",
-                "-euo",
-                "pipefail",
-                "-c",
-                self._container_shell_command(),
-            ]
-        )
-        return cmd
+        return [
+            "docker",
+            "create",
+            *docker_device_args(self.request.render_devices),
+            "--network=host",
+            "--shm-size=16gb",
+            "--group-add",
+            render_group_id(),
+            *docker_env_args(*ENV_PASSTHROUGH, f"HF_HOME={HF_MOUNT}", "PYTHONPATH=.."),
+            "-v",
+            f"{self.request.hf_cache}:{HF_MOUNT}",
+            "--name",
+            self.container_name,
+            self.request.image,
+            "/bin/bash",
+            "-euo",
+            "pipefail",
+            "-c",
+            self._container_shell_command(),
+        ]
 
     def _container_shell_command(self) -> str:
         commands = ["unset PYTORCH_ROCM_ARCH"]
@@ -630,7 +552,7 @@ class ContainerRunner:
         if result.returncode == 0:
             log.info("Copied junit xml to %s", junit_path)
         else:
-            log.warning("Could not retrieve junit xml: %s", result.stderr.strip())
+            log.warning("Could not retrieve junit xml: %s", command_output(result))
 
     def _cleanup(self) -> None:
         if self._created:
@@ -638,7 +560,6 @@ class ContainerRunner:
 
 
 class MultiNodeRunner:
-    _ENV_PASSTHROUGH = ContainerRunner._ENV_PASSTHROUGH
     _SUBNET = "192.168.10.0/24"
     _HEAD_IP = "192.168.10.10"
 
@@ -720,52 +641,34 @@ class MultiNodeRunner:
                 )
 
     def _docker_run_cmd(self, node: int, name: str, node_ip: str) -> list[str]:
-        try:
-            render_gid = str(grp.getgrnam("render").gr_gid)
-        except KeyError as err:
-            raise RuntimeError("render group not found") from err
-
+        render_devices, hip_visible_devices = self._node_gpu_devices(node)
         cmd = [
             "docker",
             "run",
             "--detach",
-            "--device",
-            "/dev/kfd",
+            *docker_device_args(render_devices),
             "--network",
             self.network_name,
             "--ip",
             node_ip,
             "--shm-size=16gb",
             "--group-add",
-            render_gid,
-        ]
-
-        render_devices, hip_visible_devices = self._node_gpu_devices(node)
-        for device in render_devices:
-            cmd.extend(["--device", device])
-        if Path("/dev/infiniband").exists():
-            cmd.extend(["--device", "/dev/infiniband", "--cap-add=IPC_LOCK"])
-
-        for env_name in self._ENV_PASSTHROUGH:
-            cmd.extend(["-e", env_name])
-        cmd.extend(
-            [
-                "-e",
+            render_group_id(),
+            *docker_env_args(
+                *ENV_PASSTHROUGH,
                 f"HIP_VISIBLE_DEVICES={hip_visible_devices}",
-                "-e",
                 f"HF_HOME={HF_MOUNT}",
-                "-e",
                 "PYTHONPATH=..",
-                "-v",
-                f"{self.request.hf_cache}:{HF_MOUNT}",
-                "--name",
-                name,
-                self.request.image,
-                "/bin/bash",
-                "-lc",
-                "tail -f /dev/null",
-            ]
-        )
+            ),
+            "-v",
+            f"{self.request.hf_cache}:{HF_MOUNT}",
+            "--name",
+            name,
+            self.request.image,
+            "/bin/bash",
+            "-lc",
+            "tail -f /dev/null",
+        ]
         return cmd
 
     def _node_gpu_devices(self, node: int) -> tuple[list[str], str]:
@@ -810,7 +713,8 @@ class MultiNodeRunner:
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(log_path, "w") as log_file:
-            log_file.write(f"=== Multi-node job started {Watchdog._now()} ===\n")
+            started_at = utc_now().isoformat(timespec="seconds")
+            log_file.write(f"=== Multi-node job started {started_at} ===\n")
             for node in range(self.request.num_nodes - 1, -1, -1):
                 process = self._exec_process(
                     self.container_names[node],
@@ -935,8 +839,7 @@ class MultiNodeRunner:
     ) -> subprocess.CompletedProcess[str]:
         result = run_command(cmd, timeout=timeout)
         if result.returncode != 0:
-            output = result.stderr.strip() or result.stdout.strip()
-            raise RuntimeError(f"{description} failed: {output}")
+            raise RuntimeError(f"{description} failed: {command_output(result)}")
         return result
 
     def _cleanup(self) -> None:
@@ -944,158 +847,6 @@ class MultiNodeRunner:
             run_command(["docker", "rm", "-f", container], timeout=30)
         if self._network_created:
             run_command(["docker", "network", "rm", self.network_name], timeout=30)
-
-
-class Watchdog:
-    def __init__(self, request: RunRequest, container_name: str) -> None:
-        self.request = request
-        self.container_name = container_name
-        self.log_path = request.results_dir / "health_watchdog.log"
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._docker_root = self._detect_docker_root()
-
-    def start(self) -> None:
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.log_path, "w") as log_file:
-            log_file.write(f"=== Watchdog started {self._now()} ===\n")
-            self._write_snapshot(log_file, "pre")
-            log_file.write("=== Samples ===\n")
-
-        self._thread = threading.Thread(target=self._loop, name="watchdog", daemon=True)
-        self._thread.start()
-        log.info("Watchdog started (interval %ds)", self.request.watchdog_interval_s)
-
-    def stop(self, exit_code: int | None = None) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=10)
-
-        with open(self.log_path, "a") as log_file:
-            log_file.write("=== Summary ===\n")
-            self._write_snapshot(log_file, "post")
-            if exit_code is not None:
-                log_file.write(f"exit_code={exit_code}\n")
-            log_file.write(f"=== Watchdog stopped {self._now()} ===\n")
-
-        log.info("Watchdog stopped")
-
-    def _loop(self) -> None:
-        with open(self.log_path, "a") as log_file:
-            while not self._stop.is_set():
-                try:
-                    log_file.write(self._sample() + "\n")
-                    log_file.flush()
-                except Exception as exc:
-                    log.warning("watchdog sample failed: %s", exc)
-                self._stop.wait(self.request.watchdog_interval_s)
-
-    def _write_snapshot(self, log_file, label: str) -> None:
-        snapshot = self._try(gpu_snapshot)
-        log_file.write(f"  mem_{label}: [{self._container_mem_oneliner()}]\n")
-        if snapshot:
-            log_file.write(f"  gpu_{label}: [{self._fmt_gpus(snapshot)}]\n")
-        log_file.write(f"  disk_{label}: [{self._disk_oneliner()}]\n")
-
-    def _sample(self) -> str:
-        return (
-            f"{self._now()}"
-            f" mem=[{self._container_mem_oneliner()}]"
-            f" disk=[{self._disk_oneliner()}]"
-            f" container={self._container_state()}"
-            f" gpu=[{self._gpu_oneliner()}]"
-        )
-
-    def _disk_oneliner(self) -> str:
-        paths = [("/", "root"), ("/tmp", "tmp")]
-        if self._docker_root and os.path.isdir(self._docker_root):
-            paths.append((self._docker_root, "docker"))
-
-        parts = []
-        seen_devices: set[int] = set()
-        for path, label in paths:
-            try:
-                stat = os.stat(path)
-                if stat.st_dev in seen_devices:
-                    continue
-                seen_devices.add(stat.st_dev)
-                usage = shutil.disk_usage(path)
-                pct = round(usage.used * 100 / usage.total, 1) if usage.total else 0
-                free = round(usage.free / 1024**3, 1)
-                parts.append(f"{label}={pct}%/{free}G")
-            except OSError:
-                pass
-        return ",".join(parts) or "?"
-
-    def _gpu_oneliner(self) -> str:
-        try:
-            return ",".join(
-                f"{gpu['used_mib']}/{gpu['total_mib']}" for gpu in gpu_snapshot()
-            )
-        except Exception:
-            return "?"
-
-    def _container_state(self) -> str:
-        try:
-            result = run_command(
-                [
-                    "docker",
-                    "inspect",
-                    "--format",
-                    "{{.State.Status}}/exit={{.State.ExitCode}}/oom={{.State.OOMKilled}}",
-                    self.container_name,
-                ],
-                timeout=5,
-            )
-            return result.stdout.strip() if result.returncode == 0 else "?"
-        except Exception:
-            return "?"
-
-    def _container_mem_oneliner(self) -> str:
-        try:
-            result = run_command(
-                [
-                    "docker",
-                    "stats",
-                    "--no-stream",
-                    "--format",
-                    "{{.MemUsage}}",
-                    self.container_name,
-                ],
-                timeout=5,
-            )
-            return result.stdout.strip() if result.returncode == 0 else "?"
-        except Exception:
-            return "?"
-
-    @staticmethod
-    def _detect_docker_root() -> str | None:
-        try:
-            result = run_command(
-                ["docker", "info", "-f", "{{.DockerRootDir}}"], timeout=10
-            )
-            docker_root = result.stdout.strip()
-            return docker_root or None
-        except Exception:
-            return None
-
-    @staticmethod
-    def _try(func):
-        try:
-            return func()
-        except Exception:
-            return None
-
-    @staticmethod
-    def _fmt_gpus(snapshot: list[dict[str, Any]]) -> str:
-        return ",".join(
-            f"GPU{gpu['gpu']}={gpu['used_mib']}/{gpu['total_mib']}MiB"
-            for gpu in snapshot
-        )
-
-    @staticmethod
-    def _now() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class ArtifactCollector:
@@ -1107,7 +858,6 @@ class ArtifactCollector:
         result: RunResult,
         *,
         started_at: datetime,
-        watchdog_path: Path | None = None,
     ) -> int:
         exit_code = result.exit_code
         if result.mode == "single-node" and exit_code == 0:
@@ -1117,11 +867,9 @@ class ArtifactCollector:
             result=result,
             exit_code=exit_code,
             started_at=started_at,
-            finished_at=datetime.now(timezone.utc),
+            finished_at=utc_now(),
         )
-        self._upload_existing(
-            summary_path, result.log_path, result.junit_path, watchdog_path
-        )
+        self._upload_existing(summary_path, result.log_path, result.junit_path)
         return exit_code
 
     def _validate_junit(self, junit_path: Path | None) -> int:
@@ -1193,7 +941,7 @@ class ArtifactCollector:
             ["buildkite-agent", "artifact", "upload", str(path)], timeout=300
         )
         if result.returncode != 0:
-            log.warning("upload failed for %s: %s", path.name, result.stderr.strip())
+            log.warning("upload failed for %s: %s", path.name, command_output(result))
         else:
             log.info("Uploaded %s", path.name)
 
@@ -1203,41 +951,35 @@ class AmdTestRunner:
         self.request = request
 
     def run(self) -> int:
-        started_at = datetime.now(timezone.utc)
+        started_at = utc_now()
         active_request = self.request
         artifact_dir: Path | None = None
         result = RunResult(
             mode=self.request.execution_mode,
             exit_code=1,
         )
-        watchdog: Watchdog | None = None
 
         try:
-            self._check_gpus()
             active_request, artifact_dir = self._prepare_execution()
             log.info("Test name: %s", active_request.test_name or "<unset>")
             log.info("Image: %s", active_request.image)
             log.info("Execution mode: %s", active_request.execution_mode)
-            if active_request.execution_mode == "multi-node":
-                runner = MultiNodeRunner(active_request, artifact_dir)
-            else:
-                runner = ContainerRunner(active_request, artifact_dir)
+            runner_cls = (
+                MultiNodeRunner
+                if active_request.execution_mode == "multi-node"
+                else ContainerRunner
+            )
+            runner = runner_cls(active_request, artifact_dir)
             result.container_name = runner.container_name
-            watchdog = Watchdog(active_request, result.container_name or "node0")
-            watchdog.start()
             if active_request.commands:
                 log.info("Commands: %s", active_request.commands)
             result = runner.run()
         except Exception as exc:
             log.error("amd test runner failed: %s", exc)
-        finally:
-            if watchdog is not None:
-                watchdog.stop(result.exit_code)
 
         return ArtifactCollector(active_request).finalize(
             result,
             started_at=started_at,
-            watchdog_path=watchdog.log_path if watchdog is not None else None,
         )
 
     def _prepare_execution(self) -> tuple[RunRequest, Path | None]:
@@ -1268,10 +1010,7 @@ class AmdTestRunner:
             self._ensure_image(fallback_request.image)
             return fallback_request, None
 
-    def _check_artifact_container_visibility(self, artifact_dir: Path | None) -> None:
-        if artifact_dir is None:
-            return
-
+    def _check_artifact_container_visibility(self, artifact_dir: Path) -> None:
         name = f"rocm_artifact_check_{self.request.commit}_{os.urandom(4).hex()}"
         create = run_command(
             [
@@ -1293,16 +1032,16 @@ class AmdTestRunner:
         )
         if create.returncode != 0:
             raise RuntimeError(
-                f"artifact visibility check create failed: {create.stderr.strip()}"
+                f"artifact visibility check create failed: {command_output(create)}"
             )
 
         try:
             copy_artifact_to_container(artifact_dir, name)
             start = run_command(["docker", "start", "--attach", name], timeout=120)
             if start.returncode != 0:
-                output = start.stderr.strip() or start.stdout.strip()
                 raise RuntimeError(
-                    f"artifact is not visible inside Docker container: {output}"
+                    "artifact is not visible inside Docker container: "
+                    f"{command_output(start)}"
                 )
         finally:
             run_command(["docker", "rm", "-f", name], timeout=30)
@@ -1314,39 +1053,6 @@ class AmdTestRunner:
         if self._docker_pull(image):
             return
         raise RuntimeError(f"Failed to pull test image: {image}")
-
-    def _check_gpus(self) -> None:
-        try:
-            snapshot = gpu_snapshot()
-        except RuntimeError as exc:
-            fallback_count = len(self.request.render_devices)
-            fallback_source = "Buildkite render-device metadata"
-            if fallback_count == 0:
-                fallback_count = amd_smi_list_gpu_count()
-                fallback_source = "amd-smi list"
-
-            if fallback_count == 0:
-                raise RuntimeError("No GPUs detected by amd-smi") from exc
-
-            log.warning(
-                "amd-smi memory snapshot failed (%s); detected %d GPU(s) via %s",
-                exc,
-                fallback_count,
-                fallback_source,
-            )
-            return
-
-        if snapshot:
-            log.info("Detected %d GPU(s)", len(snapshot))
-            return
-
-        fallback_count = len(self.request.render_devices) or amd_smi_list_gpu_count()
-        if fallback_count == 0:
-            raise RuntimeError("No GPUs detected by amd-smi")
-        log.warning(
-            "amd-smi memory snapshot was empty; detected %d GPU(s) via fallback",
-            fallback_count,
-        )
 
     @staticmethod
     def _image_exists_locally(image: str) -> bool:
@@ -1363,7 +1069,7 @@ class AmdTestRunner:
                 log.info("Pulled %s on attempt %d", image, attempt + 1)
                 return True
             log.warning(
-                "docker pull attempt %d failed: %s", attempt + 1, result.stderr.strip()
+                "docker pull attempt %d failed: %s", attempt + 1, command_output(result)
             )
             if attempt < retries - 1:
                 time.sleep(delay)
