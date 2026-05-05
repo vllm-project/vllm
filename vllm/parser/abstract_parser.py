@@ -657,7 +657,12 @@ class DelegatingParser(Parser):
         kwargs = getattr(self, "_chat_template_kwargs", None)
         if kwargs is None:
             return False
-        return bool(kwargs.get("thinking")) or bool(kwargs.get("enable_thinking"))
+        # Be defensive: some custom parser construction paths may pass the full
+        # ``kwargs`` dict, where chat template options are nested one level deeper.
+        chat_kwargs = kwargs.get("chat_template_kwargs", kwargs)
+        return bool(chat_kwargs.get("thinking")) or bool(
+            chat_kwargs.get("enable_thinking")
+        )
 
     def _should_prefill_reasoning_ended_from_prompt(self) -> bool:
         """Whether to apply ``is_reasoning_end`` on ``prompt_token_ids``."""
