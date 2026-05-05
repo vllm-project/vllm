@@ -626,7 +626,7 @@ class SpeculativeConfig:
                     revision=self.revision,
                     code_revision=self.code_revision,
                     tokenizer_revision=self.target_model_config.tokenizer_revision,
-                    max_model_len=self.max_model_len,
+                    max_model_len=self.max_model_len,  # type: ignore[arg-type]
                     spec_target_max_model_len=self.target_model_config.max_model_len,
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
