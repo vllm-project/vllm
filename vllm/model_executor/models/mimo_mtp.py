@@ -26,10 +26,9 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -46,11 +45,10 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        model_config: ModelConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.token_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hidden_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -59,8 +57,7 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         )
         self.mtp_block = Qwen2DecoderLayer(
             config=config,
-            cache_config=cache_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             quant_config=quant_config,
             prefix=prefix,
         )

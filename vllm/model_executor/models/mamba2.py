@@ -48,9 +48,9 @@ class Mamba2DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MambaConfig,
-        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -99,8 +99,6 @@ class Mamba2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         is_lora_enabled = bool(lora_config)
@@ -119,8 +117,7 @@ class Mamba2Model(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Mamba2DecoderLayer(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),

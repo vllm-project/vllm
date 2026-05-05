@@ -10,7 +10,7 @@ from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -21,7 +21,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -64,13 +63,12 @@ class DFlashQwen3Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         attention_bias: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_name = prefix
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -115,11 +113,9 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
-            model_config=model_config,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -158,13 +154,11 @@ class DFlashQwen3DecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         *,
         config: Qwen3Config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
         self.hidden_size = config.hidden_size
-        model_config = vllm_config.model_config
         set_default_rope_theta(config, default_theta=1000000)
         attn_type = AttentionType.DECODER
 
@@ -176,12 +170,10 @@ class DFlashQwen3DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             attention_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            model_config=model_config,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,

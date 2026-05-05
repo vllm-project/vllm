@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
+from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -87,10 +88,11 @@ class BlipAttention(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig | Blip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -115,7 +117,7 @@ class BlipAttention(nn.Module):
         self.projection = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.projection",
         )
 
@@ -189,15 +191,16 @@ class BlipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         # fallback to sdpa attention if tp unavailable
         self.self_attn = BlipAttention(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -231,11 +234,12 @@ class BlipEncoder(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
 
@@ -271,13 +275,14 @@ class BlipVisionModel(nn.Module, SupportsQuant):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
 
         self.embeddings = BlipVisionEmbeddings(config)

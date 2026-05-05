@@ -25,7 +25,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -65,15 +65,15 @@ class LoopCoderAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
         layer_idx: int = 0,
     ) -> None:
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -160,8 +160,7 @@ class LoopCoderAttention(nn.Module):
                     self.scaling,
                     num_kv_heads=self.num_kv_heads,
                     cache_config=loop_cache_config,
-                    model_config=model_config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
                     **{
@@ -213,12 +212,12 @@ class LoopCoderDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         layer_idx: int = 0,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
@@ -235,8 +234,7 @@ class LoopCoderDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
@@ -426,7 +424,7 @@ class IQuestLoopCoderModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: LoopCoderDecoderLayer(
                 config=config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
                 layer_idx=extract_layer_index(prefix),

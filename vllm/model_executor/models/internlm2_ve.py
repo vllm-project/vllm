@@ -7,10 +7,9 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.internlm2 import (
     InternLM2Attention,
     InternLM2ForCausalLM,
@@ -24,12 +23,11 @@ class InternLM2VEDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.attention = InternLM2Attention(
@@ -38,9 +36,7 @@ class InternLM2VEDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attention",
         )
         self.feed_forward = InternLM2MLP(

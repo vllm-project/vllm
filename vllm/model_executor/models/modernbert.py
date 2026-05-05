@@ -66,8 +66,8 @@ class ModernBertAttention(nn.Module):
         self,
         config: ModernBertConfig,
         layer_id: int | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -119,7 +119,7 @@ class ModernBertAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{layer_id}.attn",
             per_layer_sliding_window=sliding_window,
         )
@@ -168,9 +168,9 @@ class ModernBertLayer(nn.Module):
     def __init__(
         self,
         config: ModernBertConfig,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         layer_id: int | None = None,
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
         self.config = config
@@ -184,7 +184,7 @@ class ModernBertLayer(nn.Module):
             config=config,
             layer_id=layer_id,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
+            vllm_config=vllm_config,
         )
         self.mlp_norm = nn.LayerNorm(
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias

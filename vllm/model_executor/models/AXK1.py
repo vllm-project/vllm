@@ -32,7 +32,7 @@ from torch import nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -246,7 +246,6 @@ class AXK1Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         prefix: str = "",
@@ -343,9 +342,7 @@ class AXK1Attention(nn.Module):
             self.qk_head_dim,
             self.scaling,
             num_kv_heads=self.num_local_heads,
-            model_config=vllm_config.model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -417,7 +414,6 @@ class AXK1MLAAttention(nn.Module):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
@@ -541,9 +537,8 @@ class AXK1MLAAttention(nn.Module):
             self.q_lora_rank,
             self.kv_lora_rank,
             mla_modules,
-            cache_config,
-            quant_config,
-            prefix,
+            vllm_config=vllm_config,
+            prefix=prefix,
         )
 
     def forward(
@@ -567,7 +562,6 @@ class AXK1DecoderLayer(nn.Module):
         if config is None:
             config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         self.config = config
@@ -604,7 +598,6 @@ class AXK1DecoderLayer(nn.Module):
             q_lora_rank=config.q_lora_rank,
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=None,

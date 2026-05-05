@@ -42,7 +42,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -354,12 +354,11 @@ class FlashDecoderLayer(nn.Module):
         self,
         vllm_config: VllmConfig,
         config: FlashConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
         self.layer_idx = int(prefix.split(sep=".")[-1])
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -380,10 +379,6 @@ class FlashDecoderLayer(nn.Module):
                     ),
                     kv_lora_rank=config.kv_lora_rank,
                     max_position_embeddings=max_position_embeddings,
-                    cache_config=cache_config,
-                    quant_config=None
-                    if "self_attn" in getattr(config, "disable_quant_module", [])
-                    else quant_config,
                     prefix=f"{prefix}.self_attn.{i}",
                 )
                 for i in range(2)
@@ -482,8 +477,6 @@ class FlashModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -501,8 +494,6 @@ class FlashModel(nn.Module):
             lambda prefix: FlashDecoderLayer(
                 vllm_config,
                 config,
-                cache_config=cache_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

@@ -20,7 +20,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -120,7 +119,7 @@ class Phi4MMImageEncoder(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         model_dir: str = "",
     ) -> None:
@@ -1033,7 +1032,6 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_encoder = Phi4MMImageEncoder(
                 config,
-                quant_config,
                 prefix="model.vision_embed_tokens",
                 model_dir=config._name_or_path,
             )

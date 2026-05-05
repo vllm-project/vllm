@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from transformers import DbrxConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -188,12 +188,11 @@ class DbrxAttention(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
         self.head_dim = self.d_model // self.total_num_heads
@@ -250,9 +249,7 @@ class DbrxAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -275,18 +272,14 @@ class DbrxFusedNormAttention(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
         self.attn = DbrxAttention(
             config,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.norm_1 = nn.LayerNorm(self.d_model)
@@ -313,17 +306,14 @@ class DbrxBlock(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.norm_attn_norm = DbrxFusedNormAttention(
             config,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.norm_attn_norm",
         )
         self.ffn = DbrxMoE(config, quant_config, prefix=f"{prefix}.ffn")

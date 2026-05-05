@@ -24,7 +24,7 @@ from transformers.image_utils import ImageInput
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import (
     get_pp_group,
@@ -885,12 +885,11 @@ class Molmo2Attention(nn.Module):
         self,
         config: TextConfig,
         rope_parameters: dict[str, Any],
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -960,9 +959,7 @@ class Molmo2Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -1070,19 +1067,16 @@ class Molmo2DecoderLayer(nn.Module):
         self,
         config: TextConfig,
         rope_parameters: dict[str, Any],
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Attention block.
         self.self_attn = Molmo2Attention(
             config,
             rope_parameters,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -1158,7 +1152,6 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -1186,15 +1179,12 @@ class Molmo2TextModel(nn.Module, SupportsQuant):
             if text_config.norm_after
             else Molmo2DecoderLayer
         )
-        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             text_config.num_hidden_layers,
             lambda prefix: decoder_layer(
                 text_config,
                 hf_text_config.rope_parameters,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

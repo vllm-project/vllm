@@ -68,11 +68,12 @@ class EXAONE4_5_VisionAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Per attention head and per partition values.
         self.tp_size = (
             1
@@ -111,7 +112,7 @@ class EXAONE4_5_VisionAttention(nn.Module):
             input_size=projection_size,
             output_size=embed_dim,
             bias=True,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -206,11 +207,12 @@ class Exaone4_5_VisionBlock(nn.Module):
         mlp_hidden_dim: int,
         hidden_act: str = "silu",
         norm_layer: Callable[[int], nn.Module] | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
@@ -220,7 +222,7 @@ class Exaone4_5_VisionBlock(nn.Module):
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
         )

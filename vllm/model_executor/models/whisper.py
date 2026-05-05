@@ -18,7 +18,7 @@ from transformers import (
 from transformers.models.whisper.modeling_whisper import sinusoids
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -151,12 +151,11 @@ class WhisperAttention(nn.Module):
         bias: bool = True,
         attn_type: AttentionType = AttentionType.DECODER,
         per_layer_sliding_window: int | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.embed_dim = embed_dim
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -188,7 +187,7 @@ class WhisperAttention(nn.Module):
             input_size=embed_dim,
             output_size=embed_dim,
             bias=bias,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.out_proj",
         )
         if attn_type == AttentionType.ENCODER:
@@ -204,11 +203,9 @@ class WhisperAttention(nn.Module):
                 self.head_dim,
                 self.scaling,
                 num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
-                model_config=model_config,
             )
         else:  # AttentionType.DECODER (regular decoder self-attention)
             self.attn = Attention(
@@ -216,12 +213,10 @@ class WhisperAttention(nn.Module):
                 self.head_dim,
                 self.scaling,
                 num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
                 attn_type=self.attn_type,
                 per_layer_sliding_window=per_layer_sliding_window,
-                model_config=model_config,
             )
 
     def _init_qkv(
@@ -261,20 +256,16 @@ class WhisperCrossAttention(WhisperAttention):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__(
             embed_dim=embed_dim,
             num_heads=num_heads,
             bias=bias,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
             attn_type=AttentionType.ENCODER_DECODER,
-            model_config=model_config,
         )
 
     def _init_qkv(
@@ -361,7 +352,6 @@ class WhisperEncoderLayer(nn.Module):
         super().__init__()
         config = vllm_config.model_config.hf_config
         sliding_window = getattr(config, "sliding_window", None)
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.embed_dim = config.d_model
@@ -370,10 +360,8 @@ class WhisperEncoderLayer(nn.Module):
             num_heads=config.encoder_attention_heads,
             attn_type=AttentionType.ENCODER,
             per_layer_sliding_window=sliding_window,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
-            model_config=vllm_config.model_config,
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.mlp = WhisperMLP(
@@ -407,33 +395,27 @@ class WhisperDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.self_attn = WhisperAttention(
             embed_dim=config.d_model,
             num_heads=config.decoder_attention_heads,
             attn_type=AttentionType.DECODER,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
-            model_config=vllm_config.model_config,
         )
         self.self_attn_layer_norm = nn.LayerNorm(config.d_model)
         self.encoder_attn = WhisperCrossAttention(
             embed_dim=config.d_model,
             num_heads=config.decoder_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.encoder_attn",
-            model_config=vllm_config.model_config,
+            vllm_config=vllm_config,
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(config.d_model)
         self.mlp = WhisperMLP(
             embed_dim=config.d_model,
             ffn_dim=config.decoder_ffn_dim,
             act_fn=config.activation_function,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
         )
         self.final_layer_norm = nn.LayerNorm(config.d_model)

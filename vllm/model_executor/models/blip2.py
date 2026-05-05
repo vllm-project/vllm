@@ -81,9 +81,7 @@ class Blip2QFormerMultiHeadAttention(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         is_cross_attention: bool = False,
         prefix: str = "",
     ) -> None:
@@ -183,9 +181,7 @@ class Blip2QFormerAttention(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         is_cross_attention: bool = False,
         prefix: str = "",
     ) -> None:
@@ -193,9 +189,7 @@ class Blip2QFormerAttention(nn.Module):
 
         self.attention = Blip2QFormerMultiHeadAttention(
             config,
-            quant_config=quant_config,
-            cache_config=cache_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             is_cross_attention=is_cross_attention,
             prefix=f"{prefix}.attention",
         )
@@ -253,9 +247,7 @@ class Blip2QFormerLayer(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         layer_idx: int,
         prefix: str = "",
     ) -> None:
@@ -265,9 +257,7 @@ class Blip2QFormerLayer(nn.Module):
         self.seq_len_dim = 1
         self.attention = Blip2QFormerAttention(
             config,
-            quant_config=quant_config,
-            cache_config=cache_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attention",
         )
 
@@ -276,9 +266,7 @@ class Blip2QFormerLayer(nn.Module):
         if layer_idx % config.cross_attention_frequency == 0:
             self.crossattention = Blip2QFormerAttention(
                 config,
-                quant_config=quant_config,
-                cache_config=cache_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 is_cross_attention=True,
                 prefix=f"{prefix}.crossattention",
             )
@@ -349,8 +337,8 @@ class Blip2QFormerEncoder(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -396,12 +384,13 @@ class Blip2QFormerModel(nn.Module):
         self,
         config: Blip2QFormerConfig,
         *,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
 

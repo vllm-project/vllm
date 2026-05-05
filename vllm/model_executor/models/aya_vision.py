@@ -343,7 +343,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = SiglipVisionModel(
                 config.vision_config,
-                quant_config,
+                vllm_config=vllm_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )

@@ -197,10 +197,11 @@ class HunYuanVisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Per attention head and per partition values.
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -229,7 +230,7 @@ class HunYuanVisionAttention(nn.Module):
         self.o_proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.o_proj",
             disable_tp=use_data_parallel,
         )
@@ -261,7 +262,7 @@ class HunYuanVisionBlock(nn.Module):
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.gelu,
         norm_layer: Callable[[int], nn.Module] | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -273,7 +274,7 @@ class HunYuanVisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = HunYuanVisionMLP(
@@ -281,7 +282,6 @@ class HunYuanVisionBlock(nn.Module):
             mlp_hidden_dim,
             act_fn=act_fn,
             bias=True,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -434,10 +434,11 @@ class HunYuanVisionTransformer(nn.Module):
     def __init__(
         self,
         vision_config: HunYuanVLVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         num_hidden_layers = vision_config.num_hidden_layers
         self.hidden_size = vision_config.hidden_size

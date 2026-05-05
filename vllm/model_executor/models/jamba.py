@@ -120,9 +120,9 @@ class JambaMambaDecoderLayer(nn.Module):
         self,
         config: JambaConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         is_lora_enabled: bool | None = False,
         prefix: str = "",
         **kwargs,
@@ -190,13 +190,12 @@ class JambaAttentionDecoderLayer(nn.Module):
         self,
         config: JambaConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -230,7 +229,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -239,9 +238,8 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -309,9 +307,6 @@ class JambaModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
 
@@ -330,9 +325,7 @@ class JambaModel(nn.Module):
             return layer_class(
                 config,
                 layer_idx,
-                model_config,
-                cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
                 **extra_kwargs,
             )

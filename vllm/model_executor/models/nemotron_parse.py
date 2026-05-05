@@ -20,7 +20,7 @@ from transformers import (
     PretrainedConfig,
 )
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -99,22 +99,19 @@ class BartDecoderLayer(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.embed_dim = config.d_model
 
         self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             attn_type=AttentionType.DECODER,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
-            model_config=model_config,
         )
         self.activation_fn = get_act_fn(config.activation_function)
 
@@ -127,10 +124,8 @@ class BartDecoderLayer(nn.Module):
         self.encoder_attn = WhisperCrossAttention(
             self.embed_dim,
             config.decoder_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder_attn",
-            model_config=model_config,
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
 
@@ -250,14 +245,14 @@ class MBartDecoderNoPos(nn.Module):
     def __init__(
         self,
         config: BartConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         lora_config: LoRAConfig | None = None,
         embed_tokens: nn.Embedding | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.lora_config = lora_config
@@ -274,10 +269,8 @@ class MBartDecoderNoPos(nn.Module):
             [
                 MBartDecoderLayer(
                     config,
-                    cache_config,
-                    quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
-                    model_config=model_config,
+                    vllm_config=vllm_config,
                 )
                 for layer_idx in range(config.decoder_layers)
             ]

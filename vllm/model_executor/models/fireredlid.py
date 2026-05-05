@@ -122,7 +122,7 @@ class FireRedLIDAttention(nn.Module):
         d_model: int,
         n_head: int,
         *,
-        vllm_config: VllmConfig,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -134,9 +134,7 @@ class FireRedLIDAttention(nn.Module):
         self.head_dim = d_model // n_head
         self.scaling = self.head_dim**-0.5
 
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.w_qs = ColumnParallelLinear(
             d_model,
@@ -166,22 +164,20 @@ class FireRedLIDAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc",
         )
-        self._init_attn(cache_config, quant_config, model_config, prefix)
+        self._init_attn(vllm_config, prefix)
 
-    def _init_attn(self, cache_config, quant_config, model_config, prefix: str) -> None:
+    def _init_attn(self, vllm_config, prefix: str) -> None:
         raise NotImplementedError
 
 
 class FireRedLIDSelfAttention(FireRedLIDAttention):
-    def _init_attn(self, cache_config, quant_config, model_config, prefix: str) -> None:
+    def _init_attn(self, vllm_config, prefix: str) -> None:
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -195,15 +191,13 @@ class FireRedLIDSelfAttention(FireRedLIDAttention):
 
 
 class FireRedLIDCrossAttention(FireRedLIDAttention):
-    def _init_attn(self, cache_config, quant_config, model_config, prefix: str) -> None:
+    def _init_attn(self, vllm_config, prefix: str) -> None:
         self.attn = CrossAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

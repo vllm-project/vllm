@@ -20,6 +20,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import PretrainedConfig
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import (
@@ -576,13 +577,14 @@ class RadioInternVisionModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         self.img_size, self.grid_size, self.num_patches = self._init_img_size(

@@ -105,9 +105,9 @@ class FalconH1SSMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
-        model_config: ModelConfig | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -216,12 +216,11 @@ class FalconH1AttentionDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         set_default_rope_theta(config, default_theta=1e11)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
@@ -273,7 +272,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -282,9 +281,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.key_multiplier = config.key_multiplier
@@ -333,18 +330,16 @@ class FalconH1ParallelHybrid(nn.Module):
         self,
         config: FalconH1Config,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         # Instantiate the attention branch
         self.self_attn = FalconH1AttentionDecoderLayer(
             config=config,
-            model_config=model_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             quant_config=quant_config,
             prefix=prefix,
         )
@@ -357,8 +352,7 @@ class FalconH1ParallelHybrid(nn.Module):
         # Instantiate the SSM branch
         self.mamba = FalconH1SSMDecoderLayer(
             config=config,
-            model_config=model_config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             quant_config=quant_config,
             prefix=ssm_prefix,
         )
@@ -423,9 +417,6 @@ class FalconH1Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: FalconH1Config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
 
@@ -447,9 +438,7 @@ class FalconH1Model(nn.Module):
             return layer_class(
                 config,
                 layer_idx,
-                model_config,
-                cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             )
 

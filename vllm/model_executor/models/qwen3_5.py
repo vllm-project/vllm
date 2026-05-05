@@ -125,8 +125,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         super(Qwen3NextDecoderLayer, self).__init__()
 
         config = vllm_config.model_config.hf_text_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.layer_type = layer_type
@@ -143,9 +141,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
             )
         else:
@@ -583,7 +578,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
         self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)

@@ -17,7 +17,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -93,12 +93,11 @@ class QWenAttention(nn.Module):
         num_heads: int,
         max_position_embeddings: int,
         rope_parameters: dict[str, Any] | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -131,10 +130,8 @@ class QWenAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
     def forward(
@@ -154,12 +151,11 @@ class QWenBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         self.attn = QWenAttention(
@@ -167,10 +163,8 @@ class QWenBlock(nn.Module):
             config.num_attention_heads,
             config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
         self.ln_2 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -211,8 +205,6 @@ class QWenModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         model_config = vllm_config.model_config
 
         self.config = config
@@ -226,8 +218,7 @@ class QWenModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: QWenBlock(
                 config,
-                cache_config,
-                quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
                 model_config=model_config,
             ),

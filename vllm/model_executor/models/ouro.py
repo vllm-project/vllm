@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -113,14 +113,13 @@ class OuroAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -186,9 +185,7 @@ class OuroAttention(nn.Module):
                     self.head_dim,
                     self.scaling,
                     num_kv_heads=self.num_kv_heads,
-                    model_config=model_config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
                     **{
@@ -218,12 +215,11 @@ class OuroDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
@@ -240,9 +236,7 @@ class OuroDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
@@ -336,14 +330,12 @@ class OuroModel(nn.Module):
         )
 
         # Use the provided decoder layer type or default to OuroDecoderLayer
-        model_config = vllm_config.model_config
         decoder_layer_type = decoder_layer_type or OuroDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer_type(
                 config=config,
-                model_config=model_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),

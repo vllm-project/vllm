@@ -7,7 +7,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -92,14 +92,13 @@ class BertWithRopeAttention(nn.Module):
         self,
         hidden_size: int,
         num_attention_heads: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -124,7 +123,7 @@ class BertWithRopeAttention(nn.Module):
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.qkv_proj",
         )
 
@@ -135,9 +134,7 @@ class BertWithRopeAttention(nn.Module):
             head_size=self.head_dim,
             scale=self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -347,21 +344,18 @@ class BertWithRopeBlock(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         moe: bool = False,
         bias: bool = True,
         rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.attn = BertWithRopeAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             bias=bias,
             rotary_kwargs=rotary_kwargs,
             prefix=f"{prefix}.attention",

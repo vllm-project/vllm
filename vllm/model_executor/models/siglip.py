@@ -15,7 +15,7 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -359,13 +359,13 @@ class SiglipAttention(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         self.embed_dim = config.hidden_size
@@ -415,7 +415,7 @@ class SiglipAttention(nn.Module):
                 self.num_heads_per_partition,
                 self.head_dim,
                 self.scale,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
 
@@ -481,8 +481,7 @@ class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
@@ -493,15 +492,13 @@ class SiglipEncoderLayer(nn.Module):
 
         self.self_attn = SiglipAttention(
             config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -528,14 +525,15 @@ class SiglipEncoder(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
 
@@ -580,12 +578,13 @@ class SiglipTextTransformer(nn.Module):
     def __init__(
         self,
         config: SiglipTextConfig,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         embed_dim = config.hidden_size
@@ -655,7 +654,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -668,7 +667,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -693,7 +692,7 @@ class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -701,6 +700,7 @@ class SiglipVisionTransformer(nn.Module):
         use_head: bool | None = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         embed_dim = config.hidden_size
@@ -860,7 +860,7 @@ class SiglipVisionModel(nn.Module):
     def __init__(
         self,
         config: SiglipVisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -868,6 +868,7 @@ class SiglipVisionModel(nn.Module):
         use_head: bool | None = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.quant_config = quant_config
         self.vision_model = SiglipVisionTransformer(

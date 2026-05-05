@@ -32,7 +32,7 @@ from torch import nn
 from transformers import OlmoConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -71,12 +71,11 @@ class OlmoAttention(nn.Module):
     def __init__(
         self,
         config: OlmoConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
@@ -111,10 +110,8 @@ class OlmoAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             scale=self.scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
         # Attention output projection.
@@ -200,19 +197,16 @@ class OlmoDecoderLayer(nn.Module):
     def __init__(
         self,
         config: OlmoConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Attention block.
         self.self_attn = OlmoAttention(
             config,
-            cache_config,
-            quant_config,
             prefix=f"{prefix}.self_attn",
-            model_config=model_config,
+            vllm_config=vllm_config,
         )
 
         # MLP block.
@@ -251,9 +245,6 @@ class OlmoModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.config = config
 
@@ -264,10 +255,8 @@ class OlmoModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: OlmoDecoderLayer(
                 config,
-                cache_config,
-                quant_config,
                 prefix=prefix,
-                model_config=model_config,
+                vllm_config=vllm_config,
             ),
             prefix=f"{prefix}.layers",
         )

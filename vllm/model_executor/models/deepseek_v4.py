@@ -1072,8 +1072,7 @@ class DeepseekV4Attention(nn.Module):
             mla_modules=mla_modules,
             window_size=self.window_size,
             compress_ratio=self.compress_ratio,
-            cache_config=vllm_config.cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
         )
 

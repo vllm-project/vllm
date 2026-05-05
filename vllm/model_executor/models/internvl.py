@@ -579,7 +579,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_model = self._init_vision_model(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 is_mono=self.is_mono,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
@@ -616,7 +616,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None,
         *,
         is_mono: bool,
         prefix: str,
@@ -632,7 +632,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
 
             return InternVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
             )

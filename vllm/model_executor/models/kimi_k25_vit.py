@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import GELUActivation
 
+from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
@@ -345,13 +346,14 @@ class MoonViTEncoderLayer(nn.Module):
         num_heads: int,
         hidden_dim: int,
         mlp_dim: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         *,
         activation=F.gelu,
         attn_bias: bool = False,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.use_data_parallel = is_vit_use_data_parallel()
 
         self.num_heads = num_heads
@@ -385,7 +387,7 @@ class MoonViTEncoderLayer(nn.Module):
             hidden_dim,
             hidden_dim,
             bias=attn_bias,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.wo",
             disable_tp=self.use_data_parallel,
         )
@@ -554,10 +556,11 @@ class MoonViT3dPretrainedModel(nn.Module):
     def __init__(
         self,
         config: KimiK25VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         config = deepcopy(config)
         self.config = config  # Required for run_dp_sharded_mrope_vision_model
         self.merge_kernel_size = config.merge_kernel_size

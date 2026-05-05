@@ -10,7 +10,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -88,12 +88,11 @@ class StepAttention(nn.Module):
     def __init__(
         self,
         config,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -145,9 +144,7 @@ class StepAttention(nn.Module):
             self.head_dim,
             self.scale,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             alibi_slopes=alibi_slopes,
             prefix=f"{prefix}.attn",
             use_alibi_sqrt=True,
@@ -202,22 +199,16 @@ class StepDecoderLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
         self.self_attn = StepAttention(
             config=config,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = StepMLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
             bias=getattr(config, "mlp_bias", False),
         )

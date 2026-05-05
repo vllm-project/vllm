@@ -12,7 +12,7 @@ from torch import nn
 from transformers import Gemma3TextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
@@ -98,13 +98,12 @@ class Rnj1Attention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         attn_logits_soft_cap: float | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -167,9 +166,7 @@ class Rnj1Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             attn_type=AttentionType.DECODER,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
@@ -203,12 +200,11 @@ class Rnj1DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Gemma3TextConfig,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.self_attn = Rnj1Attention(
             config=config,
@@ -217,9 +213,7 @@ class Rnj1DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             attn_logits_soft_cap=None,
             prefix=f"{prefix}.self_attn",
         )

@@ -9,7 +9,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -82,11 +82,9 @@ class MistralAttention(LlamaAttention):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -96,11 +94,9 @@ class MistralAttention(LlamaAttention):
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             bias=bias,
             bias_o_proj=bias_o_proj,
-            cache_config=cache_config,
-            model_config=model_config,
             prefix=prefix,
             attn_type=attn_type,
         )

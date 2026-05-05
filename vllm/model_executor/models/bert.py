@@ -8,7 +8,7 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, PoolerConfig, VllmConfig
+from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -155,20 +155,17 @@ class BertLayer(nn.Module):
     def __init__(
         self,
         config: BertConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.attention = BertAttention(
             hidden_size=config.hidden_size,
             num_attention_heads=config.num_attention_heads,
             layer_norm_eps=config.layer_norm_eps,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attention",
         )
 
@@ -176,7 +173,6 @@ class BertLayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            quant_config=quant_config,
             prefix=f"{prefix}.intermediate",
         )
 
@@ -201,9 +197,7 @@ class BertAttention(nn.Module):
         hidden_size: int,
         num_attention_heads: int,
         layer_norm_eps: float,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -211,16 +205,13 @@ class BertAttention(nn.Module):
         self.self = BertSelfAttention(
             hidden_size=hidden_size,
             num_attention_heads=num_attention_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.output",
         )
 
         self.output = BertSelfOutput(
             hidden_size=hidden_size,
             layer_norm_eps=layer_norm_eps,
-            quant_config=quant_config,
             prefix=f"{prefix}.output",
         )
 
@@ -237,9 +228,7 @@ class BertSelfAttention(nn.Module):
         self,
         hidden_size: int,
         num_attention_heads: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -265,7 +254,7 @@ class BertSelfAttention(nn.Module):
             total_num_heads=self.total_num_heads,
             total_num_kv_heads=self.total_num_kv_heads,
             bias=True,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.qkv_proj",
         )
 
@@ -274,9 +263,7 @@ class BertSelfAttention(nn.Module):
             head_size=self.head_dim,
             scale=self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

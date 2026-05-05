@@ -12,7 +12,7 @@
 import torch
 from transformers import PretrainedConfig
 
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import BatchedTensorInputs
 from vllm.multimodal.parse import (
@@ -155,7 +155,7 @@ class H2OVLChatModel(InternVLChatModel):
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None,
         *,
         is_mono: bool,
         prefix: str,
@@ -171,7 +171,7 @@ class H2OVLChatModel(InternVLChatModel):
 
             return InternVisionModel(
                 config.vision_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
             )

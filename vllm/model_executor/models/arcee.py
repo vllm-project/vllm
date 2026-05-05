@@ -10,18 +10,19 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -57,7 +58,7 @@ class ArceeMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Any | None = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         prefix: str = "",
         reduce_results: bool = True,
@@ -103,12 +104,11 @@ class ArceeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
-        cache_config: Any | None = None,
-        quant_config: Any | None = None,
-        model_config: Any | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Determine if attention bias is needed (some variants use bias terms)
@@ -132,11 +132,9 @@ class ArceeDecoderLayer(nn.Module):
                 config, "num_key_value_heads", config.num_attention_heads
             ),
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=attention_bias,
             bias_o_proj=bias_o_proj,
-            cache_config=cache_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attn_type=getattr(
                 config, "attn_type", "decoder"
@@ -185,15 +183,13 @@ class ArceeModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
-        vllm_config,
+        vllm_config: VllmConfig,
         prefix: str = "",
         layer_type: type[nn.Module] = ArceeDecoderLayer,
     ) -> None:
         super().__init__()
         config: LlamaConfig = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
         self.quant_config = quant_config
         self.config = config
         self.vocab_size = config.vocab_size
@@ -215,9 +211,8 @@ class ArceeModel(nn.Module, EagleModelMixin):
             config.num_hidden_layers,
             lambda prefix: layer_type(
                 config=config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
-                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

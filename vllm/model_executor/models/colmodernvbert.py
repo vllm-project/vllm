@@ -258,12 +258,11 @@ class ColModernVBertForRetrieval(
         config: ColModernVBertConfig = vllm_config.model_config.hf_config
         self.config = config
         text_config = config.text_config
-        quant_config = vllm_config.quant_config
 
         # --- Vision encoder (reuses SiglipVisionModel from siglip.py) ---
         self.vision_model = SiglipVisionModel(
             config.vision_config,
-            quant_config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 

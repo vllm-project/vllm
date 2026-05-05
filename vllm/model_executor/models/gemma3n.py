@@ -22,7 +22,7 @@ from torch import nn
 from transformers.models.gemma3n.configuration_gemma3n import Gemma3nTextConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -284,12 +284,11 @@ class Gemma3nAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int,
         max_position_embeddings: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -395,12 +394,10 @@ class Gemma3nAttention(nn.Module):
             head_size=self.head_dim,
             scale=1.0,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
+            vllm_config=vllm_config,
         )
 
     def forward(
@@ -433,12 +430,11 @@ class Gemma3nDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Gemma3nTextConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         assert isinstance(config, Gemma3nTextConfig)
         self.altup_active_idx = config.altup_active_idx
         assert config.altup_correct_scale
@@ -459,10 +455,8 @@ class Gemma3nDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
             max_position_embeddings=config.max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
-            model_config=model_config,
         )
         self.mlp = Gemma3nMLP(
             hidden_size=config.hidden_size,
@@ -816,15 +810,12 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         )
 
         # Allocate config.num_kv_shared_layers layers for self-decoder
-        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Gemma3nDecoderLayer(
                 config,
-                cache_config,
-                quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
-                model_config=model_config,
             ),
             prefix=f"{prefix}.layers",
         )

@@ -112,7 +112,6 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
         if config is None:
             config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
@@ -145,8 +144,6 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
             q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
         )

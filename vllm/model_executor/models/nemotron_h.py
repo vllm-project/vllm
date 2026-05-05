@@ -26,7 +26,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -265,13 +265,12 @@ class NemotronHMLPDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config else None
         self.config = config
 
         hybrid_override_pattern = config.hybrid_override_pattern
@@ -321,13 +320,12 @@ class NemotronHMoEDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config else None
         self.config = config
 
         # Get per-layer config for heterogeneous models if exists
@@ -364,13 +362,14 @@ class NemotronHMambaDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config else None
+        model_config = vllm_config.model_config if vllm_config else None
+        quant_config = vllm_config.quant_config if vllm_config else None
         self.config = config
         self.mixer = MambaMixer2(
             hidden_size=config.hidden_size,
@@ -413,9 +412,7 @@ class NemotronHAttention(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -442,6 +439,7 @@ class NemotronHAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
 
+        quant_config = vllm_config.quant_config if vllm_config else None
         self.qkv_proj = QKVParallelLinear(
             config.hidden_size,
             self.head_dim,
@@ -455,7 +453,7 @@ class NemotronHAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -467,11 +465,9 @@ class NemotronHAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             per_layer_sliding_window=sliding_window,
-            model_config=model_config,
         )
 
     def forward(
@@ -491,9 +487,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         self,
         config: NemotronHConfig,
         layer_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -506,9 +500,7 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         self.mixer = NemotronHAttention(
             layer_config,
             layer_idx,
-            model_config,
-            cache_config,
-            quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.mixer",
         )
 
@@ -545,9 +537,6 @@ class NemotronHModel(nn.Module):
         super().__init__()
 
         config: NemotronHConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.config = config
@@ -569,9 +558,7 @@ class NemotronHModel(nn.Module):
             return layer_class(
                 config=config,
                 layer_idx=layer_idx,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 parallel_config=parallel_config,
                 prefix=prefix,
             )

@@ -93,10 +93,11 @@ class OpenPanguVisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads
         )
@@ -118,7 +119,7 @@ class OpenPanguVisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.proj",
         )
         self.attn = MMEncoderAttention(
@@ -230,10 +231,11 @@ class OpenPanguVisionBlock(nn.Module):
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
         vision_config=None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.norm1 = norm_layer(dim)
@@ -242,7 +244,7 @@ class OpenPanguVisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = OpenPanguVisionMLP(

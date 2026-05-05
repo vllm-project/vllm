@@ -32,7 +32,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -153,12 +153,11 @@ class MiniMaxM2Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -214,9 +213,7 @@ class MiniMaxM2Attention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             per_layer_sliding_window=attn_window_size,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -258,11 +255,10 @@ class MiniMaxM2DecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        model_config: ModelConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
@@ -284,9 +280,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -333,8 +327,6 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
 
@@ -355,8 +347,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             lambda prefix: MiniMaxM2DecoderLayer(
                 config,
                 prefix,
-                model_config=model_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
             ),
             prefix=f"{prefix}.layers",

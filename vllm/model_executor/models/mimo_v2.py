@@ -8,8 +8,6 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
-    CacheConfig,
-    ModelConfig,
     VllmConfig,
     get_current_vllm_config,
     str_dtype_to_torch_dtype,
@@ -108,12 +106,13 @@ class MiMoV2MLP(nn.Module):
 class MiMoV2MoE(nn.Module):
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         is_nextn: bool = False,
     ):
         super().__init__()
 
+        vllm_config = get_current_vllm_config()
         config = vllm_config.model_config.hf_text_config
         parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
@@ -226,13 +225,12 @@ class MiMoV2Attention(nn.Module):
         layer_id: int = 0,
         rope_theta: float = 1000000,
         max_position_embeddings: int = 32768,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         partial_rotary_factor: float = 1.0,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.layer_id = layer_id
         tp_size = get_tensor_model_parallel_world_size()
@@ -307,9 +305,7 @@ class MiMoV2Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             per_layer_sliding_window=sliding_window,
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
@@ -370,8 +366,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 rope_theta=getattr(config, "swa_rope_theta", rope_theta),
                 max_position_embeddings=max_position_embeddings,
-                quant_config=quant_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
             )
@@ -388,8 +383,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
                 layer_id=layer_id,
                 rope_theta=rope_theta,
                 max_position_embeddings=max_position_embeddings,
-                quant_config=quant_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
                 prefix=f"{prefix}.self_attn",
             )

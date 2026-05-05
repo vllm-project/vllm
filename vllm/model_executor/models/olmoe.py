@@ -22,7 +22,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -125,16 +125,12 @@ class OlmoeAttention(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        if model_config is None:
-            model_config = vllm_config.model_config
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
@@ -194,10 +190,8 @@ class OlmoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
     def _apply_qk_norm(
@@ -232,14 +226,11 @@ class OlmoeDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
 
-        model_config = vllm_config.model_config
         self.self_attn = OlmoeAttention(
             vllm_config=vllm_config,
-            model_config=model_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -248,7 +239,7 @@ class OlmoeDecoderLayer(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)

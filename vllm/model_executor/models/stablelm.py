@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import StableLmConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -96,12 +96,11 @@ class StablelmAttention(nn.Module):
     def __init__(
         self,
         config: StableLmConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -157,9 +156,7 @@ class StablelmAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_key_value_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -180,17 +177,14 @@ class StablelmDecoderLayer(nn.Module):
     def __init__(
         self,
         config: StableLmConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.self_attn = StablelmAttention(
             config,
-            cache_config,
-            quant_config,
-            model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = StablelmMLP(config, quant_config, prefix=f"{prefix}.mlp")
@@ -226,9 +220,7 @@ class StableLMEpochModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -240,9 +232,7 @@ class StableLMEpochModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: StablelmDecoderLayer(
                 config,
-                cache_config,
-                quant_config,
-                model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

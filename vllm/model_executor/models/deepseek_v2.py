@@ -123,12 +123,11 @@ class DeepseekAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -176,9 +175,7 @@ class DeepseekAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=vllm_config.model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -417,12 +414,11 @@ class DeepseekV2Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -517,9 +513,7 @@ class DeepseekV2Attention(nn.Module):
             self.qk_head_dim,
             self.scaling,
             num_kv_heads=self.num_local_heads,
-            model_config=vllm_config.model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -606,12 +600,12 @@ class Indexer(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         q_lora_rank: int,
-        quant_config: QuantizationConfig | None,
-        cache_config: CacheConfig | None,
         topk_indices_buffer: torch.Tensor | None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
@@ -866,13 +860,12 @@ class DeepseekV2MLAAttention(nn.Module):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -981,8 +974,6 @@ class DeepseekV2MLAAttention(nn.Module):
                 config,
                 hidden_size,
                 q_lora_rank,
-                quant_config,
-                cache_config,
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
@@ -1035,9 +1026,8 @@ class DeepseekV2MLAAttention(nn.Module):
             self.q_lora_rank,
             self.kv_lora_rank,
             mla_modules,
-            cache_config,
-            quant_config,
-            prefix,
+            vllm_config=vllm_config,
+            prefix=prefix,
             skip_topk=_skip_topk,
         )
 
@@ -1063,7 +1053,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         if config is None:
             config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
@@ -1103,8 +1092,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
         )

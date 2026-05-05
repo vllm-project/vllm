@@ -33,7 +33,7 @@ from torch import nn
 from transformers import MixtralConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -162,12 +162,11 @@ class MixtralAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -218,10 +217,8 @@ class MixtralAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
     def forward(
@@ -241,13 +238,12 @@ class MixtralDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.self_attn = MixtralAttention(
             config=config,
@@ -255,10 +251,8 @@ class MixtralDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
-            model_config=model_config,
         )
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
@@ -303,7 +297,6 @@ class MixtralModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         parallel_config = vllm_config.parallel_config
@@ -322,16 +315,14 @@ class MixtralModel(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
         self.num_redundant_experts = parallel_config.eplb_config.num_redundant_experts
 
-        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MixtralDecoderLayer(
                 config,
-                cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=self.enable_eplb,
-                model_config=model_config,
+                vllm_config=vllm_config,
             ),
             prefix=f"{prefix}.layers",
         )

@@ -4,10 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
 @dataclass
@@ -61,8 +60,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         mla_modules: MLAModules,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
     ) -> None:
@@ -106,8 +104,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             v_head_dim=self.v_head_dim,
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,

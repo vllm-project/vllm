@@ -30,7 +30,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -138,12 +138,11 @@ class BaiChuanAttention(nn.Module):
         position_embedding: str,
         rope_parameters: dict,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tensor_model_parallel_world_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -184,8 +183,7 @@ class BaiChuanAttention(nn.Module):
                 self.head_dim,
                 scaling,
                 alibi_slopes=alibi_slopes,
-                quant_config=quant_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
         else:
@@ -199,9 +197,7 @@ class BaiChuanAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
 
@@ -224,12 +220,11 @@ class BaiChuanDecoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         position_embedding: str,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = BaiChuanAttention(
@@ -238,9 +233,7 @@ class BaiChuanDecoderLayer(nn.Module):
             position_embedding=position_embedding,
             rope_parameters=getattr(config, "rope_parameters", None),
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = BaiChuanMLP(
@@ -289,9 +282,6 @@ class BaiChuanModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -305,9 +295,7 @@ class BaiChuanModel(nn.Module):
             lambda prefix: BaiChuanDecoderLayer(
                 config,
                 position_embedding,
-                cache_config,
-                quant_config,
-                model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

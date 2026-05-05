@@ -32,7 +32,7 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -310,12 +310,11 @@ class PhiMoEAttention(nn.Module):
         rope_parameters: dict,
         head_dim: int | None = None,
         max_position: int = 4096 * 32,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -365,9 +364,7 @@ class PhiMoEAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -388,12 +385,11 @@ class PhiMoEDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PhiMoEConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         self.self_attn = PhiMoEAttention(
@@ -404,9 +400,7 @@ class PhiMoEDecoderLayer(nn.Module):
             head_dim=getattr(
                 config, "head_dim", self.hidden_size // config.num_attention_heads
             ),
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
@@ -457,9 +451,7 @@ class PhiMoEModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.vocab_size = config.vocab_size
 
@@ -474,9 +466,7 @@ class PhiMoEModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: PhiMoEDecoderLayer(
                 config,
-                cache_config,
-                quant_config,
-                model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

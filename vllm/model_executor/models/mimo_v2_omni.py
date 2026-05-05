@@ -135,10 +135,11 @@ class MiMoVisionAttention(nn.Module):
         kv_channels: int,
         use_sink: bool = False,
         visual_token_window_size: int = 64,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1
@@ -177,7 +178,7 @@ class MiMoVisionAttention(nn.Module):
             input_size=num_heads * kv_channels,
             output_size=embed_dim,
             bias=True,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -327,10 +328,11 @@ class MiMoVisionBlock(nn.Module):
         norm_eps: float = 1e-6,
         use_sink: bool = False,
         visual_token_window_size: int = 64,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.norm1 = RMSNorm(dim, eps=norm_eps)
         self.norm2 = RMSNorm(dim, eps=norm_eps)
         self.attn = MiMoVisionAttention(
@@ -341,7 +343,7 @@ class MiMoVisionBlock(nn.Module):
             kv_channels=kv_channels,
             use_sink=use_sink,
             visual_token_window_size=visual_token_window_size,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = MiMoVisionMLP(

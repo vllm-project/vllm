@@ -4,10 +4,8 @@ import functools
 
 import torch
 
-from vllm.config import CacheConfig, ModelConfig
 from vllm.config.vllm import VllmConfig
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -87,14 +85,13 @@ class ChunkedLocalAttention(Attention):
         attention_chunk_size: int,
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         kv_sharing_target_layer_name: str | None = None,
         prefix: str = "",
     ):
         self.attention_chunk_size = attention_chunk_size
         dtype = torch.get_default_dtype()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
@@ -111,9 +108,7 @@ class ChunkedLocalAttention(Attention):
             scale=scale,
             num_kv_heads=num_kv_heads,
             alibi_slopes=alibi_slopes,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             attn_backend=attn_backend,

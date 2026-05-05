@@ -167,7 +167,7 @@ class Phi3HDImageEmbedding(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

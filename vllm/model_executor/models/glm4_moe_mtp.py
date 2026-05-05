@@ -30,7 +30,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
@@ -79,12 +79,11 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         parallel_config: ParallelConfig | None = None,
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
@@ -94,9 +93,8 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
         self.mtp_block = Glm4MoeDecoderLayer(
             config=config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             quant_config=quant_config,
-            model_config=model_config,
             prefix=prefix,
             enable_eplb=self.enable_eplb,
         )

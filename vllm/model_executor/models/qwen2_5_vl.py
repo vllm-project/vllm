@@ -312,10 +312,11 @@ class Qwen2_5_VisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Per attention head and per partition values.
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -345,7 +346,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         self.proj = RowParallelLinear(
             input_size=projection_size,
             output_size=embed_dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -437,7 +438,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         mlp_hidden_dim: int,
         act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
         norm_layer: Callable[[int], nn.Module] | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -449,7 +450,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             embed_dim=dim,
             num_heads=num_heads,
             projection_size=dim,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = Qwen2_5_VisionMLP(
@@ -457,7 +458,6 @@ class Qwen2_5_VisionBlock(nn.Module):
             mlp_hidden_dim,
             act_fn=act_fn,
             bias=True,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 

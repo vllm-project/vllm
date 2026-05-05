@@ -228,10 +228,11 @@ class DotsVisionAttention(nn.Module):
         num_heads: int = 16,
         bias: bool = True,
         *,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         use_data_parallel = is_vit_use_data_parallel()
 
         self.embed_dim = dim
@@ -257,7 +258,7 @@ class DotsVisionAttention(nn.Module):
             input_size=dim,
             output_size=dim,
             bias=bias,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.proj",
             disable_tp=use_data_parallel,
         )
@@ -434,7 +435,7 @@ class DotsVisionBlock(nn.Module):
         self,
         config,
         *,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -444,13 +445,12 @@ class DotsVisionBlock(nn.Module):
             config.embed_dim,
             num_heads=config.num_attention_heads,
             bias=config.use_bias,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.norm1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
         self.mlp = DotsSwiGLUFFN(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.norm2 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)

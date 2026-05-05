@@ -32,7 +32,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -82,11 +82,9 @@ class DeciLMAttention(LlamaAttention):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -96,13 +94,11 @@ class DeciLMAttention(LlamaAttention):
             num_heads,
             num_kv_heads,
             max_position_embeddings,
-            quant_config,
-            bias,
-            bias_o_proj,
-            cache_config,
-            model_config,
-            prefix,
-            attn_type,
+            vllm_config=vllm_config,
+            bias=bias,
+            bias_o_proj=bias_o_proj,
+            prefix=prefix,
+            attn_type=attn_type,
         )
 
     def _init_rotary_emb(
@@ -131,12 +127,11 @@ class DeciLMDecoderLayer(nn.Module):
         self,
         config: LlamaConfig,
         layer_idx: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         block_config = config.block_configs[layer_idx]
         self._is_no_op_attention = block_config.attention.no_op
         self._is_no_op_ffn = block_config.ffn.no_op
@@ -163,11 +158,9 @@ class DeciLMDecoderLayer(nn.Module):
                 num_heads=config.num_attention_heads,
                 num_kv_heads=num_kv_heads,
                 max_position_embeddings=max_position_embeddings,
-                quant_config=quant_config,
                 bias=attention_bias,
                 bias_o_proj=bias_o_proj,
-                cache_config=cache_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
             )
             self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -240,8 +233,6 @@ class DeciModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -265,9 +256,8 @@ class DeciModel(nn.Module):
             return layer_type(
                 config,
                 layer_idx,
-                cache_config,
                 quant_config=quant_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             )
 

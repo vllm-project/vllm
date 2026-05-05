@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -257,13 +257,12 @@ class LagunaAttention(nn.Module):
         num_kv_heads: int,
         max_position_embeddings: int = 131072,
         head_dim: int | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         attention_sink: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -405,9 +404,7 @@ class LagunaAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
             sinks=sinks,
@@ -458,13 +455,12 @@ class LagunaDecoderLayer(nn.Module):
     def __init__(
         self,
         config,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
 
@@ -494,9 +490,7 @@ class LagunaDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             max_position_embeddings=config.max_position_embeddings,
             head_dim=getattr(config, "head_dim", None),
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attention_sink=attention_sink,
         )
@@ -600,8 +594,7 @@ class LagunaModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: LagunaDecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,

@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -194,9 +193,7 @@ class Attention(nn.Module, AttentionLayerBase):
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         use_alibi_sqrt: bool | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
         prefix: str = "",
@@ -211,6 +208,13 @@ class Attention(nn.Module, AttentionLayerBase):
         `self.kv_cache`.
         """
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
+        compilation_config = (
+            vllm_config.compilation_config if vllm_config is not None else None
+        )
+
         sliding_window: int | None
         if per_layer_sliding_window is not None:
             # per-layer sliding window
@@ -362,7 +366,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # and let torch.compile handle them.
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        compilation_config = get_current_vllm_config().compilation_config
+        assert compilation_config is not None
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self

@@ -28,6 +28,7 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2VisionConfig,
 )
 
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -125,10 +126,11 @@ class Idefics2VisionAttention(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         use_data_parallel = is_vit_use_data_parallel()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -158,7 +160,7 @@ class Idefics2VisionAttention(nn.Module):
             self.embed_dim,
             self.embed_dim,
             bias=True,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -252,20 +254,19 @@ class Idefics2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.embed_dim = config.hidden_size
         self.self_attn = Idefics2VisionAttention(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -305,12 +306,13 @@ class Idefics2Encoder(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
 
@@ -355,7 +357,7 @@ class Idefics2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
@@ -363,6 +365,7 @@ class Idefics2VisionTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         embed_dim = config.hidden_size
         self.config = config

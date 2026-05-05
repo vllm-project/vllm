@@ -33,7 +33,7 @@ from torch import nn
 from transformers import ApertusConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
 from vllm.model_executor.layers.attention import (
@@ -127,15 +127,14 @@ class ApertusAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -199,9 +198,7 @@ class ApertusAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
@@ -246,12 +243,11 @@ class ApertusDecoderLayer(nn.Module):
     def __init__(
         self,
         config: ApertusConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
@@ -281,11 +277,9 @@ class ApertusDecoderLayer(nn.Module):
                 config, "num_key_value_heads", config.num_attention_heads
             ),
             max_position_embeddings=max_position_embeddings,
-            quant_config=quant_config,
             bias=attention_bias,
             bias_o_proj=bias_o_proj,
-            cache_config=cache_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
@@ -334,9 +328,7 @@ class ApertusModel(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.config = config
         self.quant_config = quant_config
@@ -357,9 +349,8 @@ class ApertusModel(nn.Module, EagleModelMixin):
             config.num_hidden_layers,
             lambda prefix: layer_type(
                 config=config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
-                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

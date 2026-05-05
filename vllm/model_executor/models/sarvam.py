@@ -28,7 +28,7 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -102,11 +102,10 @@ class SarvamMLAAttention(nn.Module):
         self,
         vllm_config: VllmConfig,
         config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
 
         self.config = config
         self.hidden_size = config.hidden_size
@@ -222,8 +221,7 @@ class SarvamMLAAttention(nn.Module):
             self.q_lora_rank,
             self.kv_lora_rank,
             mla_modules,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
         )
 
@@ -383,7 +381,6 @@ class SarvamMLABlock(nn.Module):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         layer_idx = int(prefix.split(".")[-1])
@@ -394,8 +391,6 @@ class SarvamMLABlock(nn.Module):
         self.self_attn = SarvamMLAAttention(
             vllm_config=vllm_config,
             config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)

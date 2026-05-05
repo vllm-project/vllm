@@ -11,7 +11,7 @@ import torch.nn as nn
 from transformers import MptConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -57,12 +57,11 @@ class MPTAttention(nn.Module):
     def __init__(
         self,
         config: MptConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.d_model = config.d_model
         self.total_num_heads = config.n_heads
         self.head_dim = self.d_model // self.total_num_heads
@@ -127,9 +126,7 @@ class MPTAttention(nn.Module):
             scaling,
             alibi_slopes=alibi_slopes,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -189,19 +186,16 @@ class MPTBlock(nn.Module):
     def __init__(
         self,
         config: MptConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
         self.attn = MPTAttention(
             config,
-            cache_config,
-            quant_config,
-            model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.norm_2 = nn.LayerNorm(hidden_size)
@@ -230,9 +224,6 @@ class MPTModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         assert config.embedding_fraction == 1.0
         assert config.norm_type == "low_precision_layernorm"
@@ -245,9 +236,7 @@ class MPTModel(nn.Module):
             config.n_layers,
             lambda prefix: MPTBlock(
                 config,
-                cache_config,
-                quant_config,
-                model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.blocks",

@@ -260,7 +260,7 @@ class AriaTextMoELayer(nn.Module):
     def __init__(
         self,
         config: AriaTextConfig,
-        quant_config: QuantizationConfig | None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

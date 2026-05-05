@@ -118,9 +118,7 @@ class Zamba2Attention(nn.Module):
         config: Zamba2Config,
         bare_block_idx: int,
         num_hybrid_layers: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the attention layer.
@@ -129,11 +127,11 @@ class Zamba2Attention(nn.Module):
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare attention block
             num_hybrid_layers: Total number of hybrid layers
-            cache_config: Configuration for key-value caching
-            quant_config: Configuration for model quantization
+            vllm_config: vLLM configuration object
             prefix: Optional prefix for parameter names
         """
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.num_hybrid_layers = num_hybrid_layers
@@ -190,8 +188,7 @@ class Zamba2Attention(nn.Module):
                     self.num_attention_heads,
                     self.attention_head_dim,
                     self.scale,
-                    model_config=model_config,
-                    cache_config=cache_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}.attn.{j}",
                 )
                 j += 1
@@ -405,9 +402,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
         config: Zamba2Config,
         bare_block_idx: int,
         num_hybrid_layers: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the decoder layer.
@@ -416,20 +411,18 @@ class Zamba2AttentionDecoderLayer(nn.Module):
             config: The Zamba2 model configuration
             bare_block_idx: Index of the bare block
             num_hybrid_layers: Total number of hybrid layers
-            cache_config: Configuration for key-value caching
-            quant_config: Configuration for model quantization
+            vllm_config: vLLM configuration object
             prefix: Optional prefix for parameter names
         """
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         # Initialize attention sublayer
         self.self_attn = Zamba2Attention(
             config,
             bare_block_idx=bare_block_idx,
             num_hybrid_layers=num_hybrid_layers,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
         )
 
@@ -599,9 +592,7 @@ class Zamba2HybridLayer(nn.Module):
         shared_transformer: Zamba2AttentionDecoderLayer,
         config: Zamba2Config,
         block_idx: int,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         """Initialize the hybrid layer.
@@ -610,6 +601,7 @@ class Zamba2HybridLayer(nn.Module):
             shared_transformer: Transformer decoder layer for attention pathway
         """
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.block_idx = block_idx
         self.shared_transformer = shared_transformer
         self.linear = ReplicatedLinear(
@@ -621,8 +613,8 @@ class Zamba2HybridLayer(nn.Module):
         )
         self.mamba_decoder = Zamba2MambaDecoderLayer(
             config,
-            model_config=model_config,
-            cache_config=cache_config,
+            model_config=vllm_config.model_config if vllm_config is not None else None,
+            cache_config=vllm_config.cache_config if vllm_config is not None else None,
             quant_config=quant_config,
             prefix=prefix,
         )
@@ -689,9 +681,6 @@ class Zamba2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         is_lora_enabled = bool(lora_config)
         assert not is_lora_enabled
@@ -719,9 +708,7 @@ class Zamba2Model(nn.Module):
                     config,
                     bare_block_idx=idx,
                     num_hybrid_layers=len(layer2block_map),
-                    model_config=model_config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     prefix=f"{prefix}",
                 )
                 for idx in range(config.num_mem_blocks)
@@ -742,9 +729,7 @@ class Zamba2Model(nn.Module):
                         block,
                         config,
                         block_idx,
-                        model_config=model_config,
-                        cache_config=cache_config,
-                        quant_config=quant_config,
+                        vllm_config=vllm_config,
                         prefix=prefix,
                     )
                 )
@@ -752,9 +737,9 @@ class Zamba2Model(nn.Module):
                 layers.append(
                     Zamba2MambaDecoderLayer(
                         config,
-                        model_config=model_config,
-                        cache_config=cache_config,
-                        quant_config=quant_config,
+                        model_config=vllm_config.model_config,
+                        cache_config=vllm_config.cache_config,
+                        quant_config=vllm_config.quant_config,
                         prefix=prefix,
                     )
                 )

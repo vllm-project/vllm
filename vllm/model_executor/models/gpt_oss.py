@@ -9,7 +9,7 @@ from torch import nn
 from transformers import GptOssConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -72,12 +72,11 @@ class OAIAttention(nn.Module):
     def __init__(
         self,
         config: GptOssConfig,
-        quant_config: QuantizationConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = extract_layer_index(prefix)
         self.head_dim = config.head_dim
         self.num_attention_heads = config.num_attention_heads
@@ -140,9 +139,7 @@ class OAIAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_local_key_value_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             per_layer_sliding_window=sliding_window,
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
@@ -226,22 +223,17 @@ class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        model_config = vllm_config.model_config
 
         self.layer_idx = extract_layer_index(prefix)
         self.attn = OAIAttention(
             config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            quant_config=quant_config,
-            cache_config=cache_config,
-            model_config=model_config,
         )
         self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -288,7 +280,6 @@ class GptOssModel(nn.Module, EagleModelMixin):
             lambda prefix: TransformerBlock(
                 vllm_config,
                 prefix=prefix,
-                quant_config=self.quant_config,
             ),
             prefix=f"{prefix}.layers",
         )

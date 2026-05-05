@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -61,12 +61,11 @@ class MiniCPM3Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         max_position_embeddings: int = 8192,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -129,10 +128,8 @@ class MiniCPM3Attention(nn.Module):
             self.qk_head_dim,
             self.scaling,
             num_kv_heads=self.num_local_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
         )
 
     def forward(
@@ -216,14 +213,13 @@ class MiniCPM3Model(MiniCPMModel):
         quant_config: QuantizationConfig | None,
         model_config: ModelConfig | None = None,
     ):
+        vllm_config = get_current_vllm_config()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniCPM3DecoderLayer(
                 config,
-                cache_config,
-                quant_config,
                 prefix=prefix,
-                model_config=model_config,
+                vllm_config=vllm_config,
             ),
             prefix=f"{prefix}.layers",
         )

@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -224,13 +224,12 @@ class HYV3Attention(nn.Module):
         max_position_embeddings: int = 8192,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-5,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -284,9 +283,7 @@ class HYV3Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         if self.use_qk_norm:
@@ -324,12 +321,11 @@ class HYV3DecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         layer_idx = int(prefix.split(".")[-1])
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -342,9 +338,7 @@ class HYV3DecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -398,7 +392,6 @@ class HYV3Model(nn.Module):
 
         model_config = vllm_config.model_config
         config = model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         parallel_config = vllm_config.parallel_config
@@ -418,8 +411,7 @@ class HYV3Model(nn.Module):
             config.num_hidden_layers,
             lambda prefix: HYV3DecoderLayer(
                 config=config,
-                cache_config=cache_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),

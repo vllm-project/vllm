@@ -13,7 +13,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -49,12 +49,11 @@ class GLMAttention(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -119,9 +118,7 @@ class GLMAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -195,12 +192,11 @@ class GLMBlock(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.apply_residual_connection_post_layernorm = (
             config.apply_residual_connection_post_layernorm
         )
@@ -216,9 +212,7 @@ class GLMBlock(nn.Module):
         # Self attention.
         self.self_attention = GLMAttention(
             config,
-            cache_config,
-            quant_config,
-            model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attention",
         )
         self.hidden_dropout = config.hidden_dropout
@@ -273,9 +267,7 @@ class GLMTransformer(nn.Module):
     def __init__(
         self,
         config: ChatGLMConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -289,9 +281,7 @@ class GLMTransformer(nn.Module):
             self.num_layers,
             lambda prefix: GLMBlock(
                 config,
-                cache_config,
-                quant_config,
-                model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -341,9 +331,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.config = config
 
@@ -359,9 +347,7 @@ class ChatGLMModel(nn.Module, SupportsQuant):
         self.kv_channels = config.kv_channels
         self.encoder = GLMTransformer(
             config,
-            cache_config,
-            quant_config,
-            model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.encoder",
         )
 

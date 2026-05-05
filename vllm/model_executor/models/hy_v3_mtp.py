@@ -31,7 +31,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -89,11 +89,10 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        model_config: ModelConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -101,7 +100,7 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
         self.shared_head = HYV3SharedHead(config=config, quant_config=quant_config)
         self.mtp_block = HYV3DecoderLayer(
             config=config,
-            cache_config=cache_config,
+            vllm_config=vllm_config,
             quant_config=quant_config,
             prefix=prefix,
         )

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -190,13 +190,12 @@ class KimiMLAAttention(nn.Module):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         use_nope: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -269,9 +268,8 @@ class KimiMLAAttention(nn.Module):
             self.q_lora_rank,
             self.kv_lora_rank,
             mla_modules,
-            cache_config,
-            quant_config,
-            prefix,
+            vllm_config=vllm_config,
+            prefix=prefix,
         )
 
     def forward(
@@ -288,14 +286,12 @@ class KimiDecoderLayer(nn.Module):
         self,
         config: KimiLinearConfig,
         layer_idx: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        parallel_config: ParallelConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
 
         self.is_moe = config.is_moe
@@ -304,8 +300,7 @@ class KimiDecoderLayer(nn.Module):
             self.self_attn = KimiDeltaAttention(
                 layer_idx=layer_idx,
                 hidden_size=config.hidden_size,
-                quant_config=quant_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 model_config=config,
                 prefix=f"{prefix}.self_attn",
             )
@@ -314,9 +309,7 @@ class KimiDecoderLayer(nn.Module):
                 layer_idx=layer_idx,
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
-                quant_config=quant_config,
-                cache_config=cache_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
                 config=config,
                 qk_nope_head_dim=config.qk_nope_head_dim,
@@ -386,10 +379,6 @@ class KimiLinearModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -410,11 +399,8 @@ class KimiLinearModel(nn.Module):
             return KimiDecoderLayer(
                 config,
                 layer_idx,
-                cache_config,
-                quant_config,
-                parallel_config,
-                model_config,
-                prefix,
+                vllm_config=vllm_config,
+                prefix=prefix,
                 **extra_kwargs,
             )
 

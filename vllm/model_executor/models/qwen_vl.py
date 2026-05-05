@@ -250,7 +250,7 @@ class VisualAttentionBlock(nn.Module):
         n_head: int,
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -262,7 +262,7 @@ class VisualAttentionBlock(nn.Module):
         self.mlp = QwenVLMLP(
             hidden_size=d_model,
             intermediate_size=mlp_width,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -292,10 +292,11 @@ class TransformerBlock(nn.Module):
         heads: int,
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.width = width
         self.layers = layers
 
@@ -339,11 +340,12 @@ class VisionTransformer(nn.Module):
         n_queries: int = 256,
         output_dim: int = 512,
         image_start_id: int = 151857,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         image_height, image_width = self.image_size = (image_size, image_size)
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)

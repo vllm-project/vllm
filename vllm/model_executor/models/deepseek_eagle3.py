@@ -59,7 +59,6 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
 
         if config is None:
             config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = get_draft_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
@@ -91,8 +90,6 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
             q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=kv_lora_rank,
             max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             input_size=2 * self.hidden_size if layer_idx == 0 else self.hidden_size,
         )

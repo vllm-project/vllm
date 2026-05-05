@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -113,13 +113,12 @@ class BailingMoeV25MLAAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         layer_id: int = 0,
         prefix: str = "attention",
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.layer_id = layer_id
@@ -247,9 +246,8 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_lora_rank,
             self.kv_lora_rank,
             mla_modules,
-            cache_config,
-            quant_config,
-            prefix,
+            vllm_config=vllm_config,
+            prefix=prefix,
         )
 
     def forward(
@@ -472,13 +470,18 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         layer_id: int = 0,
         prefix: str = "linear_attn",
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
+        self.model_config = (
+            vllm_config.model_config if vllm_config is not None else None
+        )
+        self.cache_config = (
+            vllm_config.cache_config if vllm_config is not None else None
+        )
 
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
@@ -486,8 +489,6 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
         self.total_kv_heads = config.num_attention_heads  # MHA
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.model_config = model_config
-        self.cache_config = cache_config
         self.prefix = prefix
 
         self.head_dim = (
@@ -786,13 +787,12 @@ class BailingMoeV25DecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         layer_id: int = 0,
         prefix: str = "layer",
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
 
@@ -802,20 +802,16 @@ class BailingMoeV25DecoderLayer(nn.Module):
         if self.attention_type == 0:  # Linear attention
             self.self_attn = BailingMoELinearAttention(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 layer_id=layer_id,
                 prefix=f"{prefix}.self_attn",
-                model_config=model_config,
-                cache_config=cache_config,
             )
         else:  # Full attention
             self.self_attn = BailingMoeV25MLAAttention(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 layer_id=layer_id,
                 prefix=f"{prefix}.self_attn",
-                cache_config=cache_config,
-                model_config=model_config,
             )
 
         # MLP/MoE
@@ -897,9 +893,6 @@ class BailingMoeV25Model(nn.Module):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -935,11 +928,9 @@ class BailingMoeV25Model(nn.Module):
 
             return BailingMoeV25DecoderLayer(
                 config=layer_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 layer_id=layer_idx,
                 prefix=prefix,
-                model_config=model_config,
-                cache_config=cache_config,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

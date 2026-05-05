@@ -187,10 +187,11 @@ class PerceptionEncoderVisionAttention(nn.Module):
         max_grid_height: int,
         max_grid_width: int,
         use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.embed_dim = embed_dim
         self.total_num_heads = num_heads
         self.head_dim = embed_dim // num_heads
@@ -216,7 +217,7 @@ class PerceptionEncoderVisionAttention(nn.Module):
             embed_dim,
             embed_dim,
             bias=True,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -261,17 +262,18 @@ class PerceptionEncoderVisionBlock(nn.Module):
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.attn = PerceptionEncoderVisionAttention(
             d_model,
             n_head,
             max_grid_height=max_grid_height,
             max_grid_width=max_grid_width,
             use_cls_token=use_cls_token,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.ls_1 = (
@@ -314,10 +316,11 @@ class PerceptionEncoderVisionTransformer(nn.Module):
         act_layer: Callable = nn.GELU,
         norm_layer: Callable = nn.LayerNorm,
         use_cls_token: bool = False,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.width = width
         self.layers = layers
         self.resblocks = nn.ModuleList(
@@ -351,10 +354,11 @@ class PerceptionEncoder(nn.Module):
         config,
         act_layer: Callable,
         norm_layer: Callable = _DEFAULT_NORM_LAYER,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.patch_size = config.patch_size
 
         self.output_dim = config.output_dim or config.width

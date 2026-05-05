@@ -119,8 +119,8 @@ class WindowQFormerDownsampler(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: QuantizationConfig | None = None,
         cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         spatial_offset: int | None = None,
         prefix: str = "",
     ):

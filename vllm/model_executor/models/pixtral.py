@@ -21,7 +21,7 @@ from transformers.models.pixtral.modeling_pixtral import (
     position_ids_in_meshgrid,
 )
 
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
@@ -345,7 +345,7 @@ class PixtralForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(
                 self.vision_args,
-                model_config=vllm_config.model_config,
+                quant_config=vllm_config.quant_config,
                 prefix=maybe_prefix(prefix, "vision_encoder"),
             )
             self.pre_mm_projector_norm = (
@@ -716,7 +716,6 @@ class Attention(nn.Module):
         self,
         args: VisionEncoderArgs,
         quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
         disable_tp: bool = False,
     ):
@@ -781,7 +780,6 @@ class TransformerBlock(nn.Module):
         self,
         args: VisionEncoderArgs,
         quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
         disable_tp: bool = False,
     ):
@@ -789,14 +787,12 @@ class TransformerBlock(nn.Module):
         self.attention = Attention(
             args,
             quant_config=quant_config,
-            model_config=model_config,
             prefix=f"{prefix}.attention",
             disable_tp=disable_tp,
         )
         self.feed_forward = FeedForward(
             args.hidden_size,
             args.intermediate_size,
-            quant_config=quant_config,
             prefix=f"{prefix}.feed_forward",
             disable_tp=disable_tp,
         )
@@ -823,7 +819,6 @@ class Transformer(nn.Module):
         self,
         args: VisionEncoderArgs,
         quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
         disable_tp: bool = False,
     ):
@@ -834,7 +829,6 @@ class Transformer(nn.Module):
                 TransformerBlock(
                     args,
                     quant_config=quant_config,
-                    model_config=model_config,
                     prefix=f"{prefix}.layers.{idx}",
                     disable_tp=disable_tp,
                 )
@@ -875,7 +869,6 @@ class VisionTransformer(nn.Module):
         self,
         args: VisionEncoderArgs,
         quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -892,7 +885,6 @@ class VisionTransformer(nn.Module):
         self.transformer = Transformer(
             args,
             quant_config=quant_config,
-            model_config=model_config,
             prefix=f"{prefix}.transformer",
             disable_tp=disable_tp,
         )
@@ -1284,7 +1276,6 @@ class PixtralHFTransformerBlock(nn.Module):
         )
         self.feed_forward = PixtralHFMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.feed_forward",
         )
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)

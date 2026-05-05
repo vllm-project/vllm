@@ -20,7 +20,7 @@ from transformers import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
     get_pp_group,
@@ -179,10 +179,11 @@ class MultiHeadDotProductAttention(nn.Module):
         config: VisionBackboneConfig,
         use_bias: bool = True,
         nlayers: int = 1,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.hidden_size = config.image_emb_dim
         self.total_num_heads = config.image_num_heads
@@ -227,7 +228,7 @@ class MultiHeadDotProductAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=use_bias,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.wo",
         )
 
@@ -266,10 +267,11 @@ class ResidualAttentionBlock(nn.Module):
     def __init__(
         self,
         config: VisionBackboneConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.attention = MultiHeadDotProductAttention(
             config, quant_config=quant_config, prefix=f"{prefix}.attention"
         )
@@ -410,12 +412,11 @@ class MolmoAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = config.num_attention_heads
@@ -469,9 +470,7 @@ class MolmoAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -602,18 +601,15 @@ class MolmoDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         # Attention block.
         self.self_attn = MolmoAttention(
             config,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
 
@@ -683,10 +679,11 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         self,
         config: PretrainedConfig,
         vision_config: VisionBackboneConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.vit_layers = VIT_LAYERS
         self.image_num_patch = vision_config.image_num_patch
         self.llm_patches_per_crop = (
@@ -703,13 +700,12 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         self.image_pooling_2d = MultiHeadDotProductAttention(
             vision_config,
             nlayers=len(self.vit_layers),
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.image_pooling_2d",
         )
         self.image_projector = ImageProjectorMLP(
             config,
             input_dim=vision_config.image_emb_dim,
-            quant_config=quant_config,
             prefix=f"{prefix}.image_projector",
         )
 
@@ -1378,7 +1374,7 @@ class MolmoForCausalLM(
             self.vision_backbone = MolmoVisionBackbone(
                 config,
                 vision_config,
-                quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_backbone"),
             )
 

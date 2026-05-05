@@ -9,7 +9,7 @@ from torch import nn
 from transformers import CohereConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -112,12 +112,11 @@ class CohereMoeAttention(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.layer_idx = extract_layer_index(prefix)
@@ -175,9 +174,7 @@ class CohereMoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
         )
@@ -281,20 +278,17 @@ class CohereMoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
 
         self.self_attn = CohereMoeAttention(
             config,
-            cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.mlp = CohereMoe(
@@ -331,7 +325,6 @@ class CohereMoeModel(nn.Module):
 
         model_config = vllm_config.model_config
         config = model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -344,8 +337,7 @@ class CohereMoeModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: CohereMoeDecoderLayer(
                 config,
-                cache_config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),

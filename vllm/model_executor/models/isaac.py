@@ -479,11 +479,12 @@ class Siglip2VisionAttention(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
@@ -512,7 +513,7 @@ class Siglip2VisionAttention(nn.Module):
         self.out_proj = RowParallelLinear(
             input_size=config.hidden_size,
             output_size=config.hidden_size,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
@@ -569,7 +570,7 @@ class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -578,13 +579,12 @@ class Siglip2EncoderLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.self_attn = Siglip2VisionAttention(
             config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -617,11 +617,12 @@ class Siglip2Encoder(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.layers = nn.ModuleList(
             [
@@ -655,10 +656,11 @@ class Siglip2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.quant_config = quant_config
         embed_dim = config.hidden_size

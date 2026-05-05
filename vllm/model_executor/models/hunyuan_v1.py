@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -152,14 +152,13 @@ class HunYuanAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
         layer_id: int = -1,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -218,9 +217,7 @@ class HunYuanAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -261,14 +258,13 @@ class HunYuanCrossAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position_embeddings: int = 8192,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         bias: bool = False,
-        cache_config: CacheConfig | None = None,
         prefix: str = "",
         layer_id: int = -1,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -325,9 +321,7 @@ class HunYuanCrossAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             attn_type=AttentionType.ENCODER_DECODER,
         )
@@ -477,14 +471,13 @@ class HunYuanDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         layer_id: int = -1,
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         assert layer_id >= 0
         self.layer_id = layer_id
         self.hidden_size = config.hidden_size
@@ -512,10 +505,8 @@ class HunYuanDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 max_position_embeddings=max_position_embeddings,
-                model_config=model_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 bias=attention_bias,
-                cache_config=cache_config,
                 prefix=f"{prefix}.self_attn",
                 layer_id=layer_id,
             )
@@ -528,10 +519,8 @@ class HunYuanDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 max_position_embeddings=max_position_embeddings,
-                model_config=model_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 bias=attention_bias,
-                cache_config=cache_config,
                 prefix=f"{prefix}.self_attn",
                 layer_id=layer_id,
             )
@@ -601,7 +590,6 @@ class HunYuanModel(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         eplb_config = vllm_config.parallel_config.eplb_config
@@ -623,14 +611,12 @@ class HunYuanModel(nn.Module, EagleModelMixin):
             )
         else:
             self.embed_tokens = PPMissingLayer()
-        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: HunYuanDecoderLayer(
                 config=config,
-                model_config=model_config,
+                vllm_config=vllm_config,
                 layer_id=int(prefix.split(".")[-1]),
-                cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,

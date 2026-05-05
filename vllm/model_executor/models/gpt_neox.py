@@ -27,7 +27,7 @@ from torch import nn
 from transformers import GPTNeoXConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
@@ -60,12 +60,11 @@ class GPTNeoXAttention(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_size = self.hidden_size // self.total_num_heads
@@ -101,9 +100,7 @@ class GPTNeoXAttention(nn.Module):
             self.num_heads,
             self.head_size,
             scaling,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -153,12 +150,11 @@ class GPTNeoXLayer(nn.Module):
     def __init__(
         self,
         config: GPTNeoXConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.use_parallel_residual = config.use_parallel_residual
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
@@ -168,9 +164,7 @@ class GPTNeoXLayer(nn.Module):
         )
         self.attention = GPTNeoXAttention(
             config,
-            cache_config,
-            quant_config,
-            model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attention",
         )
         self.mlp = GPTNeoXMLP(config, quant_config, prefix=f"{prefix}.mlp")
@@ -209,9 +203,6 @@ class GPTNeoXModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
 
         self.config = config
 
@@ -223,9 +214,7 @@ class GPTNeoXModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: GPTNeoXLayer(
                 config,
-                cache_config,
-                quant_config,
-                model_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

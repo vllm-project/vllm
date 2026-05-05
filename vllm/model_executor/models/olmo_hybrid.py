@@ -32,8 +32,6 @@ from transformers.activations import ACT2FN
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
-    CacheConfig,
-    ModelConfig,
     SpeculativeConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -160,8 +158,6 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
     def __init__(
         self,
         config,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         speculative_config: SpeculativeConfig | None = None,
         prefix: str = "",
@@ -188,6 +184,9 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
         self.allow_neg_eigval = getattr(config, "linear_allow_neg_eigval", False)
         self.prefix = prefix
 
+        vllm_config = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
         self.config = config
         self.model_config = model_config
         self.cache_config = cache_config
@@ -607,13 +606,10 @@ class OlmoHybridAttention(nn.Module):
         self,
         *,
         vllm_config: VllmConfig,
-        model_config: ModelConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        if model_config is None:
-            model_config = vllm_config.model_config
 
         hidden_size = self.config.hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -665,10 +661,8 @@ class OlmoHybridAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
             prefix=f"{prefix}.attn",
-            model_config=model_config,
+            vllm_config=vllm_config,
         )
 
         rope_parameters = getattr(self.config, "rope_parameters", None)
@@ -787,7 +781,6 @@ class OlmoHybridDecoderLayer(nn.Module):
         else:
             self.self_attn = OlmoHybridAttention(
                 vllm_config=vllm_config,
-                model_config=model_config,
                 prefix=f"{prefix}.self_attn",
             )
             # Attention layers use these norm names

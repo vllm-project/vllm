@@ -14,7 +14,7 @@ from torch import nn
 from transformers.models.granitemoeshared import GraniteMoeSharedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -78,12 +78,11 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
     def __init__(
         self,
         config: GraniteMoeSharedConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         self.self_attn = GraniteMoeAttention(
             hidden_size=self.hidden_size,
@@ -91,9 +90,7 @@ class GraniteMoeSharedDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_parameters=config.rope_parameters,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             attention_multiplier=config.attention_multiplier,
         )
@@ -154,8 +151,6 @@ class GraniteMoeSharedModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -174,9 +169,8 @@ class GraniteMoeSharedModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: GraniteMoeSharedDecoderLayer(
                 config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
-                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

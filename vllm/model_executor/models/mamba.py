@@ -10,7 +10,7 @@ from torch import nn
 from transformers import MambaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -21,7 +21,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -50,13 +49,13 @@ class MambaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MambaConfig,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         is_lora_enabled: bool | None = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        model_config = vllm_config.model_config if vllm_config is not None else None
         self.config = config
         self.is_falcon_mamba = config.model_type == "falcon_mamba"
         self.is_lora_enabled = is_lora_enabled
@@ -104,8 +103,6 @@ class MambaModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         is_lora_enabled = bool(lora_config)
@@ -123,8 +120,7 @@ class MambaModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: MambaDecoderLayer(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
                 is_lora_enabled=is_lora_enabled,
                 prefix=prefix,

@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -276,9 +276,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         scale: float,
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
         prefix: str = "",
@@ -291,6 +289,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         self.block_pool_size = block_pool_size
         dtype = torch.get_default_dtype()
 
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
         else:
@@ -312,9 +311,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             scale=scale,
             num_kv_heads=num_kv_heads,
             alibi_slopes=alibi_slopes,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             logits_soft_cap=logits_soft_cap,
             per_layer_sliding_window=per_layer_sliding_window,
             prefix=prefix,
@@ -345,9 +342,7 @@ class WhisperCausalAttention(nn.Module):
         attn_type: AttentionType = AttentionType.DECODER,
         per_layer_sliding_window: int | None = None,
         block_pool_size: int = 1,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -372,6 +367,7 @@ class WhisperCausalAttention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
 
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self._init_qkv(embed_dim, bias, quant_config, prefix=prefix)
         self.out_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
@@ -388,9 +384,7 @@ class WhisperCausalAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             attn_type=AttentionType.DECODER,
             per_layer_sliding_window=per_layer_sliding_window,
@@ -453,7 +447,6 @@ class WhisperCausalEncoderLayer(nn.Module):
         sliding_window = getattr(config, "sliding_window", None)
         block_pool_size = config.block_pool_size
         assert block_pool_size > 1
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.embed_dim = config.d_model
@@ -465,9 +458,7 @@ class WhisperCausalEncoderLayer(nn.Module):
             max_position_embeddings=config.max_position_embeddings,
             block_pool_size=block_pool_size,
             per_layer_sliding_window=sliding_window,
-            cache_config=cache_config,
-            model_config=model_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
         )
         self.self_attn_layer_norm = CausalRMSNorm(self.embed_dim)

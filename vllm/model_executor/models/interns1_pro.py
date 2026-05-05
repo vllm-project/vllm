@@ -32,7 +32,7 @@ import torch
 from torch import nn
 from transformers import AutoProcessor, PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
     get_tensor_model_parallel_world_size,
@@ -273,13 +273,12 @@ class InternS1ProMoeAttention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -333,9 +332,7 @@ class InternS1ProMoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
             **{
                 "layer_idx": extract_layer_index(prefix),
@@ -374,8 +371,6 @@ class InternS1ProMoeDecoderLayer(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_text_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
@@ -407,9 +402,7 @@ class InternS1ProMoeDecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
-            model_config=model_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
@@ -477,7 +470,13 @@ class InternS1ProMoeLLMModel(Qwen3MoeLLMModel):
 
 
 class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[torch.nn.Module] = InternS1ProMoeDecoderLayer,
+    ):
         super(Qwen3MoeForCausalLM, self).__init__()
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config

@@ -242,7 +242,7 @@ class GraniteSpeechEncoderProjector(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: CacheConfig,
+        cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -502,9 +502,10 @@ class GraniteSpeechCTCEncoder(nn.Module):
         self,
         config: PretrainedConfig,
         prefix: str,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
 
         # Precompute clamped relative positional encoding distances

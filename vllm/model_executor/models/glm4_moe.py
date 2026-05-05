@@ -33,7 +33,7 @@ from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -227,12 +227,11 @@ class Glm4MoeAttention(nn.Module):
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
         use_qk_norm: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -284,9 +283,7 @@ class Glm4MoeAttention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -319,13 +316,12 @@ class Glm4MoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: Glm4MoeConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
         # DecoderLayers are created with `make_layers` which passes the prefix
@@ -342,9 +338,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=config.attention_bias,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            model_config=model_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
             use_qk_norm=config.use_qk_norm,
         )
@@ -404,9 +398,7 @@ class Glm4MoeModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        model_config = vllm_config.model_config
         enable_eplb = vllm_config.parallel_config.enable_eplb
         self.config = config
 
@@ -423,9 +415,8 @@ class Glm4MoeModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Glm4MoeDecoderLayer(
                 config=config,
-                cache_config=cache_config,
+                vllm_config=vllm_config,
                 quant_config=quant_config,
-                model_config=model_config,
                 prefix=prefix,
                 enable_eplb=enable_eplb,
             ),

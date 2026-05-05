@@ -515,7 +515,7 @@ class Gemma3ForConditionalGeneration(
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = SiglipVisionModel(
                 config.vision_config,
-                quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.multi_modal_projector = Gemma3MultiModalProjector(config)

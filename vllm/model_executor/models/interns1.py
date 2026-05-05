@@ -24,7 +24,6 @@ from transformers.models.internvl.video_processing_internvl import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -533,7 +532,6 @@ class InternS1ForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
@@ -550,7 +548,7 @@ class InternS1ForConditionalGeneration(
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = self._init_vision_model(
                 config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.multi_modal_projector = self._init_mlp1(config)
@@ -573,14 +571,14 @@ class InternS1ForConditionalGeneration(
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None,
+        vllm_config: VllmConfig | None,
         *,
         prefix: str,
     ):
         num_hidden_layers = config.vision_config.num_hidden_layers
         return InternS1VisionModel(
             config.vision_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             num_hidden_layers_override=num_hidden_layers,
             prefix=prefix,
         )
