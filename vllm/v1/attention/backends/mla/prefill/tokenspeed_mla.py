@@ -1,0 +1,146 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""TokenSpeed CuTe DSL backend for MLA prefill."""
+
+from typing import TYPE_CHECKING
+
+import torch
+
+from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.attention.mla_attention import (
+        MLACommonPrefillMetadata,
+    )
+    from vllm.platforms.interface import DeviceCapability
+
+
+class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
+    """TokenSpeed CuTe DSL backend for MLA prefill."""
+
+    requires_r1_mla_dimensions = True
+
+    @staticmethod
+    def get_name() -> str:
+        return "TOKENSPEED_MLA"
+
+    @classmethod
+    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+        return device_capability.major == 10
+
+    @classmethod
+    def is_available(cls) -> bool:
+        try:
+            from tokenspeed_mla import (
+                tokenspeed_mla_prefill,  # noqa: F401
+            )
+
+            return True
+        except ImportError:
+            return False
+
+    def __init__(
+        self,
+        num_heads: int,
+        scale: float,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        layer_names: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            num_heads=num_heads,
+            scale=scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            vllm_config=vllm_config,
+            device=device,
+            layer_names=layer_names,
+        )
+
+        # Pre-JIT the kernel for the FP8 prefill shape so the first forward
+        # pass doesn't pay the compile cost. warmup_compile_prefill is
+        # idempotent: each (q_dtype, d_qk, d_v) is compiled at most once
+        # process-wide, so calling it once per layer instantiation is fine.
+        from tokenspeed_mla import warmup_compile_prefill
+
+        warmup_compile_prefill(
+            q_dtype=torch.float8_e4m3fn,
+            d_qk=qk_nope_head_dim + qk_rope_head_dim,
+            d_v=v_head_dim,
+            enable_pdl=False,
+        )
+
+    def prepare_metadata(
+        self,
+        prefill_metadata: "MLACommonPrefillMetadata",
+    ) -> None:
+        super().prepare_metadata(prefill_metadata)
+        self._query_seq_lens = (
+            prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
+        )
+
+    def run_prefill_new_tokens(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        return_softmax_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        from tokenspeed_mla import tokenspeed_mla_prefill
+
+        ret = tokenspeed_mla_prefill(
+            query=q,
+            key=k,
+            value=v,
+            seq_lens=self._query_seq_lens,
+            cum_seq_lens=self._prefill_metadata.query_start_loc,
+            max_seq_len=self._prefill_metadata.max_query_len,
+            batch_size=self._query_seq_lens.shape[0],
+            softmax_scale=self.scale,
+            is_causal=True,
+            return_lse=return_softmax_lse,
+            enable_pdl=False,
+        )
+
+        if isinstance(ret, tuple):
+            # Convert from (q_len, num_heads) to (num_heads, q_len)
+            return ret[0], ret[1].transpose(0, 1).contiguous()
+        return ret
+
+    def run_prefill_context_chunk(
+        self,
+        chunk_idx: int,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        from tokenspeed_mla import tokenspeed_mla_prefill
+
+        assert self._prefill_metadata.chunked_context is not None
+        chunked = self._prefill_metadata.chunked_context
+
+        attn_out, lse = tokenspeed_mla_prefill(
+            query=q,
+            key=k,
+            value=v,
+            seq_lens=chunked.seq_lens[chunk_idx],
+            cum_seq_lens=chunked.cu_seq_lens[chunk_idx],
+            max_seq_len=chunked.max_seq_lens[chunk_idx],
+            batch_size=chunked.seq_lens[chunk_idx].shape[0],
+            softmax_scale=self.scale,
+            is_causal=False,
+            return_lse=True,
+            cum_seq_lens_q=self._prefill_metadata.query_start_loc,
+            max_seq_len_q=self._prefill_metadata.max_query_len,
+            enable_pdl=False,
+        )
+
+        # Convert from (q_len, num_heads) to (num_heads, q_len)
+        return attn_out, lse.transpose(0, 1).contiguous()

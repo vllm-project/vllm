@@ -43,6 +43,10 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "vllm.v1.attention.backends.mla.prefill.trtllm_ragged."
         "TrtllmRaggedPrefillBackend"
     )
+    TOKENSPEED_MLA = (
+        "vllm.v1.attention.backends.mla.prefill.tokenspeed_mla."
+        "TokenspeedMLAPrefillBackend"
+    )
 
     def get_path(self) -> str:
         """Get the fully qualified class path for this backend."""
