@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 import json
 import warnings
 from types import SimpleNamespace
@@ -8,7 +9,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-from fastapi.responses import ORJSONResponse
 
 from vllm.entrypoints.pooling.utils import encode_pooling_output_float_or_ndarray
 
@@ -24,6 +24,18 @@ def test_encode_pooling_output_float_or_ndarray_returns_numpy_array():
 
     assert isinstance(encoded, np.ndarray)
     np.testing.assert_allclose(encoded, [1.0, 2.0, 3.0])
+
+
+@pytest.mark.skipif(
+    importlib.util.find_spec("orjson") is None,
+    reason="orjson is not installed",
+)
+def test_orjson_serializes_numpy_array():
+    from fastapi.responses import ORJSONResponse
+
+    output = _pooling_output(torch.tensor([1.0, 2.0, 3.0], dtype=torch.float32))
+    encoded = encode_pooling_output_float_or_ndarray(output)
+
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         response = ORJSONResponse(content={"embedding": encoded})
