@@ -268,6 +268,31 @@ class MusicFlamingoMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
 
 
 class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
+    def _expand_audio_tokens(
+        self,
+        prompt: str,
+        processor: Any,
+        feature_attention_mask: torch.Tensor,
+        chunk_counts: list[int],
+    ) -> str:
+        audio_token = processor.audio_token
+        expanded_prompt = prompt
+
+        for item_idx in range(len(chunk_counts)):
+            audio_token_length = _count_audio_tokens_from_mask(
+                feature_attention_mask,
+                chunk_counts,
+                item_idx,
+            )
+            replacement = (
+                processor.audio_bos_token
+                + audio_token * audio_token_length
+                + processor.audio_eos_token
+            )
+            expanded_prompt = expanded_prompt.replace(audio_token, replacement, 1)
+
+        return expanded_prompt
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -303,11 +328,6 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
             n_win = max(1, (n_samples + window_size - 1) // window_size)
             chunk_counts.append(min(n_win, max_windows))
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
-
-        if "rote_timestamps" not in outputs:
-            raise KeyError(
-                "MusicFlamingoProcessor output must include `rote_timestamps`."
-            )
 
         return outputs
 
@@ -405,6 +425,32 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
             rote_timestamps=rote_timestamps,
         )
 
+    def _build_audio_timestamps(
+        self,
+        chunk_counts: list[int],
+        seq_len: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        audio_embed_frame_step = self.config.audio_frame_step * 4
+        frame_offsets = (
+            torch.arange(seq_len, device=device, dtype=torch.float32)
+            * audio_embed_frame_step
+        )
+
+        if not chunk_counts:
+            return frame_offsets.new_empty((0, seq_len))
+
+        window_indices = torch.cat(
+            [
+                torch.arange(count, device=device, dtype=torch.float32)
+                for count in chunk_counts
+            ]
+        )
+        return (
+            window_indices.unsqueeze(1) * seq_len * audio_embed_frame_step
+            + frame_offsets
+        )
+
     def _process_audio_input(
         self, audio_input: MusicFlamingoInputs
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
@@ -412,13 +458,6 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
             return super()._process_audio_input(audio_input)
 
         rote_timestamps = audio_input["rote_timestamps"]
-        if rote_timestamps is None:
-            raise ValueError(
-                "MusicFlamingo audio feature inputs must include `rote_timestamps`."
-            )
-        if isinstance(rote_timestamps, list):
-            rote_timestamps = torch.cat(rote_timestamps, dim=0)
-
         (
             input_features,
             feature_attention_mask,
@@ -428,6 +467,15 @@ class MusicFlamingoForConditionalGeneration(AudioFlamingo3ForConditionalGenerati
             input_features,
             feature_attention_mask,
         )
+        if rote_timestamps is None:
+            rote_timestamps = self._build_audio_timestamps(
+                chunk_counts,
+                seq_len=hidden_states.shape[-2],
+                device=hidden_states.device,
+            )
+        elif isinstance(rote_timestamps, list):
+            rote_timestamps = torch.cat(rote_timestamps, dim=0)
+
         cos, sin = self.pos_emb(
             rote_timestamps.to(hidden_states.device),
             seq_len=hidden_states.shape[-2],

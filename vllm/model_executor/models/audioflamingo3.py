@@ -372,6 +372,31 @@ class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
+    def _expand_audio_tokens(
+        self,
+        prompt: str,
+        processor: Any,
+        feature_attention_mask: torch.Tensor,
+        chunk_counts: list[int],
+    ) -> str:
+        audio_token = getattr(processor, "audio_token", "<sound>")
+        expanded_prompt = prompt
+
+        start_idx = 0
+        for chunk_count in chunk_counts:
+            sample_mask = feature_attention_mask[start_idx : start_idx + chunk_count]
+            start_idx += chunk_count
+
+            sample_input_length = sample_mask.sum().reshape(1)
+            audio_token_length = _get_audio_post_pool_output_lengths(
+                sample_input_length.to(torch.long)
+            )[0]
+            expanded_prompt = expanded_prompt.replace(
+                audio_token, audio_token * int(audio_token_length.item()), 1
+            )
+
+        return expanded_prompt
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -414,19 +439,43 @@ class AudioFlamingo3MultiModalProcessor(
                 n_win = max_windows
             chunk_counts.append(n_win)
 
-        outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        flat_chunks = []
+        for audio, n_win in zip(audio_list, chunk_counts):
+            n_samples = len(audio) if isinstance(audio, list) else audio.shape[0]
+            time_cap = min(n_samples, n_win * window_size)
+            for i in range(n_win):
+                start = i * window_size
+                end = min((i + 1) * window_size, time_cap)
+                flat_chunks.append(audio[start:end])
+
+        return_tensors = tok_kwargs.get("return_tensors", "pt")
+        audio_kwargs = dict(mm_kwargs)
+        audio_kwargs.setdefault("sampling_rate", sampling_rate)
+        audio_kwargs.setdefault("return_tensors", return_tensors)
+        text_kwargs = dict(tok_kwargs)
+        text_kwargs.setdefault("return_tensors", return_tensors)
+
+        outputs = feature_extractor(flat_chunks, **audio_kwargs)
 
         if "input_features_mask" in outputs:
             outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+        elif "attention_mask" in outputs:
+            outputs["feature_attention_mask"] = outputs.pop("attention_mask")
 
         outputs["chunk_counts"] = torch.tensor(chunk_counts, dtype=torch.long)
 
-        return outputs
+        expanded_prompt = self._expand_audio_tokens(
+            prompt,
+            processor,
+            outputs["feature_attention_mask"],
+            chunk_counts,
+        )
+        text_outputs = processor.tokenizer([expanded_prompt], **text_kwargs)
+
+        return BatchFeature(
+            data={**text_outputs, **outputs},
+            tensor_type=return_tensors,
+        )
 
     def _get_mm_fields_config(
         self,

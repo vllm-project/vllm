@@ -156,8 +156,9 @@ class _HfExamplesInfo:
             is_version_valid = True
             should_check_version = False
 
-        # Reasons only apply when the installed version misses the requested
-        # bound for the corresponding model runner.
+        # Reasons explain a known incompatibility with a violated version
+        # bound. They should not skip models when the installed version is
+        # already within the requested range.
         is_reason_applicable = (
             not is_version_valid
             and self.transformers_version_reason is not None
