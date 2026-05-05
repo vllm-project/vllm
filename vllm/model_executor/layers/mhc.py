@@ -234,6 +234,39 @@ def mhc_pre(
     num_tokens = residual_flat.shape[0]
     fn_flat = fn
 
+    if current_platform.is_rocm():
+        x = residual_flat.view(num_tokens, hc_mult * hidden_size).to(torch.float32)
+        mixes = torch.matmul(x, fn_flat.t())
+        sqrsum = x.square().sum(dim=-1, keepdim=True)
+        mixes = mixes * torch.rsqrt(sqrsum / (hc_mult * hidden_size) + rms_eps)
+
+        pre_logits = mixes[:, :hc_mult] * hc_scale[0] + hc_base[:hc_mult]
+        pre_mix = torch.sigmoid(pre_logits) + hc_pre_eps
+
+        post_logits = (
+            mixes[:, hc_mult : 2 * hc_mult] * hc_scale[1]
+            + hc_base[hc_mult : 2 * hc_mult]
+        )
+        post_mix = torch.sigmoid(post_logits) * hc_post_mult_value
+
+        comb_logits = mixes[:, 2 * hc_mult :].view(
+            num_tokens, hc_mult, hc_mult
+        ) * hc_scale[2] + hc_base[2 * hc_mult :].view(1, hc_mult, hc_mult)
+        comb_mix = torch.softmax(comb_logits, dim=-1) + hc_sinkhorn_eps
+        comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+        for _ in range(sinkhorn_repeat - 1):
+            comb_mix = comb_mix / (comb_mix.sum(dim=-1, keepdim=True) + hc_sinkhorn_eps)
+            comb_mix = comb_mix / (comb_mix.sum(dim=-2, keepdim=True) + hc_sinkhorn_eps)
+
+        layer_input = torch.sum(
+            pre_mix.unsqueeze(-1) * residual_flat.to(torch.float32), dim=1
+        ).to(torch.bfloat16)
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
+
     # these number are from deepgemm kernel impl
     block_k = 64
     block_m = 64
@@ -414,6 +447,14 @@ def mhc_post(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
+    if current_platform.is_rocm():
+        mixed_residual = torch.einsum(
+            "...ij,...ih->...jh",
+            comb_res_mix.to(torch.float32),
+            residual.to(torch.float32),
+        )
+        post_term = post_layer_mix.to(torch.float32) * x.unsqueeze(-2).to(torch.float32)
+        return (mixed_residual + post_term).to(residual.dtype)
     out = torch.empty_like(residual)
     mhc_post_tilelang(
         comb_res_mix,
@@ -551,6 +592,49 @@ def hc_head_fuse_tilelang(
         T.pdl_trigger()
 
 
+def _hc_head_fused_reference(
+    hs_flat: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    out: torch.Tensor,
+    hidden_size: int,
+    rms_eps: float,
+    hc_eps: float,
+    hc_mult: int,
+) -> None:
+    """Pure-PyTorch reference for `hc_head_fuse_tilelang`.
+
+    Used on platforms where the tilelang HIP/CUDA backend is not available
+    (e.g. ROCm builds shipping a tilelang wheel without `target.build.tilelang_hip`).
+    Mirrors the math of the tilelang kernel exactly:
+
+        x      = hs_flat.flatten(-2, -1)                # (T, hc_mult * H), fp32
+        mixes  = x @ fn.T                               # (T, hc_mult)
+        rsqrt  = 1 / sqrt(||x||^2 / (hc_mult * H) + rms_eps)
+        pre[m] = sigmoid(mixes[m] * rsqrt * hc_scale[0] + hc_base[m]) + hc_eps
+        out    = sum_m pre[m] * hs_flat[:, m, :]        # cast back to bf16
+
+    `out` is mutated in place to keep the same op contract
+    (`mutates_args=["out"]`).
+    """
+    num_tokens = hs_flat.shape[0]
+    if num_tokens == 0:
+        return
+    x = hs_flat.reshape(num_tokens, hc_mult * hidden_size).to(torch.float32)
+    # fn: (hc_mult, hc_mult * hidden_size) → mixes: (T, hc_mult)
+    mixes = torch.matmul(x, fn.t())
+    sqrsum = x.square().sum(dim=-1, keepdim=True)
+    rsqrt = torch.rsqrt(sqrsum / (hc_mult * hidden_size) + rms_eps)
+    # hc_scale has shape (1,); hc_base has shape (hc_mult,)
+    pre_mix = torch.sigmoid(mixes * rsqrt * hc_scale[0] + hc_base) + hc_eps
+    # weighted sum over the hc_mult channel dim
+    result = torch.sum(pre_mix.unsqueeze(-1) * hs_flat.to(torch.float32), dim=1).to(
+        out.dtype
+    )
+    out.copy_(result)
+
+
 def _hc_head_fused_kernel(
     hs_flat: torch.Tensor,
     fn: torch.Tensor,
@@ -563,8 +647,15 @@ def _hc_head_fused_kernel(
     hc_mult: int,
 ) -> None:
     """Fill pre-allocated `out` (T, H) in-place with the hc_head result."""
-    if hs_flat.shape[0] > 0:
-        hc_head_fuse_tilelang(
+    if hs_flat.shape[0] == 0:
+        return
+    if current_platform.is_rocm():
+        # tilelang ships only the CUDA codegen in upstream wheels, so the HIP
+        # FFI target (`target.build.tilelang_hip`) is missing and the JIT call
+        # would raise `ValueError: Cannot find global function ...`. Use a
+        # numerically equivalent torch fallback instead. `mhc_pre` and
+        # `mhc_post` already follow this same pattern above.
+        _hc_head_fused_reference(
             hs_flat,
             fn,
             hc_scale,
@@ -575,6 +666,18 @@ def _hc_head_fused_kernel(
             hc_eps,
             hc_mult,
         )
+        return
+    hc_head_fuse_tilelang(
+        hs_flat,
+        fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_eps,
+        hc_eps,
+        hc_mult,
+    )
 
 
 direct_register_custom_op(
