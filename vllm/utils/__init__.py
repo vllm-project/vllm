@@ -46,6 +46,4 @@ def is_moe_layer(module: torch.nn.Module) -> bool:
             if _check_bases(b):
                 return True
 
-    res = _check_bases(module.__class__)
-    print(f"IS_MOE_LAYER[{module.__class__}] = {res}")
-    return res
+    return _check_bases(module.__class__)
