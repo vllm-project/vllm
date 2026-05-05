@@ -475,11 +475,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.use_sparse = use_sparse
 
-        vllm_config = get_current_vllm_config_or_none()
+        _vllm_config = get_current_vllm_config_or_none()
         self.dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+            _vllm_config is not None
+            and _vllm_config.parallel_config.decode_context_parallel_size > 1
+            and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
         # Initialize q/k/v range constants.
