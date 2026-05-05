@@ -18,6 +18,8 @@ from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
 
+_TORCH_HAS_BLOCK_SCALED_MM = torch.__version__ >= "2.12" or "dev" in torch.__version__
+
 
 class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
@@ -91,6 +93,8 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def is_supported(cls, compute_capability=None):
         if not current_platform.is_xpu():
             return False, "XPUFp8BlockScaledMM only support on XPU"
+        if not _TORCH_HAS_BLOCK_SCALED_MM:
+            return False, "XPUFp8BlockScaledMM requires PyTorch >= 2.12"
         return True, None
 
     def apply_block_scaled_mm(
