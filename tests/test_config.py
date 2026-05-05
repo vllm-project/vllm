@@ -400,7 +400,7 @@ def test_nested_rope_parameters():
     """Test that nested rope_parameters (e.g., TranslateGemma) are handled correctly."""
     model_config = ModelConfig("google/translategemma-4b-it")
 
-    rope_params = model_config.hf_config.rope_parameters
+    rope_params = model_config.hf_config.text_config.rope_parameters
     assert "full_attention" in rope_params
     assert "sliding_attention" in rope_params
     assert "rope_type" in rope_params["full_attention"]
