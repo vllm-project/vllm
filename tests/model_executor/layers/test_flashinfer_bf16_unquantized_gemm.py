@@ -14,6 +14,18 @@ def _mock_flashinfer_mm(a, b, bias=None, backend="auto"):
     return torch.nn.functional.linear(a, b.t(), bias)
 
 
+def _mock_flashinfer_available(monkeypatch, supported_backends=("auto", "cudnn")):
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.is_flashinfer_bf16_backend_supported",
+        lambda backend: backend in supported_backends,
+    )
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.get_flashinfer_bf16_supported_backends",
+        lambda: tuple(backend for backend in supported_backends if backend != "auto"),
+    )
+
+
 def test_maybe_flashinfer_bf16_unquantized_gemm_uses_flashinfer_on_sm100(
     monkeypatch,
 ):
@@ -28,7 +40,7 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_uses_flashinfer_on_sm100(
     )
 
     flashinfer_mm_mock = MagicMock(side_effect=_mock_flashinfer_mm)
-    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
+    _mock_flashinfer_available(monkeypatch)
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, None)
@@ -36,6 +48,27 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_uses_flashinfer_on_sm100(
     flashinfer_mm_mock.assert_called_once()
     assert flashinfer_mm_mock.call_args.kwargs["backend"] == "auto"
     torch.testing.assert_close(out, expected)
+
+
+def test_maybe_flashinfer_bf16_unquantized_gemm_skips_default_off_sm100(
+    monkeypatch,
+):
+    x = torch.randn(2, 16, dtype=torch.bfloat16)
+    weight = torch.randn(8, 16, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: False
+    )
+
+    flashinfer_mm_mock = MagicMock(side_effect=_mock_flashinfer_mm)
+    _mock_flashinfer_available(monkeypatch)
+    monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
+
+    out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, None, None)
+
+    assert out is None
+    flashinfer_mm_mock.assert_not_called()
 
 
 def test_maybe_flashinfer_bf16_unquantized_gemm_allows_forced_cudnn_off_sm100(
@@ -52,7 +85,7 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_allows_forced_cudnn_off_sm100(
     )
 
     flashinfer_mm_mock = MagicMock(side_effect=_mock_flashinfer_mm)
-    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
+    _mock_flashinfer_available(monkeypatch, supported_backends=("cudnn",))
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, "cudnn")
@@ -60,6 +93,44 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_allows_forced_cudnn_off_sm100(
     flashinfer_mm_mock.assert_called_once()
     assert flashinfer_mm_mock.call_args.kwargs["backend"] == "cudnn"
     torch.testing.assert_close(out, expected)
+
+
+@pytest.mark.parametrize(
+    "x,weight,bias",
+    [
+        (
+            torch.randn(2, 16, dtype=torch.float16),
+            torch.randn(8, 16, dtype=torch.bfloat16),
+            None,
+        ),
+        (
+            torch.randn(2, 16, dtype=torch.bfloat16),
+            torch.randn(8, 16, dtype=torch.float16),
+            None,
+        ),
+        (
+            torch.randn(2, 16, dtype=torch.bfloat16),
+            torch.randn(8, 16, dtype=torch.bfloat16),
+            torch.randn(8, dtype=torch.float16),
+        ),
+        (
+            torch.randn(16, dtype=torch.bfloat16),
+            torch.randn(8, 16, dtype=torch.bfloat16),
+            None,
+        ),
+        (
+            torch.randn(2, 16, dtype=torch.bfloat16),
+            torch.randn(8, 15, dtype=torch.bfloat16),
+            None,
+        ),
+    ],
+)
+def test_maybe_flashinfer_bf16_unquantized_gemm_rejects_invalid_inputs(
+    x,
+    weight,
+    bias,
+):
+    assert utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, None) is None
 
 
 def test_default_unquantized_gemm_cpu_falls_back_to_torch():
@@ -73,19 +144,34 @@ def test_default_unquantized_gemm_cpu_falls_back_to_torch():
     torch.testing.assert_close(out, expected)
 
 
-def test_maybe_flashinfer_bf16_unquantized_gemm_propagates_forced_backend(
+def test_maybe_flashinfer_bf16_unquantized_gemm_rejects_forced_cutlass_bias(
     monkeypatch,
 ):
     x = torch.randn(2, 16, dtype=torch.bfloat16)
     weight = torch.randn(8, 16, dtype=torch.bfloat16)
-    flashinfer_mm_mock = MagicMock(side_effect=RuntimeError("backend unsupported"))
+    bias = torch.randn(8, dtype=torch.bfloat16)
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(
         current_platform, "is_device_capability_family", lambda _: False
     )
-    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
-    monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
+    _mock_flashinfer_available(monkeypatch, supported_backends=("cutlass",))
 
-    with pytest.raises(RuntimeError, match="backend unsupported"):
+    with pytest.raises(ValueError, match="does not support bias"):
+        utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, "cutlass")
+
+
+def test_maybe_flashinfer_bf16_unquantized_gemm_rejects_unsupported_forced_backend(
+    monkeypatch,
+):
+    x = torch.randn(2, 16, dtype=torch.bfloat16)
+    weight = torch.randn(8, 16, dtype=torch.bfloat16)
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: False
+    )
+    _mock_flashinfer_available(monkeypatch, supported_backends=("cudnn",))
+
+    with pytest.raises(ValueError, match="VLLM_FLASHINFER_BF16_GEMM_BACKEND"):
         utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, None, "tgv")
