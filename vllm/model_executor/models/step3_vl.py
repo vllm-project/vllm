@@ -909,11 +909,18 @@ class Step3VLForConditionalGeneration(
             end = cum_patches[i + 1]
             if patch_pixel_values is not None and end > start:
                 selected_patch_pv_list.append(patch_pixel_values[start:end])
-        selected_patch_pv = (
-            torch.cat(selected_patch_pv_list)
-            if selected_patch_pv_list
-            else torch.empty(0, dtype=torch.float32, device=self.device)
-        )
+        if selected_patch_pv_list:
+            selected_patch_pv = torch.cat(selected_patch_pv_list)
+        else:
+            patch_img_size = getattr(self.config.vision_config, "patch_image_size", 504)
+            selected_patch_pv = torch.empty(
+                0,
+                3,
+                patch_img_size,
+                patch_img_size,
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         selected_num_patches = [num_patches[i] for i in indices]
 
@@ -957,8 +964,8 @@ class Step3VLForConditionalGeneration(
     ) -> "EncoderCudaGraphCaptureInputs":
         vision_config = self.config.vision_config
 
-        _, max_num_patches_per_item, max_total_patch_count = (
-            self._get_capture_patch_config(token_budget, max_batch_size)
+        _, _, max_total_patch_count = self._get_capture_patch_config(
+            token_budget, max_batch_size
         )
         dummy_pixel_values = torch.randn(
             max_batch_size,
