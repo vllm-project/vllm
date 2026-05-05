@@ -996,8 +996,9 @@ class InternVLChatModel(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[int]:
-        return [n * self.num_image_token
-                for n in self._get_internvl_patches_list(mm_kwargs)]
+        return [
+            n * self.num_image_token for n in self._get_internvl_patches_list(mm_kwargs)
+        ]
 
     def get_encoder_cudagraph_per_item_input_sizes(
         self,
@@ -1011,10 +1012,12 @@ class InternVLChatModel(
         indices: list[int],
     ) -> dict[str, Any]:
         modality = self.get_input_modality(mm_kwargs)
-        pv_key = ("pixel_values_flat"
-                  if modality == "image" else "pixel_values_flat_video")
-        patches_key = ("image_num_patches"
-                       if modality == "image" else "video_num_patches")
+        pv_key = (
+            "pixel_values_flat" if modality == "image" else "pixel_values_flat_video"
+        )
+        patches_key = (
+            "image_num_patches" if modality == "image" else "video_num_patches"
+        )
 
         pixel_values = mm_kwargs[pv_key]
         patches_list = self._get_internvl_patches_list(mm_kwargs)
@@ -1028,7 +1031,7 @@ class InternVLChatModel(
             cum_patches.append(cum_patches[-1] + n)
 
         selected_pv = torch.cat(
-            [pixel_values[cum_patches[i]: cum_patches[i + 1]] for i in indices]
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
         )
         selected_patches = [patches_list[i] for i in indices]
 
