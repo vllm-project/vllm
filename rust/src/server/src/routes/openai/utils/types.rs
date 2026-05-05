@@ -273,8 +273,10 @@ pub enum ChatMessage {
         content: Option<MessageContent>,
         name: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
-        /// Reasoning content for O1-style models.
-        reasoning_content: Option<String>,
+        /// Reasoning content for reasoning-capable models.
+        #[serde(alias = "reasoning_content")]
+        #[serde(alias = "thinking")]
+        reasoning: Option<String>,
     },
     #[serde(rename = "tool")]
     Tool {

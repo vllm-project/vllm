@@ -200,16 +200,14 @@ fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
         ChatMessage::Assistant {
             content,
             tool_calls,
-            reasoning_content,
+            reasoning,
             name: _,
         } => {
             let mut blocks = Vec::new();
-            if let Some(reasoning_content) = reasoning_content
-                && !reasoning_content.is_empty()
+            if let Some(reasoning) = reasoning
+                && !reasoning.is_empty()
             {
-                blocks.push(AssistantContentBlock::Reasoning {
-                    text: reasoning_content,
-                });
+                blocks.push(AssistantContentBlock::Reasoning { text: reasoning });
             }
             if let Some(content) = content {
                 blocks.extend(convert_assistant_text_blocks(content)?);
@@ -345,7 +343,9 @@ mod tests {
     use vllm_text::output::TextDecodeOptions;
 
     use super::prepare_chat_request;
-    use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
+    use crate::routes::openai::chat_completions::types::{
+        AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
+    };
     use crate::routes::openai::utils::types::{
         ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent, Tool,
         ToolCall, ToolChoice, ToolChoiceValue,
@@ -377,7 +377,7 @@ mod tests {
             }])),
             name: None,
             tool_calls: None,
-            reasoning_content: None,
+            reasoning: None,
         }];
         request.add_generation_prompt = Some(false);
         request.continue_final_message = true;
@@ -583,13 +583,18 @@ mod tests {
 
     #[test]
     fn prepare_chat_request_accepts_assistant_reasoning_history() {
+        let message = ChatCompletionMessage {
+            role: AssistantRole,
+            content: Some("answer".to_string()),
+            tool_calls: None,
+            reasoning: Some("inner".to_string()),
+        };
+        let message_json = serde_json::to_value(message).expect("message serializes");
+
         let request = ChatCompletionRequest {
-            messages: vec![ChatMessage::Assistant {
-                content: Some(MessageContent::Text("answer".to_string())),
-                name: None,
-                tool_calls: None,
-                reasoning_content: Some("inner".to_string()),
-            }],
+            messages: vec![
+                serde_json::from_value(message_json).expect("response message is valid history"),
+            ],
             add_generation_prompt: Some(false),
             ..base_request()
         };
@@ -616,6 +621,40 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_accepts_legacy_reasoning_content_alias() {
+        let request = ChatCompletionRequest {
+            messages: vec![
+                serde_json::from_value(json!({
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "inner",
+                }))
+                .expect("legacy reasoning_content alias is accepted"),
+            ],
+            add_generation_prompt: Some(false),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            "Qwen/Qwen1.5-0.5B-Chat",
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "inner".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ])]
+        );
+    }
+
+    #[test]
     fn prepare_chat_request_accepts_tools_and_tool_history() {
         let request = ChatCompletionRequest {
             messages: vec![
@@ -630,7 +669,7 @@ mod tests {
                             arguments: Some(r#"{"city":"Paris"}"#.to_string()),
                         },
                     }]),
-                    reasoning_content: None,
+                    reasoning: None,
                 },
                 ChatMessage::Tool {
                     content: MessageContent::Text("Sunny".to_string()),
@@ -799,7 +838,7 @@ mod tests {
             content: Some(MessageContent::Text("hello".to_string())),
             name: None,
             tool_calls: None,
-            reasoning_content: None,
+            reasoning: None,
         }];
         request.continue_final_message = true;
 
@@ -839,7 +878,7 @@ mod tests {
                 content: Some(MessageContent::Text("hello".to_string())),
                 name: None,
                 tool_calls: None,
-                reasoning_content: None,
+                reasoning: None,
             }],
             ..base_request()
         };

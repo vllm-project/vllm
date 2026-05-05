@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
 
@@ -347,11 +349,22 @@ pub(super) struct ChatCompletionChoice {
     pub token_ids: Option<Vec<u32>>,
 }
 
+/// A literal type for the "assistant" role, since the API only allows that specific value in
+/// responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SerializeDisplay)]
+pub(super) struct AssistantRole;
+
+impl fmt::Display for AssistantRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("assistant")
+    }
+}
+
 /// Mirrors the Python vLLM response `ChatMessage` class.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionMessage {
-    pub role: String,
+    pub role: AssistantRole,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
     pub reasoning: Option<String>,
@@ -401,7 +414,7 @@ pub(super) struct ChatCompletionStreamChoice {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Serialize)]
 pub(super) struct ChatMessageDelta {
-    pub role: Option<String>,
+    pub role: Option<AssistantRole>,
     pub content: Option<String>,
     pub tool_calls: Option<Vec<ToolCallDelta>>,
     pub reasoning: Option<String>,
