@@ -315,11 +315,33 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         while len(self._protected_prompt_block_ids) > max_blocks:
+            if not self._release_one_protected_prompt_block():
+                return
+
+    def _release_one_protected_prompt_block(self) -> bool:
+        while self._protected_prompt_block_queue:
             block_id = self._protected_prompt_block_queue.popleft()
             if block_id not in self._protected_prompt_block_ids:
                 continue
+
             self._protected_prompt_block_ids.remove(block_id)
-            self.block_pool.free_blocks([self.block_pool.blocks[block_id]])
+            block = self.block_pool.blocks[block_id]
+            if block.ref_cnt > 0:
+                self.block_pool.free_blocks([block])
+            return True
+        return False
+
+    def release_protected_prompt_blocks(
+        self, target_free_blocks: int | None = None
+    ) -> None:
+        while self._protected_prompt_block_ids:
+            if (
+                target_free_blocks is not None
+                and self.block_pool.get_num_free_blocks() >= target_free_blocks
+            ):
+                return
+            if not self._release_one_protected_prompt_block():
+                return
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """

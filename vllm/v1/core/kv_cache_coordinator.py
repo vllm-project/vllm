@@ -250,6 +250,17 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, total_computed_tokens)
 
+    def release_protected_prompt_blocks(
+        self, target_free_blocks: int | None = None
+    ) -> None:
+        for manager in self.single_type_managers:
+            if (
+                target_free_blocks is not None
+                and self.block_pool.get_num_free_blocks() >= target_free_blocks
+            ):
+                return
+            manager.release_protected_prompt_blocks(target_free_blocks)
+
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the blocks for the request.

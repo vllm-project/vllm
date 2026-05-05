@@ -345,7 +345,7 @@ class KVCacheManager:
                 num_tokens_main_model=full_num_tokens,
                 apply_admission_cap=True,
             )
-            if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+            if not self._has_enough_free_blocks(num_blocks_to_allocate):
                 return None
 
         num_tokens_main_model = total_computed_tokens + num_new_tokens
@@ -373,7 +373,7 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
 
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        if not self._has_enough_free_blocks(num_blocks_to_allocate):
             # Cannot allocate new blocks
             return None
 
@@ -446,6 +446,12 @@ class KVCacheManager:
         """
         self.block_pool.evict_blocks(block_ids)
 
+    def _has_enough_free_blocks(self, num_blocks: int) -> bool:
+        if num_blocks <= self.block_pool.get_num_free_blocks():
+            return True
+        self.coordinator.release_protected_prompt_blocks(num_blocks)
+        return num_blocks <= self.block_pool.get_num_free_blocks()
+
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
@@ -455,6 +461,7 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
+        self.coordinator.release_protected_prompt_blocks()
         if not self.block_pool.reset_prefix_cache():
             return False
         if self.log_stats:

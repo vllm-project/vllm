@@ -2693,6 +2693,97 @@ def test_deepseek_v4_mla_keeps_hybrid_aligned_prompt_blocks_after_decode():
     assert num_computed_tokens == expected_hit_tokens
 
 
+def test_deepseek_v4_mla_protected_prompt_blocks_do_not_block_admission():
+    block_size = 8
+    prompt_tokens = 4 * block_size + 3
+    protected_blocks_per_prompt = (prompt_tokens - 1) // block_size
+    num_prompts = 10
+    num_blocks = 80
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer_full"],
+                    MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.uint8,
+                        cache_dtype_str="fp8_ds_mla",
+                        model_version="deepseek_v4",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=512,
+        max_num_batched_tokens=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    mla_manager = manager.coordinator.single_type_managers[0]
+
+    for i in range(num_prompts):
+        prompt = list(range(i * 1000, i * 1000 + prompt_tokens))
+        req = make_request(f"protected_{i}", prompt, block_size, sha256)
+        assert manager.allocate_slots(req, prompt_tokens) is not None
+        req.num_computed_tokens = prompt_tokens
+        manager.free(req)
+
+    assert len(mla_manager._protected_prompt_block_ids) == (
+        num_prompts * protected_blocks_per_prompt
+    )
+    assert manager.block_pool.get_num_free_blocks() < 64
+
+    long_req = make_request(
+        "long",
+        list(range(100_000, 100_000 + 64 * block_size)),
+        block_size,
+        sha256,
+    )
+    assert (
+        manager.allocate_slots(long_req, block_size, full_sequence_must_fit=True)
+        is not None
+    )
+
+
+def test_reset_prefix_cache_releases_deepseek_v4_mla_protected_blocks():
+    block_size = 8
+    prompt_tokens = 4 * block_size + 3
+    manager = KVCacheManager(
+        KVCacheConfig(
+            num_blocks=32,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer_full"],
+                    MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.uint8,
+                        cache_dtype_str="fp8_ds_mla",
+                        model_version="deepseek_v4",
+                    ),
+                )
+            ],
+        ),
+        max_model_len=512,
+        max_num_batched_tokens=128,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    req = make_request("protected", list(range(prompt_tokens)), block_size, sha256)
+    assert manager.allocate_slots(req, prompt_tokens) is not None
+    req.num_computed_tokens = prompt_tokens
+    manager.free(req)
+
+    assert manager.coordinator.single_type_managers[0]._protected_prompt_block_ids
+    assert manager.reset_prefix_cache()
+
+
 def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     """The cap only loosens the SWA group; a prompt that exceeds the
     full-attention pool capacity must still be rejected."""
