@@ -928,6 +928,16 @@ VLM_TEST_SETTINGS = {
             ),
         ],
     ),
+    "qianfan_ocr": VLMTestInfo(
+        models=["baidu/Qianfan-OCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModelForImageTextToText,
+        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
+    ),
     "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
