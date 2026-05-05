@@ -317,7 +317,7 @@ vLLM assumes that its cache directories are **private and trusted**. Cache conte
 
 ### Cache Directory Configuration
 
-All cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it.
+Most cache paths default to subdirectories under a single root. Changing `VLLM_CACHE_ROOT` changes the default location for all features that inherit from it. When `torch.compile` caching is enabled (the default), vLLM also redirects `TRITON_CACHE_DIR` into this tree. If compile caching is disabled, Triton falls back to its own default location (`~/.triton/cache`).
 
 | Environment Variable | Default | Description |
 | --- | --- | --- |
@@ -329,7 +329,7 @@ All cache paths default to subdirectories under a single root. Changing `VLLM_CA
 
 ### Recommendations
 
-- **Restrict file permissions** on `VLLM_CACHE_ROOT` so that only the vLLM process owner can read and write to it.
+- **Restrict file permissions** on `VLLM_CACHE_ROOT` (and any other cache directories used by dependencies, such as `~/.triton` if compile caching is disabled) so that only the vLLM process owner can read and write to them.
 - **Do not copy cache contents from untrusted sources.** If you distribute cache artifacts between environments, ensure they originate from a trusted build pipeline.
 - **Container deployments:** If mounting cache directories into containers, ensure the volume source is trusted.
 
