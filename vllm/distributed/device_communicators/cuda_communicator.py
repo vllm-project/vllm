@@ -343,6 +343,34 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
 
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        world_size = self.world_size
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input_
+        if dim < 0:
+            dim += input_.dim()
+        input_size = input_.size()
+        # Use PyNCCL's all_gather to avoid ProcessGroupNCCL watchdog
+        # thread crashes (hipErrorCapturedEvent) during CUDA graph capture
+        # on ROCm.
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            output_size = (input_size[0] * world_size,) + input_size[1:]
+            output_tensor = torch.empty(
+                output_size, dtype=input_.dtype, device=input_.device
+            )
+            pynccl_comm.all_gather(output_tensor, input_)
+            output_tensor = output_tensor.reshape((world_size,) + input_size)
+            output_tensor = output_tensor.movedim(0, dim)
+            output_tensor = output_tensor.reshape(
+                input_size[:dim]
+                + (world_size * input_size[dim],)
+                + input_size[dim + 1 :]
+            )
+            return output_tensor
+        return super().all_gather(input_, dim)
+
     def all_gatherv(
         self,
         input_: torch.Tensor | list[torch.Tensor],
