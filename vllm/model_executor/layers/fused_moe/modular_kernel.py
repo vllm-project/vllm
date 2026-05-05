@@ -1531,6 +1531,12 @@ class FusedMoEKernel:
         else:
             return False
 
+    def clear_shared_experts(self) -> None:
+        """Release ownership of shared experts so the runner can overlap them
+        with routed experts via a separate CUDA stream."""
+        if isinstance(self.impl, FusedMoEKernelModularImpl):
+            self.impl.shared_experts = None
+
     @property
     def is_monolithic(self) -> bool:
         return isinstance(self.impl, FusedMoEKernelMonolithicImpl)

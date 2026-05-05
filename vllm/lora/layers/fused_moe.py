@@ -15,7 +15,11 @@ from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRACon
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.lora_experts_mixin import LoRAExpertsMixin
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEKernel,
+    FusedMoEKernelModularImpl,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
@@ -58,6 +62,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         routed_experts._ensure_moe_quant_config_init()
         if getattr(routed_experts.quant_method, "supports_internal_mk", False):
             moe_kernel = routed_experts.quant_method.moe_kernel
+            assert moe_kernel is not None, (
+                "Fused MoE quant method must provide a moe_kernel."
+            )
+            # Don't let the kernel own shared experts so the runner can
+            # overlap them with routed experts via a separate CUDA stream.
+            assert isinstance(moe_kernel.impl, FusedMoEKernelModularImpl)
+            moe_kernel.impl.shared_experts = None
         else:
             prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
             moe_kernel = FusedMoEKernel(
@@ -482,9 +493,13 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
 
-        assert isinstance(model_config, PretrainedConfig)
+        if model_config is None:
+            raise ValueError("model_config must be provided for MoE LoRA.")
+        architectures = model_config.architectures
+        if not architectures:
+            raise ValueError("model_config.architectures must be defined for MoE LoRA.")
         self._verify_ep_fs(lora_config)
-        self._base_model = model_config.architectures[0]
+        self._base_model = architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
