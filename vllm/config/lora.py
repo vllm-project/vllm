@@ -111,7 +111,6 @@ class LoRAConfig:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(f"{self.max_cpu_loras=} must be >= {self.max_loras=}.")
-
         if envs.VLLM_LORA_ENABLE_DUAL_STREAM and not current_platform.is_cuda_alike():
             raise ValueError("Dual CUDA streams are only supported on CUDA platforms.")
         if envs.VLLM_LORA_ENABLE_DUAL_STREAM and self.fully_sharded_loras:
