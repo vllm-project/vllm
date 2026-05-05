@@ -16,6 +16,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
+
 
 class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
@@ -69,4 +71,43 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        pass
+        m = A.shape[0]
+        A_2d = A.reshape(m, A.shape[-1])
+        out = torch._scaled_mm(
+            A_2d,
+            B,
+            scale_a=As,
+            scale_b=Bs,
+            bias=bias,
+            out_dtype=out_dtype,
+        )
+        if type(out) is tuple and len(out) == 2:
+            out = out[0]
+        return out.reshape(*output_shape, out.shape[-1])
+
+
+class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        if not current_platform.is_xpu():
+            return False, "XPUFp8BlockScaledMM only support on XPU"
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
+        out = torch._scaled_mm(
+            A,
+            B.t().contiguous(),
+            scale_a=As,
+            scale_b=Bs.t().contiguous(),
+            out_dtype=out_dtype,
+        )
+        if type(out) is tuple and len(out) == 2:
+            out = out[0]
+        return out
