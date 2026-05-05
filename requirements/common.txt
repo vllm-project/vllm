@@ -49,7 +49,7 @@ ijson # Required for mistral streaming tool parser
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic >= 0.71.0
-model-hosting-container-standards >= 0.1.13, < 1.0.0
+model-hosting-container-standards >= 0.1.14, < 1.0.0
 mcp
 opentelemetry-sdk >= 1.27.0
 opentelemetry-api >= 1.27.0
