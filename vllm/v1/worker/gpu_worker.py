@@ -957,6 +957,7 @@ class Worker(WorkerBase):
             init_info: Dictionary containing backend-specific initialization info
         """
         self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
@@ -1006,6 +1007,7 @@ class Worker(WorkerBase):
             update_info: Dictionary containing backend-specific update info
         """
         self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
 
         if not self._weight_update_active:
             raise RuntimeError(
