@@ -65,6 +65,8 @@ class Mxfp4MoeBackend(Enum):
     MARLIN = "MARLIN"
     # ROCm AITER backends
     AITER_MXFP4_BF16 = "AITER_MXFP4_BF16"  # W4A16: CK kernel
+    # Keep the legacy name as an alias while the ROCm split backend rename settles.
+    AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     # Triton
     TRITON = "TRITON"
@@ -255,7 +257,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
-        return [Mxfp4MoeBackend.AITER]
+        return [Mxfp4MoeBackend.AITER_MXFP4_BF16]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
@@ -555,7 +557,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     ):
         priority_backends = [
             Mxfp4MoeBackend.TRITON_UNFUSED,
-            Mxfp4MoeBackend.AITER,
+            Mxfp4MoeBackend.AITER_MXFP4_BF16,
         ]
     else:
         priority_backends = _get_priority_backends()
@@ -1269,7 +1271,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
         from vllm._aiter_ops import rocm_aiter_ops
 
         if w13_bias is not None:
