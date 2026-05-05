@@ -146,9 +146,9 @@ def maybe_flashinfer_bf16_unquantized_gemm(
     if backend is None and not current_platform.is_device_capability_family(100):
         return None
 
-    if flashinfer_backend == "cutlass" and bias is not None:
+    if flashinfer_backend in ("cutlass", "cublaslt") and bias is not None:
         raise ValueError(
-            "VLLM_BF16_GEMM_BACKEND='cutlass' does not support bias for "
+            f"VLLM_BF16_GEMM_BACKEND={flashinfer_backend!r} does not support bias for "
             "FlashInfer BF16 GEMM."
         )
 
