@@ -121,6 +121,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
             if self.end_token_id in delta_token_ids:
                 # start token in previous, end token in delta,
                 # extract reasoning content
+                if self.end_token not in delta_text:
+                    # Token ID arrived before text was flushed
+                    # (stop-sequence buffering). Wait for next delta.
+                    return None
                 end_index = delta_text.find(self.end_token)
                 reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.end_token) :]
@@ -139,6 +143,13 @@ class BaseThinkingReasoningParser(ReasoningParser):
             if self.end_token_id in delta_token_ids:
                 # start token in delta, end token in delta,
                 # extract reasoning content
+                if (
+                    self.start_token not in delta_text
+                    or self.end_token not in delta_text
+                ):
+                    # Token IDs arrived before text was flushed.
+                    # Wait for next delta.
+                    return None
                 start_index = delta_text.find(self.start_token)
                 end_index = delta_text.find(self.end_token)
                 reasoning = delta_text[start_index + len(self.start_token) : end_index]

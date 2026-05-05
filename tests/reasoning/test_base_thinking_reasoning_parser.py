@@ -436,3 +436,39 @@ class TestBaseThinkingReasoningParserEdgeCases:
         # Should treat as regular content since tokens don't match exactly
         assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
         assert content is None
+
+
+class TestBaseThinkingStreamingBuffered:
+    """Test streaming with buffered token IDs (stream_interval > 1)."""
+
+    def test_end_token_id_buffered_with_start_in_previous(self, test_tokenizer):
+        """end_token_id in delta but end_token text not yet flushed."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start_id = parser.start_token_id
+        end_id = parser.end_token_id
+
+        result = parser.extract_reasoning_streaming(
+            previous_text="some reasoning",
+            current_text="some reasoning more",
+            delta_text="more",  # end_token text NOT present
+            previous_token_ids=[start_id],
+            current_token_ids=[start_id, end_id, 999],
+            delta_token_ids=[end_id, 999],
+        )
+        assert result is None
+
+    def test_both_tokens_buffered_in_delta(self, test_tokenizer):
+        """start and end token IDs in delta but text not yet flushed."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start_id = parser.start_token_id
+        end_id = parser.end_token_id
+
+        result = parser.extract_reasoning_streaming(
+            previous_text="",
+            current_text="prefix",
+            delta_text="prefix",  # neither token text present
+            previous_token_ids=[],
+            current_token_ids=[start_id, end_id, 999],
+            delta_token_ids=[start_id, end_id, 999],
+        )
+        assert result is None
