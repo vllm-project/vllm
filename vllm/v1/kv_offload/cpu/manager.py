@@ -311,3 +311,6 @@ class FilterReusedOffloadingManager(OffloadingManager):
 
     def request_finished(self, req_id: str) -> bool:
         return self._backing.request_finished(req_id)
+
+    def shutdown(self) -> None:
+        return self._backing.shutdown()
