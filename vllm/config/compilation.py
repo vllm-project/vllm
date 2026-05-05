@@ -1436,11 +1436,10 @@ class CompilationConfig:
             and max_num_reqs > kv_cache_config.num_blocks
         ):
             num_blocks = kv_cache_config.num_blocks
-            user_set_max_num_seqs = (
-                scheduler_config is not None
-                and scheduler_config.original_max_num_seqs is not None
-            )
-            if user_set_max_num_seqs:
+            if (
+                scheduler_config is None
+                or scheduler_config.original_max_num_seqs is not None
+            ):
                 raise ValueError(
                     f"max_num_seqs ({max_num_reqs}) exceeds available Mamba "
                     f"cache blocks ({num_blocks}). Each decode sequence "
@@ -1457,20 +1456,39 @@ class CompilationConfig:
                 num_blocks,
                 num_blocks,
             )
-            assert scheduler_config is not None
+            # TODO: this in-place mutation of scheduler_config + cudagraph
+            # sizes patches state that was already computed against the
+            # pre-clamp max_num_seqs. Long-term fix: defer cudagraph size
+            # finalization until after max_num_seqs is known
+            # (post-KV-cache-profiling) so the values are correct from
+            # the start. Until that refactor lands, any new
+            # max_num_seqs-dependent attribute on CompilationConfig must
+            # be re-clamped in `_clamp_cudagraph_sizes_to`.
             scheduler_config.max_num_seqs = num_blocks
-            if self.cudagraph_capture_sizes:
-                self.cudagraph_capture_sizes = [
-                    s for s in self.cudagraph_capture_sizes if s <= num_blocks
-                ]
-                if (
-                    self.max_cudagraph_capture_size is not None
-                    and self.max_cudagraph_capture_size > num_blocks
-                ):
-                    self.max_cudagraph_capture_size = num_blocks
+            self._clamp_cudagraph_sizes_to(num_blocks)
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
+
+    def _clamp_cudagraph_sizes_to(self, max_size: int) -> None:
+        """Clamp cudagraph capture sizes so they fit within `max_size`.
+
+        Filters `cudagraph_capture_sizes` and lowers
+        `max_cudagraph_capture_size` if either exceeds `max_size`. Used
+        when a downstream constraint (e.g. Mamba cache blocks) forces a
+        smaller batch size after the cudagraph sizes were already
+        computed in `VllmConfig`.
+        """
+        if not self.cudagraph_capture_sizes:
+            return
+        self.cudagraph_capture_sizes = [
+            s for s in self.cudagraph_capture_sizes if s <= max_size
+        ]
+        if (
+            self.max_cudagraph_capture_size is not None
+            and self.max_cudagraph_capture_size > max_size
+        ):
+            self.max_cudagraph_capture_size = max_size
 
     def adjust_cudagraph_sizes_for_spec_decode(
         self, uniform_decode_query_len: int, tensor_parallel_size: int

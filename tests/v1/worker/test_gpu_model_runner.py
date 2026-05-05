@@ -1222,9 +1222,25 @@ def test_is_uniform_decode() -> None:
     current_platform.is_rocm(),
     reason="Attention backend FLASHINFER is not supported on ROCm.",
 )
-def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
-    """Test that a ValueError is raised when max_num_seqs exceeds the
-    available Mamba cache blocks for hybrid models with FULL cudagraphs.
+@pytest.mark.parametrize(
+    "original_max_num_seqs, expect_raise",
+    [
+        pytest.param(10, True, id="user_set_raises"),
+        pytest.param(None, False, id="default_auto_adjusts"),
+    ],
+)
+def test_mamba_cache_when_max_num_seqs_exceeds_blocks(
+    original_max_num_seqs, expect_raise
+):
+    """Verify behavior when max_num_seqs exceeds the available Mamba
+    cache blocks for hybrid models with FULL cudagraphs:
+
+    - When the user set `max_num_seqs` explicitly (`original_max_num_seqs`
+      is not None), raise `ValueError` with the actionable message.
+    - When `max_num_seqs` is the engine-determined default
+      (`original_max_num_seqs` is None), auto-adjust it down to the
+      available block count and filter cudagraph capture sizes
+      accordingly so the server can start.
 
     See: https://github.com/vllm-project/vllm/issues/34094
     """
@@ -1252,6 +1268,7 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
+        original_max_num_seqs=original_max_num_seqs,
         max_num_batched_tokens=512,
         max_model_len=512,
         is_encoder_decoder=model_config.is_encoder_decoder,
@@ -1319,5 +1336,13 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
         # Force max_num_seqs to exceed num_blocks so the check triggers.
         runner.max_num_reqs = num_blocks + 100
 
-        with pytest.raises(ValueError, match="max_num_seqs"):
+        if expect_raise:
+            with pytest.raises(ValueError, match="max_num_seqs"):
+                runner.initialize_kv_cache(kv_cache_config)
+        else:
             runner.initialize_kv_cache(kv_cache_config)
+            assert scheduler_config.max_num_seqs == num_blocks
+            assert all(
+                s <= num_blocks
+                for s in vllm_config.compilation_config.cudagraph_capture_sizes
+            )

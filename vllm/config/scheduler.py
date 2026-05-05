@@ -69,8 +69,9 @@ class SchedulerConfig:
 
     original_max_num_seqs: int | None = None
     """The user-supplied `max_num_seqs` before any defaulting, or `None` if
-    the user did not set it explicitly. Used to decide whether `max_num_seqs`
-    may be auto-adjusted (e.g. lowered to fit available Mamba cache blocks)."""
+    the user did not set it explicitly. Set by `EngineArgs.create_engine_config`;
+    not user-configurable. Used to decide whether `max_num_seqs` may be auto-adjusted
+    (e.g. lowered to fit available Mamba cache blocks)."""
 
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
