@@ -648,21 +648,37 @@ class DelegatingParser(Parser):
         return state.reasoning_ended
 
     def _expect_streamed_thinking_blocks(self) -> bool:
-        """True when chat template kwargs say the model emits thinking in outputs.
+        """True when chat template kwargs say the model emits thinking in
+        outputs (``thinking=True`` or ``enable_thinking=True``).  When
+        kwargs are missing, falls back to the reasoning parser: any
+        ``reasoning_start_str`` implies streamed thinking blocks
+        (DeepSeek / R1 / Qwen3-thinking, but *not* Identity).
 
-        Mirrors ``DeepSeekV3ReasoningParser`` so multi-turn DeepSeek keeps streaming
-        reasoning extraction while Qwen-style ``thinking=false`` + tools can still
-        use ``is_reasoning_end(prompt)`` to skip empty prefilled think spans.
+        An explicit ``thinking=False`` / ``enable_thinking=False``
+        overrides the fallback so Qwen3-thinking-disabled + tools can
+        still use ``is_reasoning_end(prompt)``.
         """
-        kwargs = getattr(self, "_chat_template_kwargs", None)
-        if kwargs is None:
-            return False
-        # Be defensive: some custom parser construction paths may pass the full
-        # ``kwargs`` dict, where chat template options are nested one level deeper.
+        # 1. Respect explicit kwargs (handle both flat and nested shapes).
+        kwargs = getattr(self, "_chat_template_kwargs", None) or {}
         chat_kwargs = kwargs.get("chat_template_kwargs", kwargs)
-        return bool(chat_kwargs.get("thinking")) or bool(
-            chat_kwargs.get("enable_thinking")
-        )
+        if isinstance(chat_kwargs, dict):
+            if bool(chat_kwargs.get("thinking")) or bool(
+                chat_kwargs.get("enable_thinking")
+            ):
+                return True
+            if (
+                chat_kwargs.get("thinking") is False
+                or chat_kwargs.get("enable_thinking") is False
+            ):
+                return False
+        # 2. Fallback: a reasoning parser with a start token implies streaming
+        #    think blocks (DeepSeek/R1/Qwen3-thinking). IdentityReasoningParser
+        #    has reasoning_start_str=None and correctly falls through to False.
+        if self._reasoning_parser is not None:
+            return (
+                getattr(self._reasoning_parser, "reasoning_start_str", None) is not None
+            )
+        return False
 
     def _should_prefill_reasoning_ended_from_prompt(self) -> bool:
         """Whether to apply ``is_reasoning_end`` on ``prompt_token_ids``."""
