@@ -511,11 +511,11 @@ class Glm4MoeModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name_mapped.endswith(".bias") and name_mapped not in params_dict:
                     continue
-                if is_pp_missing_parameter(name_mapped, self):
-                    continue
 
                 name_mapped = maybe_remap_kv_scale_name(name_mapped, params_dict)
                 if name_mapped is None:
+                    continue
+                if is_pp_missing_parameter(name_mapped, self):
                     continue
 
                 param = params_dict[name_mapped]
@@ -524,6 +524,7 @@ class Glm4MoeModel(nn.Module):
                     weight_loader(param, loaded_weight)
                 else:
                     weight_loader(param, loaded_weight, shard_id)
+                name = name_mapped
                 break
             else:
                 is_expert_weight = False
