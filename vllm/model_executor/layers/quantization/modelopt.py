@@ -1241,10 +1241,16 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         weight_scale    fp8-e4m3  per 16-elem group along input dim
         weight_scale_2  fp32      per-tensor global scale = amax / (6.0 * 448.0)
 
-    No activation quantization; no input_scale on disk. Marlin expects the
-    global scale in the same form ModelOpt stores (amax/2688), so we rename
-    weight_scale_2 -> weight_global_scale **without reciprocation** -- the CT
-    W4A16 path reciprocates only because CT stores the inverse on disk.
+    No activation quantization. Marlin expects the global scale in the same
+    form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
+    weight_global_scale **without reciprocation** -- the CT W4A16 path
+    reciprocates only because CT stores the inverse on disk.
+
+    We also register a placeholder input_scale parameter so that W4A4-shaped
+    checkpoints (which contain *_proj.input_scale tensors) can be loaded
+    under this method without the per-shard loader hitting a KeyError on
+    the merged-name lookup. The placeholder is discarded in
+    process_weights_after_loading -- its value is never used.
     """
 
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
@@ -1323,7 +1329,26 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
+        # Placeholder input_scale param so W4A4-shaped checkpoints can be
+        # loaded under this method without KeyError on the merged-name
+        # lookup (qwen2-style stacked-loader path renames *_proj.input_scale
+        # to e.g. qkv_proj.input_scale and looks it up unconditionally).
+        # Discarded in process_weights_after_loading; never read by the kernel.
+        # For native W4A16 checkpoints (no input_scale on disk) the param
+        # stays uninitialized and is simply deleted.
+        input_scale = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("input_scale", input_scale)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Discard the input_scale placeholder. Whether it carries values
+        # (W4A4 ckpt loaded as W4A16) or is uninitialized (native W4A16
+        # ckpt), W4A16 mode does not quantize activations, so this is unused.
+        if hasattr(layer, "input_scale"):
+            del layer.input_scale
+
         if torch.unique(layer.weight_scale_2).numel() != 1:
             logger.warning_once(
                 "In NVFP4_W4A16 linear, the global weight scale "
