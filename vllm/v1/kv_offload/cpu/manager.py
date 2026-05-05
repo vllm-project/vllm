@@ -218,10 +218,10 @@ class FilterReusedOffloadingManager(OffloadingManager):
     intercepted:
 
     * ``prepare_store`` — filters out keys that have not yet
-    * ``lookup`` — records the visited key in an internal LRU
-      counter, then delegates to the backing manager.
       crossed the threshold *before* calling the backing
       ``prepare_store``.
+    * ``lookup`` — records the visited key in an internal LRU
+      counter, then delegates to the backing manager.
 
     Args:
         backing: The underlying ``OffloadingManager`` to delegate to.
