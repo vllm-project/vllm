@@ -23,7 +23,13 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-FLASHINFER_BF16_GEMM_BACKENDS = ("cudnn", "cutlass", "tgv", "cublaslt")
+FLASHINFER_BF16_GEMM_BACKENDS = (
+    "cudnn",
+    "cutlass",
+    "tgv",
+    "cublaslt",
+    "tinygemm",
+)
 FLASHINFER_BF16_GEMM_BACKENDS_WITHOUT_BIAS = ("cutlass", "cublaslt")
 
 # This is the storage path for the cubins, it can be replaced
@@ -733,7 +739,7 @@ def flashinfer_bf16_mm(
         assert bias.dtype == torch.bfloat16
         assert bias.device == a.device
 
-    pdl = backend == "tgv" or (backend == "auto" and bias is not None)
+    pdl = backend in ("tgv", "tinygemm") or (backend == "auto" and bias is not None)
     return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl, backend)
 
 
