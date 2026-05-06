@@ -257,10 +257,14 @@ class DPSupervisor:
             deadline = time.monotonic() + 60.0
             while not supervisor_server.started:
                 if supervisor_server_task.done():
-                    await self._raise_if_supervisor_server_stopped(
-                        supervisor_server_task,
-                        "Multi-port external LB supervisor exited before startup",
-                    )
+                    try:
+                        raise RuntimeError(
+                            "Multi-port external LB supervisor exited before startup"
+                        ) from supervisor_server_task.exception()
+                    except asyncio.CancelledError as exc:
+                        raise RuntimeError(
+                            "Multi-port external LB supervisor exited before startup"
+                        ) from exc
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
                         "Timed out starting multi-port external LB supervisor"
@@ -302,21 +306,6 @@ class DPSupervisor:
         )
         self._stop_requested.set()
 
-    async def _raise_if_supervisor_server_stopped(
-        self,
-        supervisor_server_task: asyncio.Task[None],
-        message: str,
-    ) -> None:
-        if not supervisor_server_task.done():
-            return
-        try:
-            await supervisor_server_task
-        except asyncio.CancelledError as exc:
-            raise RuntimeError(message) from exc
-        except Exception as exc:
-            raise RuntimeError(message) from exc
-        raise RuntimeError(message)
-
     def _start_children(self) -> None:
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
@@ -337,10 +326,15 @@ class DPSupervisor:
         timeout = aiohttp.ClientTimeout(total=HEALTHCHECK_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while not self._stop_requested.is_set():
-                await self._raise_if_supervisor_server_stopped(
-                    supervisor_server_task,
-                    "Multi-port external LB supervisor exited unexpectedly",
-                )
+                if supervisor_server_task.done():
+                    try:
+                        raise RuntimeError(
+                            "Multi-port external LB supervisor exited unexpectedly"
+                        ) from supervisor_server_task.exception()
+                    except asyncio.CancelledError as exc:
+                        raise RuntimeError(
+                            "Multi-port external LB supervisor exited unexpectedly"
+                        ) from exc
                 child_health = await asyncio.gather(
                     *(
                         _probe_endpoint(session, self.args, port, "/health")
