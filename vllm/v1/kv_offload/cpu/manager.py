@@ -86,7 +86,11 @@ class CPUOffloadingManager(OffloadingManager):
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         block = self._policy.get(key)
-        return block is not None and block.is_ready
+        if block is None:
+            return False
+        if not block.is_ready:
+            return None  # write in-flight; caller should retry
+        return True
 
     def prepare_load(
         self,

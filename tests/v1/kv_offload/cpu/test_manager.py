@@ -163,9 +163,9 @@ def test_cpu_manager():
         ),
     )
 
-    # lookup [1, 2] -> not ready
-    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
-    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
+    # lookup [1, 2] -> write in-flight, not yet ready
+    assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is None
+    assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is None
 
     # no events so far
     assert list(cpu_manager.take_events()) == []
@@ -296,9 +296,9 @@ class TestARCPolicy:
             ),
         )
 
-        # lookup [1, 2] -> not ready
-        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
-        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is False
+        # lookup [1, 2] -> write in-flight, not yet ready
+        assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is None
+        assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is None
 
         # no events so far
         assert list(cpu_manager.take_events()) == []
