@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from math import lcm
 from typing import NamedTuple
 
 from vllm import envs
@@ -303,6 +304,21 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, total_computed_tokens)
 
+    def release_protected_prompt_blocks(
+        self,
+        target_free_blocks: int | None = None,
+        block_ids_to_skip: set[int] | None = None,
+    ) -> None:
+        for manager in self.single_type_managers:
+            if (
+                target_free_blocks is not None
+                and self.block_pool.get_num_free_blocks() >= target_free_blocks
+            ):
+                return
+            manager.release_protected_prompt_blocks(
+                target_free_blocks, block_ids_to_skip
+            )
+
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the blocks for the request.
@@ -550,6 +566,24 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if group.use_eagle:
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
+
+        # The LCM of the block sizes of all attention types.
+        # The cache hit length must be a multiple of the LCM of the block sizes
+        # to make sure the cache hit length is a multiple of the block size of
+        # each attention type. Requiring this because we don't support partial
+        # block cache hit yet.
+        block_sizes = [group.spec.block_size for group in self.attention_groups]
+        self.lcm_block_size = lcm(*block_sizes)
+        for manager in self.single_type_managers:
+            manager.cache_alignment_tokens = self.lcm_block_size
+
+        # Attention-group indices (into ``self.attention_groups``) that
+        # contain at least one EAGLE/MTP KV cache group.
+        self.eagle_attn_group_indices: set[int] = {
+            i
+            for i, group in enumerate(self.attention_groups)
+            if group.use_eagle
+        }
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         # Cache hits in this coordinator are always a multiple of
