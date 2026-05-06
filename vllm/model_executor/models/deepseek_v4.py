@@ -1245,7 +1245,12 @@ class DeepseekV4Model(nn.Module):
         # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
-        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # Disable them on ROCm because of hang issues.
+        aux_stream_list = (
+            None
+            if current_platform.is_rocm()
+            else [torch.cuda.Stream() for _ in range(3)]
+        )
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.

@@ -81,8 +81,24 @@ from .utils import (
 logger = init_logger(__name__)
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
+_SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+
+def _get_max_soft_tokens(
+    merged_kwargs: Mapping[str, object],
+) -> tuple[object | None, bool]:
+    """Return configured image max_soft_tokens and whether it is top-level."""
+    val = merged_kwargs.get("max_soft_tokens")
+    if val is not None:
+        return val, True
+
+    images_kwargs = merged_kwargs.get("images_kwargs")
+    if isinstance(images_kwargs, Mapping):
+        return images_kwargs.get("max_soft_tokens"), False
+
+    return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -216,10 +232,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         config = self.get_hf_config()
-        # Upper bound: the pooler outputs default_output_length slots
-        # per image (280).  After padding is stripped the actual count
-        # is ≤ this value, but vLLM needs the max for memory planning.
+        # Upper bound: the pooler outputs max_soft_tokens slots per image.
+        # After padding is stripped the actual count is ≤ this value, but
+        # vLLM needs the max for memory planning.
         tokens_per_image = config.vision_config.default_output_length
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val, _ = _get_max_soft_tokens(merged_kwargs)
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
         if config.audio_config is not None:
             # Audio max tokens from the processor's audio_seq_length.
@@ -492,13 +512,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Validate max_soft_tokens early and exit cleanly on bad values.
-        _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
-
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
-        val = merged_kwargs.get("max_soft_tokens")
-        if val is None:
-            val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
+        val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
             raise ValueError(
@@ -645,7 +660,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
         patched_mm_kwargs = dict(mm_kwargs)
-        if val is not None:
+        if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
         processed_outputs = super()._call_hf_processor(
@@ -755,7 +770,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
                     hf_processor_mm_kwargs,
                 )
-                max_soft_tokens = merged_kwargs.get("max_soft_tokens")
+                val, _ = _get_max_soft_tokens(merged_kwargs)
+                max_soft_tokens = (
+                    val
+                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS
+                    else None
+                )
                 return self.info.get_image_repl(
                     image_width=image_size.width,
                     image_height=image_size.height,
