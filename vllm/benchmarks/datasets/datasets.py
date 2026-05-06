@@ -2259,12 +2259,15 @@ class CustomMMDataset(CustomDataset):
         "image_files": ["path/to/image1.png", "path/to/image2.png"],
     }
     {
-        "prompt": "Which country has the most pokemons based on the given graphs?",
-        "image_files": ["path/to/image.png"],
+        "prompt": "Describe the video and the accompanying image.",
+        "video_files": ["path/to/clip.mp4"],
+        "image_files": ["path/to/frame.png"],
     }
     ```
 
-    NOTE: Only the first image file in "image_files" is used for each sample request.
+    Each item must contain "image_files", "video_files", or both.
+    If both are present, "image_files" takes precedence.
+    Only the first file in each list is used.
 
     This is used to benchmark multimodal LLMs on arbitrary datasets.
     """
@@ -2298,24 +2301,27 @@ class CustomMMDataset(CustomDataset):
             prompt = item["prompt"]
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            if "video_files" in item:
-                videos = item["video_files"]
-                if len(videos) > 1:
-                    logger.warning(
-                        "Multiple video files found for sample %d. "
-                        "Only the first video will be used.",
-                        i,
-                    )
-                mm_content = process_video(videos[0])
+            image_files = item.get("image_files", [])
+            video_files = item.get("video_files", [])
+            if image_files and video_files:
+                logger.warning(
+                    "Both 'image_files' and 'video_files' found for sample %d. "
+                    "Only images will be used.",
+                    i,
+                )
+                video_files = []
+            if video_files:
+                files, process_fn, modality = video_files, process_video, "video"
             else:
-                images = item["image_files"]
-                if len(images) > 1:
-                    logger.warning(
-                        "Multiple image files found for sample %d. "
-                        "Only the first image will be used.",
-                        i,
-                    )
-                mm_content = process_image(images[0])
+                files, process_fn, modality = image_files, process_image, "image"
+            if len(files) > 1:
+                logger.warning(
+                    "Multiple %s files found for sample %d. "
+                    "Only the first will be used.",
+                    modality,
+                    i,
+                )
+            mm_content = process_fn(files[0])
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
