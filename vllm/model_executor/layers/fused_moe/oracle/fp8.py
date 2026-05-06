@@ -220,9 +220,6 @@ def select_fp8_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
-    if config.is_lora_enabled:
-        return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)[0]
-
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 

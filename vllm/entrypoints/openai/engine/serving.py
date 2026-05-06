@@ -157,6 +157,19 @@ class OpenAIServing:
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
 
+        # Computed once at startup (cached by ``vllm_config`` identity) and
+        # stamped on non-streaming responses. Streaming chunks deliberately
+        # omit it to avoid per-chunk overhead.
+        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+
+        try:
+            self.system_fingerprint: str | None = get_system_fingerprint(
+                engine_client.vllm_config
+            )
+        except Exception:
+            # Never fail server startup over the fingerprint.
+            self.system_fingerprint = None
+
     async def beam_search(
         self,
         prompt: EngineInput,
@@ -625,8 +638,9 @@ class OpenAIServing:
             and request.tool_choice
             and isinstance(request.tool_choice, ToolChoiceFunction)
         ):
-            assert content is not None
             # Forced Function Call (Responses API)
+            if content is None:
+                return [], None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
@@ -638,7 +652,8 @@ class OpenAIServing:
             and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
         ):
             # Named function with standard JSON-based parsing
-            assert content is not None
+            if content is None:
+                return [], None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
@@ -741,6 +756,8 @@ class OpenAIServing:
 
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
+            return True
+        if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
             return True
         return self.models.is_base_model(model_name)
 

@@ -85,7 +85,7 @@ def test_select_default_backend_by_platform(
 
 
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
+    "vllm.utils.flashinfer.has_flashinfer",
     return_value=False,
 )
 @patch(

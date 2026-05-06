@@ -138,14 +138,22 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 
 - `/v1/models` - List available models
 - `/v1/chat/completions` - Chat completions
+- `/v1/chat/completions/batch` - Batch chat completions
+- `/v1/chat/completions/render` - Render chat completion requests
 - `/v1/completions` - Text completions
+- `/v1/completions/render` - Render completion requests
 - `/v1/embeddings` - Generate embeddings
 - `/v1/audio/transcriptions` - Audio transcription
 - `/v1/audio/translations` - Audio translation
 - `/v1/messages` - Anthropic-compatible messages API
-- `/v1/responses` - Response management
+- `/v1/messages/count_tokens` - Count tokens for Anthropic messages
+- `/v1/responses` - Create a response
+- `/v1/responses/{response_id}` - Retrieve a response
+- `/v1/responses/{response_id}/cancel` - Cancel a response
 - `/v1/score` - Scoring API
 - `/v1/rerank` - Reranking API
+- `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 
 ### Unprotected Endpoints (No API Key Required)
 
@@ -155,16 +163,23 @@ The following endpoints **do not require authentication** even when `--api-key` 
 
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 - `/inference/v1/generate` - Generate completions
+- `/generative_scoring` - Generative scoring API
 - `/pooling` - Pooling API
 - `/classify` - Classification API
 - `/score` - Scoring API (non-`/v1` variant)
 - `/rerank` - Reranking API (non-`/v1` variant)
 
-**Operational control endpoints (always enabled):**
+**Operational control endpoints (only when `"generate"` task is supported):**
 
 - `/pause` - Pause generation (causes denial of service)
 - `/resume` - Resume generation
+- `/is_paused` - Check if generation is paused
 - `/scale_elastic_ep` - Trigger scaling operations
+- `/is_scaling_elastic_ep` - Check if scaling is in progress
+- `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
+- `/update_weights` - Update model weights (can alter model behavior)
+- `/get_world_size` - Get distributed world size
+- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
 
 **Utility endpoints:**
 
@@ -207,9 +222,9 @@ These endpoints are only available when profiling is enabled and should only be 
 
 An attacker who can reach the vLLM HTTP server can:
 
-1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
-2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
-3. **Access operational controls** to manipulate server state (e.g., pausing generation)
+1. **Bypass authentication** by using non-`/v1` endpoints like `/invocations`, `/inference/v1/generate`, `/generative_scoring`, `/pooling`, `/classify`, `/score`, or `/rerank` to run arbitrary inference without credentials
+2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
+3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
 5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
 
@@ -287,6 +302,12 @@ Built-in demo tools are controlled by two settings:
 To disable the Python code interpreter specifically, omit `code_interpreter` from `VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS`.
 
 **Consider a custom implementation**: The GPT-OSS Python tool is a reference implementation. For production deployments, consider implementing a custom code execution sandbox with stricter isolation guarantees. See the [GPT-OSS documentation](https://github.com/openai/gpt-oss?tab=readme-ov-file#python) for guidance.
+
+## Dynamic LoRA Loading
+
+vLLM supports dynamically loading and unloading LoRA adapters at runtime via the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` API endpoints. This functionality is **not enabled by default** — it requires both `--enable-lora` and the environment variable `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` to be set.
+
+**Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
 
 ## Reporting Security Vulnerabilities
 

@@ -221,6 +221,10 @@ class KimiK2ReasoningParser(ReasoningParser):
             return None
 
         if self._end_token_id in delta_token_ids:
+            if self._end_token not in delta_text:
+                # Token ID arrived before text was flushed (stop-sequence buffering).
+                # Wait for the next delta when the text becomes visible.
+                return None
             end_index = delta_text.find(self._end_token)
             reasoning = delta_text[:end_index]
             content = delta_text[end_index + len(self._end_token) :]
@@ -229,6 +233,9 @@ class KimiK2ReasoningParser(ReasoningParser):
             )
 
         if self._tool_section_start_token_id in delta_token_ids:
+            if self._tool_section_start_token not in delta_text:
+                # Token ID arrived before text was flushed (stop-sequence buffering).
+                return None
             tool_index = delta_text.find(self._tool_section_start_token)
             reasoning = delta_text[:tool_index]
             content = delta_text[tool_index:]

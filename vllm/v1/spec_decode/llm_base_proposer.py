@@ -84,6 +84,15 @@ class SpecDecodeBaseProposer:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
+        # DeepSeek V4 MTP consumes the target's pre-hc_head residual stream,
+        # shape (T, hc_mult * hidden_size). Expand the hidden_states buffer
+        # so target_hidden_states fits; detect DeepseekV4 via draft hf_config.
+        draft_hf_config = self.draft_model_config.hf_config
+        if hasattr(draft_hf_config, "compress_ratios") and hasattr(
+            draft_hf_config, "hc_mult"
+        ):
+            self.hidden_size = self.hidden_size * draft_hf_config.hc_mult
+
         # Unifying eagle, draft model, and parallel drafting support.
         # DFlash always uses parallel drafting (all tokens in one pass),
         # but has an additional slot for the next_token_id (does not shift like EAGLE)
@@ -95,6 +104,12 @@ class SpecDecodeBaseProposer:
             1 if (self.pass_hidden_states_to_model and self.method != "dflash") else 0
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
+
+        # When True, all draft steps reuse the same position as the
+        # first step instead of advancing by one each iteration.
+        # Used by draft models with Q-only attention that share KV
+        # with the target and always predict from the same position.
+        self.constant_draft_positions: bool = False
 
         self.parallel_drafting_token_id: int = 0
         self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
@@ -184,7 +199,7 @@ class SpecDecodeBaseProposer:
 
         if self.needs_extra_input_slots:
             self._raise_if_padded_drafter_batch_disabled()
-            self._raise_if_multimodal()
+            self._warn_if_multimodal()
             self._raise_if_mrope()
 
         self.is_rejected_token_mask: torch.Tensor | None = None
@@ -300,11 +315,12 @@ class SpecDecodeBaseProposer:
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
-    def _raise_if_multimodal(self):
+    def _warn_if_multimodal(self):
         if self.supports_mm_inputs:
-            raise NotImplementedError(
+            logger.warning(
                 "Speculative Decoding with draft models or parallel drafting "
-                "does not support multimodal models yet"
+                "does not fully support multimodal models yet. "
+                "Proceeding with text-only speculative decoding."
             )
 
     def _raise_if_mrope(self):
@@ -379,9 +395,9 @@ class SpecDecodeBaseProposer:
         return {name: view for name in self._draft_attn_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """Initialize cudagraph dispatcher keys for eagle.
+        """Initialize cudagraph dispatcher keys for the drafter.
 
-        Eagle only supports PIECEWISE cudagraphs (via mixed_mode).
+        Only supports PIECEWISE cudagraphs (via mixed_mode).
         This should be called after adjust_cudagraph_sizes_for_spec_decode.
         """
         if (
@@ -490,6 +506,12 @@ class SpecDecodeBaseProposer:
             positions = self.positions[token_indices_to_sample]
         hidden_states = hidden_states[token_indices_to_sample]
 
+        if self.constant_draft_positions:
+            # Write the sampling positions into the front of the
+            # positions buffer so that subsequent loop iterations
+            # (which read via _get_positions) use the correct values.
+            self.positions[:batch_size] = positions
+
         if any(isinstance(md, TreeAttentionMetadata) for md in per_group_attn_metadata):
             # Draft using tree attention - requires full logits for top-k
             logits = self.model.compute_logits(sample_hidden_states)
@@ -547,59 +569,25 @@ class SpecDecodeBaseProposer:
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
-            # Use fused kernel for slot mapping and metadata updates.
-            # Write clamped positions directly into the positions buffer to
-            # avoid an extra D2D copy for the common (non-mrope) case.
-            positions_1d = positions[0] if self.uses_mrope else positions
-            if self.uses_mrope:
-                out_pos = self.mrope_positions[0, :batch_size]
-            elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-                out_pos = self.xdrope_positions[0, :batch_size]
-            else:
-                out_pos = self.positions[:batch_size]
-            eagle_step_update_slot_mapping_and_metadata(
-                positions_1d=positions_1d,
-                block_table_tensor=common_attn_metadata.block_table_tensor,
-                seq_lens=common_attn_metadata.seq_lens,
-                block_size=block_size,
-                max_model_len=self.max_model_len,
-                out_clamped_positions=out_pos,
-                out_slot_mapping=self._slot_mapping_buffer[:input_batch_size],
-                input_batch_size=input_batch_size,
-            )
-            common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
-            if self.uses_mrope:
-                self.mrope_positions[1:, :batch_size] = self.mrope_positions[
-                    0, :batch_size
-                ]
-                positions = self.mrope_positions[:, :batch_size]
-            elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
-                self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[
-                    0, :batch_size
-                ]
-                positions = self.xdrope_positions[0, :batch_size]
-            else:
-                positions = self.positions[:batch_size]
-            # Increment the maximum sequence length. We increment max_seq_len
-            # unconditionally even though some seq_lens may have been capped above,
-            # as max_seq_len serves as an upper bound for sequence lengths.
-            common_attn_metadata.max_seq_len = min(
-                common_attn_metadata.max_seq_len + 1, self.max_model_len
-            )
 
-            # Also update the CPU-side shadow; NOTE: this is hacky and should be
-            # removed in when common_attn_metadata.seq_lens_cpu is deprecated.
-            if common_attn_metadata._seq_lens_cpu is not None:
-                common_attn_metadata._seq_lens_cpu += 1
-            if common_attn_metadata._num_computed_tokens_cpu is not None:
-                common_attn_metadata._num_computed_tokens_cpu += 1
-            if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
-                common_attn_metadata.seq_lens_cpu_upper_bound += 1
+            if not self.constant_draft_positions:
+                positions = self._update_positions_dependent_metadata(
+                    positions,
+                    common_attn_metadata,
+                    batch_size,
+                    input_batch_size,
+                    block_size,
+                )
 
-            # Rebuild attention metadata
-            _, per_layer_attn_metadata = self.build_per_group_and_layer_attn_metadata(
-                common_attn_metadata, draft_index=token_index + 1
-            )
+            # Rebuild attention metadata. When draft positions are constant
+            # (e.g. Gemma4 MTP), common_attn_metadata is invariant across
+            # loop iterations so we build once and reuse.
+            if not self.constant_draft_positions or token_index == 0:
+                _, per_layer_attn_metadata = (
+                    self.build_per_group_and_layer_attn_metadata(
+                        common_attn_metadata, draft_index=token_index + 1
+                    )
+                )
 
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
@@ -644,6 +632,58 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
+
+    def _update_positions_dependent_metadata(
+        self,
+        positions: torch.Tensor,
+        common_attn_metadata,
+        batch_size: int,
+        input_batch_size: int,
+        block_size: int,
+    ) -> torch.Tensor:
+        """Update positions, slot mappings, and sequence metadata for the
+        next draft step. Returns the updated positions tensor."""
+        positions_1d = positions[0] if self.uses_mrope else positions
+        if self.uses_mrope:
+            out_pos = self.mrope_positions[0, :batch_size]
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            out_pos = self.xdrope_positions[0, :batch_size]
+        else:
+            out_pos = self.positions[:batch_size]
+        eagle_step_update_slot_mapping_and_metadata(
+            positions_1d=positions_1d,
+            block_table_tensor=common_attn_metadata.block_table_tensor,
+            seq_lens=common_attn_metadata.seq_lens,
+            block_size=block_size,
+            max_model_len=self.max_model_len,
+            out_clamped_positions=out_pos,
+            out_slot_mapping=self._slot_mapping_buffer[:input_batch_size],
+            input_batch_size=input_batch_size,
+        )
+        common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
+        if self.uses_mrope:
+            self.mrope_positions[1:, :batch_size] = self.mrope_positions[0, :batch_size]
+            positions = self.mrope_positions[:, :batch_size]
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            self.xdrope_positions[1:, :batch_size] = self.xdrope_positions[
+                0, :batch_size
+            ]
+            positions = self.xdrope_positions[0, :batch_size]
+        else:
+            positions = self.positions[:batch_size]
+        common_attn_metadata.max_seq_len = min(
+            common_attn_metadata.max_seq_len + 1,
+            self.max_model_len,
+        )
+
+        if common_attn_metadata._seq_lens_cpu is not None:
+            common_attn_metadata._seq_lens_cpu += 1
+        if common_attn_metadata._num_computed_tokens_cpu is not None:
+            common_attn_metadata._num_computed_tokens_cpu += 1
+        if common_attn_metadata.seq_lens_cpu_upper_bound is not None:
+            common_attn_metadata.seq_lens_cpu_upper_bound += 1
+
+        return positions
 
     def set_inputs_first_pass(
         self,
@@ -874,16 +914,12 @@ class SpecDecodeBaseProposer:
         is not sampled and comes from `request.get_token_id()` instead. This is denoted
         the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-        # Precompute get_token_id for when there is no valid next token
+        # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
-                for i in range(num_reqs)
-            ],
-            dtype=np.int32,
-        )
+        for i in range(num_reqs):
+            self.backup_next_token_ids.np[i] = requests[
+                gpu_input_batch.req_ids[i]
+            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
         backup_tokens_gpu = self.backup_next_token_ids.gpu
 
@@ -1267,15 +1303,29 @@ class SpecDecodeBaseProposer:
         Subclasses may override to apply additional config changes.
         """
         spec_cfg = self.speculative_config
+        base = self.vllm_config
+
         if spec_cfg.moe_backend is not None:
-            return replace(
-                self.vllm_config,
+            base = replace(
+                base,
                 kernel_config=replace(
-                    self.vllm_config.kernel_config,
+                    base.kernel_config,
                     moe_backend=spec_cfg.moe_backend,
                 ),
             )
-        return self.vllm_config
+
+        # Note (matt): Never inherit the attention backend from base, because there are
+        # many opportunities for incompatibility, so we always independently autoselect
+        # unless explicitly specified in the speculative config.
+        base = replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                backend=spec_cfg.attention_backend,
+            ),
+        )
+
+        return base
 
     def _get_model(self) -> nn.Module:
         """
@@ -1308,9 +1358,12 @@ class SpecDecodeBaseProposer:
             self.vllm_config,
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
-        self._draft_attn_layer_names = (
-            set(all_attn_layers.keys()) - target_attn_layer_names
-        )
+        # Filter to only layers that have KV cache specs.
+        self._draft_attn_layer_names = {
+            name
+            for name in (set(all_attn_layers.keys()) - target_attn_layer_names)
+            if all_attn_layers[name].get_kv_cache_spec(self.vllm_config) is not None
+        }
 
         if self.supports_mm_inputs:
             # Even if the target model is multimodal, we can also use
@@ -1332,6 +1385,7 @@ class SpecDecodeBaseProposer:
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
+                "MiMoV2OmniForCausalLM",
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3_5ForConditionalGeneration",
                 "Qwen3_5MoeForConditionalGeneration",
@@ -1513,6 +1567,17 @@ class SpecDecodeBaseProposer:
                         logger.info(
                             "Shared target model lm_head with MTP shared_head.head."
                         )
+
+        if hasattr(target_language_model.model, "topk_indices_buffer"):
+            if hasattr(self.model.model, "topk_indices_buffer"):
+                del self.model.model.topk_indices_buffer
+            self.model.model.topk_indices_buffer = (
+                target_language_model.model.topk_indices_buffer
+            )
+            logger.info(
+                "Detected MTP model with topk_indices_buffer. "
+                "Sharing target model topk_indices_buffer with the draft model."
+            )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
