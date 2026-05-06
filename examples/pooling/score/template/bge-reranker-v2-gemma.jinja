@@ -1,0 +1,3 @@
+A: {{ (messages | selectattr("role", "eq", "query") | first).content }}
+B: {{ (messages | selectattr("role", "eq", "document") | first).content }}
+Given a query A and a passage B, determine whether the passage contains an answer to the query by providing a prediction of either 'Yes' or 'No'.
