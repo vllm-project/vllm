@@ -1,12 +1,12 @@
 # KV Load Failure Recovery Test
 
-This example builds upon the `disaggregated-prefill-v1` example in `examples/offline_inference`.
+This example builds upon the `example_connector` example in `examples/disaggregated`.
 
 It demonstrates vLLM's ability to recover from KV load failures in both synchronous and asynchronous loading modes. The goal is to verify that vLLM correctly identifies invalid KV blocks, reschedules the affected requests, and ensures successful and consistent output.
 
 ## Files
 
-- `prefill_example.py` – performs the prefill stage and saves KV data (same as in `disaggregated-prefill-v1`).
+- `prefill_example.py` – performs the prefill stage and saves KV data (same as in `example_connector`).
 - `decode_example.py` – performs the decode stage. Accepts:
     - `--simulate-failure`: simulates KV load failure using a custom connector.
     - `--async-load`: enables asynchronous KV loading mode.

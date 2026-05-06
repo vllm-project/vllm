@@ -122,7 +122,7 @@ Quick sanity check:
 - Encoder cache should enable exact output reproduction
 - Test cleans up all instances and cache files after completion
 - Safe to run multiple times (idempotent)
-- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/online_serving/disaggregated_encoder/README.md`
+- We setup the PD disagg part with NixlConnector. Please read details about EPD in `examples/disaggregated/disaggregated_encoder/README.md`
 
 ## Requirements
 
