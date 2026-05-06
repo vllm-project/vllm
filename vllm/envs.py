@@ -193,7 +193,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_USE_FLASHINFER_BF16_GEMM: bool = True
     VLLM_FLASHINFER_BF16_GEMM_BACKEND: (
-        Literal["auto", "cudnn", "cutlass", "tgv", "cublaslt"] | None
+        Literal["auto", "cudnn", "cutlass", "tgv", "cublaslt", "tinygemm"] | None
     ) = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
@@ -1587,11 +1587,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "cutlass": force FlashInfer CUTLASS BF16 GEMM
     # - "tgv": force FlashInfer TGV BF16 GEMM
     # - "cublaslt": force FlashInfer cuBLASLt BF16 GEMM
+    # - "tinygemm": force FlashInfer TinyGEMM BF16 GEMM
     # - <none>: use the default rollout policy
     "VLLM_FLASHINFER_BF16_GEMM_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_BF16_GEMM_BACKEND",
         None,
-        ["auto", "cudnn", "cutlass", "tgv", "cublaslt"],
+        ["auto", "cudnn", "cutlass", "tgv", "cublaslt", "tinygemm"],
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
