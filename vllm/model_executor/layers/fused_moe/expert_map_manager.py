@@ -368,6 +368,9 @@ class ExpertMapManager:
         Used during dynamic reconfiguration (e.g., elastic scaling).
 
         Args:
+            global_num_experts: New total number of experts across all ranks
+            moe_parallel_config: New MoE parallel configuration (contains ep_size,
+                                 ep_rank, backend flags)
         """
         self.moe_parallel_config = moe_parallel_config
         self.global_num_experts = global_num_experts
