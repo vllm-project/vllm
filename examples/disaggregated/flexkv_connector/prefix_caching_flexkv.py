@@ -14,7 +14,7 @@ Requirements:
 
 Usage:
     1. Run this script:
-       python examples/offline_inference/prefix_caching_flexkv.py \
+       python examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py \
            --model /path/to/your/model
 
     2. Arguments:
