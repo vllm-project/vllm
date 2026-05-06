@@ -228,7 +228,6 @@ class MultiPortExternalLBSupervisor:
         self.child_health = [False] * len(self.child_ports)
         self.processes: list[BaseProcess] = []
         self._stop_requested = asyncio.Event()
-        self._failed_process: BaseProcess | None = None
         self._supervisor_server: uvicorn.Server | None = None
         self._supervisor_server_task: asyncio.Task[None] | None = None
         self._shutdown_signal = signal.SIGTERM
@@ -241,6 +240,7 @@ class MultiPortExternalLBSupervisor:
         )
 
     async def run(self) -> None:
+        failed_process: BaseProcess | None = None
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
@@ -248,7 +248,7 @@ class MultiPortExternalLBSupervisor:
         try:
             await self._start_supervisor_server()
             self._start_children()
-            await self._monitor_children()
+            failed_process = await self._monitor_children()
         finally:
             self._stop_requested.set()
             await self._shutdown_children()
@@ -256,11 +256,11 @@ class MultiPortExternalLBSupervisor:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(sig)
 
-        if self._failed_process is not None:
+        if failed_process is not None:
             raise RuntimeError(
                 f"Multi-port external LB child exited unexpectedly: "
-                f"{self._failed_process.name} "
-                f"exit code {self._failed_process.exitcode}"
+                f"{failed_process.name} "
+                f"exit code {failed_process.exitcode}"
             )
 
     def _handle_signal(self, signum: int) -> None:
@@ -347,7 +347,7 @@ class MultiPortExternalLBSupervisor:
         healthy, _ = await _probe_endpoint(session, self.args, port, "/health")
         return healthy
 
-    async def _monitor_children(self) -> None:
+    async def _monitor_children(self) -> BaseProcess | None:
         timeout = aiohttp.ClientTimeout(total=HEALTHCHECK_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while not self._stop_requested.is_set():
@@ -360,7 +360,7 @@ class MultiPortExternalLBSupervisor:
                         for port, process in zip(self.child_ports, self.processes)
                     )
                 )
-                self._failed_process = next(
+                failed_process = next(
                     (
                         process
                         for process in self.processes
@@ -368,13 +368,14 @@ class MultiPortExternalLBSupervisor:
                     ),
                     None,
                 )
-                if self._failed_process is not None:
-                    break
+                if failed_process is not None:
+                    return failed_process
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
                         self._stop_requested.wait(),
                         timeout=HEALTHCHECK_INTERVAL_S,
                     )
+        return None
 
     async def _shutdown_children(self) -> None:
         if self.processes:
