@@ -26,6 +26,11 @@ steps:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 1)
   key: entrypoints-integration-api-server-openai-part-1
@@ -38,11 +43,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 
 - label: Entrypoints Integration (API Server openai - Part 2)
@@ -57,11 +57,6 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 3)
   key: entrypoints-integration-api-server-openai-part-3
