@@ -218,6 +218,20 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _slice_cpu_request_state_for_metadata(
+    tensor: torch.Tensor,
+    num_reqs: int,
+    num_reqs_padded: int,
+) -> torch.Tensor:
+    sliced = tensor[:num_reqs_padded]
+    if num_reqs_padded > num_reqs:
+        # Padded CUDA graph rows must not inherit stale request state.
+        sliced = sliced.clone()
+        sliced[num_reqs:num_reqs_padded] = 0
+    return sliced
+
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -2161,12 +2175,16 @@ class GPUModelRunner(
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
             self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
+        num_computed_tokens_cpu = _slice_cpu_request_state_for_metadata(
+            self.input_batch.num_computed_tokens_cpu_tensor,
+            num_reqs,
+            num_reqs_padded,
+        )
+        num_prompt_tokens_cpu = _slice_cpu_request_state_for_metadata(
+            self.input_batch.num_prompt_tokens_cpu_tensor,
+            num_reqs,
+            num_reqs_padded,
+        )
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         seq_lens_cpu_upper_bound = seq_lens_cpu
 

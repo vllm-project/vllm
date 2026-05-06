@@ -28,8 +28,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import CommonAttentionMetadata, MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -41,7 +42,10 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_model_runner import (
+    GPUModelRunner,
+    _slice_cpu_request_state_for_metadata,
+)
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
 BLOCK_SIZE = 16
@@ -278,6 +282,72 @@ def test_select_common_block_size_no_valid_option():
 
     with pytest.raises(ValueError):
         select_common_block_size(48, [backend_a, backend_b])
+
+
+def test_slice_cpu_request_state_for_metadata_clears_padding():
+    tensor = torch.tensor([12, 34, 56, 78], dtype=torch.int32)
+
+    sliced = _slice_cpu_request_state_for_metadata(
+        tensor, num_reqs=2, num_reqs_padded=4
+    )
+
+    assert sliced.tolist() == [12, 34, 0, 0]
+    assert tensor.tolist() == [12, 34, 56, 78]
+
+
+def test_slice_cpu_request_state_for_metadata_returns_view_without_padding():
+    tensor = torch.tensor([12, 34, 56, 78], dtype=torch.int32)
+
+    sliced = _slice_cpu_request_state_for_metadata(
+        tensor, num_reqs=2, num_reqs_padded=2
+    )
+
+    assert sliced.tolist() == [12, 34]
+    sliced[0] = 99
+    assert tensor.tolist() == [99, 34, 56, 78]
+
+
+def test_slice_cpu_request_state_for_metadata_keeps_padding_decode_only():
+    num_reqs = 2
+    num_reqs_padded = 4
+    query_start_loc = torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32)
+    seq_lens = torch.tensor([8, 9, 0, 0], dtype=torch.int32)
+    num_computed_tokens = torch.tensor([7, 8, 1, 2], dtype=torch.int32)
+    num_prompt_tokens = torch.tensor([4, 4, 3, 4], dtype=torch.int32)
+
+    stale_is_prefilling = (
+        num_computed_tokens[:num_reqs_padded] < num_prompt_tokens[:num_reqs_padded]
+    )
+    stale_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=seq_lens,
+        num_reqs=num_reqs_padded,
+        num_actual_tokens=2,
+        max_query_len=1,
+        max_seq_len=9,
+        block_table_tensor=torch.zeros((num_reqs_padded, 1), dtype=torch.int32),
+        slot_mapping=torch.arange(2, dtype=torch.int64),
+        is_prefilling=stale_is_prefilling,
+    )
+
+    assert split_decodes_and_prefills(
+        stale_metadata, treat_short_extends_as_decodes=False
+    ) == (2, 2, 2, 0)
+
+    fixed_num_computed_tokens = _slice_cpu_request_state_for_metadata(
+        num_computed_tokens, num_reqs, num_reqs_padded
+    )
+    fixed_num_prompt_tokens = _slice_cpu_request_state_for_metadata(
+        num_prompt_tokens, num_reqs, num_reqs_padded
+    )
+    fixed_metadata = stale_metadata.replace(
+        is_prefilling=fixed_num_computed_tokens < fixed_num_prompt_tokens
+    )
+
+    assert split_decodes_and_prefills(
+        fixed_metadata, treat_short_extends_as_decodes=False
+    ) == (num_reqs_padded, 0, 2, 0)
 
 
 def test_update_states_new_request(model_runner, dist_init):
