@@ -1582,6 +1582,7 @@ def _parse_chat_message_content_mm_part(
 PART_TYPES_TO_SKIP_NONE_CONTENT = (
     "text",
     "refusal",
+    "thinking",
 )
 
 
@@ -1794,7 +1795,7 @@ def _extract_thinking(
     for part in content:
         if isinstance(part, dict) and part.get("type") == "thinking":
             thinking_str = _ThinkParser(part).get("thinking", None)
-            if thinking_str:
+            if thinking_str is not None:
                 thinking_parts.append(thinking_str)
         else:
             non_thinking_parts.append(part)
