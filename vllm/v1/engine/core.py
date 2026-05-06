@@ -39,7 +39,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
-from vllm.v1.core.kv_cache_planning import get_kv_cache_configs
+from vllm.v1.core.kv_cache_config_builder import get_kv_cache_configs
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,

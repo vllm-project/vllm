@@ -443,6 +443,20 @@ class Platform:
         pass
 
     @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config: "VllmConfig") -> str | None:
+        """
+        Provide a vendor-specific KV cache config builder.
+
+        Receives the full vllm_config so vendors can make per-model
+        decisions based on architecture, HF config fields, quantization,
+        parallelism config, etc.
+
+        Returns a fully-qualified class path string, or None to fall
+        back to the model's declaration or the default builder.
+        """
+        return None
+
+    @classmethod
     def _find_non_ssm_backend(
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":
