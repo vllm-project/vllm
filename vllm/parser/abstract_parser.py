@@ -459,7 +459,8 @@ class DelegatingParser(Parser):
             (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
         ):
             # Forced Function Call
-            assert content is not None
+            if content is None:
+                return [], None
             function_calls.append(
                 FunctionCall(name=self._get_function_name(request), arguments=content)
             )
