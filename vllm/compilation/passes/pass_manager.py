@@ -19,9 +19,6 @@ from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 if rocm_aiter_ops.is_enabled():
-    from .fusion.allreduce_rms_fusion import (
-        RocmAiterAllReduceFusionPass,
-    )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
