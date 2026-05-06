@@ -132,22 +132,18 @@ class SpeculatorsConfig(PretrainedConfig):
 
         speculators_model_type = config_dict.get("speculators_model_type")
 
-        # Map speculators model types to vLLM speculative methods.
-        # Some speculators types (e.g. peagle) are variants of existing
-        # methods (eagle3) with additional config like parallel_drafting.
-        METHOD_MAP: dict[str, dict[str, object]] = {
-            "peagle": {
-                "method": "eagle3",
-                "parallel_drafting": True,
-            },
-        }
-        overrides = METHOD_MAP.get(speculators_model_type, {})
+        method = speculators_model_type
+        parallel_drafting = False
+        if speculators_model_type == "peagle":
+            method = "eagle3"
+            parallel_drafting = True
 
-        result: dict[str, object] = {
-            "method": overrides.get("method", speculators_model_type),
+        # Build base vLLM speculative configuration
+        result = {
+            "method": method,
             "num_speculative_tokens": num_speculative_tokens,
         }
-        if "parallel_drafting" in overrides:
-            result["parallel_drafting"] = overrides["parallel_drafting"]
+        if parallel_drafting:
+            result["parallel_drafting"] = parallel_drafting
 
         return result
