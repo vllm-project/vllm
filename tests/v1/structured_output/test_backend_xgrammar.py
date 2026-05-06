@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import torch
 from transformers import AutoTokenizer
 
@@ -62,6 +64,24 @@ def test_xgrammar_draft_tree_branch_token_indices():
         (1, 4),
         (1, 5),
     ]
+
+
+def test_xgrammar_backend_builds_chain_when_speculative_tree_absent():
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    backend = XgrammarBackend(
+        vllm_config=SimpleNamespace(
+            structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
+            speculative_config=SimpleNamespace(
+                num_speculative_tokens=3,
+                speculative_token_tree=None,
+            ),
+        ),
+        tokenizer=tokenizer,
+        vocab_size=tokenizer.vocab_size,
+    )
+
+    assert backend.draft_tree is not None
+    assert backend.draft_tree.tree_choices == ((0,), (0, 0), (0, 0, 0))
 
 
 def test_xgrammar_speculative_bitmask_chain_matches_linear_walk():
