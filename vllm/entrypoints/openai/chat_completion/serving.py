@@ -1362,9 +1362,9 @@ class OpenAIServingChat(OpenAIServing):
             # Reset tool parser streaming state so that any section-level
             # buffers or counters are cleaned up promptly rather than
             # waiting for garbage collection.
-            for tp in tool_parsers:
-                if tp is not None:
-                    tp.reset_streaming_state()
+            for parser in parsers:
+                if parser is not None and parser.tool_parser is not None:
+                    parser.tool_parser.reset_streaming_state()
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 
