@@ -30,9 +30,7 @@ def _pad_tensor_dim(
     dim: int,
     padded_size: int,
 ) -> torch.Tensor:
-    """No using torch.nn.functional.pad.
-    Allocating same-dtype zero block and concatenating along the target dim is clearer.
-    """
+    """Pad tensor along a specific dimension to a given size."""
     pad_size = padded_size - tensor.size(dim)
     if pad_size == 0:
         return tensor
@@ -41,6 +39,8 @@ def _pad_tensor_dim(
             f"Cannot pad dim {dim} from {tensor.size(dim)} to {padded_size}."
         )
 
+    # No using torch.nn.functional.pad.
+    # Allocating zero block and concatenating along the target dim is more clear.
     pad_shape = list(tensor.shape)
     pad_shape[dim] = pad_size
     pad = tensor.new_zeros(pad_shape)
