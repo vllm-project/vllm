@@ -89,6 +89,16 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
+- label: Kernels KDA Test
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/model_executor/layers/fla/ops/kda.py
+  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - tests/kernels/test_kda.py
+  commands:
+    - pytest -v -s kernels/test_kda.py
+
 - label: Kernels DeepGEMM Test (H100)
   key: kernels-deepgemm-test-h100
   timeout_in_minutes: 45
@@ -115,7 +125,7 @@ steps:
   key: kernels-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
@@ -202,7 +212,7 @@ steps:
 - label: Kernels Fp4 MoE Test (B200)
   key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 60
-  device: b200
+  device: b200-k8s
   num_devices: 1
   optional: true
   commands:

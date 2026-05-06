@@ -289,6 +289,7 @@ class OpenAIServingChat(OpenAIServing):
                 self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
 
             sampling_params: SamplingParams | BeamSearchParams
@@ -347,6 +348,11 @@ class OpenAIServingChat(OpenAIServing):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=reasoning_ended,
+                    reasoning_parser_kwargs={
+                        "chat_template_kwargs": chat_template_kwargs,
+                    }
+                    if reasoning_parser
+                    else None,
                 )
 
             generators.append(generator)
@@ -1302,8 +1308,8 @@ class OpenAIServingChat(OpenAIServing):
                 request.tool_choice
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
-                assert tool_calls is not None and len(tool_calls) > 0
                 tool_call_class_items = []
+                tool_calls = tool_calls or []
                 for idx, tc in enumerate(tool_calls):
                     # Use native ID if available (e.g., Kimi K2),
                     # otherwise generate ID with correct id_type
