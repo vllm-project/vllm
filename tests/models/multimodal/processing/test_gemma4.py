@@ -111,6 +111,8 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
         ({"video": {"num_frames": 0}}, 32 * (70 + 2 + 6)),
         ({"video": {"num_frames": -1}}, 32 * (70 + 2 + 6)),
         ({"video": {"num_frames": "32"}}, 32 * (70 + 2 + 6)),
+        ({"video": {"num_frames": True}}, 32 * (70 + 2 + 6)),
+        ({"video": {"num_frames": False}}, 32 * (70 + 2 + 6)),
     ],
 )
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
@@ -145,6 +147,8 @@ def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
         ({"video": {"num_frames": 0}}, 32),
         ({"video": {"num_frames": -1}}, 32),
         ({"video": {"num_frames": "32"}}, 32),
+        ({"video": {"num_frames": True}}, 32),
+        ({"video": {"num_frames": False}}, 32),
     ],
 )
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])

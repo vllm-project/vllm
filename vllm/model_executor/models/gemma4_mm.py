@@ -234,7 +234,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         if not isinstance(video_kwargs, Mapping):
             video_kwargs = {}
         num_frames = video_kwargs.get("num_frames", _VIDEO_MAX_FRAMES)
-        if not isinstance(num_frames, int) or num_frames <= 0:
+        if type(num_frames) is not int or num_frames <= 0:
             return _VIDEO_MAX_FRAMES
         return num_frames
 
