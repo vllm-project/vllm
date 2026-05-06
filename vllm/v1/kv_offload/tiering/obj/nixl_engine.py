@@ -91,7 +91,7 @@ class NixlEngine:
             return False
 
         xfer_handle = self._agent.initialize_xfer(
-            op, xfer_desc, files_desc.trim(), "ObjSecondaryTier"
+            op, xfer_desc, files_desc.trim(), "ObjNixlEngine"
         )
         if not xfer_handle:
             logger.error("initialize_xfer failed for job %d", job_id)
@@ -114,7 +114,11 @@ class NixlEngine:
         to_remove: list[_TransferEntry] = []
 
         for entry in self._in_flight:
-            state = self._agent.check_xfer_state(entry.xfer_handle)
+            try:
+                state = self._agent.check_xfer_state(entry.xfer_handle)
+            except Exception as exc:
+                logger.error("check_xfer_state raised for job %d: %s", entry.job_id, exc)
+                state = "ERR"
             if state == "PROC":
                 continue
             self._agent.deregister_memory(entry.files_desc)

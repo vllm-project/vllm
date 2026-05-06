@@ -195,13 +195,18 @@ class TestObjTierBasic:
 
     def test_load_in_flight_returns_none(self):
         """Keys being promoted (submit_load in flight) must return None."""
-        # Manually seed dict so lookup would return True without in-flight
         k = key(5)
-        self.tier._stored_keys.add(k)
 
-        # Submit load and check before draining
-        job = make_job(3, [k], [0])
-        self.tier.submit_load(job)
+        # Store the key to S3 first so the subsequent load has something to read
+        store_job = make_job(2, [k], [0])
+        self.tier.submit_store(store_job)
+        store_results = drain(self.tier)
+        assert store_results and store_results[0].success
+        assert self.tier.lookup(k, _CTX) is True
+
+        # Submit load into a different slot and check in-flight before draining
+        load_job = make_job(3, [k], [1])
+        self.tier.submit_load(load_job)
 
         assert self.tier.lookup(k, _CTX) is None
 
