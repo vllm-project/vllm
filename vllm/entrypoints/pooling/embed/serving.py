@@ -115,10 +115,10 @@ class ServingEmbedding(PoolingServing):
 
             for idx, final_res in enumerate(final_res_batch):
                 item = EmbeddingResponseData(
-                    index=idx, embedding=[],
+                    index=idx,
+                    embedding=[],
                 ).model_dump()
-                item["embedding"] = encode_pooling_output_float_or_ndarray(
-                    final_res)
+                item["embedding"] = encode_pooling_output_float_or_ndarray(final_res)
                 items.append(item)
                 num_prompt_tokens += len(final_res.prompt_token_ids)
 
