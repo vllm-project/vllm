@@ -109,10 +109,11 @@ def _bmm_fp8_kernel(
         a_ptrs += BLOCK_SIZE_L * stride_in_l
         b_ptrs += BLOCK_SIZE_L * stride_w_l
 
-    # Load scale and quantize to FP8
+    # Load scale and quantize to FP8. vLLM convention: `scale` is the actual
+    # quantization scale (i.e. dequant = q * scale), so we divide by it here.
     scale = tl.load(scale_ptr)
-    # FP8 quant: clamp(value * scale, -max, max)
-    acc = acc * scale
+    inv_scale = 1.0 / scale
+    acc = acc * inv_scale
     acc = tl.where(acc > FP8_MAX, FP8_MAX, acc)
     acc = tl.where(acc < -FP8_MAX, -FP8_MAX, acc)
     result = acc.to(output_ptr.type.element_ty)

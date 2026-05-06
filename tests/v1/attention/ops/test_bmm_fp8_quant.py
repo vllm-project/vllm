@@ -26,7 +26,8 @@ def _reference_bmm_fp8(input_tensor, weight, scale):
     ref_bmm = torch.bmm(input_tensor, weight)  # (N, B, V)
     ref_bf16 = ref_bmm.transpose(0, 1).reshape(B, N * V)
     _, fp8_max = get_fp8_min_max()
-    ref_fp8 = (ref_bf16.float() * scale.item()).clamp(-fp8_max, fp8_max).to(fp8_dtype)
+    # vLLM convention: `scale` is the actual scale → divide to quantize.
+    ref_fp8 = (ref_bf16.float() / scale.item()).clamp(-fp8_max, fp8_max).to(fp8_dtype)
     return ref_fp8
 
 
@@ -47,7 +48,7 @@ def test_triton_bmm_fp8_quant_correctness(B, dtype):
 
     input_tensor = torch.randn(N, B, L, dtype=dtype, device=device)
     weight = torch.randn(N, L, V, dtype=dtype, device=device)
-    scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+    scale = torch.tensor([100.0], dtype=torch.float32, device=device)
 
     ref_fp8 = _reference_bmm_fp8(input_tensor, weight, scale)
 
@@ -69,7 +70,7 @@ def test_triton_bmm_fp8_quant_shapes():
     device = torch.device("cuda:0")
     fp8_dtype = current_platform.fp8_dtype()
     dtype = torch.bfloat16
-    scale = torch.tensor([0.005], dtype=torch.float32, device=device)
+    scale = torch.tensor([200.0], dtype=torch.float32, device=device)
 
     shapes = [
         (16, 1, 512, 128),  # single token
@@ -132,7 +133,7 @@ def test_helion_bmm_fp8_quant_correctness(B, dtype):
 
     input_tensor = torch.randn(N, B, L, dtype=dtype, device=device)
     weight = torch.randn(N, L, V, dtype=dtype, device=device)
-    scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+    scale = torch.tensor([100.0], dtype=torch.float32, device=device)
 
     ref_fp8 = _reference_bmm_fp8(input_tensor, weight, scale)
 
@@ -154,7 +155,7 @@ def test_helion_bmm_fp8_quant_shapes():
     device = torch.device("cuda:0")
     fp8_dtype = torch.float8_e4m3fn
     dtype = torch.bfloat16
-    scale = torch.tensor([0.005], dtype=torch.float32, device=device)
+    scale = torch.tensor([200.0], dtype=torch.float32, device=device)
 
     shapes = [
         (16, 1, 512, 128),
@@ -190,7 +191,7 @@ def test_triton_vs_helion_consistency(B):
 
     input_tensor = torch.randn(N, B, L, dtype=torch.bfloat16, device=device)
     weight = torch.randn(N, L, V, dtype=torch.bfloat16, device=device)
-    scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+    scale = torch.tensor([100.0], dtype=torch.float32, device=device)
 
     # Triton
     triton_out = torch.empty(B, N * V, dtype=fp8_dtype, device=device)

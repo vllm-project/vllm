@@ -812,23 +812,34 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if quant_key is not None:
-            # NVFP4 isn't fused in this PR — its scale tensor uses a packed
-            # tile layout where shape[0] doesn't track tokens, so the MQA/MHA
+            # NVFP4 isn't fused yet — its scale tensor uses a packed tile
+            # layout where shape[0] doesn't track tokens, so the MQA/MHA
             # split breaks `output_block_scale[: fp4_scales.shape[0]].copy_(...)`.
-            # Quantize the whole output in one shot like the original code did,
-            # and skip MQA quantization inside _v_up_proj for this case.
+            # Quantize the whole output in one shot, and skip MQA quantization
+            # inside _v_up_proj for this case.
             # Other quant keys: _v_up_proj already handled MQA, so we only
             # cover MHA (prefill) tokens here.
             start = 0 if quant_key == kNvfp4Dynamic else num_mqa_tokens
             if start < num_actual_toks:
+                # NVFP4's scaled_fp4_quant writes scales into a tile-aligned
+                # region whose row count exceeds the per-token slice — pass
+                # the full output_block_scale tensor like the pre-fusion code
+                # did. Other quant keys are token-aligned and stay sliced.
+                bs_arg = (
+                    output_block_scale
+                    if quant_key == kNvfp4Dynamic
+                    else (
+                        output_block_scale[start:num_actual_toks]
+                        if output_block_scale is not None
+                        else None
+                    )
+                )
                 self._quantize_tokens(
                     output[start:num_actual_toks],
                     quant_key,
                     quant_output[start:num_actual_toks],
                     output_scale,
-                    output_block_scale[start:num_actual_toks]
-                    if output_block_scale is not None
-                    else None,
+                    bs_arg,
                     quant_group_size,
                     quant_scale_ue8m0,
                     quant_col_major,

@@ -67,7 +67,7 @@ def generate_bmm_fp8_quant_inputs() -> dict[str, tuple[Any, ...]]:
             weight_tensor = torch.randn(
                 N, kv_lora_rank, v_head_dim, device="cuda", dtype=torch.bfloat16
             )
-            scale_tensor = torch.tensor([0.01], device="cuda", dtype=torch.float32)
+            scale_tensor = torch.tensor([100.0], device="cuda", dtype=torch.float32)
 
             config_key = f"heads_{N}_batch_{B}"
             inputs[config_key] = (input_tensor, weight_tensor, scale_tensor)
@@ -131,7 +131,8 @@ def bmm_fp8_quant_helion(
     Args:
         input: (N, B, L) input tensor in bf16/fp16
         weight: (N, L, V) weight tensor in bf16/fp16
-        scale: scalar tensor - static quantization scale
+        scale: scalar tensor — actual quantization scale (vLLM convention:
+            dequant = q * scale; quant divides by scale).
 
     Returns:
         (B, N, V) tensor in FP8, viewable as (B, N*V)
@@ -150,10 +151,12 @@ def bmm_fp8_quant_helion(
         # result                   shape: (tile_n, tile_b, V)
         result = input[tile_n, tile_b, :] @ weight[tile_n, :, :]
 
-        # Quantize to FP8: scale, clamp, cast
+        # Quantize to FP8. vLLM convention: divide by scale (so dequant
+        # = q * scale).
         result_f32 = result.to(torch.float32)
         scale_val = hl.load(scale, [0])
-        result_scaled = (result_f32 * scale_val).clamp(-_FP8_MAX, _FP8_MAX)
+        inv_scale = 1.0 / scale_val
+        result_scaled = (result_f32 * inv_scale).clamp(-_FP8_MAX, _FP8_MAX)
 
         # Transpose (tile_n, tile_b, V) -> (tile_b, tile_n, V) in registers
         # and store directly into the (B, N, V) output buffer.
