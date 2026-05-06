@@ -10,31 +10,26 @@ if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
-        FusedMoEConfig,
         FusedMoEQuantConfig,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
-)
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
-    maybe_post_process_fp8_weight_block,
-    process_fp8_weight_block_strategy,
+from vllm.model_executor.layers.quantization.online.moe_base import (
+    OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -42,16 +37,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     cutlass_fp8_supported,
 )
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_supported, per_block_cast_to_fp8
+from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -63,6 +57,10 @@ class _Fp8OnlineLinearBase(LinearMethodBase):
     weights onto meta device and materializes them just-in-time."""
 
     uses_meta_device: bool = True
+
+    def __init__(self):
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
         self,
@@ -103,18 +101,41 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-tensor during loading."""
 
     def __init__(self):
-        self.out_dtype = torch.get_default_dtype()
+        super().__init__()
 
+        self.weight_quant_key = kFp8StaticTensorSym
         # Use per-token quantization for better perf if dynamic and cutlass
         if cutlass_fp8_supported():
-            activation_quant_key = kFp8DynamicTokenSym
+            self.activation_quant_key = kFp8DynamicTokenSym
         else:
-            activation_quant_key = kFp8DynamicTensorSym
+            self.activation_quant_key = kFp8DynamicTensorSym
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
 
         self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=activation_quant_key,
-            weight_quant_key=kFp8StaticTensorSym,
-            out_dtype=torch.get_default_dtype(),
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
 
@@ -166,19 +187,14 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
     Loads fp16/bf16 weights and quantizes them per-block during loading."""
 
     def __init__(self):
-        self.out_dtype = torch.get_default_dtype()
+        super().__init__()
         self.weight_block_size = [128, 128]
-
-        self.use_deep_gemm = is_deep_gemm_supported()
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(*self.weight_block_size),
-            act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
-            cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=self.use_aiter_and_is_supported,
-            use_deep_gemm=self.use_deep_gemm,
+        self.activation_quant_key = create_fp8_quant_key(
+            static=False,
+            group_shape=GroupShape(1, self.weight_block_size[0]),
+        )
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(*self.weight_block_size)
         )
 
     def create_weights(
@@ -202,6 +218,15 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         )
         layer.weight_block_size = self.weight_block_size
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -213,14 +238,10 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
             layer.weight, block_size=block_size, use_ue8m0=False
         )
 
-        qweight, weight_scale_inv = process_fp8_weight_block_strategy(
-            qweight, weight_scale_inv
-        )
-
         replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
 
-        maybe_post_process_fp8_weight_block(layer)
+        self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
@@ -234,12 +255,10 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         assert self.weight_block_size is not None
 
         # Note: batch invariance already handled in the function below
-        return self.w8a8_block_fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale_inv,
-            input_scale=layer.input_scale,
-            bias=bias,
+        return self.fp8_linear.apply_weights(
+            layer,
+            x,
+            bias,
         )
 
 
@@ -248,21 +267,15 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
 # ---------------------------------------------------------------------------
 
 
-class _Fp8OnlineMoEBase(FusedMoEMethodBase):
+class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
     """Shared base for online FP8 MoE methods. Loads fp16/bf16 checkpoint
     weights onto meta device and materializes them just-in-time."""
-
-    uses_meta_device: bool = True
 
     # Declared here for mypy; actual values are set in __init__.
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
     weight_scale_name: str
     weight_block_size: list[int] | None
-    moe: "FusedMoEConfig"
-    is_monolithic: bool
-    moe_quant_config: "FusedMoEQuantConfig | None"
-    moe_kernel: "mk.FusedMoEKernel | None"
 
     def __init__(
         self,
@@ -292,77 +305,6 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
             activation_key=activation_key,
             allow_vllm_cutlass=False,
         )
-
-    def create_weights(
-        self,
-        layer: Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        layer.num_experts = num_experts
-        layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
-
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                device="meta",
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                device="meta",  # materialized and processed during loading
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # BIASES (for models like GPT-OSS that have biased MoE)
-        if self.moe.has_bias:
-            w13_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    device="meta",  # materialized and processed during loading
-                    dtype=layer.orig_dtype,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_bias", w13_bias)
-            set_weight_attrs(w13_bias, extra_weight_attrs)
-
-            w2_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    hidden_size,
-                    device="meta",  # materialized and processed during loading
-                    dtype=layer.orig_dtype,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w2_bias", w2_bias)
-            set_weight_attrs(w2_bias, extra_weight_attrs)
-
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
-
-        initialize_online_processing(layer)
 
     def _setup_kernel(
         self,
@@ -410,15 +352,6 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
                 shared_experts=layer.shared_experts,
             )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> "mk.FusedMoEPrepareAndFinalizeModular | None":
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
-        )
-
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig":
@@ -440,67 +373,8 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
             block_shape=self.weight_block_size,
         )
 
-        # Inject biases into the quant config if the model has them
-        # (e.g. GPT-OSS biased MoE)
-        if quant_config is not None and self.moe.has_bias:
-            w13_bias = getattr(layer, "w13_bias", None)
-            w2_bias = getattr(layer, "w2_bias", None)
-            if w13_bias is not None:
-                quant_config._w1.bias = w13_bias
-            if w2_bias is not None:
-                quant_config._w2.bias = w2_bias
-
+        self._maybe_inject_biases(quant_config, layer)
         return quant_config
-
-    @property
-    def supports_eplb(self) -> bool:
-        return True
-
-    def apply_monolithic(
-        self,
-        layer: "FusedMoE",
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply_monolithic(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routed_scaling_factor=layer.routed_scaling_factor,
-        )
-
-    def apply(
-        self,
-        layer: "FusedMoE",
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts_input=shared_experts_input,
-        )
 
 
 class Fp8PerTensorOnlineMoEMethod(_Fp8OnlineMoEBase):

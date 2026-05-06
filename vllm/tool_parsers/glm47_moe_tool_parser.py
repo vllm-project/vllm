@@ -23,6 +23,8 @@ logger = init_logger(__name__)
 
 
 class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
+    supports_required_and_named = False
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
         # GLM-4.7 format: <tool_call>func_name[<arg_key>...]*</tool_call>

@@ -33,6 +33,14 @@ class IdentityReasoningParser(ReasoningParser):
                 "constructor during construction."
             )
 
+    @property
+    def reasoning_start_str(self) -> str | None:
+        return None
+
+    @property
+    def reasoning_end_str(self) -> str | None:
+        return None
+
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # Always return True, since we never treat reasoning specially
         return True

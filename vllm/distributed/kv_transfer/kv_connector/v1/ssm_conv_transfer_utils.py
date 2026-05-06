@@ -114,7 +114,7 @@ def derive_mamba_conv_split(
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
     # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl_connector __init__.  Use it directly instead of heuristic detection.
+    # in nixl worker __init__.  Use it directly instead of heuristic detection.
     assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
     local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
     conv_rows = conv_shape[1]
@@ -151,7 +151,9 @@ def derive_mamba_conv_split(
     )
 
 
-def compute_mamba_phys_ratio(ssm_sizes: tuple[int, ...], block_len: int) -> int:
+def compute_physical_blocks_per_logical(
+    ssm_sizes: tuple[int, ...], block_len: int
+) -> int:
     """Derive _physical_blocks_per_logical_kv_block from remote metadata.
 
     The remote engine's ratio is not sent directly in the handshake, so we

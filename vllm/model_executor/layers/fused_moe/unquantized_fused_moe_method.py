@@ -297,7 +297,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         return self.forward_native(
-            layer, x, topk_weights, topk_ids, shared_experts_input
+            layer,
+            x,
+            topk_weights,
+            topk_ids,
+            shared_experts_input,
         )
 
     def apply_monolithic(
@@ -305,6 +309,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         if self.unquantized_backend == UnquantizedMoeBackend.CPU:

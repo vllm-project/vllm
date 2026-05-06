@@ -47,18 +47,7 @@ class BlockTables:
                 device=device,
             )
             self.block_tables.append(block_table)
-        self.block_table_ptrs = self._make_ptr_tensor(
-            [b.gpu for b in self.block_tables]
-        )
-        self.block_table_strides = torch.tensor(
-            [b.gpu.stride(0) for b in self.block_tables],
-            dtype=torch.int64,
-            device=self.device,
-        )
 
-        self.block_sizes_tensor = torch.tensor(
-            self.block_sizes, dtype=torch.int32, device=self.device
-        )
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
@@ -69,7 +58,6 @@ class BlockTables:
         self.input_block_tables: list[torch.Tensor] = [
             torch.zeros_like(b.gpu) for b in self.block_tables
         ]
-        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
         self.slot_mappings = torch.zeros(
             self.num_kv_cache_groups,
@@ -78,11 +66,32 @@ class BlockTables:
             device=self.device,
         )
 
+        self.init_block_table_layout_tensors()
+
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
         # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
         return torch.tensor(
             [t.data_ptr() for t in x], dtype=torch.uint64, device=self.device
         )
+
+    def init_block_table_layout_tensors(self) -> None:
+        # Called at init and after a CuMem kv_cache wake-up. The ptr tensors
+        # cache raw data_ptr() values that go stale once the underlying tensors
+        # are reallocated on wake; block_sizes_tensor needs re-populating
+        # because its storage lives under the kv_cache pool tag and comes back
+        # with undefined contents.
+        self.block_table_ptrs = self._make_ptr_tensor(
+            [b.gpu for b in self.block_tables]
+        )
+        self.block_table_strides = torch.tensor(
+            [b.gpu.stride(0) for b in self.block_tables],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.block_sizes_tensor = torch.tensor(
+            self.block_sizes, dtype=torch.int32, device=self.device
+        )
+        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
         self,

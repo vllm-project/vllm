@@ -617,8 +617,13 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
-            req_state.num_cached_tokens = engine_core_output.num_cached_tokens
-            req_state.is_prefilling = False
+
+            if req_state.is_prefilling:
+                if engine_core_output.prefill_stats is not None:
+                    req_state.num_cached_tokens = (
+                        engine_core_output.prefill_stats.num_cached_tokens
+                    )
+                req_state.is_prefilling = False
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -776,7 +781,6 @@ class OutputProcessor:
             engine_core_output,
             engine_core_timestamp,
             req_state.is_prefilling,
-            req_state.prompt_len,
             req_state.stats,
             self.lora_states,
             req_state.lora_name,
@@ -795,6 +799,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
+            request_id=req_state.external_req_id,
             num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,

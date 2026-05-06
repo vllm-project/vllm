@@ -763,31 +763,24 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
-def _checkpoints_fit_in_ram(files: list[str], threshold: float = 0.9) -> bool:
-    """Return True if total size of *files* fits within *threshold* of available RAM."""
+def _get_checkpoints_size_bytes(files: list[str]) -> int:
+    """Return the total size of the checkpoint files in bytes."""
     if not files:
-        return True
+        return 0
+    return sum(os.path.getsize(f) for f in files)
+
+
+def _get_available_ram_bytes() -> int:
+    """Return the available RAM in bytes."""
     import psutil
 
-    total_size = sum(os.path.getsize(f) for f in files)
-    available_ram = psutil.virtual_memory().available
-    fits = total_size <= threshold * available_ram
-    if not fits:
-        logger.warning(
-            "NFS detected but checkpoint total size (%.2f GiB) exceeds "
-            "%.0f%% of available RAM (%.2f GiB). Skipping prefetching checkpoints.",
-            total_size / (1024**3),
-            threshold * 100,
-            available_ram / (1024**3),
-        )
-    return fits
+    return psutil.virtual_memory().available
 
 
-def _is_nfs_path(files: list[str]) -> bool:
-    """Check whether the first file in *files* resides on an NFS
-    filesystem (Linux only)."""
+def _get_fs_type(files: list[str]) -> str:
+    """Get the filesystem type of the first file in *files* (Linux only)."""
     if not files:
-        return False
+        return ""
     try:
         # Only the first file is checked — all checkpoint shards reside
         # in the same directory and therefore on the same filesystem.
@@ -810,12 +803,11 @@ def _is_nfs_path(files: list[str]) -> bool:
                 ) and len(mount_point) > len(best_mount):
                     best_mount = mount_point
                     best_fstype = fstype
-        return best_fstype in ("nfs", "nfs4")
+        return best_fstype
     except Exception:
         # /proc/mounts is Linux-specific; on other OSes (or if the read
-        # fails for any reason) we fall back to "not NFS" rather than
-        # crashing model loading.
-        return False
+        # fails for any reason) we fall back to an empty string.
+        return ""
 
 
 def _prefetch_checkpoint(file_path: str) -> None:
@@ -901,11 +893,63 @@ def safetensors_weights_iterator(
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
-    should_prefetch = safetensors_load_strategy == "prefetch" or (
-        safetensors_load_strategy is None
-        and _is_nfs_path(sorted_files)
-        and _checkpoints_fit_in_ram(sorted_files)
+    fs_type = _get_fs_type(sorted_files)
+    is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
+    total_bytes = _get_checkpoints_size_bytes(sorted_files)
+    avail_bytes = _get_available_ram_bytes()
+    ram_threshold_pct = 90
+    fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
+    fs_name = fs_type.upper() if fs_type else "unknown"
+
+    logger.info_once(
+        "Filesystem type for checkpoints: %s. Checkpoint size: %.2f GiB. "
+        "Available RAM: %.2f GiB.",
+        fs_name,
+        total_bytes / 1024**3,
+        avail_bytes / 1024**3,
     )
+
+    should_prefetch = safetensors_load_strategy == "prefetch"
+    if safetensors_load_strategy is None:
+        if is_net_fs and fits_in_ram:
+            should_prefetch = True
+        elif is_net_fs and not fits_in_ram:
+            logger.warning_once(
+                "Network filesystem (%s) detected but checkpoint total size "
+                "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB). "
+                "Skipping auto-prefetch.",
+                fs_name,
+                total_bytes / 1024**3,
+                ram_threshold_pct,
+                avail_bytes / 1024**3,
+            )
+        elif not is_net_fs and fits_in_ram:
+            logger.info_once(
+                "Auto-prefetch is disabled because the filesystem (%s) is not a "
+                "recognized network FS (NFS/Lustre). If you want to force "
+                "prefetching, start vLLM with --safetensors-load-strategy=prefetch.",
+                fs_name,
+            )
+        elif not is_net_fs and not fits_in_ram:
+            logger.info_once(
+                "Auto-prefetch is disabled because the filesystem (%s) is not a "
+                "recognized network FS (NFS/Lustre) and the checkpoint size "
+                "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB).",
+                fs_name,
+                total_bytes / 1024**3,
+                ram_threshold_pct,
+                avail_bytes / 1024**3,
+            )
+    elif should_prefetch and not fits_in_ram:
+        logger.warning_once(
+            "safetensors_load_strategy='prefetch' was explicitly specified, but "
+            "checkpoint total size (%.2f GiB) exceeds %d%% of available RAM "
+            "(%.2f GiB). This may cause out-of-memory errors.",
+            total_bytes / 1024**3,
+            ram_threshold_pct,
+            avail_bytes / 1024**3,
+        )
+
     if should_prefetch:
         _prefetch_all_checkpoints(sorted_files)
 
@@ -1320,8 +1364,8 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
-            # "broadcast" instead of copy
-            param.data.fill_(loaded_weight.item())
+            # reshape to match before copying
+            param.data.copy_(loaded_weight.view(param.shape))
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
@@ -1518,6 +1562,11 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
         # .mixer.attn.{k,v}_scale
         (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
+        # HYV3 format: .self_attn.q.scale -> .self_attn.attn.q_scale
+        (r"\.self_attn\.q\.scale$", r".self_attn.attn.q_scale"),
+        # HYV3 format: .self_attn.{k,v}_cache.scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.([kv])_cache\.scale$", r".self_attn.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
         (r"\.([qkv])_scale$", r".attn.\1_scale"),
         (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
@@ -1532,6 +1581,9 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
             ".k_zero_point",
             ".v_zero_point",
             ".q_zero_point",
+            ".q.scale",
+            ".k_cache.scale",
+            ".v_cache.scale",
         )
     ):
         import regex as re

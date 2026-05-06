@@ -7,14 +7,14 @@ import torch
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    BatchedDeepGemmExperts,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    BatchedDeepGemmExperts,
+)
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
@@ -223,7 +223,7 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
     )
 
 if has_mori():
-    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
 
@@ -367,7 +367,9 @@ else:
     CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+        CutlassExpertsFp4,
+    )
 
     register_experts(
         CutlassExpertsFp4,

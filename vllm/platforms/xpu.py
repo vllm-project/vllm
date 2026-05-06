@@ -61,6 +61,12 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
+        # TurboQuant KV cache: route directly to TQ backend
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            logger.info_once("Using TurboQuant attention backend.")
+            return AttentionBackendEnum.TURBOQUANT.get_path()
+
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
             logger.info_once("Using XPU MLA Sparse backend.")
@@ -124,6 +130,10 @@ class XPUPlatform(Platform):
         Set the device for the current platform.
         """
         torch.xpu.set_device(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.xpu.manual_seed_all(seed)
 
     @classmethod
     def get_device_capability(
@@ -203,6 +213,26 @@ class XPUPlatform(Platform):
                     "falling back to PIECEWISE graph mode on XPU platform."
                 )
 
+        # Disable fusion passes not yet supported on XPU.
+        pass_config = compilation_config.pass_config
+        fusion_passes_to_disable = {
+            "enable_sp": "Sequence parallelism",
+            "fuse_gemm_comms": "Async TP",
+            "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
+            "fuse_norm_quant": "RMSNorm + quant fusion",
+            "fuse_act_quant": "Activation + quant fusion",
+            "fuse_attn_quant": "Attention + quant fusion",
+            "fuse_act_padding": "Activation + padding fusion",
+            "fuse_rope_kvcache": "RoPE + KV cache fusion",
+        }
+        for flag, feature_name in fusion_passes_to_disable.items():
+            if getattr(pass_config, flag):
+                logger.warning(
+                    "Feature %r is not yet supported on XPU and will be disabled.",
+                    feature_name,
+                )
+                setattr(pass_config, flag, False)
+
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
@@ -217,6 +247,10 @@ class XPUPlatform(Platform):
         # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
         # ref. https://openucx.readthedocs.io/en/master/faq.html
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
+
+        # spawn is the only supported multiprocessing method on XPU
+        if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -308,6 +342,10 @@ class XPUPlatform(Platform):
                 " is not available."
             )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return True
 
     @classmethod
     def get_default_ir_op_priority(

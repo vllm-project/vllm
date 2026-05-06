@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
@@ -1595,91 +1595,92 @@ class KeyeForConditionalGeneration(
             self._process_video_embeds(video_type, video_grid_thw, pixel_values_videos)
         )
 
+    @staticmethod
+    def _split_video_grid_thw(
+        grid_thw: torch.Tensor | list[list[int]] | list[int],
+    ) -> list[list[int]]:
+        """
+        Split video grid_thw along the t dimension into per-frame rows.
+
+        This preserves Keye's current M-RoPE behavior, where a video is emitted
+        as consecutive frame-level multimodal blocks rather than a single block
+        spanning the whole video.
+        """
+        if isinstance(grid_thw, list):
+            if len(grid_thw) == 0:
+                return []
+            if isinstance(grid_thw[0], int):
+                grid_thw = torch.tensor([grid_thw], dtype=torch.long)
+            else:
+                grid_thw = torch.tensor(grid_thw, dtype=torch.long)
+        elif grid_thw.ndim == 1:
+            grid_thw = grid_thw.unsqueeze(0)
+
+        if grid_thw.numel() == 0:
+            return []
+
+        t, hw = grid_thw[:, 0], grid_thw[:, 1:]
+        ones = torch.ones_like(hw[:, :1])
+        out = torch.cat([ones, hw], dim=1).repeat_interleave(t, dim=0)
+        return out.tolist()
+
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        spatial_merge_size = self.config.vision_config.spatial_merge_size
+
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            if mm_feature.data is None:
+                raise ValueError("M-RoPE calculation requires multimodal feature data")
+
+            if mm_feature.modality == "image":
+                grid_thw = mm_feature.data["image_grid_thw"].data
+                if isinstance(grid_thw, torch.Tensor):
+                    if grid_thw.ndim == 2:
+                        assert grid_thw.shape[0] == 1
+                        t, h, w = grid_thw[0].tolist()
+                    else:
+                        t, h, w = grid_thw.tolist()
+                else:
+                    if isinstance(grid_thw[0], list):
+                        assert len(grid_thw) == 1
+                        t, h, w = grid_thw[0]
+                    else:
+                        t, h, w = grid_thw
+
+                yield (
+                    mm_feature.mm_position.offset,
+                    t,
+                    h // spatial_merge_size,
+                    w // spatial_merge_size,
+                )
+            elif mm_feature.modality == "video":
+                current_offset = mm_feature.mm_position.offset
+                for t, h, w in self._split_video_grid_thw(
+                    mm_feature.data["video_grid_thw"].data
+                ):
+                    llm_grid_h = h // spatial_merge_size
+                    llm_grid_w = w // spatial_merge_size
+                    yield (current_offset, t, llm_grid_h, llm_grid_w)
+                    current_offset += t * llm_grid_h * llm_grid_w
+            else:
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw", "video_grid_thw"},
-        )
-        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
-        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
-
-        if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
-            video_grid_thw = video_grid_thw[0]
-
-        def split_thw(grid_thw: torch.Tensor | list[int]) -> list[list[int]]:
-            """
-            Split grid_thw along the t dimension.
-
-            Args:
-                grid_thw: shape [N, 3] tensor or nested list of [t, h, w].
-
-            Returns:
-                List of [1, h, w] rows, repeated t times for each original row.
-            """
-
-            if isinstance(grid_thw, list):
-                grid_thw = torch.tensor(grid_thw, dtype=torch.long)
-
-            if grid_thw.numel() == 0:
-                return []
-
-            t, hw = grid_thw[:, 0], grid_thw[:, 1:]
-            ones = torch.ones_like(hw[:, :1])  # [N,1]
-            out = torch.cat([ones, hw], dim=1).repeat_interleave(t, dim=0)
-            return out.tolist()
-
-        video_grid_thw = split_thw(video_grid_thw)
-
-        hf_config = self.config
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
-        spatial_merge_size = hf_config.vision_config.spatial_merge_size
-
-        image_nums = len(image_grid_thw)
-        frame_nums = len(video_grid_thw)
         llm_pos_ids_list: list = []
-
         st = 0
-        remain_images, remain_frames = image_nums, frame_nums
 
-        image_index, video_index = 0, 0
-        for _ in range(image_nums + frame_nums):
-            if remain_images > 0:
-                try:
-                    ed_image = input_tokens.index(image_token_id, st)
-                except ValueError:
-                    ed_image = len(input_tokens) + 1
-            else:
-                ed_image = len(input_tokens) + 1
-            if remain_frames > 0:
-                try:
-                    ed_video = input_tokens.index(video_token_id, st)
-                except ValueError:
-                    ed_video = len(input_tokens) + 1
-            else:
-                ed_video = len(input_tokens) + 1
-
-            if ed_image < ed_video:
-                t, h, w = image_grid_thw[image_index]
-                image_index += 1
-                remain_images -= 1
-                ed = ed_image
-            else:
-                t, h, w = video_grid_thw[video_index]
-                video_index += 1
-                remain_frames -= 1
-                ed = ed_video
-
-            llm_grid_t, llm_grid_h, llm_grid_w = (
-                t,
-                h // spatial_merge_size,
-                w // spatial_merge_size,
-            )
-            text_len = ed - st
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
@@ -1711,7 +1712,7 @@ class KeyeForConditionalGeneration(
             llm_pos_ids_list.append(
                 torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
-            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0

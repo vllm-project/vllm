@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.responses.utils import (
     _construct_single_message_from_response_item,
     _maybe_combine_reasoning_and_tool_call,
     construct_chat_messages_with_tool_call,
+    construct_input_messages,
     convert_tool_responses_to_completions_format,
     should_continue_final_message,
 )
@@ -738,3 +739,71 @@ class TestMaybeCombineReasoningAndToolCall:
         result = _maybe_combine_reasoning_and_tool_call(item, messages)
 
         assert result is None
+
+
+class TestConstructInputMessagesInstructionsLeak:
+    """Regression tests for #37697: instructions from a prior response
+    should NOT leak through previous_response_id."""
+
+    def test_old_instructions_stripped_from_prev_msg(self):
+        """System message in prev_msg must be dropped so the new request's
+        instructions are the only system message in the conversation."""
+        prev = [
+            {"role": "system", "content": "old instructions"},
+            {"role": "user", "content": "What is 2+2?"},
+            {"role": "assistant", "content": "4"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions="new instructions",
+            request_input="What is 3+3?",
+            prev_msg=prev,
+        )
+        system_msgs = [m for m in msgs if m.get("role") == "system"]
+        assert len(system_msgs) == 1
+        assert system_msgs[0]["content"] == "new instructions"
+
+    def test_no_instructions_in_new_request(self):
+        """If the new request has no instructions, old ones should still
+        be stripped -- they must not carry over."""
+        prev = [
+            {"role": "system", "content": "old instructions"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="What is 3+3?",
+            prev_msg=prev,
+        )
+        system_msgs = [m for m in msgs if m.get("role") == "system"]
+        assert len(system_msgs) == 0
+
+    def test_non_system_messages_preserved(self):
+        """User/assistant messages from prev_msg must remain intact."""
+        prev = [
+            {"role": "system", "content": "old instructions"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        msgs = construct_input_messages(
+            request_instructions="new instructions",
+            request_input="Follow up",
+            prev_msg=prev,
+        )
+        roles = [m["role"] for m in msgs]
+        assert roles == ["system", "user", "assistant", "user"]
+        assert msgs[0]["content"] == "new instructions"
+        assert msgs[1]["content"] == "Hi"
+        assert msgs[2]["content"] == "Hello"
+        assert msgs[3]["content"] == "Follow up"
+
+    def test_no_prev_msg(self):
+        """Baseline: when there's no prev_msg, instructions work normally."""
+        msgs = construct_input_messages(
+            request_instructions="be helpful",
+            request_input="hello",
+            prev_msg=None,
+        )
+        assert len(msgs) == 2
+        assert msgs[0] == {"role": "system", "content": "be helpful"}
+        assert msgs[1] == {"role": "user", "content": "hello"}

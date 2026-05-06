@@ -44,12 +44,14 @@ from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
     get_loopback_ip,
     get_open_port,
 )
+from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
@@ -168,24 +170,14 @@ class MultiprocExecutor(Executor):
                 [] if context.get_start_method() == "fork" else None
             )
 
+            # For CPU backend only, to setup OpenMP threads affinity
+            cpu_omp_manager = OMPProcessManager(self.vllm_config)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
-                if current_platform.is_cpu():
-                    om = current_platform.get_omp_manager()
-                    logger.info("Configured OMP PLACES %s", str(om.omp_places))
-                    unready_worker_handle = om.run(
-                        WorkerProc.make_worker_process,
-                        vllm_config=self.vllm_config,
-                        local_rank=local_rank,
-                        rank=global_rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                        shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
-                        inherited_fds=inherited_fds,
-                    )
-                else:
+                with cpu_omp_manager.configure_omp_envs(
+                    rank=global_rank, local_rank=local_rank
+                ):
                     unready_worker_handle = WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
                         local_rank=local_rank,
@@ -688,7 +680,12 @@ class WorkerProc:
             daemon=True,
         )
 
-        proc.start()
+        # Apply NUMA binding if configured
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank, process_kind="worker"
+        ):
+            proc.start()
+
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
@@ -839,6 +836,8 @@ class WorkerProc:
 
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
+            if kwargs["vllm_config"].parallel_config.numa_bind:
+                numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
 
             worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
@@ -1033,7 +1032,6 @@ def set_multiprocessing_worker_envs():
                 "external environment to tune this value as needed.",
                 current_parallelism,
                 default_omp_num_threads,
-                scope="local",
             )
             os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
             torch.set_num_threads(default_omp_num_threads)
