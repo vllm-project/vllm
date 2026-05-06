@@ -1577,20 +1577,18 @@ __global__ void gemm_q4_wmma_kernel_v7(
   const int k_start = blockIdx.z * k_per_split;
   const int k_end = k_start + k_per_split;
 
-  // Same LDS as V5 — B tile shared across all 8 waves.
-  __shared__ T b_lds[2][16][64];
+  // LDS with K-contiguous layout [buf][N][K] — enables vectorized ds_load_b128.
+  // Triton uses this layout to read 8 bf16 per instruction instead of 1.
+  __shared__ T b_lds[2][64][16];
 
-  // Dequant: only waves 0-3 participate (128 slots = 64N × 2 octets).
-  auto dequant_into = [&](int buf, int k_tile) {
-    if (wave_id >= 4) return;  // waves 4-7 skip dequant
-
-    const int my_n_local = lane_lo;
-    const int my_n_in_tile = wave_id * 16 + my_n_local;
-    const int my_k_octet = lane_hi;
+  // Dequant: waves 0-3 load+unpack+write to LDS in one pass (monolithic).
+  auto dequant_into = [&](int buf, int k_tile) __attribute__((always_inline)) {
+    if (wave_id >= 4) return;
+    const int my_n_in_tile = wave_id * 16 + lane_lo;
     const int actual_n = n_tile + my_n_in_tile;
-
     if (actual_n >= size_n) return;
 
+    const int my_k_octet = lane_hi;
     const int qk_row = (k_tile / 8) + my_k_octet;
     const uint32_t qa = b_q[qk_row * size_n + actual_n];
 
@@ -1600,7 +1598,6 @@ __global__ void gemm_q4_wmma_kernel_v7(
     const uint32_t zero_v =
         ((b_qzeros[qz_idx] >> qz_shift) & 0xF) + (uint32_t)zero_offset;
     const T scale_t = b_scales[g * size_n + actual_n];
-
     const int k_base = my_k_octet * 8;
 
     if constexpr (std::is_same<T, half>::value) {
@@ -1608,27 +1605,27 @@ __global__ void gemm_q4_wmma_kernel_v7(
       prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
       half2 dq[4];
       dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
-      b_lds[buf][k_base + 0][my_n_in_tile] = __low2half(dq[0]);
-      b_lds[buf][k_base + 1][my_n_in_tile] = __high2half(dq[0]);
-      b_lds[buf][k_base + 2][my_n_in_tile] = __low2half(dq[1]);
-      b_lds[buf][k_base + 3][my_n_in_tile] = __high2half(dq[1]);
-      b_lds[buf][k_base + 4][my_n_in_tile] = __low2half(dq[2]);
-      b_lds[buf][k_base + 5][my_n_in_tile] = __high2half(dq[2]);
-      b_lds[buf][k_base + 6][my_n_in_tile] = __low2half(dq[3]);
-      b_lds[buf][k_base + 7][my_n_in_tile] = __high2half(dq[3]);
+      b_lds[buf][my_n_in_tile][k_base + 0] = __low2half(dq[0]);
+      b_lds[buf][my_n_in_tile][k_base + 1] = __high2half(dq[0]);
+      b_lds[buf][my_n_in_tile][k_base + 2] = __low2half(dq[1]);
+      b_lds[buf][my_n_in_tile][k_base + 3] = __high2half(dq[1]);
+      b_lds[buf][my_n_in_tile][k_base + 4] = __low2half(dq[2]);
+      b_lds[buf][my_n_in_tile][k_base + 5] = __high2half(dq[2]);
+      b_lds[buf][my_n_in_tile][k_base + 6] = __low2half(dq[3]);
+      b_lds[buf][my_n_in_tile][k_base + 7] = __high2half(dq[3]);
     } else {
       float z_f, y_f;
       prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
       bf162_t dq[4];
       dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
-      b_lds[buf][k_base + 0][my_n_in_tile] = dq[0].x;
-      b_lds[buf][k_base + 1][my_n_in_tile] = dq[0].y;
-      b_lds[buf][k_base + 2][my_n_in_tile] = dq[1].x;
-      b_lds[buf][k_base + 3][my_n_in_tile] = dq[1].y;
-      b_lds[buf][k_base + 4][my_n_in_tile] = dq[2].x;
-      b_lds[buf][k_base + 5][my_n_in_tile] = dq[2].y;
-      b_lds[buf][k_base + 6][my_n_in_tile] = dq[3].x;
-      b_lds[buf][k_base + 7][my_n_in_tile] = dq[3].y;
+      b_lds[buf][my_n_in_tile][k_base + 0] = dq[0].x;
+      b_lds[buf][my_n_in_tile][k_base + 1] = dq[0].y;
+      b_lds[buf][my_n_in_tile][k_base + 2] = dq[1].x;
+      b_lds[buf][my_n_in_tile][k_base + 3] = dq[1].y;
+      b_lds[buf][my_n_in_tile][k_base + 4] = dq[2].x;
+      b_lds[buf][my_n_in_tile][k_base + 5] = dq[2].y;
+      b_lds[buf][my_n_in_tile][k_base + 6] = dq[3].x;
+      b_lds[buf][my_n_in_tile][k_base + 7] = dq[3].y;
     }
   };
 
@@ -1636,6 +1633,9 @@ __global__ void gemm_q4_wmma_kernel_v7(
   __syncthreads();
 
   int cur_buf = 0;
+  const int m_row = m_tile + wave_id * 16 + lane_lo;
+  const T* a_row_ptr = (m_row < size_m) ? (a + m_row * size_k) : nullptr;
+
   for (int k_tile = k_start; k_tile < k_end; k_tile += 16) {
     const int next_buf = 1 - cur_buf;
     const int k_next = k_tile + 16;
@@ -1644,31 +1644,22 @@ __global__ void gemm_q4_wmma_kernel_v7(
       dequant_into(next_buf, k_next);
     }
 
-    // Each wave loads its own 16M-row A slice. wave_id 0..7 → rows 0..127.
-    const int m_row = m_tile + wave_id * 16 + lane_lo;
+    // A-load: vectorized 256-bit. b_q_perm branch removed from V7 hot path
+    // to eliminate ~450 ISA instructions of dead code (6× icache bloat).
     V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
-    if (m_row < size_m) {
-      const T* a_row = a + m_row * size_k;
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++)
-          a_frag[i] = bitcast_elem<T, E>(a_row[b_q_perm[k_tile + i]]);
-      } else {
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
+    if (a_row_ptr) {
+      __builtin_memcpy(&a_frag, a_row_ptr + k_tile, sizeof(a_frag));
     } else {
   #pragma unroll
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
 
-    // All 8 waves read same B from LDS.
-  #pragma unroll
-    for (int i = 0; i < 16; i++) {
-      b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 0]);
-      b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 16]);
-      b_frag2[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 32]);
-      b_frag3[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 48]);
-    }
+    // Vectorized LDS reads: 32 bytes (16 bf16) per b_frag → ds_load_b128 × 2.
+    static_assert(sizeof(V16) == 32, "V16 must be 32 bytes for memcpy");
+    __builtin_memcpy(&b_frag0, &b_lds[cur_buf][lane_lo +  0][0], 32);
+    __builtin_memcpy(&b_frag1, &b_lds[cur_buf][lane_lo + 16][0], 32);
+    __builtin_memcpy(&b_frag2, &b_lds[cur_buf][lane_lo + 32][0], 32);
+    __builtin_memcpy(&b_frag3, &b_lds[cur_buf][lane_lo + 48][0], 32);
 
     c_acc0 = wmma_mma(a_frag, b_frag0, c_acc0);
     c_acc1 = wmma_mma(a_frag, b_frag1, c_acc1);
@@ -1680,439 +1671,6 @@ __global__ void gemm_q4_wmma_kernel_v7(
   }
 
   // ---- Store C ---- Each wave owns 16M × 64N.
-  const int m_tile_wave = m_tile + wave_id * 16;
-  auto store_acc = [&](const v8fp32& acc, int n_base) {
-    if (gridDim.z > 1) {
-      const bool is_even_lane = (lane_lo & 1) == 0;
-      const int out_n_pair = n_base + lane_lo;
-  #pragma unroll
-      for (int i = 0; i < 8; i++) {
-        float other_f = __shfl_xor(acc[i], 1);
-        if (!is_even_lane) continue;
-
-        const int out_m = m_tile_wave + 2 * i + lane_hi;
-        if (out_m >= size_m || out_n_pair >= size_n) continue;
-
-        T* dst = c + out_m * size_n + out_n_pair;
-        if constexpr (std::is_same<T, half>::value) {
-          half2 packed =
-              __halves2half2(__float2half_rn(acc[i]), __float2half_rn(other_f));
-          atomic_add_pk_f16(reinterpret_cast<half2*>(dst), packed);
-        } else {
-          bf162_t packed;
-          packed.x = __float2bfloat16(acc[i]);
-          packed.y = __float2bfloat16(other_f);
-          atomic_add_pk_bf16(reinterpret_cast<bf162_t*>(dst), packed);
-        }
-      }
-    } else {
-      const int out_n = n_base + lane_lo;
-      if (out_n >= size_n) return;
-  #pragma unroll
-      for (int i = 0; i < 8; i++) {
-        const int out_m = m_tile_wave + 2 * i + lane_hi;
-        if (out_m < size_m) {
-          T* dst = c + out_m * size_n + out_n;
-          if constexpr (std::is_same<T, half>::value) {
-            *dst = __float2half_rn(acc[i]);
-          } else {
-            *dst = __float2bfloat16(acc[i]);
-          }
-        }
-      }
-    }
-  };
-
-  store_acc(c_acc0, n_tile + 0);
-  store_acc(c_acc1, n_tile + 16);
-  store_acc(c_acc2, n_tile + 32);
-  store_acc(c_acc3, n_tile + 48);
-}
-
-// ===========================================================================
-// ===========================================================================
-// V9 kernel: 8 waves, 128M × 64N, K-chunk=128, interleaved prefetch.
-//
-// Loads a 128-K chunk into LDS once (coalesced [N, K/8] reads from skinny
-// format), then runs 8 WMMA sub-iterations from LDS without any B global
-// loads. Double-buffered: prefetch of next chunk overlaps with compute on
-// current chunk.
-//
-// Weight format: [N, K/8] int32 ("skinny format")
-// Scales: [N, G] (activation dtype)
-// Zeros: [N, G] int32 (raw uint4 values)
-//
-// LDS: [2][128][64] × sizeof(T) = 32 KB. Fits in 64 KB budget.
-// Dequant: 64 N × 16 K-oct = 1024 loads per chunk. 128 threads → 8 loads
-//   per thread. Organized as 8 sub-passes of 128 loads (same V7 pattern).
-// ===========================================================================
-
-template <typename T>
-__global__ void gemm_q4_wmma_kernel_v9(
-    const T* __restrict__ a, const uint32_t* __restrict__ b_q,
-    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
-    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset) {
-  using E = typename WmmaNative<T>::elem;
-  using V16 = typename WmmaNative<T>::v16;
-
-  const int m_tile = blockIdx.y * 128;
-  const int n_tile = blockIdx.x * 64;
-  if (m_tile >= size_m || n_tile >= size_n) return;
-
-  const int tid = threadIdx.x;   // 0..255
-  const int wave_id = tid >> 5;  // 0..7
-  const int lane = tid & 31;
-  const int lane_lo = lane & 15;
-  const int lane_hi = lane >> 4;
-
-  v8fp32 c_acc0 = {0, 0, 0, 0, 0, 0, 0, 0};
-  v8fp32 c_acc1 = {0, 0, 0, 0, 0, 0, 0, 0};
-  v8fp32 c_acc2 = {0, 0, 0, 0, 0, 0, 0, 0};
-  v8fp32 c_acc3 = {0, 0, 0, 0, 0, 0, 0, 0};
-
-  const int groupsize = size_k / groups;
-  const int K8 = size_k / 8;
-
-  const int k_per_split = size_k / gridDim.z;
-  const int k_start = blockIdx.z * k_per_split;
-  const int k_end = k_start + k_per_split;
-
-  // Double-buffered LDS for 128-K chunks.
-  __shared__ T b_lds[2][128][64];
-
-  // Dequant with lanes→K coalesced access on [N, K/8] format.
-  // Each wave reads 2 N-rows per pass (lanes 0-15 → K-octets for N-row A,
-  // lanes 16-31 �� K-octets for N-row B). 4 waves × 2 = 8 N-rows per pass.
-  // 8 passes per chunk = 64 N-rows total.
-  // Each pass: 16 consecutive K8 reads per half-wave → 1 cache line. COALESCED.
-  auto fill_chunk = [&](int buf, int k_chunk_start) {
-    // 8 passes, each covering 8 N-rows (2 per wave × 4 waves)
-    for (int pass = 0; pass < 8; pass++) {
-      if (wave_id >= 4) continue;  // waves 4-7 skip dequant
-
-      const int n_local_base = pass * 8 + wave_id * 2 + lane_hi;  // 0..63
-      const int actual_n = n_tile + n_local_base;
-      const int my_k_oct = lane_lo;  // 0..15 → K-octet offset (COALESCED!)
-
-      if (actual_n >= size_n || my_k_oct >= 16) continue;
-
-      // Coalesced read: 16 consecutive K8 values for one N-row
-      const int qk_col = (k_chunk_start / 8) + my_k_oct;
-      const uint32_t qa = b_q[actual_n * K8 + qk_col];
-
-      // Scale/zero: one per group. K-range spans multiple groups potentially.
-      const int k_global = k_chunk_start + my_k_oct * 8;
-      const int g = k_global / groupsize;
-      const uint32_t zero_v =
-          (b_qzeros[actual_n * groups + g] & 0xF) + (uint32_t)zero_offset;
-      const T scale_t = b_scales[actual_n * groups + g];
-
-      const int k_base = my_k_oct * 8;  // LDS K-row offset
-
-      if constexpr (std::is_same<T, half>::value) {
-        half2 z_prep, y_prep;
-        prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
-        half2 dq[4];
-        dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
-        b_lds[buf][k_base + 0][n_local_base] = __low2half(dq[0]);
-        b_lds[buf][k_base + 1][n_local_base] = __high2half(dq[0]);
-        b_lds[buf][k_base + 2][n_local_base] = __low2half(dq[1]);
-        b_lds[buf][k_base + 3][n_local_base] = __high2half(dq[1]);
-        b_lds[buf][k_base + 4][n_local_base] = __low2half(dq[2]);
-        b_lds[buf][k_base + 5][n_local_base] = __high2half(dq[2]);
-        b_lds[buf][k_base + 6][n_local_base] = __low2half(dq[3]);
-        b_lds[buf][k_base + 7][n_local_base] = __high2half(dq[3]);
-      } else {
-        float z_f, y_f;
-        prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
-        bf162_t dq[4];
-        dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
-        b_lds[buf][k_base + 0][n_local_base] = dq[0].x;
-        b_lds[buf][k_base + 1][n_local_base] = dq[0].y;
-        b_lds[buf][k_base + 2][n_local_base] = dq[1].x;
-        b_lds[buf][k_base + 3][n_local_base] = dq[1].y;
-        b_lds[buf][k_base + 4][n_local_base] = dq[2].x;
-        b_lds[buf][k_base + 5][n_local_base] = dq[2].y;
-        b_lds[buf][k_base + 6][n_local_base] = dq[3].x;
-        b_lds[buf][k_base + 7][n_local_base] = dq[3].y;
-      }
-    }
-  };
-
-  // Fill initial chunk.
-  fill_chunk(0, k_start);
-  __syncthreads();
-
-  int cur_buf = 0;
-  for (int k_chunk = k_start; k_chunk < k_end; k_chunk += 128) {
-    const int next_buf = 1 - cur_buf;
-    const int k_next_chunk = k_chunk + 128;
-
-    // Interleaved: prefetch next chunk sub-passes alongside compute.
-    // Waves 0-3 issue dequant loads (latency-hidden by WMMA).
-    // All waves compute 8 WMMA sub-iterations from cur_buf.
-    const int m_row = m_tile + wave_id * 16 + lane_lo;
-    const T* a_row = (m_row < size_m) ? (a + m_row * size_k) : nullptr;
-
-  #pragma unroll 1
-    for (int sub = 0; sub < 8; sub++) {
-      // Prefetch: waves 0-3 load one sub-tile of next chunk per iteration.
-      if (k_next_chunk < k_end) {
-        dequant_16rows(next_buf, k_next_chunk + sub * 16, sub * 16);
-      }
-
-      // Compute: all 8 waves do WMMA from cur_buf.
-      const int k_sub = k_chunk + sub * 16;
-      V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
-
-      if (a_row) {
-        __builtin_memcpy(&a_frag, a_row + k_sub, sizeof(a_frag));
-      } else {
-  #pragma unroll
-        for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
-      }
-
-      const int lds_k = sub * 16;
-  #pragma unroll
-      for (int i = 0; i < 16; i++) {
-        b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][lds_k + i][lane_lo + 0]);
-        b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][lds_k + i][lane_lo + 16]);
-        b_frag2[i] = bitcast_elem<T, E>(b_lds[cur_buf][lds_k + i][lane_lo + 32]);
-        b_frag3[i] = bitcast_elem<T, E>(b_lds[cur_buf][lds_k + i][lane_lo + 48]);
-      }
-
-      c_acc0 = wmma_mma(a_frag, b_frag0, c_acc0);
-      c_acc1 = wmma_mma(a_frag, b_frag1, c_acc1);
-      c_acc2 = wmma_mma(a_frag, b_frag2, c_acc2);
-      c_acc3 = wmma_mma(a_frag, b_frag3, c_acc3);
-    }
-
-    __syncthreads();
-    cur_buf = next_buf;
-  }
-
-  // ---- Store C ---- Same as V7.
-  const int m_tile_wave = m_tile + wave_id * 16;
-  auto store_acc = [&](const v8fp32& acc, int n_base) {
-    if (gridDim.z > 1) {
-      const bool is_even_lane = (lane_lo & 1) == 0;
-      const int out_n_pair = n_base + lane_lo;
-  #pragma unroll
-      for (int i = 0; i < 8; i++) {
-        float other_f = __shfl_xor(acc[i], 1);
-        if (!is_even_lane) continue;
-        const int out_m = m_tile_wave + 2 * i + lane_hi;
-        if (out_m >= size_m || out_n_pair >= size_n) continue;
-        T* dst = c + out_m * size_n + out_n_pair;
-        if constexpr (std::is_same<T, half>::value) {
-          half2 packed =
-              __halves2half2(__float2half_rn(acc[i]), __float2half_rn(other_f));
-          atomic_add_pk_f16(reinterpret_cast<half2*>(dst), packed);
-        } else {
-          bf162_t packed;
-          packed.x = __float2bfloat16(acc[i]);
-          packed.y = __float2bfloat16(other_f);
-          atomic_add_pk_bf16(reinterpret_cast<bf162_t*>(dst), packed);
-        }
-      }
-    } else {
-      const int out_n = n_base + lane_lo;
-      if (out_n >= size_n) return;
-  #pragma unroll
-      for (int i = 0; i < 8; i++) {
-        const int out_m = m_tile_wave + 2 * i + lane_hi;
-        if (out_m < size_m) {
-          T* dst = c + out_m * size_n + out_n;
-          if constexpr (std::is_same<T, half>::value) {
-            *dst = __float2half_rn(acc[i]);
-          } else {
-            *dst = __float2bfloat16(acc[i]);
-          }
-        }
-      }
-    }
-  };
-
-  store_acc(c_acc0, n_tile + 0);
-  store_acc(c_acc1, n_tile + 16);
-  store_acc(c_acc2, n_tile + 32);
-  store_acc(c_acc3, n_tile + 48);
-}
-
-// V6 kernel: 4 waves per block, 64M × 64N tile, K=32 per iteration.
-//
-// Doubles K-tile from 16 → 32 to match group_size=32. This means:
-//   * 8 WMMA per wave per K-iter (2 K-halves × 4 N-tiles) vs 4 in V5
-//   * 1 scale/zp load per K-iter (32 K = exactly 1 group)
-//   * Half the __syncthreads() calls per total-K
-//   * Double the compute:sync ratio → better latency hiding
-//
-// LDS: [2][32][64] × sizeof(T) = 8 KB (bf16) — still within budget.
-// Dequant: 256 slots per K-tile (64N × 4 octets). Each of 128 threads
-//   handles 2 slots via two passes (first K=0..15, then K=16..31).
-// ===========================================================================
-
-template <typename T>
-__global__ void gemm_q4_wmma_kernel_v6(
-    const T* __restrict__ a, const uint32_t* __restrict__ b_q,
-    const uint32_t* __restrict__ b_qzeros, const T* __restrict__ b_scales,
-    T* __restrict__ c, const int size_m, const int size_n, const int size_k,
-    const int groups, const int zero_offset, const int* __restrict__ b_q_perm) {
-  using E = typename WmmaNative<T>::elem;
-  using V16 = typename WmmaNative<T>::v16;
-
-  const int m_tile = blockIdx.y * 64;
-  const int n_tile = blockIdx.x * 64;
-  if (m_tile >= size_m || n_tile >= size_n) return;
-
-  const int tid = threadIdx.x;   // 0..127
-  const int wave_id = tid >> 5;  // 0..3
-  const int lane = tid & 31;
-  const int lane_lo = lane & 15;
-  const int lane_hi = lane >> 4;
-
-  v8fp32 c_acc0 = {0, 0, 0, 0, 0, 0, 0, 0};
-  v8fp32 c_acc1 = {0, 0, 0, 0, 0, 0, 0, 0};
-  v8fp32 c_acc2 = {0, 0, 0, 0, 0, 0, 0, 0};
-  v8fp32 c_acc3 = {0, 0, 0, 0, 0, 0, 0, 0};
-
-  const int groupsize = size_k / groups;
-
-  const int k_per_split = size_k / gridDim.z;
-  const int k_start = blockIdx.z * k_per_split;
-  const int k_end = k_start + k_per_split;
-
-  // LDS B-tile: [buf][32 K-rows][64 N-cols], double-buffered.
-  __shared__ T b_lds[2][32][64];
-
-  // Dequant 16 K-rows into b_lds[buf][lds_k_offset..lds_k_offset+15][0..63].
-  // Same pattern as V5 but with explicit lds_k_offset for upper/lower half.
-  auto dequant_16rows = [&](int buf, int k_tile, int lds_k_offset) {
-    const int my_n_local = lane_lo;
-    const int my_n_in_tile = wave_id * 16 + my_n_local;
-    const int my_k_octet = lane_hi;
-    const int actual_n = n_tile + my_n_in_tile;
-
-    if (actual_n >= size_n) return;
-
-    const int qk_row = (k_tile / 8) + my_k_octet;
-    const uint32_t qa = b_q[qk_row * size_n + actual_n];
-
-    const int g = k_tile / groupsize;
-    const int qz_idx = g * (size_n / 8) + actual_n / 8;
-    const int qz_shift = (actual_n & 7) * 4;
-    const uint32_t zero_v =
-        ((b_qzeros[qz_idx] >> qz_shift) & 0xF) + (uint32_t)zero_offset;
-    const T scale_t = b_scales[g * size_n + actual_n];
-
-    const int k_base = lds_k_offset + my_k_octet * 8;
-
-    if constexpr (std::is_same<T, half>::value) {
-      half2 z_prep, y_prep;
-      prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
-      half2 dq[4];
-      dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
-      b_lds[buf][k_base + 0][my_n_in_tile] = __low2half(dq[0]);
-      b_lds[buf][k_base + 1][my_n_in_tile] = __high2half(dq[0]);
-      b_lds[buf][k_base + 2][my_n_in_tile] = __low2half(dq[1]);
-      b_lds[buf][k_base + 3][my_n_in_tile] = __high2half(dq[1]);
-      b_lds[buf][k_base + 4][my_n_in_tile] = __low2half(dq[2]);
-      b_lds[buf][k_base + 5][my_n_in_tile] = __high2half(dq[2]);
-      b_lds[buf][k_base + 6][my_n_in_tile] = __low2half(dq[3]);
-      b_lds[buf][k_base + 7][my_n_in_tile] = __high2half(dq[3]);
-    } else {
-      float z_f, y_f;
-      prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
-      bf162_t dq[4];
-      dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
-      b_lds[buf][k_base + 0][my_n_in_tile] = dq[0].x;
-      b_lds[buf][k_base + 1][my_n_in_tile] = dq[0].y;
-      b_lds[buf][k_base + 2][my_n_in_tile] = dq[1].x;
-      b_lds[buf][k_base + 3][my_n_in_tile] = dq[1].y;
-      b_lds[buf][k_base + 4][my_n_in_tile] = dq[2].x;
-      b_lds[buf][k_base + 5][my_n_in_tile] = dq[2].y;
-      b_lds[buf][k_base + 6][my_n_in_tile] = dq[3].x;
-      b_lds[buf][k_base + 7][my_n_in_tile] = dq[3].y;
-    }
-  };
-
-  // Initial dequant: fill both K-halves of buffer 0.
-  dequant_16rows(0, k_start, 0);
-  dequant_16rows(0, k_start + 16, 16);
-  __syncthreads();
-
-  int cur_buf = 0;
-  for (int k_tile = k_start; k_tile < k_end; k_tile += 32) {
-    const int next_buf = 1 - cur_buf;
-    const int k_next = k_tile + 32;
-
-    // Prefetch next 32 K-rows into next buffer.
-    if (k_next < k_end) {
-      dequant_16rows(next_buf, k_next, 0);
-      dequant_16rows(next_buf, k_next + 16, 16);
-    }
-
-    const int m_row = m_tile + wave_id * 16 + lane_lo;
-    const T* a_row = (m_row < size_m) ? (a + m_row * size_k) : nullptr;
-
-    // ---- First K-half: k_tile..k_tile+15 ----
-    V16 a_frag, b_frag0, b_frag1, b_frag2, b_frag3;
-    if (a_row) {
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++)
-          a_frag[i] = bitcast_elem<T, E>(a_row[b_q_perm[k_tile + i]]);
-      } else {
-        __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(a_frag));
-      }
-    } else {
-  #pragma unroll
-      for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
-    }
-
-  #pragma unroll
-    for (int i = 0; i < 16; i++) {
-      b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 0]);
-      b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 16]);
-      b_frag2[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 32]);
-      b_frag3[i] = bitcast_elem<T, E>(b_lds[cur_buf][i][lane_lo + 48]);
-    }
-
-    c_acc0 = wmma_mma(a_frag, b_frag0, c_acc0);
-    c_acc1 = wmma_mma(a_frag, b_frag1, c_acc1);
-    c_acc2 = wmma_mma(a_frag, b_frag2, c_acc2);
-    c_acc3 = wmma_mma(a_frag, b_frag3, c_acc3);
-
-    // ---- Second K-half: k_tile+16..k_tile+31 ----
-    if (a_row) {
-      if (b_q_perm) {
-  #pragma unroll
-        for (int i = 0; i < 16; i++)
-          a_frag[i] = bitcast_elem<T, E>(a_row[b_q_perm[k_tile + 16 + i]]);
-      } else {
-        __builtin_memcpy(&a_frag, a_row + k_tile + 16, sizeof(a_frag));
-      }
-    }
-
-  #pragma unroll
-    for (int i = 0; i < 16; i++) {
-      b_frag0[i] = bitcast_elem<T, E>(b_lds[cur_buf][16 + i][lane_lo + 0]);
-      b_frag1[i] = bitcast_elem<T, E>(b_lds[cur_buf][16 + i][lane_lo + 16]);
-      b_frag2[i] = bitcast_elem<T, E>(b_lds[cur_buf][16 + i][lane_lo + 32]);
-      b_frag3[i] = bitcast_elem<T, E>(b_lds[cur_buf][16 + i][lane_lo + 48]);
-    }
-
-    c_acc0 = wmma_mma(a_frag, b_frag0, c_acc0);
-    c_acc1 = wmma_mma(a_frag, b_frag1, c_acc1);
-    c_acc2 = wmma_mma(a_frag, b_frag2, c_acc2);
-    c_acc3 = wmma_mma(a_frag, b_frag3, c_acc3);
-
-    __syncthreads();
-    cur_buf = next_buf;
-  }
-
-  // ---- Store C ---- Same as V5.
   const int m_tile_wave = m_tile + wave_id * 16;
   auto store_acc = [&](const v8fp32& acc, int n_base) {
     if (gridDim.z > 1) {
