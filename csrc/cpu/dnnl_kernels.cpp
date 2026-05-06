@@ -215,7 +215,7 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
         float zp_scale_val = a_scale[i] * static_cast<float>(azp[i]);
         token_zp_scale_vec = cvt_vec_t(zp_scale_val);
       }
-      for (; j < hidden_size - vec_elem_num; ++j) {
+      for (; j < hidden_size - vec_elem_num; j += vec_elem_num) {
         cvt_vec_t elems_fp32(input_ptr + j);
         elems_fp32 = elems_fp32 * token_scale_vec;
         if constexpr (AZP) {
