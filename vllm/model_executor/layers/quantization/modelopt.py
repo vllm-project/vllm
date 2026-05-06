@@ -1008,12 +1008,14 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     def __init__(
         self,
-        quant_method: str,
-        is_checkpoint_nvfp4_serialized: bool,
-        kv_cache_quant_algo: str | None,
-        exclude_modules: list[str],
+        quant_method: str = "NVFP4",
+        is_checkpoint_nvfp4_serialized: bool = False,
+        kv_cache_quant_algo: str | None = None,
+        exclude_modules: list[str] | None = None,
         group_size: int = 16,
     ) -> None:
+        if exclude_modules is None:
+            exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
