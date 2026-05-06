@@ -11,19 +11,16 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEQuantConfig,
-    mxfp4_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
-    CutlassExpertsMxfp4,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-    select_gpt_oss_mxfp4_moe_backend as select_mxfp4_moe_backend,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -31,24 +28,23 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(self, moe):
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+    ):
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
-        self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
-        self.experts_cls: type[mk.FusedMoEExperts]
-        if self.use_cutlass_mxfp4:
-            logger.info_once("Using CutlassExpertsMxfp4 for MXFP4 MoE")
-            self.experts_cls = CutlassExpertsMxfp4
-        else:
-            logger.info_once("Using MarlinExperts for MXFP4 MoE")
-            self.experts_cls = MarlinExperts
+
+        # Select mxfp4 MoE backend
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        self.use_marlin = self.mxfp4_backend == Mxfp4MoeBackend.MARLIN
+        self.use_cutlass_mxfp4 = self.mxfp4_backend == Mxfp4MoeBackend.CUTLASS_MXFP4
 
     def create_weights(
         self,
@@ -121,19 +117,11 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if self.use_cutlass_mxfp4:
-            # W4A4: both weights and activations quantized to MXFP4
-            return mxfp4_moe_quant_config(
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-            )
-        else:
-            # W4A16: weight-only via Marlin
-            return make_mxfp4_moe_quant_config(
-                mxfp4_backend=self.mxfp4_backend,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-            )
+        return make_mxfp4_moe_quant_config(
+            mxfp4_backend=self.mxfp4_backend,
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+        )
 
     def process_weights_after_loading(self, layer: FusedMoE) -> None:
         layer.w13_weight = torch.nn.Parameter(
@@ -177,7 +165,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
-        else:
+
+        if self.use_marlin:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
                 "but FP4 quantization is being used. Weight-only FP4 "
@@ -186,6 +175,47 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
             prepare_moe_fp4_layer_for_marlin(layer)
 
+        # Allow for accessing weights and scales in standard way.
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        w13_bias = getattr(layer, "w13_bias", None)
+        w2_bias = getattr(layer, "w2_bias", None)
+
+        # Convert weights to kernel format
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=w13,
+                w2_weight=w2,
+                w13_weight_scale=w13_scale,
+                w2_weight_scale=w2_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                _cache_permute_indices=self._cache_permute_indices,
+            )
+        )
+
+        # For TRITON backends, weights are wrapped tensors from triton_kernels
+        # that don't support .detach(). Manually assign parameters.
+        if self.mxfp4_backend not in TRITON_BACKENDS:
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
+        else:
+            layer.w13_weight = w13
+            layer.w2_weight = w2
+            self.w13_precision_config = w13_scale
+            self.w2_precision_config = w2_scale
+
+        if w13_bias is not None and w2_bias is not None:
+            replace_parameter(layer, "w13_bias", w13_bias)
+            replace_parameter(layer, "w2_bias", w2_bias)
+
+        # Build quant config and kernel
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
