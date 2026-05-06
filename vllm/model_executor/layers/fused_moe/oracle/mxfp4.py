@@ -460,6 +460,15 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
+    if envs.is_set("VLLM_MXFP4_USE_CUTLASS_MXFP4") and envs.VLLM_MXFP4_USE_CUTLASS_MXFP4:
+        return _return_or_raise(
+            Mxfp4MoeBackend.CUTLASS_MXFP4,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
     for backend in AVAILABLE_BACKENDS:
         # Use requested_activation_key if provided, otherwise use backend default
         act_key = (
