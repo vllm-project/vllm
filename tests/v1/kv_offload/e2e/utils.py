@@ -56,7 +56,6 @@ _SESSION_PREFIX = f"perf/{uuid.uuid4().hex[:8]}"
 
 def make_obj_tier(
     key_prefix: str = _SESSION_PREFIX,
-    lookup_mode: str = "dict",
     **kwargs,
 ) -> ObjSecondaryTier:
     cfg = get_s3_config()
@@ -69,7 +68,6 @@ def make_obj_tier(
         pcp_size=1,
         rank=0,
         dtype="float32",
-        lookup_mode=lookup_mode,
         key_prefix=key_prefix,
         **kwargs,
     )

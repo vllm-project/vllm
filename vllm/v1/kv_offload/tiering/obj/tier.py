@@ -20,10 +20,6 @@ class ObjSecondaryTier(SecondaryTierManager):
 
     def __init__(
         self,
-        bucket: str,
-        endpoint_override: str,
-        access_key: str,
-        secret_key: str,
         model_name: str,
         gpu_block_size: int,
         tp_size: int,
@@ -31,11 +27,15 @@ class ObjSecondaryTier(SecondaryTierManager):
         pcp_size: int,
         rank: int,
         dtype: str,
-        lookup_mode: str = "nixl_query",
-        scheme: str = "http",
-        ca_bundle: str = "",
         key_prefix: str = "",
         io_threads: int = 4,
+        *,
+        bucket: str,
+        endpoint_override: str,
+        access_key: str,
+        secret_key: str,
+        scheme: str = "http",
+        ca_bundle: str = "",
     ):
         s3_params = dict(
             bucket=bucket,
@@ -56,18 +56,14 @@ class ObjSecondaryTier(SecondaryTierManager):
             dtype=dtype,
             key_prefix=key_prefix,
         )
-
-        self._lookup_mode = lookup_mode
-        if lookup_mode == "nixl_query":
-            self._nixl_lookup: NixlLookup | None = NixlLookup(**s3_params)
-        else:
-            self._nixl_lookup = None
-            self._stored_keys: set[OffloadKey] = set()
+        self._nixl_lookup = NixlLookup(**s3_params)
 
         # Keys currently being promoted S3 -> CPU (submit_load in flight)
         self._load_in_flight: set[OffloadKey] = set()
-        # job_id -> (is_store, keys) for completion bookkeeping
-        self._pending_jobs: dict[int, tuple[bool, list[OffloadKey]]] = {}
+        # Store jobs: only need to know they exist, not their keys
+        self._pending_stores: set[int] = set()
+        # Load jobs: keys needed to clear _load_in_flight on completion
+        self._pending_loads: dict[int, list[OffloadKey]] = {}
 
     def set_primary_view(self, view: memoryview) -> None:
         self._engine.set_primary_view(view)
@@ -75,21 +71,19 @@ class ObjSecondaryTier(SecondaryTierManager):
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         if key in self._load_in_flight:
             return None
-        if self._lookup_mode == "dict":
-            return key in self._stored_keys
         s3_key = self._file_mapper.get_key(get_offload_block_hash(key))
-        return self._nixl_lookup.exists(s3_key)  # type: ignore[union-attr]
+        return self._nixl_lookup.exists(s3_key)
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        keys = list(job_metadata.keys)
         s3_keys = [
-            self._file_mapper.get_key(get_offload_block_hash(k)) for k in keys
+            self._file_mapper.get_key(get_offload_block_hash(k))
+            for k in job_metadata.keys
         ]
         ok = self._engine.submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, s3_keys, "WRITE"
         )
         if ok:
-            self._pending_jobs[job_metadata.job_id] = (True, keys)
+            self._pending_stores.add(job_metadata.job_id)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
         keys = list(job_metadata.keys)
@@ -101,19 +95,17 @@ class ObjSecondaryTier(SecondaryTierManager):
         )
         if ok:
             self._load_in_flight.update(keys)
-            self._pending_jobs[job_metadata.job_id] = (False, keys)
+            self._pending_loads[job_metadata.job_id] = keys
 
     def get_finished(self) -> Iterable[JobResult]:
         for job_id, success in self._engine.get_finished():
-            job_info = self._pending_jobs.pop(job_id, None)
-            if job_info is None:
-                continue
-            is_store, keys = job_info
-            if is_store:
-                if success and self._lookup_mode == "dict":
-                    self._stored_keys.update(keys)
-            else:
+            if job_id in self._pending_stores:
+                self._pending_stores.remove(job_id)
+            elif job_id in self._pending_loads:
+                keys = self._pending_loads.pop(job_id)
                 self._load_in_flight.difference_update(keys)
+            else:
+                continue
             yield JobResult(job_id=job_id, success=success)
 
     def touch(self, keys: Collection[OffloadKey]) -> None:

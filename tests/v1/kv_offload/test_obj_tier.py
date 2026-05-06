@@ -59,7 +59,6 @@ try:
         pcp_size=1,
         rank=0,
         dtype="float32",
-        lookup_mode="dict",
     )
     del _probe
 except RuntimeError as _e:
@@ -99,7 +98,6 @@ def make_job(
 
 def make_tier(
     key_prefix: str = _RUN_PREFIX,
-    lookup_mode: str = "dict",
     **kwargs,
 ) -> ObjSecondaryTier:
     return ObjSecondaryTier(
@@ -115,7 +113,6 @@ def make_tier(
         pcp_size=1,
         rank=0,
         dtype="float32",
-        lookup_mode=lookup_mode,
         key_prefix=key_prefix,
         **kwargs,
     )
@@ -136,7 +133,7 @@ def drain(tier: ObjSecondaryTier, max_rounds: int = 200) -> list[JobResult]:
     results: list[JobResult] = []
     for _ in range(max_rounds):
         results.extend(tier.get_finished())
-        if not tier._pending_jobs:
+        if not tier._pending_stores and not tier._pending_loads:
             break
         time.sleep(0.1)
     return results
@@ -225,20 +222,6 @@ class TestObjTierBasic:
         assert self.tier.lookup(key(1), _CTX) is True
         assert self.tier.lookup(key(2), _CTX) is True
 
-    def test_nixl_query_lookup_mode(self):
-        """nixl_query mode resolves existence via S3, not in-memory dict."""
-        prefix = f"{_RUN_PREFIX}/nixlq/{uuid.uuid4().hex[:6]}"
-        tier, tensor = make_tier_with_view(
-            num_total_blocks=4, key_prefix=prefix, lookup_mode="nixl_query"
-        )
-        try:
-            assert tier.lookup(key(1), _CTX) is False
-            job = make_job(1, [key(1)], [0])
-            tier.submit_store(job)
-            drain(tier)
-            assert tier.lookup(key(1), _CTX) is True
-        finally:
-            tier.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +258,7 @@ class TestObjTierIO:
         assert all(r.success for r in results)
 
         for i, bid in enumerate(load_ids):
-            assert torch.allclose(tensor[bid], expected[i]), (
+            assert torch.equal(tensor[bid], expected[i]), (
                 f"Block {bid} data mismatch after store+load"
             )
 
@@ -301,7 +284,7 @@ class TestObjTierIO:
         assert all(r.success for r in results)
 
         for i, bid in enumerate(load_ids):
-            assert torch.allclose(tensor[bid], expected[i])
+            assert torch.equal(tensor[bid], expected[i])
 
         tier.shutdown()
 
@@ -408,7 +391,7 @@ class TestObjTierE2EWithPrimary:
         drain(obj_tier)
 
         for i, bid in enumerate(load_ids):
-            assert torch.allclose(cpu_tensor[bid], expected[keys[i]]), (
+            assert torch.equal(cpu_tensor[bid], expected[keys[i]]), (
                 f"Block {i} data mismatch after cascade+load"
             )
 
@@ -463,8 +446,8 @@ class TestObjTierE2EWithPrimary:
         # Verify data integrity after promotion
         load_spec = primary_tier.prepare_load(keys, _CTX)
         for i, bid in enumerate(load_spec.block_ids):
-            assert torch.allclose(
-                cpu_tensor[int(bid)], expected[keys[i]], rtol=1e-5, atol=1e-7
+            assert torch.equal(
+                cpu_tensor[int(bid)], expected[keys[i]]
             ), f"Block {i} data mismatch after promotion"
         primary_tier.complete_load(keys)
 
@@ -512,8 +495,8 @@ class TestObjTierE2EWithPrimary:
 
         load_spec = primary_tier.prepare_load(keys, _CTX)
         for i, bid in enumerate(load_spec.block_ids):
-            assert torch.allclose(
-                cpu_tensor[int(bid)], expected[keys[i]], rtol=1e-5, atol=1e-7
+            assert torch.equal(
+                cpu_tensor[int(bid)], expected[keys[i]]
             ), f"Block {i} data mismatch after roundtrip"
         primary_tier.complete_load(keys)
 

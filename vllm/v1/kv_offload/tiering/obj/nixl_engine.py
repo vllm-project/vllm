@@ -111,7 +111,7 @@ class NixlEngine:
     def get_finished(self) -> list[tuple[int, bool]]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
         results: list[tuple[int, bool]] = []
-        to_remove: list[_TransferEntry] = []
+        still_in_flight: deque[_TransferEntry] = deque()
 
         for entry in self._in_flight:
             try:
@@ -120,6 +120,7 @@ class NixlEngine:
                 logger.error("check_xfer_state raised for job %d: %s", entry.job_id, exc)
                 state = "ERR"
             if state == "PROC":
+                still_in_flight.append(entry)
                 continue
             self._agent.deregister_memory(entry.files_desc)
             self._agent.release_xfer_handle(entry.xfer_handle)
@@ -127,13 +128,15 @@ class NixlEngine:
             if not success:
                 logger.error("transfer failed job=%d state=%s", entry.job_id, state)
             results.append((entry.job_id, success))
-            to_remove.append(entry)
 
-        for entry in to_remove:
-            self._in_flight.remove(entry)
+        self._in_flight = still_in_flight
         return results
 
     def shutdown(self) -> None:
+        for entry in self._in_flight:
+            self._agent.deregister_memory(entry.files_desc)
+            self._agent.release_xfer_handle(entry.xfer_handle)
+        self._in_flight.clear()
         if self._primary_reg is not None:
             self._agent.deregister_memory(self._primary_reg)
             self._primary_reg = None
