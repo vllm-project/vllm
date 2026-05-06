@@ -430,33 +430,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             self._active_requests[new_req.req_id] = new_req
             self._req_blocks[new_req.req_id] = list(new_req.block_ids[0])
 
-        cached_reqs = scheduler_output.scheduled_cached_reqs
-        for i, req_id in enumerate(cached_reqs.req_ids):
-            if req_id not in self._active_requests:
-                continue
-
-            new_block_ids = cached_reqs.new_block_ids[i]
-
-            cached_req = self._active_requests[req_id]
-            req_block_ids = self._req_blocks[req_id]
-
-            if new_block_ids is None:
-                continue
-
-            block_ids = new_block_ids[0]
-
-            req_block_ids.extend(block_ids)
-            filename = os.path.join(self._storage_path, f"{req_id}.safetensors")
-
-            meta.add_request(
-                req_id=req_id,
-                filename=filename,
-                token_ids=cached_req.prompt_token_ids or [],
-                block_ids=req_block_ids,
-                block_size=self._block_size,
-                new_req=False,
-            )
-
         return meta
 
     def request_finished(
