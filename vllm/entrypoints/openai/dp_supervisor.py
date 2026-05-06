@@ -180,8 +180,8 @@ async def _probe_endpoint(
         return False, str(exc)
 
 
-def _build_multi_port_external_lb_supervisor_app(
-    supervisor: MultiPortExternalLBSupervisor,
+def _build_dp_supervisor_app(
+    supervisor: DPSupervisor,
 ) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
 
@@ -216,7 +216,7 @@ def _run_multi_port_external_lb_child(
     uvloop.run(run_server(child_args))
 
 
-class MultiPortExternalLBSupervisor:
+class DPSupervisor:
     def __init__(self, args: argparse.Namespace):
         validate_multi_port_external_lb_args(args)
         self.args = args
@@ -272,7 +272,7 @@ class MultiPortExternalLBSupervisor:
 
     async def _start_supervisor_server(self) -> None:
         host = self.args.host or "0.0.0.0"
-        app = _build_multi_port_external_lb_supervisor_app(self)
+        app = _build_dp_supervisor_app(self)
         config = uvicorn.Config(
             app,
             host=host,
@@ -419,5 +419,5 @@ class MultiPortExternalLBSupervisor:
         self._supervisor_server_task = None
 
 
-def run_multi_port_external_lb_supervisor(args: argparse.Namespace) -> None:
-    uvloop.run(MultiPortExternalLBSupervisor(args).run())
+def run_dp_supervisor(args: argparse.Namespace) -> None:
+    uvloop.run(DPSupervisor(args).run())

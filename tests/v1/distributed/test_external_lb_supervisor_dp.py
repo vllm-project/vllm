@@ -3,8 +3,8 @@
 
 import argparse
 
-from vllm.entrypoints.openai.local_external_lb import (
-    MultiPortExternalLBSupervisor,
+from vllm.entrypoints.openai.dp_supervisor import (
+    DPSupervisor,
     build_multi_port_external_lb_child_args,
     infer_multi_port_external_lb_start_rank,
 )
@@ -55,16 +55,16 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
     assert child_args.api_server_count == 1
 
 
-def test_multi_port_external_lb_supervisor_aggregates_health():
-    supervisor = MultiPortExternalLBSupervisor(_make_args())
+def test_dp_supervisor_aggregates_health():
+    supervisor = DPSupervisor(_make_args())
 
     supervisor.children_healthy = True
 
     assert supervisor.is_healthy() is True
 
 
-def test_multi_port_external_lb_supervisor_is_unhealthy_after_shutdown_requested():
-    supervisor = MultiPortExternalLBSupervisor(_make_args())
+def test_dp_supervisor_is_unhealthy_after_shutdown_requested():
+    supervisor = DPSupervisor(_make_args())
     supervisor.children_healthy = True
     supervisor._stop_requested.set()
 

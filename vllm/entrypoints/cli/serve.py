@@ -12,8 +12,8 @@ import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import run_server, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.local_external_lb import (
-    run_multi_port_external_lb_supervisor,
+from vllm.entrypoints.openai.dp_supervisor import (
+    run_dp_supervisor,
 )
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
@@ -49,7 +49,7 @@ class ServeSubcommand(CLISubcommand):
             args.model = args.model_tag
 
         if getattr(args, "data_parallel_multi_port_external_lb", False):
-            run_multi_port_external_lb_supervisor(args)
+            run_dp_supervisor(args)
             return
 
         if getattr(args, "grpc", False):
