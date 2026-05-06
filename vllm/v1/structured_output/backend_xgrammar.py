@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,93 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _XgrammarDraftTree:
+    tree_choices: tuple[tuple[int, ...], ...]
+    _topology_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+    _branch_indices_cache: dict[int, list[tuple[int, ...] | None]] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    @classmethod
+    def from_speculative_config(
+        cls, speculative_config: Any | None, num_speculative_tokens: int
+    ) -> "_XgrammarDraftTree | None":
+        if num_speculative_tokens <= 0:
+            return None
+
+        speculative_token_tree = None
+        if speculative_config is not None:
+            speculative_token_tree = speculative_config.speculative_token_tree
+
+        if speculative_token_tree is None:
+            tree_choices = tuple((0,) * (i + 1) for i in range(num_speculative_tokens))
+        else:
+            tree_choices = tuple(
+                tuple(path) for path in ast.literal_eval(speculative_token_tree)
+            )
+        return cls(tree_choices=tree_choices)
+
+    @property
+    def num_draft_tokens(self) -> int:
+        return len(self.tree_choices)
+
+    def topology(self, prefix_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return xgrammar child/sibling topology for the requested prefix."""
+        if prefix_len not in self._topology_cache:
+            num_nodes = prefix_len + 1
+            retrieve_next_token = [-1] * num_nodes
+            retrieve_next_sibling = [-1] * num_nodes
+            path_to_node = self._path_to_node(prefix_len)
+            children_by_parent: dict[int, list[int]] = {}
+
+            for node_idx, path in enumerate(self.tree_choices[:prefix_len], start=1):
+                parent_path = path[:-1]
+                if parent_path:
+                    parent_idx = path_to_node.get(parent_path)
+                    if parent_idx is None:
+                        continue
+                else:
+                    parent_idx = 0
+                children_by_parent.setdefault(parent_idx, []).append(node_idx)
+
+            for parent_idx, children in children_by_parent.items():
+                retrieve_next_token[parent_idx] = children[0]
+                for left, right in zip(children, children[1:]):
+                    retrieve_next_sibling[left] = right
+            self._topology_cache[prefix_len] = (
+                torch.tensor(retrieve_next_token, dtype=torch.int64),
+                torch.tensor(retrieve_next_sibling, dtype=torch.int64),
+            )
+        return self._topology_cache[prefix_len]
+
+    def branch_token_indices(self, prefix_len: int) -> list[tuple[int, ...] | None]:
+        """Return draft-token indices needed to reach each node."""
+        if prefix_len not in self._branch_indices_cache:
+            branch_indices: list[tuple[int, ...] | None] = [()] + [None] * prefix_len
+            path_to_node = self._path_to_node(prefix_len)
+            for node_idx, path in enumerate(self.tree_choices[:prefix_len], start=1):
+                indices: list[int] = []
+                for depth in range(1, len(path) + 1):
+                    ancestor_idx = path_to_node.get(path[:depth])
+                    if ancestor_idx is None:
+                        indices = []
+                        break
+                    indices.append(ancestor_idx - 1)
+                else:
+                    branch_indices[node_idx] = tuple(indices)
+            self._branch_indices_cache[prefix_len] = branch_indices
+        return self._branch_indices_cache[prefix_len]
+
+    def _path_to_node(self, prefix_len: int) -> dict[tuple[int, ...], int]:
+        return {
+            path: idx
+            for idx, path in enumerate(self.tree_choices[:prefix_len], start=1)
+        }
 
 
 @dataclass
@@ -71,8 +159,12 @@ class XgrammarBackend(StructuredOutputBackend):
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
             self.num_speculative_tokens = (
-                self.vllm_config.speculative_config.num_speculative_tokens
+                self.vllm_config.speculative_config.num_speculative_tokens or 0
             )
+        self.draft_tree = _XgrammarDraftTree.from_speculative_config(
+            self.vllm_config.speculative_config,
+            self.num_speculative_tokens,
+        )
 
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
@@ -119,6 +211,7 @@ class XgrammarBackend(StructuredOutputBackend):
             ),
             vocab_size=self.vocab_size,
             ctx=ctx,
+            draft_tree=self.draft_tree,
         )
 
     def allocate_token_bitmask(self, max_num_seqs: int):
@@ -140,6 +233,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
     vocab_size: int
     matcher: xgr.GrammarMatcher = field(hash=False)
     ctx: xgr.CompiledGrammar = field(hash=False)
+    draft_tree: _XgrammarDraftTree | None = field(default=None, repr=False, hash=False)
     num_processed_tokens: int = field(
         default_factory=lambda: 0, repr=False, hash=False, init=False
     )
@@ -188,8 +282,84 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.num_processed_tokens -= num_tokens
         self._is_terminated = self.matcher.is_terminated()
 
-    def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
-        self.matcher.fill_next_token_bitmask(bitmask, idx)
+    def fill_bitmask(self, bitmask: torch.Tensor, batch_index: int) -> None:
+        self.matcher.fill_next_token_bitmask(bitmask, batch_index)
+
+    def fill_speculative_bitmask(
+        self,
+        bitmask: torch.Tensor,
+        batch_index: int,
+        tokens: list[int],
+        apply_bitmask: bool,
+    ) -> bool:
+        if self.draft_tree is None:
+            return False
+        if len(tokens) > self.draft_tree.num_draft_tokens:
+            return False
+
+        known_len = _get_speculative_prefix_len(tokens)
+        num_rows = len(tokens) + 1
+        rows = bitmask[batch_index : batch_index + num_rows]
+        rows.fill_(-1)
+        if not apply_bitmask or self.is_terminated():
+            return True
+
+        if known_len == 0:
+            self.matcher.fill_next_token_bitmask(bitmask, batch_index)
+            return True
+
+        token_bitmask = bitmask[batch_index : batch_index + known_len + 1]
+        draft_tokens = torch.empty(known_len + 1, dtype=torch.int64)
+        draft_tokens[0] = 0
+        draft_tokens[1:] = torch.tensor(tokens[:known_len], dtype=torch.int64)
+
+        retrieve_next_token, retrieve_next_sibling = self.draft_tree.topology(known_len)
+        try:
+            traverse_completed = self.matcher.fork().traverse_draft_tree(
+                retrieve_next_token,
+                retrieve_next_sibling,
+                draft_tokens,
+                token_bitmask,
+                -1.0,
+            )
+        except RuntimeError:
+            traverse_completed = False
+        if traverse_completed:
+            return True
+
+        self._fill_speculative_bitmask_with_forks(
+            token_bitmask,
+            tokens[:known_len],
+            known_len,
+        )
+        return True
+
+    def _fill_speculative_bitmask_with_forks(
+        self,
+        bitmask: torch.Tensor,
+        tokens: list[int],
+        prefix_len: int,
+    ) -> None:
+        assert self.draft_tree is not None
+        self.matcher.fill_next_token_bitmask(bitmask, 0)
+        branch_token_indices = self.draft_tree.branch_token_indices(prefix_len)
+        for node_idx in range(1, prefix_len + 1):
+            token_indices = branch_token_indices[node_idx]
+            if token_indices is None:
+                bitmask[node_idx].fill_(-1)
+                continue
+
+            matcher = self.matcher.fork()
+            accepted = True
+            for token_idx in token_indices:
+                if not matcher.accept_token(tokens[token_idx]):
+                    accepted = False
+                    break
+
+            if accepted:
+                matcher.fill_next_token_bitmask(bitmask, node_idx)
+            else:
+                bitmask[node_idx].fill_(-1)
 
     def is_terminated(self) -> bool:
         return self._is_terminated
@@ -197,6 +367,13 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def reset(self):
         self.num_processed_tokens = 0
         self.matcher.reset()
+
+
+def _get_speculative_prefix_len(tokens: list[int]) -> int:
+    for idx, token in enumerate(tokens):
+        if token == -1:
+            return idx
+    return len(tokens)
 
 
 # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
