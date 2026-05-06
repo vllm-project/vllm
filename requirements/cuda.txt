@@ -25,4 +25,4 @@ nvidia-cutlass-dsl>=4.4.2
 quack-kernels>=0.3.3
 
 # Tokenspeed_MLA for faster mla with spec decode
-tokenspeed-mla==0.1.0
+tokenspeed-mla==0.1.1
