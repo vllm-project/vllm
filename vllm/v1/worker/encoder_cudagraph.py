@@ -141,21 +141,6 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
-    def _detect_input_key(self, mm_kwargs: dict[str, Any]) -> str:
-        """Auto-detect the input tensor key from mm_kwargs.
-
-        Uses the ``input_key_by_modality`` mapping in config to find which
-        input key is present in mm_kwargs. The modality is inferred rather
-        than requiring the model to implement ``get_input_modality``.
-        """
-        for key in self.config.input_key_by_modality.values():
-            if key in mm_kwargs:
-                return key
-        raise ValueError(
-            f"No known input key found in mm_kwargs. "
-            f"Expected one of {list(self.config.input_key_by_modality.values())}"
-        )
-
     def capture(self):
         """Capture CUDA graphs for all token budgets."""
         for token_budget in self.token_budgets:
@@ -274,7 +259,9 @@ class EncoderCudaGraphManager:
         # Copy the input tensor. Buffers are sized for the full budget;
         # actual inputs may be smaller. Zero then slice-copy so padded
         # positions are invisible to attention (cu_seqlens masks them out).
-        input_key = self._detect_input_key(mm_kwargs)
+        input_key = input_key = self.config.input_key_by_modality[
+            self.model.get_input_modality(mm_kwargs)
+        ]
         src = mm_kwargs[input_key]
         n = src.shape[0]
         graph_meta.input_buffer[:n].copy_(src)
