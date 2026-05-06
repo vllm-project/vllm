@@ -1581,51 +1581,59 @@ __global__ void gemm_q4_wmma_kernel_v7(
   // Triton uses this layout to read 8 bf16 per instruction instead of 1.
   __shared__ T b_lds[2][64][16];
 
-  // Dequant: waves 0-3 load+unpack+write to LDS in one pass (monolithic).
+  // Dequant with scale/zero caching: 1 global_load per iter (7/8 of the time).
+  const bool dq_ok = (wave_id < 4) && (n_tile + wave_id*16 + lane_lo < size_n);
+  const int dq_n = wave_id * 16 + lane_lo;
+  const int dq_an = n_tile + dq_n;
+  const int dq_oct = lane_hi;
+  const int dq_kb = dq_oct * 8;
+  half2 ch_z = {}, ch_y = {};
+  float cf_z = 0, cf_y = 0;
+  int cached_g = -1;
+
   auto dequant_into = [&](int buf, int k_tile) __attribute__((always_inline)) {
-    if (wave_id >= 4) return;
-    const int my_n_in_tile = wave_id * 16 + lane_lo;
-    const int actual_n = n_tile + my_n_in_tile;
-    if (actual_n >= size_n) return;
+    if (!dq_ok) return;
 
-    const int my_k_octet = lane_hi;
-    const int qk_row = (k_tile / 8) + my_k_octet;
-    const uint32_t qa = b_q[qk_row * size_n + actual_n];
-
+    // Reload scale/zero only on group boundary (every groupsize/16 iters).
     const int g = k_tile / groupsize;
-    const int qz_idx = g * (size_n / 8) + actual_n / 8;
-    const int qz_shift = (actual_n & 7) * 4;
-    const uint32_t zero_v =
-        ((b_qzeros[qz_idx] >> qz_shift) & 0xF) + (uint32_t)zero_offset;
-    const T scale_t = b_scales[g * size_n + actual_n];
-    const int k_base = my_k_octet * 8;
+    if (g != cached_g) {
+      cached_g = g;
+      const int qz_idx = g * (size_n / 8) + dq_an / 8;
+      const uint32_t zero_v =
+          ((b_qzeros[qz_idx] >> ((dq_an & 7) * 4)) & 0xF) + (uint32_t)zero_offset;
+      const T sc = b_scales[g * size_n + dq_an];
+      if constexpr (std::is_same<T, half>::value)
+        prep_zero_scale_fp16_precise(zero_v, sc, ch_z, ch_y);
+      else
+        prep_zero_scale_bf16_f32(zero_v, sc, cf_z, cf_y);
+    }
+
+    const int qk_row = (k_tile / 8) + dq_oct;
+    const uint32_t qa = b_q[qk_row * size_n + dq_an];
+    const int k_base = dq_kb;
 
     if constexpr (std::is_same<T, half>::value) {
-      half2 z_prep, y_prep;
-      prep_zero_scale_fp16_precise(zero_v, scale_t, z_prep, y_prep);
       half2 dq[4];
-      dequant_4bit_8_fp16_precise(qa, dq, z_prep, y_prep);
-      b_lds[buf][my_n_in_tile][k_base + 0] = __low2half(dq[0]);
-      b_lds[buf][my_n_in_tile][k_base + 1] = __high2half(dq[0]);
-      b_lds[buf][my_n_in_tile][k_base + 2] = __low2half(dq[1]);
-      b_lds[buf][my_n_in_tile][k_base + 3] = __high2half(dq[1]);
-      b_lds[buf][my_n_in_tile][k_base + 4] = __low2half(dq[2]);
-      b_lds[buf][my_n_in_tile][k_base + 5] = __high2half(dq[2]);
-      b_lds[buf][my_n_in_tile][k_base + 6] = __low2half(dq[3]);
-      b_lds[buf][my_n_in_tile][k_base + 7] = __high2half(dq[3]);
+      dequant_4bit_8_fp16_precise(qa, dq, ch_z, ch_y);
+      b_lds[buf][dq_n][k_base + 0] = __low2half(dq[0]);
+      b_lds[buf][dq_n][k_base + 1] = __high2half(dq[0]);
+      b_lds[buf][dq_n][k_base + 2] = __low2half(dq[1]);
+      b_lds[buf][dq_n][k_base + 3] = __high2half(dq[1]);
+      b_lds[buf][dq_n][k_base + 4] = __low2half(dq[2]);
+      b_lds[buf][dq_n][k_base + 5] = __high2half(dq[2]);
+      b_lds[buf][dq_n][k_base + 6] = __low2half(dq[3]);
+      b_lds[buf][dq_n][k_base + 7] = __high2half(dq[3]);
     } else {
-      float z_f, y_f;
-      prep_zero_scale_bf16_f32(zero_v, scale_t, z_f, y_f);
       bf162_t dq[4];
-      dequant_4bit_8_bf16_to_bf16(qa, dq, z_f, y_f);
-      b_lds[buf][my_n_in_tile][k_base + 0] = dq[0].x;
-      b_lds[buf][my_n_in_tile][k_base + 1] = dq[0].y;
-      b_lds[buf][my_n_in_tile][k_base + 2] = dq[1].x;
-      b_lds[buf][my_n_in_tile][k_base + 3] = dq[1].y;
-      b_lds[buf][my_n_in_tile][k_base + 4] = dq[2].x;
-      b_lds[buf][my_n_in_tile][k_base + 5] = dq[2].y;
-      b_lds[buf][my_n_in_tile][k_base + 6] = dq[3].x;
-      b_lds[buf][my_n_in_tile][k_base + 7] = dq[3].y;
+      dequant_4bit_8_bf16_to_bf16(qa, dq, cf_z, cf_y);
+      b_lds[buf][dq_n][k_base + 0] = dq[0].x;
+      b_lds[buf][dq_n][k_base + 1] = dq[0].y;
+      b_lds[buf][dq_n][k_base + 2] = dq[1].x;
+      b_lds[buf][dq_n][k_base + 3] = dq[1].y;
+      b_lds[buf][dq_n][k_base + 4] = dq[2].x;
+      b_lds[buf][dq_n][k_base + 5] = dq[2].y;
+      b_lds[buf][dq_n][k_base + 6] = dq[3].x;
+      b_lds[buf][dq_n][k_base + 7] = dq[3].y;
     }
   };
 
