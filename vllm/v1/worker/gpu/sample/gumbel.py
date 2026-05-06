@@ -2,12 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-import vllm.envs as envs
 from vllm.triton_utils import tl, triton
-
-# Smallest positive normal fp32 value. Used to clamp the uniform draw so that
-# `log(u)` cannot produce -inf (and thus `-log(-log(u))` stays finite).
-_FP32_TINY = tl.constexpr(float.fromhex("0x1p-126"))
 
 
 @triton.jit
@@ -23,7 +18,7 @@ def _temperature_kernel(
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
     if temperature == 0.0 or temperature == 1.0:
-        # Greedy or no-op rescale: avoid loading logits at all.
+        # Early return to avoid loading logits.
         return
 
     block_idx = tl.program_id(1)
@@ -81,40 +76,46 @@ def gumbel_block_argmax(
     pos_ptr,
     processed_logits_ptr,
     processed_logits_stride,
+    processed_logits_col_ptr,
+    vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
-    USE_FP64: tl.constexpr,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
+        # Apply temperature.
         # NOTE(woosuk): Match the behavior of _temperature_kernel.
         # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
 
     if processed_logits_ptr is not None:
+        # Store the temperature-applied logits.
+        if processed_logits_col_ptr is not None:
+            col = tl.load(processed_logits_col_ptr)
+        else:
+            col = 0
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + block,
+            processed_logits_ptr
+            + req_state_idx * processed_logits_stride
+            + col * vocab_size
+            + block,
             logits,
             mask=mask,
         )
 
-    # fp32 is the default reduction dtype; fp64 is ~1/32–1/64x the throughput
-    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
-    if USE_FP64:
-        logits = logits.to(tl.float64)
+    logits = logits.to(tl.float64)
     if temp != 0.0:
+        # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
         pos = tl.load(pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
 
-        if USE_FP64:
-            u = tl_rand64(gumbel_seed, block, includes_zero=False)
-            gumbel_noise = -tl.log(-tl.log(u))
-        else:
-            u = tl.rand(gumbel_seed, block)
-            u = tl.maximum(u, _FP32_TINY)
-            gumbel_noise = -tl.log(-tl.log(u))
+        # tl.rand returns fp32, so build a true fp64 uniform from 64 random
+        # bits before applying the double-log transform.
+        u = tl_rand64(gumbel_seed, block, includes_zero=False)
+        gumbel_noise = -tl.log(-tl.log(u))
 
+        # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
     value, idx = tl.max(logits, axis=0, return_indices=True)
@@ -129,6 +130,7 @@ def _gumbel_sample_kernel(
     local_max_stride,
     processed_logits_ptr,
     processed_logits_stride,
+    processed_logits_col_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -161,6 +163,8 @@ def _gumbel_sample_kernel(
         pos_ptr,
         processed_logits_ptr,
         processed_logits_stride,
+        processed_logits_col_ptr,
+        vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
     )
     token_id = block_idx * BLOCK_SIZE + idx
@@ -175,24 +179,22 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
-    use_fp64: bool | None = None,
+    output_processed_logits: torch.Tensor | None = None,
+    output_processed_logits_col: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    if use_fp64 is None:
-        use_fp64 = bool(envs.VLLM_SAMPLER_FP64_GUMBEL)
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
-    local_max_dtype = torch.float64 if use_fp64 else torch.float32
-    local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
+    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float64)
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        processed_logits_out,
-        processed_logits_out.stride(0) if processed_logits_out is not None else 0,
+        output_processed_logits,
+        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
+        output_processed_logits_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -202,7 +204,6 @@ def gumbel_sample(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
-        USE_FP64=use_fp64,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
