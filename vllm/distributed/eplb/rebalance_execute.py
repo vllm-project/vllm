@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 The actual execution of the rearrangement.
@@ -60,6 +59,38 @@ class AsyncEplbLayerResult:
     thread calls record() after it finishes transferring weights out of the intermediate
     buffer in _move_to_workspace()
     """
+
+
+@dataclass
+class _TransferPlan:
+    """Internal plan computed by _plan_transfers for move_to_buffer.
+
+    Separates the planning logic (computing masks, send/recv maps) from the
+    execution logic (local copies, P2P communication).
+    """
+
+    is_unchanged: np.ndarray
+    """Mask of (num_local_experts,) for experts that did not change."""
+    is_received_locally: np.ndarray
+    """Mask of (num_local_experts,) for experts receivable from local data."""
+    recv_primary_mask: np.ndarray
+    """Mask of (num_local_experts,) for primary remote receives."""
+    send_count: int
+    """Number of unique experts this rank can send."""
+    send_expert_ids: np.ndarray
+    """Expert IDs (num_local_experts,) to send; valid up to send_count."""
+    send_src_rows: np.ndarray
+    """Source rows (num_local_experts,) for sends; valid up to send_count."""
+    recv_count: int
+    """Number of unique experts this rank needs to receive remotely."""
+    recv_expert_ids: np.ndarray
+    """Expert IDs (num_local_experts,) to receive; valid up to recv_count."""
+    recv_dst_rows: np.ndarray
+    """Destination rows (num_local_experts,) for receives; valid up to recv_count."""
+    eligible_local_buffer_mask: np.ndarray
+    """Mask of (num_local_experts,) for experts eligible for local buffer copy."""
+    new_local_expert_ids: np.ndarray
+    """The new expert IDs assigned to local slots."""
 
 
 def get_ep_ranks_with_experts_batch(
@@ -169,35 +200,30 @@ def get_ep_ranks_with_experts_batch(
     return ranks_to_send_map, ranks_to_recv_map
 
 
-def move_to_buffer(
+def _plan_transfers(
     num_local_experts: int,
     old_indices: np.ndarray,
     new_indices: np.ndarray,
-    expert_weights: Sequence[torch.Tensor],
-    expert_weights_buffers: Sequence[torch.Tensor],
-    cuda_stream: torch.cuda.Stream | None,
     ep_rank: int,
-    communicator: EplbCommunicator,
-) -> TransferMetadata:
+) -> _TransferPlan:
     """
-    Rearranges expert weights during EPLB rebalancing.
+    Compute the transfer plan for EPLB rebalancing.
+
+    This is the pure planning phase that determines which experts need to be
+    moved locally, sent to other ranks, or received from other ranks. It does
+    not perform any data movement.
 
     Args:
-        num_local_experts: Number of local experts.
-        old_indices: (num_experts_total,) ndarray of current (old)
-            global-to-local expert assignments.
-        new_indices: (num_experts_total,) ndarray of desired (new)
-            global-to-local assignments after rebalance.
-        expert_weights: Original expert weights for the layer.
-        expert_weights_buffers: Intermediate buffers (one per tensor).
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        num_local_experts: Number of local experts per rank.
+        old_indices: (num_experts_total,) ndarray of current global-to-local
+            expert assignments.
+        new_indices: (num_experts_total,) ndarray of desired global-to-local
+            assignments after rebalance.
         ep_rank: Rank of this process in expert parallel group.
-        communicator: EplbCommunicator instance for P2P communication.
 
     Returns:
-        TransferMetadata: Metadata needed for completing remote weight transfers.
+        _TransferPlan containing all masks and mappings needed for execution.
     """
-    assert old_indices.shape == new_indices.shape
     recv_primary_mask = np.zeros((num_local_experts,), dtype=np.bool_)
     send_expert_ids = np.full((num_local_experts,), -1, dtype=np.int64)
     send_src_rows = np.full((num_local_experts,), -1, dtype=np.int32)
@@ -251,93 +277,249 @@ def move_to_buffer(
 
     eligible_local_buffer_mask = np.logical_and(~is_unchanged, is_received_locally)
 
-    # 1. Local moves into tmp buffers
-    if bool(eligible_local_buffer_mask.any()) and send_count > 0:
-        dest_indices = np.nonzero(eligible_local_buffer_mask)[0].tolist()
-        expert_to_src_map = dict(
-            zip(send_expert_ids[:send_count], send_src_rows[:send_count])
-        )
-        for dst in dest_indices:
-            expert = new_local_expert_ids[dst]
-            src_local = expert_to_src_map.get(expert, -1)
-            if src_local != -1:
-                with torch.cuda.stream(cuda_stream):
-                    for w, b in zip(expert_weights, expert_weights_buffers):
-                        b[dst].copy_(w[src_local], non_blocking=True)
-
-    # 2. Post sends
-    if send_count > 0:
-        experts = send_expert_ids[:send_count]
-        srcs = send_src_rows[:send_count]
-        order = np.argsort(experts, kind="stable")
-        experts = experts[order]
-        srcs = srcs[order]
-
-        send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
-
-        for expert, src in zip(experts.tolist(), srcs.tolist()):
-            ranks_to_send = send_map[expert]
-            ranks_to_recv = recv_map[expert]
-            if not ranks_to_send or not ranks_to_recv:
-                continue
-            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-            sender_pos = ranks_to_send.index(ep_rank)
-            recv_begin = sender_pos * num_dst_per_sender
-            recv_end = recv_begin + num_dst_per_sender
-            recv_ranks = ranks_to_recv[recv_begin:recv_end]
-            remainder_start = len(ranks_to_send) * num_dst_per_sender
-            recver_pos = remainder_start + sender_pos
-            if recver_pos < len(ranks_to_recv):
-                recv_ranks.append(ranks_to_recv[recver_pos])
-            for dst in recv_ranks:
-                for w in expert_weights:
-                    communicator.add_send(w[src], dst)
-
-    # 3. Post recvs
-    if recv_count > 0:
-        experts = recv_expert_ids[:recv_count]
-        dsts = recv_dst_rows[:recv_count]
-        order = np.argsort(experts, kind="stable")
-        experts = experts[order]
-        dsts = dsts[order]
-
-        send_map, recv_map = get_ep_ranks_with_experts_batch(
-            experts,
-            num_local_experts,
-            old_indices,
-            new_indices,
-        )
-
-        for expert, dst in zip(experts.tolist(), dsts.tolist()):
-            ranks_to_send = send_map[expert]
-            ranks_to_recv = recv_map[expert]
-            if not ranks_to_send or not ranks_to_recv:
-                continue
-            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
-            recver_pos = ranks_to_recv.index(ep_rank)
-            remainder_start = len(ranks_to_send) * num_dst_per_sender
-            if recver_pos < remainder_start:
-                src = ranks_to_send[recver_pos // num_dst_per_sender]
-            else:
-                src = ranks_to_send[recver_pos - remainder_start]
-            for b in expert_weights_buffers:
-                communicator.add_recv(b[dst], src)
-
-    # 4. Execute the P2P operations. The real communication happens here.
-    communicator.execute()
-    # wait for the communication to finish
-    return TransferMetadata(
+    return _TransferPlan(
         is_unchanged=is_unchanged,
         is_received_locally=is_received_locally,
         recv_primary_mask=recv_primary_mask,
+        send_count=send_count,
+        send_expert_ids=send_expert_ids,
+        send_src_rows=send_src_rows,
         recv_count=recv_count,
         recv_expert_ids=recv_expert_ids,
         recv_dst_rows=recv_dst_rows,
+        eligible_local_buffer_mask=eligible_local_buffer_mask,
+        new_local_expert_ids=new_local_expert_ids,
+    )
+
+
+def _execute_local_copies(
+    plan: _TransferPlan,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: Sequence[torch.Tensor],
+    cuda_stream: torch.cuda.Stream | None,
+) -> None:
+    """
+    Copy locally-available experts into intermediate buffers.
+
+    For experts that changed position but are still available on this rank,
+    copy them from their old position to the buffer at their new position.
+
+    Args:
+        plan: The transfer plan computed by _plan_transfers.
+        expert_weights: Original expert weight tensors for the layer.
+        expert_weights_buffers: Intermediate buffers (one per tensor).
+        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+    """
+    if not bool(plan.eligible_local_buffer_mask.any()) or plan.send_count == 0:
+        return
+
+    dest_indices = np.nonzero(plan.eligible_local_buffer_mask)[0].tolist()
+    expert_to_src_map = dict(
+        zip(
+            plan.send_expert_ids[: plan.send_count],
+            plan.send_src_rows[: plan.send_count],
+        )
+    )
+    for dst in dest_indices:
+        expert = plan.new_local_expert_ids[dst]
+        src_local = expert_to_src_map.get(expert, -1)
+        if src_local != -1:
+            with torch.cuda.stream(cuda_stream):
+                for w, b in zip(expert_weights, expert_weights_buffers):
+                    b[dst].copy_(w[src_local], non_blocking=True)
+
+
+def _post_sends(
+    plan: _TransferPlan,
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    ep_rank: int,
+    expert_weights: Sequence[torch.Tensor],
+    communicator: EplbCommunicator,
+) -> None:
+    """
+    Enqueue P2P send operations for experts that need to be sent to other ranks.
+
+    For each expert this rank owns, determine which remote ranks need it and
+    enqueue the appropriate send operations via the communicator.
+
+    Args:
+        plan: The transfer plan computed by _plan_transfers.
+        num_local_experts: Number of local experts per rank.
+        old_indices: (num_experts_total,) current global expert assignments.
+        new_indices: (num_experts_total,) desired global expert assignments.
+        ep_rank: Rank of this process in expert parallel group.
+        expert_weights: Original expert weight tensors for the layer.
+        communicator: EplbCommunicator instance for P2P communication.
+    """
+    if plan.send_count == 0:
+        return
+
+    experts = plan.send_expert_ids[: plan.send_count]
+    srcs = plan.send_src_rows[: plan.send_count]
+    order = np.argsort(experts, kind="stable")
+    experts = experts[order]
+    srcs = srcs[order]
+
+    send_map, recv_map = get_ep_ranks_with_experts_batch(
+        experts,
+        num_local_experts,
+        old_indices,
+        new_indices,
+    )
+
+    for expert, src in zip(experts.tolist(), srcs.tolist()):
+        ranks_to_send = send_map[expert]
+        ranks_to_recv = recv_map[expert]
+        if not ranks_to_send or not ranks_to_recv:
+            continue
+        num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+        sender_pos = ranks_to_send.index(ep_rank)
+        recv_begin = sender_pos * num_dst_per_sender
+        recv_end = recv_begin + num_dst_per_sender
+        recv_ranks = ranks_to_recv[recv_begin:recv_end]
+        remainder_start = len(ranks_to_send) * num_dst_per_sender
+        recver_pos = remainder_start + sender_pos
+        if recver_pos < len(ranks_to_recv):
+            recv_ranks.append(ranks_to_recv[recver_pos])
+        for dst in recv_ranks:
+            for w in expert_weights:
+                communicator.add_send(w[src], dst)
+
+
+def _post_recvs(
+    plan: _TransferPlan,
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    ep_rank: int,
+    expert_weights_buffers: Sequence[torch.Tensor],
+    communicator: EplbCommunicator,
+) -> None:
+    """
+    Enqueue P2P receive operations for experts needed from other ranks.
+
+    For each expert this rank needs but does not have locally, determine
+    which remote rank will send it and enqueue the appropriate receive
+    operations via the communicator.
+
+    Args:
+        plan: The transfer plan computed by _plan_transfers.
+        num_local_experts: Number of local experts per rank.
+        old_indices: (num_experts_total,) current global expert assignments.
+        new_indices: (num_experts_total,) desired global expert assignments.
+        ep_rank: Rank of this process in expert parallel group.
+        expert_weights_buffers: Intermediate buffers (one per tensor).
+        communicator: EplbCommunicator instance for P2P communication.
+    """
+    if plan.recv_count == 0:
+        return
+
+    experts = plan.recv_expert_ids[: plan.recv_count]
+    dsts = plan.recv_dst_rows[: plan.recv_count]
+    order = np.argsort(experts, kind="stable")
+    experts = experts[order]
+    dsts = dsts[order]
+
+    send_map, recv_map = get_ep_ranks_with_experts_batch(
+        experts,
+        num_local_experts,
+        old_indices,
+        new_indices,
+    )
+
+    for expert, dst in zip(experts.tolist(), dsts.tolist()):
+        ranks_to_send = send_map[expert]
+        ranks_to_recv = recv_map[expert]
+        if not ranks_to_send or not ranks_to_recv:
+            continue
+        num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+        recver_pos = ranks_to_recv.index(ep_rank)
+        remainder_start = len(ranks_to_send) * num_dst_per_sender
+        if recver_pos < remainder_start:
+            src = ranks_to_send[recver_pos // num_dst_per_sender]
+        else:
+            src = ranks_to_send[recver_pos - remainder_start]
+        for b in expert_weights_buffers:
+            communicator.add_recv(b[dst], src)
+
+
+def move_to_buffer(
+    num_local_experts: int,
+    old_indices: np.ndarray,
+    new_indices: np.ndarray,
+    expert_weights: Sequence[torch.Tensor],
+    expert_weights_buffers: Sequence[torch.Tensor],
+    cuda_stream: torch.cuda.Stream | None,
+    ep_rank: int,
+    communicator: EplbCommunicator,
+) -> TransferMetadata:
+    """
+    Rearranges expert weights during EPLB rebalancing.
+
+    This function orchestrates the full transfer pipeline:
+    1. Plan: Compute which experts move locally vs. remotely.
+    2. Local copies: Copy locally-available experts into buffers.
+    3. Post sends: Enqueue P2P send operations for remote ranks.
+    4. Post recvs: Enqueue P2P receive operations from remote ranks.
+    5. Execute: Flush all P2P operations via the communicator.
+
+    Args:
+        num_local_experts: Number of local experts.
+        old_indices: (num_experts_total,) ndarray of current (old)
+            global-to-local expert assignments.
+        new_indices: (num_experts_total,) ndarray of desired (new)
+            global-to-local assignments after rebalance.
+        expert_weights: Original expert weights for the layer.
+        expert_weights_buffers: Intermediate buffers (one per tensor).
+        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        ep_rank: Rank of this process in expert parallel group.
+        communicator: EplbCommunicator instance for P2P communication.
+
+    Returns:
+        TransferMetadata: Metadata needed for completing remote weight transfers.
+    """
+    assert old_indices.shape == new_indices.shape
+
+    # 1. Plan: determine what moves where
+    plan = _plan_transfers(num_local_experts, old_indices, new_indices, ep_rank)
+
+    # 2. Local copies into intermediate buffers
+    _execute_local_copies(plan, expert_weights, expert_weights_buffers, cuda_stream)
+
+    # 3. Enqueue P2P sends
+    _post_sends(
+        plan,
+        num_local_experts,
+        old_indices,
+        new_indices,
+        ep_rank,
+        expert_weights,
+        communicator,
+    )
+
+    # 4. Enqueue P2P receives
+    _post_recvs(
+        plan,
+        num_local_experts,
+        old_indices,
+        new_indices,
+        ep_rank,
+        expert_weights_buffers,
+        communicator,
+    )
+
+    # 5. Execute the P2P operations. The real communication happens here.
+    communicator.execute()
+
+    return TransferMetadata(
+        is_unchanged=plan.is_unchanged,
+        is_received_locally=plan.is_received_locally,
+        recv_primary_mask=plan.recv_primary_mask,
+        recv_count=plan.recv_count,
+        recv_expert_ids=plan.recv_expert_ids,
+        recv_dst_rows=plan.recv_dst_rows,
     )
 
 
