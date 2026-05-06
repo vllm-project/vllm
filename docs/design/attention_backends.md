@@ -125,12 +125,13 @@ Priority is **1 = highest** (tried first).
 | Priority | Backend |
 | -------- | ------- |
 | 1 | `FLASHINFER_MLA` |
-| 2 | `CUTLASS_MLA` |
-| 3 | `FLASH_ATTN_MLA` |
-| 4 | `FLASHMLA` |
-| 5 | `TRITON_MLA` |
-| 6 | `FLASHINFER_MLA_SPARSE`**\*** |
-| 7 | `FLASHMLA_SPARSE` |
+| 2 | `TOKENSPEED_MLA` |
+| 3 | `CUTLASS_MLA` |
+| 4 | `FLASH_ATTN_MLA` |
+| 5 | `FLASHMLA` |
+| 6 | `TRITON_MLA` |
+| 7 | `FLASHINFER_MLA_SPARSE`**\*** |
+| 8 | `FLASHMLA_SPARSE` |
 
 **Ampere/Hopper (SM 8.x-9.x):**
 

@@ -179,19 +179,27 @@ def create_minimal_vllm_config(
 
     if prefill_backend is not None:
         prefill_cfg = get_prefill_backend_config(prefill_backend)
-        if prefill_cfg["flash_attn_version"] is not None:
-            vllm_config.attention_config.flash_attn_version = prefill_cfg[
-                "flash_attn_version"
+        if prefill_cfg.get("mla_prefill_backend_enum") is not None:
+            # Registry-based backends bypass the deprecated boolean flags.
+            from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackendEnum
+
+            vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum[
+                prefill_cfg["mla_prefill_backend_enum"]
             ]
-        vllm_config.attention_config.disable_flashinfer_prefill = prefill_cfg[
-            "disable_flashinfer_prefill"
-        ]
-        vllm_config.attention_config.use_cudnn_prefill = prefill_cfg[
-            "use_cudnn_prefill"
-        ]
-        vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = prefill_cfg[
-            "use_trtllm_ragged_deepseek_prefill"
-        ]
+        else:
+            if prefill_cfg["flash_attn_version"] is not None:
+                vllm_config.attention_config.flash_attn_version = prefill_cfg[
+                    "flash_attn_version"
+                ]
+            vllm_config.attention_config.disable_flashinfer_prefill = prefill_cfg[
+                "disable_flashinfer_prefill"
+            ]
+            vllm_config.attention_config.use_cudnn_prefill = prefill_cfg[
+                "use_cudnn_prefill"
+            ]
+            vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = (
+                prefill_cfg["use_trtllm_ragged_deepseek_prefill"]
+            )
 
     return vllm_config
 
@@ -239,6 +247,9 @@ _PREFILL_BACKEND_CONFIG: dict[str, dict] = {
         "disable_flashinfer_prefill": True,
         "use_cudnn_prefill": False,
         "use_trtllm_ragged_deepseek_prefill": True,
+    },
+    "tokenspeed": {
+        "mla_prefill_backend_enum": "TOKENSPEED_MLA",
     },
 }
 
@@ -988,9 +999,10 @@ def _run_mla_benchmark_batched(
         # Verify the actual prefill backend matches what was requested
         if prefill_backend is not None:
             prefill_cfg = get_prefill_backend_config(prefill_backend)
-            fa_version = prefill_cfg["flash_attn_version"]
-
-            if fa_version is not None:
+            # Registry-based backends raise during impl construction on misuse.
+            if prefill_cfg.get("mla_prefill_backend_enum") is not None:
+                pass
+            elif (fa_version := prefill_cfg["flash_attn_version"]) is not None:
                 # FA backend: verify the impl's FA version
                 actual_fa_version = getattr(impl, "vllm_flash_attn_version", None)
                 if actual_fa_version != fa_version:

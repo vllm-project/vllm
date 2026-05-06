@@ -30,7 +30,10 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
-from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+from vllm.v1.attention.backends.mla.prefill import (
+    MLAPrefillBackendEnum,
+    get_mla_prefill_backend,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -41,6 +44,7 @@ BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN_MLA,
     AttentionBackendEnum.FLASHINFER_MLA,
     AttentionBackendEnum.TRITON_MLA,
+    AttentionBackendEnum.TOKENSPEED_MLA,
 ]
 
 DEVICE_TYPE = current_platform.device_type
@@ -49,6 +53,7 @@ DEVICE_TYPE = current_platform.device_type
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
 
 # Remove FLASH_ATTN_MLA from the list if not supported
 if not flash_attn_supports_mla():
@@ -57,6 +62,22 @@ if not flash_attn_supports_mla():
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHMLA)
+
+# Remove TOKENSPEED_MLA if the optional package is not installed
+if AttentionBackendEnum.TOKENSPEED_MLA in BACKENDS_TO_TEST:
+    try:
+        import tokenspeed_mla  # noqa: F401
+    except ImportError:
+        BACKENDS_TO_TEST.remove(AttentionBackendEnum.TOKENSPEED_MLA)
+
+
+# Filtered per-test via validate_configuration (capability/deps/dims).
+PREFILL_BACKENDS_TO_TEST = [
+    MLAPrefillBackendEnum.FLASH_ATTN,
+    MLAPrefillBackendEnum.FLASHINFER,
+    MLAPrefillBackendEnum.TRTLLM_RAGGED,
+    MLAPrefillBackendEnum.TOKENSPEED_MLA,
+]
 
 
 SPEC_DECODE_BACKENDS = []
@@ -562,10 +583,14 @@ def run_attention_backend(
     q_scale: float,
     k_scale: float,
     kv_cache_dtype: str = "auto",
+    prefill_backend: MLAPrefillBackendEnum | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
     builder_cls, impl_cls = try_get_attention_backend(backend)
+
+    # Force the prefill backend selection (None means auto-select).
+    vllm_config.attention_config.mla_prefill_backend = prefill_backend
 
     # Set the current vllm config so that get_current_vllm_config() works
     # in the backend implementations
@@ -683,6 +708,7 @@ def run_attention_backend(
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize("prefill_backend", PREFILL_BACKENDS_TO_TEST)
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -693,6 +719,7 @@ def test_backend_correctness(
     kv_cache_dtype: str,
     q_scale: float,
     k_scale: float,
+    prefill_backend: MLAPrefillBackendEnum,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -728,6 +755,24 @@ def test_backend_correctness(
         backends_to_test.remove(AttentionBackendEnum.CUTLASS_MLA)
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
+
+    # Skip prefill backends that can't satisfy capability/deps/R1 constraints.
+    from vllm.v1.attention.backends.mla.prefill.selector import (
+        MLAPrefillSelectorConfig,
+    )
+
+    try:
+        prefill_invalid_reasons = prefill_backend.get_class().validate_configuration(
+            current_platform.get_device_capability(),
+            MLAPrefillSelectorConfig(dtype=torch.bfloat16, is_r1_compatible=True),
+        )
+    except ImportError:
+        prefill_invalid_reasons = ["ImportError"]
+    if prefill_invalid_reasons:
+        pytest.skip(
+            f"Prefill backend {prefill_backend.name} unavailable: "
+            f"{prefill_invalid_reasons}"
+        )
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
@@ -1092,6 +1137,7 @@ def test_backend_correctness(
             qk_rope_head_dim,
             v_head_dim,
             mock_kv_b_proj,
+            prefill_backend=prefill_backend,
             q_scale=q_scale,
             k_scale=k_scale,
             kv_cache_dtype=kv_cache_dtype,
