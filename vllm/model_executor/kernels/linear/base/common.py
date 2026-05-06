@@ -160,6 +160,7 @@ def make_predicated(
             _fallback: ClassVar[type] = fallback
 
             def __init__(self, config: Config) -> None:
+                super().__init__(config)
                 fallback_fn = _resolve_dispatch_fn(fallback, config)
                 dispatch_fn = dispatcher_fn(predicate, primary, fallback_fn)
                 self._dispatch_fn = dispatch_fn
