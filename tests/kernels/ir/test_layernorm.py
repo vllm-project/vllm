@@ -28,7 +28,9 @@ def test_rms_norm_registration():
         "native": True,
         "vllm_c": current_platform.is_cuda_alike(),
         "aiter": current_platform.is_rocm(),
-        "oink": False,
+        "oink": current_platform.has_device_capability(100)
+        and hasattr(torch.ops, "oink")
+        and hasattr(torch.ops.oink, "rmsnorm"),
         "xpu_kernels": current_platform.is_xpu(),
     }
 
@@ -151,7 +153,10 @@ def test_fused_add_rms_norm_registration():
         "native": True,
         "vllm_c": current_platform.is_cuda_alike(),
         "aiter": current_platform.is_rocm(),
-        "oink": False,
+        "oink": current_platform.has_device_capability(100)
+        and hasattr(torch.ops, "oink")
+        and hasattr(torch.ops.oink, "fused_add_rms_norm"),
+        "xpu_kernels": current_platform.is_xpu(),
     }
 
     actual = {
@@ -237,7 +242,7 @@ class TestFusedAddRMSNorm:
         # check that dispatched call matches direct call
         with ir.ops.fused_add_rms_norm.set_priority([provider, "native"]):
             out_dispatched, residual_dispatched = ir.ops.fused_add_rms_norm(*args[:4])
-        out_direct, residual_direct = impl.impl_fn(*args)
+        out_direct, residual_direct = impl.impl_fn(*clone_args(args))
         torch.testing.assert_close(out_dispatched, out_direct, rtol=0.0, atol=0.0)
         torch.testing.assert_close(
             residual_dispatched, residual_direct, rtol=0.0, atol=0.0
@@ -248,9 +253,11 @@ class TestFusedAddRMSNorm:
         assert not impl.supports_args(x, x_residual, weight, epsilon, variance_size=4)
 
         # test weight=None behavior
-        out_no_weight, residual_no_weight = impl.impl_fn(x, x_residual, None, epsilon)
+        out_no_weight, residual_no_weight = impl.impl_fn(
+            x.clone(), x_residual.clone(), None, epsilon
+        )
         out_unit_weight, residual_unit_weight = impl.impl_fn(
-            x, x_residual, torch.ones_like(weight), epsilon
+            x.clone(), x_residual.clone(), torch.ones_like(weight), epsilon
         )
         assert_close(ir.ops.fused_add_rms_norm, out_no_weight, out_unit_weight)
         assert_close(

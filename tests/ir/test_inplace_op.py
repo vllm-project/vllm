@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import pytest
 import torch
 from torch import Tensor
 from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
-from vllm.ir.op import IrOp, IrOpImpl, IrOpInplaceOverload
+from vllm.ir.op import IrOp, IrOpInplaceOverload
 
 
 @vllm.ir.register_op(allow_inplace=True)
@@ -60,8 +59,8 @@ class TestInplaceOp:
         torch.testing.assert_close(result_regular, x1 @ w + 1)
 
     def test_default_dispatching(self):
-        # check that the correct implementation is dispatched when no priority is set,
-        # and ops do not modify inputs
+        # check that the correct implementation is dispatched,
+        # and ops do not modify inputs when using the default overload
         w = torch.randn(3, 3)
         x = torch.randn(2, 3)
         x1 = x.clone()
@@ -78,25 +77,15 @@ class TestInplaceOp:
         torch.testing.assert_close(result_inplace, x1 @ w + 2)
         torch.testing.assert_close(result_regular, x1 @ w + 1)
 
-    @pytest.mark.xfail
     def test_trace(self):
         # Test that the inplace op can be used in a graph.
         def func(x: Tensor, y: Tensor) -> Tensor:
-            return _custom_mm2(x, y)
+            return _custom_mm2.maybe_inplace(x, y)
 
         x = torch.randn(2, 3)
         y = torch.randn(3, 4)
         graph = make_fx(func)(x, y)
-        assert any(node.target == "custom_mm2" for node in graph.graph.nodes)
-
-        # Test that the inplace op can be used in an IrOpImpl.
-        class CustomMM2Impl(IrOpImpl):
-            def __init__(self):
-                super().__init__("custom_mm2")
-
-            def forward(self, x: Tensor, y: Tensor) -> Tensor:
-                return _custom_mm2(x, y)
-
-        impl = CustomMM2Impl()
-        result = impl.forward(x, y)
-        assert torch.allclose(result, x @ y)
+        assert any(
+            node.target == torch.ops.vllm_ir._custom_mm2.maybe_inplace
+            for node in graph.graph.nodes
+        )

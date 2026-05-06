@@ -4,6 +4,7 @@ import contextlib
 import inspect
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, ClassVar, Literal, overload
 from typing import Any, ClassVar, Protocol, overload
 
 import torch
@@ -46,19 +47,29 @@ def enable_torch_wrap(enable: bool = True):
         _ENABLE_TORCH_WRAP = old
 
 
-# 0-param decorator overload
+# 0-param decorator overload (no inplace)
 @overload
 def register_op(f: Callable[..., Any]) -> "IrOp": ...
 
 
-# parametrized decorator overload
+# parametrized decorator with allow_inplace=False (default)
 @overload
 def register_op(
     *,
     name: str | None = None,
     activations: list[str] | None = None,
-    allow_inplace: bool = False,
+    allow_inplace: Literal[False] = False,
 ) -> Callable[[Callable[..., Any]], "IrOp"]: ...
+
+
+# parametrized decorator with allow_inplace=True
+@overload
+def register_op(
+    *,
+    name: str | None = None,
+    activations: list[str] | None = None,
+    allow_inplace: Literal[True],
+) -> Callable[[Callable[..., Any]], "IrOpInplace"]: ...
 
 
 def register_op(
@@ -91,7 +102,10 @@ def register_op(
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
         assert op_name not in IrOp.registry
-        op = IrOp(op_name, _f, activations, allow_inplace)
+        if allow_inplace:
+            op: IrOp = IrOpInplace(op_name, _f, activations)
+        else:
+            op = IrOp(op_name, _f, activations)
         IrOp.registry[op_name] = op
         return op
 
@@ -135,14 +149,13 @@ class IrOp:
 
     name: str
     impls: dict[str, "IrOpImpl"]
-    maybe_inplace: "IrOpInplaceOverload | None"
+    allow_inplace: bool = False
 
     def __init__(
         self,
         name: str,
         native_impl: Callable,
         activations: list[str] | None = None,
-        allow_inplace: bool = False,
     ):
         self._py_signature = inspect.signature(native_impl)
         if any(
@@ -238,6 +251,8 @@ class IrOp:
         :param provider: The name of the provider, must be unique.
         :param supported: Static support check, use this to check platform support.
         :param supports_args: Dynamic arg support check, used for types and shapes.
+        :param inplace: Does this impl reuse activation input memory for outputs
+        :param compiled: Does this impl get compiled if set_priority(..., compile=True)
         :return: A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
@@ -252,6 +267,9 @@ class IrOp:
         compatible with the implementation.
         For custom enablement logic, set op impl priority.
 
+        If compiled is True, that means that eager-mode dispatch will dispatch to a
+        torch.compile-decorated version of this implementation (with
+
         Example:
         ```python
         @my_op.register_impl("my_provider", supported=torch.cuda.is_available())
@@ -264,9 +282,7 @@ class IrOp:
         )
 
         def _register_impl(f: Callable):
-            impl = IrOpImpl(
-                self, provider, f, supported, supports_args, inplace, compiled
-            )
+            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace, compiled)
             self.impls[provider] = impl
 
             if self.get_priority():
@@ -360,7 +376,6 @@ class IrOp:
         Context manager to set the dispatch priority for implementations for this op.
 
         :param priority: List of provider names in priority order
-        :param batch_invariant_only: Only use batch-invariant implementations
         :param compile: Wrap implementations with torch.compile for better performance
                        when called inside opaque custom ops.
         """
@@ -443,6 +458,24 @@ class IrOp:
             f"Use op.override_tolerance({dtype}, atol=..., rtol=...) "
             f"or add {dtype} to DEFAULT_TOLERANCES."
         )
+
+
+class IrOpInplace(IrOp):
+    """IR op with inplace support via maybe_inplace."""
+
+    maybe_inplace: "IrOpInplaceOverload"
+    allow_inplace: bool = True
+
+    def __init__(
+        self,
+        name: str,
+        native_impl: Callable,
+        activations: list[str] | None = None,
+    ):
+        super().__init__(name, native_impl, activations)
+
+        # Create the inplace overload
+        self.maybe_inplace = IrOpInplaceOverload(self)
 
 
 class IrOpInplaceOverload:
@@ -586,10 +619,10 @@ class IrOpImpl:
         """
         Get a compiled wrapper for this implementation.
 
-        This is useful when the IR op is called inside an opaque torch custom op,
-        making it invisible to model-level compilation. By pre-compiling the
-        implementation, we can still get performance benefits even when the op
-        is not visible to the outer compilation.
+        This helps when the IR op is either called inside an opaque torch custom op and
+        hence invisible to model-level compilation, or outside any compilation context.
+        By pre-compiling the implementation, we can still get performance benefits even
+        when the op is not compiled externally.
 
         The wrapper also marks activation tensors with dynamic batch dimensions
         using torch._dynamo.mark_dynamic(t, 0) to ensure proper dynamic shapes.

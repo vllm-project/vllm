@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Samplers Test
+  key: samplers-test
   timeout_in_minutes: 75
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -10,7 +11,9 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
+    # VLLM_USE_FLASHINFER_SAMPLER defaults to 1 now, so we need to pin both
+    # values explicitly to still cover the PyTorch-native (Triton) path.
+    - VLLM_USE_FLASHINFER_SAMPLER=0 pytest -v -s samplers
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
   mirror:
     amd:

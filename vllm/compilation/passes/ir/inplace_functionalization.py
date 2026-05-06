@@ -24,6 +24,9 @@ class VllmIRInplaceFunctionalizationPass(VllmInductorPass):
     The maybe_inplace overloads have the same signature as the default overload
     so the pass simply replaces the called overload.
     That makes the graph properly functional.
+    The pass also validates that activations passed to maybe_inplace have no later
+    uses in the graph: they are donated to the maybe_inplace op call,
+    and their contents are not defined afterward.
 
     This pass operates pre-AOTAutograd,
     so it must handle non-normalized and non-functional IR.
@@ -59,7 +62,7 @@ class VllmIRInplaceFunctionalizationPass(VllmInductorPass):
                 continue
 
             # must have maybe_inplace overload and allow_inplace
-            assert ir_op.allow_inplace and ir_op.maybe_inplace is not None
+            assert ir_op.allow_inplace and hasattr(ir_op, "maybe_inplace")
 
             # Check that activation inputs are not used after this op
             for arg_idx in ir_op.activation_indices:

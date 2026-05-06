@@ -72,6 +72,8 @@ class ZeroExpertRouter(BaseRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing with full bias, compute zero expert output,
         mask zero expert IDs."""

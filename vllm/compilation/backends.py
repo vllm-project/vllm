@@ -280,6 +280,7 @@ class CompilerManager:
         compilation_counter.num_backend_compilations += 1
 
         compiled_graph = None
+        handle = None
 
         # try to load from the cache
         compiled_graph = self.load(graph, example_inputs, graph_index, compile_range)
@@ -358,7 +359,7 @@ class CompilerManager:
                     )
                 except StopCompiling:
                     assert cache_key is not None
-                    return self.loaded_artifacts[cache_key]
+                    compiled_graph = self.loaded_artifacts[cache_key]
             if cache_key is not None and compiled_graph is not None:
                 self.loaded_artifacts[cache_key] = compiled_graph
 
@@ -929,7 +930,7 @@ class VllmBackend:
         # TODO proper PassManager?
         pre_grad_pass_key = "pre_grad_custom_pass"
         assert self.pass_key != pre_grad_pass_key
-        assert self.pass_key not in self.inductor_config
+        assert pre_grad_pass_key not in self.inductor_config
         self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
             self.vllm_config
         )

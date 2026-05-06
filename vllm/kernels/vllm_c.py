@@ -35,8 +35,10 @@ def rms_norm(
 
 rms_add_no_var_size = (
     lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+    and (weight is None or weight.dtype == x.dtype)
 )
-"""vLLM Kernel does not support variance_size parameter."""
+"""vLLM Kernel does not support variance_size parameter and requires
+matching input/weight dtype."""
 
 
 @ir.ops.fused_add_rms_norm.register_impl(

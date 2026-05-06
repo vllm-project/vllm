@@ -334,7 +334,7 @@ class LLM:
                 f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
                 "the explicit multi-process data-parallel example at "
-                "'examples/offline_inference/data_parallel.py'."
+                "'examples/features/data_parallel/data_parallel_offline.py'."
             )
 
         engine_args = EngineArgs(
@@ -926,7 +926,10 @@ class LLM:
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
                     tools=tools,
-                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                    tokenize=(
+                        is_mistral_tokenizer(renderer.tokenizer)
+                        or self.model_config.enable_prompt_embeds
+                    ),
                 ),
             ),
             mm_processor_kwargs=mm_processor_kwargs,

@@ -41,7 +41,7 @@ IR operations are declared using the `@register_op` decorator with a native PyTo
 from torch import Tensor
 from vllm.ir import register_op
 
-@register_op(has_reduction=True)
+@register_op
 def rms_norm(x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None) -> Tensor:
     """Weighted root-mean-square layer normalization"""
     orig_dtype = x.dtype
@@ -82,7 +82,6 @@ Implementations can specify:
 
 - `supported`: Static boolean indicating if this implementation is available
 - `supports_args`: Function checking if the implementation supports specific arguments
-- `batch_invariant`: Whether this implementation produces batch-invariant results
 - `inplace`: Whether this implementation reuses input memory for outputs
 
 ### Using IR Operations in Models
@@ -115,9 +114,8 @@ class RMSNorm(nn.Module):
 Kernel selection is controlled via priority lists in the configuration.
 Priority lists specify the order in which implementations are considered,
 with the first supported implementation being selected.
-This includes the static support check (`supported=...`),
-the dynamic arg support check (`supports_args=...`),
-and batch-invariance filtering if `VLLM_BATCH_INVARIANT=1` is set.
+This includes the static support check (`supported=...`) and
+the dynamic arg support check (`supports_args=...`).
 
 #### Command Line Configuration
 
@@ -162,7 +160,7 @@ llm = LLM(
 Each platform provides default priority lists that are automatically applied:
 
 ```python
-# CUDA platform defaults (when compiling with Inductor)
+# CUDA/XPU/ROCm platform defaults (when compiling with Inductor)
 {
   "rms_norm": ["native"],  # Native torch is default
   "fused_add_rms_norm": ["native"],
@@ -178,6 +176,12 @@ Each platform provides default priority lists that are automatically applied:
 {
     "rms_norm": ["aiter", "vllm_c", "native"],
     "fused_add_rms_norm": ["aiter", "vllm_c", "native"],
+}
+
+# XPU platform defaults (eager or Dynamo-only)
+{
+    "rms_norm": ["xpu_kernels", "native"],
+    "fused_add_rms_norm": ["xpu_kernels", "native"],
 }
 ```
 
@@ -200,7 +204,7 @@ in the FX graph without decomposition:
 ```python
 # Python code (epsilon=1e-5)
 x1 = ir.ops.rms_norm(x, weight, epsilon)
-x2, residual_out = ir.ops.fused_add_rms_norm,maybe_inplace(x1, residual, weight, epsilon)
+x2, residual_out = ir.ops.fused_add_rms_norm.maybe_inplace(x1, residual, weight, epsilon)
 
 # FX graph after Dynamo tracing
 x1 = torch.ops.vllm_ir.rms_norm.default(x, weight, 1e-5); x = None
@@ -224,7 +228,7 @@ residual_out = out[1]
 ```
 
 The pass also tracks which inputs were "donated" (passed to `maybe_inplace`),
-storing this information in vLLM's  `PassContext` for later use in clone elimination.
+storing this information in vLLM's `PassContext` for later use in clone elimination.
 
 ### 3. IR Fusion and Transformation Passes
 
@@ -351,7 +355,6 @@ Operations are declared with the `@register_op` decorator, which creates an `IrO
 ```python
 @register_op(
     name=None,           # Operation name (defaults to function name)
-    has_reduction=False, # Whether op performs reduction (affects batch invariance)
     activations=None,    # List of activation parameters (defaults to params starting with 'x')
     allow_inplace=False, # Whether to create a maybe_inplace overload
 )
@@ -361,11 +364,6 @@ def op_name(...):
 
 **Parameters:**
 
-- `has_reduction`: Set to `True` for operations like normalization that reduce across dimensions. This affects batch invariance requirements.
-- `activations`: List of parameter names considered "activations" (typically consumed by `maybe_inplace`). Defaults to parameters starting with `x`.
-- `allow_inplace`: Creates a `maybe_inplace` overload for memory-efficient execution (see below).
-
-### The `maybe_inplace` Overload
 
 The `maybe_inplace` overload is a critical feature for memory efficiency in LLM inference.
 It signals that the caller doesn't need to preserve the activation inputs after the operation,
@@ -479,7 +477,6 @@ Implementations are registered using the `register_impl` method:
     provider="provider_name",  # Unique identifier (e.g., "vllm_c", "aiter", "triton")
     supported=True,            # Static availability check
     supports_args=None,        # Dynamic argument support check
-    batch_invariant=False,     # Whether implementation is batch-invariant
 )
 def impl_fn(...):
     ...
@@ -490,7 +487,8 @@ def impl_fn(...):
 - `native`: Reserved for the native torch implementation (declared with `@register_op`)
 - `vllm_c`: C++/CUDA kernels via `torch.ops._C`
 - `aiter`: AMD AITER library
-- `triton_*`: Triton kernels (e.g., `triton_batch_invariant`)
+- `xpu_kernels`: SYCL/SYCLTLA kernels implemented in `vllm-xpu-kernels`
+- `triton_*`: Triton kernels
 - Platform/library names for other implementations
 
 **Support checking:**
@@ -515,19 +513,6 @@ def aiter_rms_norm_supports(x, weight, epsilon, variance_size=None):
 
 @ir.ops.rms_norm.register_impl("aiter", supports_args=aiter_rms_norm_supports)
 def rms_norm(...):
-    ...
-```
-
-### Batch Invariance
-
-Batch-invariant implementations produce identical per-example outputs regardless of batch size.
-This is critical for RLHF and other training scenarios where numerical reproducibility is required.
-
-```python
-@ir.ops.rms_norm.register_impl("triton_batch_invariant", batch_invariant=True)
-def rms_norm(...):
-    # Implementation uses careful reduction algorithms to ensure
-    # output is identical irrespective of the batch size
     ...
 ```
 
@@ -622,5 +607,5 @@ The migration can be done incrementally, one operation at a time.
 ## See Also
 
 - [torch.compile Integration](torch_compile.md) - General compilation infrastructure
+- [Fusions](fusions.md) - Custom fusion and transformation passes in vLLM
 - [Custom Operations](custom_op.md) - Legacy custom op system
-- [Kernel Development Guide](../../contributing/kernel_development.md) - Writing and registering kernels

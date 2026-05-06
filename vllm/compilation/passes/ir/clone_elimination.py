@@ -3,7 +3,8 @@
 import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from torch._ops import OpOverload
+from torch._higher_order_ops.triton_kernel_wrap import TritonKernelWrapperFunctional
+from torch._ops import HigherOrderOperator, OpOverload
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -25,6 +26,10 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
         # It is also guaranteed to be the final use,
         # as auto_functionalized returns the tensor back for follow-up use.
         return False
+    elif user.op == "call_function" and isinstance(user.target, HigherOrderOperator):
+        # By default, be conservative, assume this could be a write
+        # (except functional HOPs)
+        return not isinstance(user.target, TritonKernelWrapperFunctional)
 
     assert isinstance(user.target, OpOverload), (
         f"{node=} {user=} {user.op=} {user.target=}"
@@ -37,11 +42,8 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
             continue
 
         # If not a write, next arg could be
-        if not schema.arguments[i].is_write:
-            continue
-
-        # Short-circuit, we know it's a write
-        return True
+        if schema.arguments[i].is_write:
+            return True
 
     # No writes found
     return False
@@ -50,6 +52,13 @@ def user_writes_to_node(user: fx.Node, node: fx.Node) -> bool:
 class UnsafeCloneEliminationPass(VllmInductorPass):
     """
     This pass removes clone nodes that are no longer needed after vLLM IR lowering.
+    It uses donated_input_ids to eliminate clones of donated graph inputs, preserving
+    contents of non-donated graph inputs.
+
+    It is "unsafe" because it does not (yet) take aliasing into account. Solving
+    aliasing is an open problem, so this pass intends to support known vLLM cases
+    and not guarantee soundness on general graphs. In the future, this pass will likely
+    support basic forms of aliasing to handle simple views (e.g. qkv -> q,k,v).
     """
 
     def __init__(self, vllm_config: VllmConfig) -> None:

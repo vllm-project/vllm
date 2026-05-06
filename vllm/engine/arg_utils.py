@@ -542,6 +542,14 @@ class EngineArgs:
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
+    mm_encoder_attn_dtype: str | None = MultiModalConfig.mm_encoder_attn_dtype
+    mm_encoder_fp8_scale_path: str | None = MultiModalConfig.mm_encoder_fp8_scale_path
+    mm_encoder_fp8_scale_save_path: str | None = (
+        MultiModalConfig.mm_encoder_fp8_scale_save_path
+    )
+    mm_encoder_fp8_scale_save_margin: float = (
+        MultiModalConfig.mm_encoder_fp8_scale_save_margin
+    )
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -954,7 +962,9 @@ class EngineArgs:
             "-dpn",
             type=int,
             help="Data parallel rank of this instance. "
-            "When set, enables external load balancer mode.",
+            "When set, enables external load balancer mode for MoE "
+            "data-parallel deployments. Unsupported for non-MoE models; "
+            "launch independent vLLM instances instead.",
         )
         parallel_group.add_argument(
             "--data-parallel-start-rank",
@@ -1178,6 +1188,22 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--mm-encoder-attn-backend",
             **multimodal_kwargs["mm_encoder_attn_backend"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-attn-dtype",
+            **multimodal_kwargs["mm_encoder_attn_dtype"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-path",
+            **multimodal_kwargs["mm_encoder_fp8_scale_path"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-save-path",
+            **multimodal_kwargs["mm_encoder_fp8_scale_save_path"],
+        )
+        multimodal_group.add_argument(
+            "--mm-encoder-fp8-scale-save-margin",
+            **multimodal_kwargs["mm_encoder_fp8_scale_save_margin"],
         )
         multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
@@ -1517,6 +1543,10 @@ class EngineArgs:
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
+            mm_encoder_attn_dtype=self.mm_encoder_attn_dtype,
+            mm_encoder_fp8_scale_path=self.mm_encoder_fp8_scale_path,
+            mm_encoder_fp8_scale_save_path=self.mm_encoder_fp8_scale_save_path,
+            mm_encoder_fp8_scale_save_margin=self.mm_encoder_fp8_scale_save_margin,
             pooler_config=self.pooler_config,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
@@ -1669,29 +1699,15 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        # TurboQuant: auto-skip first/last 2 layers (boundary protection).
-        # These layers are most sensitive to quantization error.
-        # Users can add extra layers via --kv-cache-dtype-skip-layers.
         if resolved_cache_dtype.startswith("turboquant_"):
-            if model_config.is_hybrid:
-                raise NotImplementedError(
-                    "TurboQuant KV cache is not supported for hybrid "
-                    "(attention + Mamba) models. Boundary layer protection "
-                    "requires uniform attention layers."
-                )
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
 
-            num_layers = model_config.hf_text_config.num_hidden_layers
-            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
-            merged = sorted(existing | set(boundary), key=lambda x: int(x))
-            cache_config.kv_cache_dtype_skip_layers = merged
-            logger.info(
-                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
-                merged,
-                num_layers,
+            cache_config.kv_cache_dtype_skip_layers = sorted(
+                existing | set(boundary), key=int
             )
 
         ray_runtime_env = None
@@ -1765,6 +1781,16 @@ class EngineArgs:
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
         )
+        if (
+            self.data_parallel_size > 1
+            and data_parallel_external_lb
+            and not model_config.is_moe
+        ):
+            raise ValueError(
+                "Non-MoE models do not support external data parallel mode. "
+                "For external load balancing, launch independent vLLM "
+                "instances without --data-parallel-* arguments."
+            )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_rank is not None, (

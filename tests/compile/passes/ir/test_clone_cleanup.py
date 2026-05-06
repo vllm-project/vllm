@@ -262,6 +262,48 @@ class TestCloneCleanup:
         assert user_writes_to_node(copy_node, placeholders[0])
         assert not user_writes_to_node(copy_node, placeholders[1])
 
+    def test_auto_functionalized_not_a_write(self):
+        """auto_functionalized ops are follow-up uses, not writes."""
+        from torch._higher_order_ops.auto_functionalize import auto_functionalized
+
+        def f(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        graph_module = make_fx(f)(torch.randn(2, 3))
+        x_node = [n for n in graph_module.graph.nodes if n.op == "placeholder"][0]
+
+        # Create an auto_functionalized node in the graph
+        with graph_module.graph.inserting_before(None):
+            af_node = graph_module.graph.call_function(
+                auto_functionalized, kwargs={"input": x_node}
+            )
+
+        # auto_functionalized should not be treated as a write
+        assert not user_writes_to_node(af_node, x_node)
+
+    def test_higher_order_op_conservatively_writes(self):
+        """Other higher-order operators are conservatively treated as writes."""
+        from torch._ops import HigherOrderOperator
+
+        def f(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        graph_module = make_fx(f)(torch.randn(2, 3))
+        x_node = [n for n in graph_module.graph.nodes if n.op == "placeholder"][0]
+
+        # Create a concrete higher-order operator subclass
+        class MockHigherOrderOp(HigherOrderOperator):
+            def __call__(self, *args, **kwargs):
+                return args[0] if args else None
+
+        mock_hoo = MockHigherOrderOp("mock_higher_order_op")
+
+        with graph_module.graph.inserting_before(None):
+            hoo_node = graph_module.graph.call_function(mock_hoo, args=(x_node,))
+
+        # Should be conservative and assume it could write
+        assert user_writes_to_node(hoo_node, x_node)
+
 
 class TestCloneCleanupWithDonatedInputs:
     """Test UnsafeCloneEliminationPass with donated input tracking via PassContext."""

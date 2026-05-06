@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: DeepSeek V2-Lite Accuracy
+  key: deepseek-v2-lite-accuracy
   timeout_in_minutes: 60
   device: h100
   optional: true
@@ -12,6 +13,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy
+  key: qwen3-30b-a3b-fp8-block-accuracy
   timeout_in_minutes: 60
   device: h100
   optional: true
@@ -21,6 +23,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
+  key: qwen3-30b-a3b-fp8-block-accuracy-b200
   timeout_in_minutes: 60
   device: b200
   optional: true
@@ -30,6 +33,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
 - label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy
+  key: qwen3-30b-a3b-fp8-dp4-async-eplb-accuracy
   timeout_in_minutes: 60
   device: h100
   optional: true
@@ -39,6 +43,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
 - label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100)
+  key: deepseek-v2-lite-prefetch-offload-accuracy-h100
   timeout_in_minutes: 60
   device: h100
   optional: true

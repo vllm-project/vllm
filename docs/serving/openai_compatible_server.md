@@ -251,7 +251,7 @@ The following extra parameters are supported:
 Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/online_serving/openai_responses_client_with_tools.py)
+Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/tool_calling/openai_responses_client_with_tools.py)
 
 #### Extra parameters
 
@@ -279,7 +279,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 !!! note
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
-Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
+Code example: [examples/speech_to_text/openai/openai_transcription_client.py](../../examples/speech_to_text/openai/openai_transcription_client.py)
 
 NOTE: beam search is currently supported in the transcriptions endpoint for encoder-decoder multimodal models, e.g., whisper, but highly inefficient as work for handling the encoder/decoder cache is actively ongoing. This is an active point of ongoing optimization and will be handled properly in the very near future.
 
@@ -397,7 +397,7 @@ Please mind that the popular `openai/whisper-large-v3-turbo` model does not supp
 !!! note
     To use the Translation API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
-Code example: [examples/online_serving/openai_translation_client.py](../../examples/online_serving/openai_translation_client.py)
+Code example: [examples/speech_to_text/openai/openai_translation_client.py](../../examples/speech_to_text/openai/openai_translation_client.py)
 
 #### Extra Parameters
 

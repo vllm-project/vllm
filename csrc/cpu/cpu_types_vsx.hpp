@@ -9,6 +9,10 @@
 
 namespace vec_op {
 
+// FP8 tag types for tag dispatch (see cpu_attn_vec.hpp)
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 // FIXME: FP16 is not fully supported in Torch-CPU
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \

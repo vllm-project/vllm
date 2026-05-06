@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Sequence Parallel Correctness Tests (2 GPUs)
+  key: sequence-parallel-correctness-tests-2-gpus
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   num_devices: 2
@@ -17,6 +18,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 - label: Sequence Parallel Correctness Tests (2xH100)
+  key: sequence-parallel-correctness-tests-2xh100
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: h100
@@ -27,6 +29,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 - label: AsyncTP Correctness Tests (2xH100)
+  key: asynctp-correctness-tests-2xh100
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: h100
@@ -37,6 +40,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
 - label: AsyncTP Correctness Tests (B200)
+  key: asynctp-correctness-tests-b200
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: b200
@@ -47,6 +51,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
 - label: Distributed Compile Unit Tests (2xH100)
+  key: distributed-compile-unit-tests-2xh100
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: h100
@@ -60,6 +65,7 @@ steps:
   - pytest -s -v tests/compile/passes/distributed
 
 - label: Fusion and Compile Unit Tests (2xB200)
+  key: fusion-and-compile-unit-tests-2xb200
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: b200
@@ -89,6 +95,7 @@ steps:
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Fusion E2E Quick (H100)
+  key: fusion-e2e-quick-h100
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: h100
@@ -107,6 +114,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"
 
 - label: Fusion E2E Config Sweep (H100)
+  key: fusion-e2e-config-sweep-h100
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: h100
@@ -126,6 +134,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: Fusion E2E Config Sweep (B200)
+  key: fusion-e2e-config-sweep-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200
@@ -139,6 +148,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3)"
 
 - label: Fusion E2E TP2 Quick (H100)
+  key: fusion-e2e-tp2-quick-h100
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: h100
@@ -156,6 +166,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
 
 - label: Fusion E2E TP2 AR-RMS Config Sweep (H100)
+  key: fusion-e2e-tp2-ar-rms-config-sweep-h100
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: h100
@@ -175,6 +186,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
 
 - label: Fusion E2E TP2 AsyncTP Config Sweep (H100)
+  key: fusion-e2e-tp2-asynctp-config-sweep-h100
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: h100
@@ -194,6 +206,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
 
 - label: Fusion E2E TP2 (B200)
+  key: fusion-e2e-tp2-b200
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: b200
