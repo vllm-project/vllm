@@ -90,6 +90,7 @@ def test_engine_status_wire_format_is_pinned():
         EngineStatusType.HEALTHY: (0, "healthy"),
         EngineStatusType.DEAD: (1, "dead"),
         EngineStatusType.UNHEALTHY: (2, "unhealthy"),
+        EngineStatusType.PAUSED: (3, "paused"),
     }
 
     missing = set(EngineStatusType) - set(expected)
@@ -179,7 +180,7 @@ async def test_pause_operation_timeout(
 async def test_monitor_and_report_on_fault(client_sentinel: ClientSentinel):
     """Fault should update status and publish fault-state report."""
     fault_info = FaultInfo(
-        engine_id="0",
+        engine_id=0,
         type="EngineDeadError",
         message="dead",
         engine_status=EngineStatusType.DEAD,
