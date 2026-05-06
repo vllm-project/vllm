@@ -312,6 +312,21 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
+        if As.dtype != Bs.dtype:
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                _upcast_e8m0_to_fp32,
+            )
+
+            if As.dtype == torch.float8_e8m0fnu:
+                As = _upcast_e8m0_to_fp32(As).contiguous()
+            else:
+                As = As.to(torch.float32)
+
+            if Bs.dtype == torch.float8_e8m0fnu:
+                Bs = _upcast_e8m0_to_fp32(Bs).contiguous()
+            else:
+                Bs = Bs.to(torch.float32)
+
         out_dtype = self.config.out_dtype
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
