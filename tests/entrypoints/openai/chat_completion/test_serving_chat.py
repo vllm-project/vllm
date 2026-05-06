@@ -808,6 +808,57 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
 
 @pytest.mark.asyncio
+async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
+    """When truncate_prompt_tokens is set, max_tokens must be calculated using
+    the truncated prompt length, not the original prompt length.
+
+    Regression: without the fix, get_max_tokens received the untruncated prompt
+    length, causing the output budget to be underestimated.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # "what is 1+1?" tokenizes to 7 tokens with the test chat template
+    # (max_model_len=100 -> max_tokens = 93 without truncation, confirmed by
+    # test_serving_chat_should_set_correct_max_tokens above).
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    # Baseline: no truncation -> max_tokens = 100 - 7 = 93.
+    req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # With truncate_prompt_tokens=5 (less than 7): the effective prompt length
+    # is 5, so max_tokens should be 100 - 5 = 95, not 93.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=5,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 95
+
+    # With truncate_prompt_tokens=-1 (meaning use full max_model_len as the
+    # truncation limit, i.e., no practical truncation vs the window): effective
+    # length = min(7, 100) = 7 -> max_tokens = 93 again.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=-1,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+
+@pytest.mark.asyncio
 async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     """Regression test: when the Mistral tokenizer path returns token IDs
     directly, we must still apply input length + max_tokens validation.

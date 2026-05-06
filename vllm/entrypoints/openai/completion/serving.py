@@ -151,6 +151,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
 
             sampling_params: SamplingParams | BeamSearchParams

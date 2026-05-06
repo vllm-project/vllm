@@ -416,6 +416,9 @@ class OpenAIServingResponses(OpenAIServing):
                 self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=(
+                    -1 if request.truncation != "disabled" else None
+                ),
             )
 
             sampling_params = request.to_sampling_params(
@@ -700,6 +703,9 @@ class OpenAIServingResponses(OpenAIServing):
                     self._extract_prompt_len(engine_input),
                     self.default_sampling_params,  # type: ignore
                     self.override_max_tokens,  # type: ignore
+                    truncate_prompt_tokens=(
+                        -1 if context.request.truncation != "disabled" else None
+                    ),
                 )
 
             # OPTIMIZATION
