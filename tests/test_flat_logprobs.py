@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for FlatLogprobs.append_fast with list.extend optimization."""
+
 import itertools
 
 import pytest
@@ -172,9 +173,7 @@ class TestAppendLogprobsForNextPosition:
     def test_flat_empty_token_ids(self):
         flat = create_sample_logprobs(flat_logprobs=True)
 
-        append_logprobs_for_next_position(
-            flat, [], [], [], rank=1, num_logprobs=5
-        )
+        append_logprobs_for_next_position(flat, [], [], [], rank=1, num_logprobs=5)
 
         assert len(flat) == 1
         assert len(flat.token_ids) == 0

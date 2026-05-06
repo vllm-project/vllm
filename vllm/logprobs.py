@@ -199,9 +199,7 @@ def append_logprobs_for_next_position(
         else:
             decoded_tokens = list(itertools.islice(decoded_tokens, n))
         ranks_list: list[int | None] = [rank, *range(1, n)] if n > 0 else []
-        request_logprobs.append_fast(
-            token_ids, logprobs, ranks_list, decoded_tokens
-        )
+        request_logprobs.append_fast(token_ids, logprobs, ranks_list, decoded_tokens)
     else:
         topk_ranks = range(1, n)
         ranks = itertools.chain((rank,), topk_ranks)
