@@ -924,6 +924,36 @@ class MixtureOfExperts(Protocol):
     ) -> None: ...
 
 
+def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
+    """
+    Given an arbitrary model,
+     - if the model itself is a MixtureOfExperts, return the model directly.
+     - if the model is a multi-modal model, and its `language_model` is a
+       MixtureOfExperts, return the `language_model`.
+     - if neither, return None.
+
+    :param model: Model being served.
+    :type model: object
+    :return: Return MixtureOfExperts instance contained within the model.
+    :rtype: MixtureOfExperts | None
+    """
+
+    if is_mixture_of_experts(model):
+        return model
+
+    if isinstance(model, SupportsMultiModal):
+        try:
+            mm_language_model = model.get_language_model()
+            return (
+                mm_language_model if is_mixture_of_experts(mm_language_model) else None
+            )
+        except (NotImplementedError, AttributeError):
+            logger.info_once("Cannot fetch language_model from MultiModal model")
+            return None
+
+    return None
+
+
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
     return (
         isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
