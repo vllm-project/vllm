@@ -449,6 +449,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output._base is None
             and disable_inplace()
         ):
-            output.data = result
+            output.set_(result)
         else:
             output.copy_(result)
