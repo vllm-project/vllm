@@ -606,6 +606,13 @@ class CudaPlatformBase(Platform):
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
+def _nvml_device_handle(physical_device_id: "int | str"):
+    """Get an NVML device handle for an int index or a UUID string (MIG)."""
+    if isinstance(physical_device_id, str):
+        return pynvml.nvmlDeviceGetHandleByUUID(physical_device_id)
+    return pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+
 class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @cache
@@ -613,7 +620,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+            handle = _nvml_device_handle(physical_device_id)
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
         except RuntimeError:
@@ -641,14 +648,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @with_nvml_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = _nvml_device_handle(physical_device_id)
         return pynvml.nvmlDeviceGetUUID(handle)
 
     @classmethod
     @with_nvml_context
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = _nvml_device_handle(physical_device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
@@ -678,8 +685,8 @@ class NvmlCudaPlatform(CudaPlatformBase):
         return True
 
     @classmethod
-    def _get_physical_device_name(cls, device_id: int = 0) -> str:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    def _get_physical_device_name(cls, device_id: "int | str" = 0) -> str:
+        handle = _nvml_device_handle(device_id)
         return pynvml.nvmlDeviceGetName(handle)
 
     @classmethod

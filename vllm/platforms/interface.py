@@ -232,7 +232,7 @@ class Platform:
         import vllm.kernels  # noqa: F401
 
     @classmethod
-    def device_id_to_physical_device_id(cls, device_id: int):
+    def device_id_to_physical_device_id(cls, device_id: int) -> "int | str":
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
@@ -245,9 +245,11 @@ class Platform:
             try:
                 return int(physical_device_id)
             except ValueError:
-                # MIG device UUID (e.g. "MIG-<uuid>") — CUDA already remaps
-                # it to logical device 0, so device_id is the correct index.
-                return device_id
+                # Non-integer identifier such as a MIG device UUID
+                # (e.g. "MIG-<uuid>"). Return the raw string so callers
+                # can use nvmlDeviceGetHandleByUUID or equivalent APIs and
+                # get accurate per-partition hardware info.
+                return physical_device_id
         else:
             return device_id
 
