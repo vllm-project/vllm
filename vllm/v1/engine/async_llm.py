@@ -77,7 +77,6 @@ class AsyncLLM(EngineClient):
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
         log_requests: bool = True,
         start_engine_loop: bool = True,
         stat_loggers: list[StatLoggerFactory] | None = None,
@@ -95,7 +94,6 @@ class AsyncLLM(EngineClient):
             log_stats: Whether to log stats.
             usage_context: Usage context of the LLM.
             mm_registry: Multi-modal registry.
-            use_cached_outputs: Whether to use cached outputs.
             log_requests: Whether to log requests.
             start_engine_loop: Whether to start the engine loop.
             stat_loggers: customized stat loggers for the engine.
@@ -295,6 +293,7 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -315,7 +314,7 @@ class AsyncLLM(EngineClient):
             )
 
         if isinstance(prompt, AsyncGenerator):
-            if reasoning_ended is not None:
+            if reasoning_ended is not None or reasoning_parser_kwargs is not None:
                 raise NotImplementedError
 
             # Streaming input case.
@@ -363,6 +362,8 @@ class AsyncLLM(EngineClient):
 
         if reasoning_ended is not None:
             request.reasoning_ended = reasoning_ended
+        if reasoning_parser_kwargs is not None:
+            request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
         self.input_processor.assign_request_id(request)
 
@@ -536,6 +537,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -565,6 +567,7 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
             # The output_handler task pushes items into the queue.

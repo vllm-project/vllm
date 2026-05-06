@@ -11,6 +11,7 @@ from typing import Any
 
 import torch._functorch.config
 import torch.fx as fx
+from torch._dynamo.utils import dynamo_timed
 from torch._inductor.runtime.triton_heuristics import CachingAutotuner
 from torch._logging._internal import trace_structured
 
@@ -275,6 +276,7 @@ class PiecewiseBackend:
 
             range_entry.compiled = True
 
+    @dynamo_timed("vllm_log_compile_start_torch_trace_only")
     def _log_compile_start(self, compile_range: Range):
         """Log compilation event for TORCH_TRACE/tlparse."""
         is_cudagraph_size = (

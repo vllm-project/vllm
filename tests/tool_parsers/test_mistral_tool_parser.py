@@ -24,7 +24,6 @@ from mistral_common.protocol.instruct.tool_calls import (
     ToolChoiceEnum as MistralToolChoiceEnum,
 )
 from partial_json_parser.core.options import Allow
-from pydantic import ValidationError
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -250,6 +249,7 @@ def test_extract_tool_calls_no_tools(parser_fixture, request):
         "argument_before_name_and_name_in_argument",
         "multiple_tools",
         "content_before_tool",
+        "trailing_data_after_json",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -338,6 +338,24 @@ def test_extract_tool_calls_no_tools(parser_fixture, request):
             ],
             "Hello",
         ),
+        (
+            """[TOOL_CALLS] [{"name": "get_current_weather", "arguments":{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\nextra trailing data""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Dallas",
+                                "state": "TX",
+                                "unit": "fahrenheit",
+                            }
+                        ),
+                    )
+                )
+            ],
+            None,
+        ),
     ],
 )
 def test_extract_tool_calls_pre_v11_tokenizer(
@@ -366,19 +384,22 @@ def test_extract_tool_calls_pre_v11_multiple_bot_tokens_raises(
         )
 
 
-def test_extract_tool_calls_pre_v11_regex_fallback_raises(
+def test_extract_tool_calls_pre_v11_regex_fallback(
     mistral_pre_v11_tool_parser,
 ):
-    """The regex fallback path finds valid JSON but does not re-serialize
-    the `arguments` dict to a string, causing a Pydantic
-    `ValidationError` when constructing `FunctionCall`."""
+    """The regex fallback path finds valid JSON via regex when the primary
+    raw_decode fails on leading junk. It should re-serialize arguments
+    and return a valid tool call."""
     model_output = (
         '[TOOL_CALLS]  junk [{"name": "add", "arguments":{"a": 1, "b": 2}}] trail'
     )
-    with pytest.raises(ValidationError):
-        mistral_pre_v11_tool_parser.extract_tool_calls(
-            model_output, request=_DUMMY_REQUEST
-        )
+    result = mistral_pre_v11_tool_parser.extract_tool_calls(
+        model_output, request=_DUMMY_REQUEST
+    )
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "add"
+    assert result.tool_calls[0].function.arguments == json.dumps({"a": 1, "b": 2})
 
 
 def test_extract_tool_calls_pre_v11_regex_fallback_fails(
@@ -569,6 +590,33 @@ def _test_extract_tool_calls_streaming(
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
 
+    if expected_tool_calls:
+        assert len(tool_parser.streamed_args_for_tool) == len(expected_tool_calls)
+        assert len(tool_parser.prev_tool_call_arr) == len(expected_tool_calls)
+        for i in range(len(expected_tool_calls)):
+            assert (
+                tool_parser.prev_tool_call_arr[i]["arguments"]
+                == tool_parser.streamed_args_for_tool[i]
+            )
+            assert tool_parser.streamed_args_for_tool[i] == function_args_strs[i]
+            assert (
+                tool_parser.prev_tool_call_arr[i]["name"]
+                == expected_tool_calls[i].function.name
+            )
+
+        # Simulate the serving layer's unstreamed-args check
+        index = len(tool_parser.prev_tool_call_arr) - 1
+        args = tool_parser.prev_tool_call_arr[index].get("arguments", {})
+        expected_call = (
+            args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+        )
+        actual_call = tool_parser.streamed_args_for_tool[index]
+        remaining_call = expected_call.replace(actual_call, "", 1)
+        assert remaining_call == ""
+    else:
+        assert len(tool_parser.streamed_args_for_tool) == 0
+        assert len(tool_parser.prev_tool_call_arr) == 0
+
 
 @pytest.mark.parametrize(
     ids=[
@@ -579,6 +627,7 @@ def _test_extract_tool_calls_streaming(
         "argument_before_name",
         "argument_before_name_and_name_in_argument",
         "multiple_tools",
+        "trailing_data_after_json",
     ],
     argnames=["model_output", "expected_tool_calls", "expected_content"],
     argvalues=[
@@ -667,6 +716,24 @@ def _test_extract_tool_calls_streaming(
                 ),
             ],
             "",
+        ),
+        (
+            """[TOOL_CALLS] [{"name": "get_current_weather", "arguments":{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}}]\nextra trailing data""",  # noqa: E501
+            [
+                ToolCall(
+                    function=FunctionCall(
+                        name="get_current_weather",
+                        arguments=json.dumps(
+                            {
+                                "city": "Dallas",
+                                "state": "TX",
+                                "unit": "fahrenheit",
+                            }
+                        ),
+                    )
+                )
+            ],
+            "\nextra trailing data",
         ),
     ],
 )
@@ -815,6 +882,8 @@ def test_extract_tool_calls_streaming_v11_no_tools(
         previous_text = current_text
 
     assert collected_content == model_output
+    assert len(mistral_tool_parser.streamed_args_for_tool) == 0
+    assert len(mistral_tool_parser.prev_tool_call_arr) == 0
 
 
 @pytest.mark.parametrize(
