@@ -2603,3 +2603,76 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 f"got {notif!r} (expected {expected_notif!r}, "
                 f"buggy form would be {bad_notif!r})"
             )
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_handshake_zmq_failure_no_keyerror(default_vllm_config, dist_init):
+    """Regression test: KeyError when handshake fails before _block_size is set.
+
+    In production, when _nixl_handshake fails at the zmq level (e.g. timeout),
+    _block_size[engine_id] is never populated. The request ends up in
+    _failed_recv_reqs and then get_finished() must not crash with KeyError
+    when trying to call block_size_ratio_from_engine_id().
+
+    This differs from test_handshake_failure_returns_finished which fails
+    inside add_remote_agent (after _block_size is already set).
+    """
+    from zmq.error import Again
+
+    vllm_config = create_vllm_config()
+
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0.0
+    )
+
+    # Patch _nixl_handshake to raise zmq.Again (simulating sock.recv timeout)
+    # This ensures _block_size[engine_id] is NEVER populated.
+    def failing_handshake(*args, **kwargs):
+        raise Again("Resource temporarily unavailable")
+
+    connector.connector_worker._nixl_handshake = failing_handshake
+
+    request_id = "test_zmq_timeout"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=[10, 11, 12],
+        kv_transfer_params={
+            "remote_block_ids": [20, 21, 22],
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        virtual_engine=0,
+        slot_mapping={},
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    # Wait for handshake to fail
+    time.sleep(0.2)
+
+    # Verify _block_size was NOT populated (reproducing the real bug condition)
+    worker = connector.connector_worker
+    assert FakeNixlConnectorWorker.REMOTE_ENGINE_ID not in worker._block_size
+
+    # This must NOT raise KeyError
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert request_id in done_recving
+
+    # Blocks should be marked invalid
+    invalid_blocks = connector.get_block_ids_with_load_errors()
+    assert invalid_blocks == {10, 11, 12}
+
+

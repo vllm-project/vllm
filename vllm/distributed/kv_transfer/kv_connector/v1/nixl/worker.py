@@ -1644,9 +1644,10 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
-        # add requests that skipped transfer to done_recving
-        done_recving.update(self._failed_recv_reqs)
-        self._failed_recv_reqs.clear()
+        # Atomic swap to avoid race with background handshake thread
+        failed_req_ids = self._failed_recv_reqs
+        self._failed_recv_reqs = set()
+        done_recving.update(failed_req_ids)
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -1664,6 +1665,11 @@ class NixlConnectorWorker:
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
             assert meta.remote is not None
+
+            # Skip post-processing for failed requests (no data transferred)
+            if req_id in failed_req_ids:
+                continue
+
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
