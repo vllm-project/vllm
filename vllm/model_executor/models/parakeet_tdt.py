@@ -370,10 +370,9 @@ class ParakeetTDTModel(nn.Module):
 
     def _joint_logits(
         self,
-        encoder_frame: torch.Tensor,
+        encoder_state: torch.Tensor,
         decoder_state: torch.Tensor,
     ) -> torch.Tensor:
-        encoder_state = self.encoder_projector(encoder_frame)
         return self.joint(encoder_state, decoder_state)
 
     @torch.inference_mode()
@@ -383,11 +382,12 @@ class ParakeetTDTModel(nn.Module):
         token_ids: list[int] = []
         state: tuple[torch.Tensor, torch.Tensor] | None = None
         last_token: int | None = None
+        encoder_projected = self.encoder_projector(encoder_output)
 
         time_idx = 0
         out_len = int(encoder_output.shape[0])
         while time_idx < out_len:
-            encoder_frame = encoder_output[time_idx : time_idx + 1]
+            encoder_state = encoder_projected[time_idx : time_idx + 1]
             symbols_added = 0
             need_loop = True
             skip = 1
@@ -395,7 +395,7 @@ class ParakeetTDTModel(nn.Module):
             while need_loop and symbols_added < cfg.max_symbols_per_step:
                 label = cfg.blank_token_id if last_token is None else last_token
                 pred_state, next_state = self.decoder.predict(label, state, device)
-                logits = self._joint_logits(encoder_frame, pred_state)[0]
+                logits = self._joint_logits(encoder_state, pred_state)[0]
 
                 token_logits = logits[: cfg.vocab_size].float()
                 duration_logits = logits[cfg.vocab_size :].float()
@@ -417,7 +417,7 @@ class ParakeetTDTModel(nn.Module):
                 time_idx += skip
                 need_loop = skip == 0
 
-            if symbols_added == cfg.max_symbols_per_step:
+            if need_loop:
                 time_idx += 1
 
         token_ids.append(cfg.eos_token_id)
