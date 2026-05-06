@@ -66,6 +66,6 @@ def test_multi_port_external_lb_supervisor_aggregates_health():
 def test_multi_port_external_lb_supervisor_is_unhealthy_while_shutting_down():
     supervisor = MultiPortExternalLBSupervisor(_make_args())
     supervisor.child_health = [True, True, True, True]
-    supervisor.begin_shutdown()
+    supervisor._stop_requested.set()
 
     assert supervisor.is_healthy() is False

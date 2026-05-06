@@ -232,14 +232,10 @@ class MultiPortExternalLBSupervisor:
         self._supervisor_server: uvicorn.Server | None = None
         self._supervisor_server_task: asyncio.Task[None] | None = None
         self._shutdown_signal = signal.SIGTERM
-        self._shutting_down = False
-
-    def begin_shutdown(self) -> None:
-        self._shutting_down = True
 
     def is_healthy(self) -> bool:
         return (
-            not self._shutting_down
+            not self._stop_requested.is_set()
             and len(self.child_health) == len(self.child_ports)
             and all(self.child_health)
         )
@@ -254,7 +250,6 @@ class MultiPortExternalLBSupervisor:
             self._start_children()
             await self._monitor_children()
         finally:
-            self.begin_shutdown()
             self._stop_requested.set()
             await self._shutdown_children()
             await self._shutdown_supervisor_server()
@@ -277,7 +272,6 @@ class MultiPortExternalLBSupervisor:
             "multi-port external LB child ranks",
             signum,
         )
-        self.begin_shutdown()
         self._stop_requested.set()
 
     async def _start_supervisor_server(self) -> None:
