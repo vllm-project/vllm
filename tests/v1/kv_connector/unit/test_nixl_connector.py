@@ -430,6 +430,7 @@ def test_kv_transfer_handshake(dist_init):
                 kv_connector_metadata["remote_host"],
                 kv_connector_metadata["remote_port"],
                 kv_connector_metadata["tp_size"],
+                kv_connector_metadata["pp_size"],
                 kv_connector_metadata["remote_engine_id"],
             )
 
@@ -459,6 +460,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attribute needed for tests that do not call it.
+        self.region_labels = ["layer.0"]
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
         test_shape = self.attn_backends[0].get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
@@ -480,7 +482,12 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         )
 
     def _nixl_handshake(
-        self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
+        self,
+        host: str,
+        port: int,
+        remote_tp_size: int,
+        remote_pp_size: int,
+        expected_engine_id: str,
     ) -> dict[int, str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
@@ -748,6 +755,7 @@ class TestNixlHandshake:
             host="localhost",
             port=1234,
             remote_tp_size=4,
+            remote_pp_size=1,
             expected_engine_id=worker.REMOTE_ENGINE_ID,
         )
         check_handshake(4)
@@ -760,6 +768,7 @@ class TestNixlHandshake:
             host="localhost",
             port=1234,
             remote_tp_size=6,
+            remote_pp_size=1,
             expected_engine_id=worker.REMOTE_ENGINE_ID,
         )
         check_handshake(6)
@@ -2382,6 +2391,7 @@ def test_compatibility_hash_validation(
                     host="localhost",
                     port=1234,
                     remote_tp_size=1,
+                    remote_pp_size=1,
                     expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 )
         else:
@@ -2389,6 +2399,7 @@ def test_compatibility_hash_validation(
                 host="localhost",
                 port=1234,
                 remote_tp_size=1,
+                remote_pp_size=1,
                 expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             )
             # Verify handshake returned agent mapping
@@ -2481,5 +2492,6 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 host="localhost",
                 port=1234,
                 remote_tp_size=1,
+                remote_pp_size=1,
                 expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             )
