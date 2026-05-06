@@ -7,6 +7,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
+from vllm.entrypoints.codec_compression import wrap_streaming_response
 from vllm.entrypoints.codec_frame import (
     CONTENT_TYPE,
     PROTO_SCHEMA,
@@ -70,6 +71,15 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         )
 
     media_type = CONTENT_TYPE.get(request.stream_format, "text/event-stream")
+    # Negotiated transport compression for binary streams. JSON SSE keeps
+    # whatever compression is applied higher up the stack (proxies / FastAPI
+    # middleware) and is unaffected by this codepath.
+    if request.stream_format != "json":
+        return wrap_streaming_response(
+            raw_request.headers.get("accept-encoding", ""),
+            generator,
+            media_type=media_type,
+        )
     return StreamingResponse(content=generator, media_type=media_type)
 
 
@@ -132,7 +142,11 @@ async def create_completion_codec(raw_request: Request):
         )
 
     media_type = CONTENT_TYPE.get(stream_format, "application/x-msgpack")
-    return StreamingResponse(content=generator, media_type=media_type)
+    return wrap_streaming_response(
+        raw_request.headers.get("accept-encoding", ""),
+        generator,
+        media_type=media_type,
+    )
 
 
 @router.get(
