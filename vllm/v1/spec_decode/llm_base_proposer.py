@@ -193,7 +193,7 @@ class SpecDecodeBaseProposer:
 
         if self.needs_extra_input_slots:
             self._raise_if_padded_drafter_batch_disabled()
-            self._raise_if_multimodal()
+            self._warn_if_multimodal()
             self._raise_if_mrope()
 
         self.is_rejected_token_mask: torch.Tensor | None = None
@@ -309,11 +309,12 @@ class SpecDecodeBaseProposer:
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
-    def _raise_if_multimodal(self):
+    def _warn_if_multimodal(self):
         if self.supports_mm_inputs:
-            raise NotImplementedError(
+            logger.warning(
                 "Speculative Decoding with draft models or parallel drafting "
-                "does not support multimodal models yet"
+                "does not fully support multimodal models yet. "
+                "Proceeding with text-only speculative decoding."
             )
 
     def _raise_if_mrope(self):
