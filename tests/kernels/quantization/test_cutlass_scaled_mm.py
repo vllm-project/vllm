@@ -38,6 +38,14 @@ MNK_FACTORS = [
     (512, 8192, 4096),
     (512, 16384, 128),
     (512, 24576, 128),
+    # Shapes with N or K not divisible by 16 — exercises the padding path
+    # in _cutlass_scaled_mm_maybe_padded (Qwen2.5-VL vision MLP dims).
+    (32, 3420, 1280),
+    (32, 1280, 6840),
+    (1, 3420, 1280),
+    (64, 6840, 1280),
+    (16, 100, 200),
+    (33, 255, 513),
 ]
 
 CUDA_DEVICES = [
@@ -100,7 +108,11 @@ def cutlass_fp8_gemm_helper(
 
     torch.testing.assert_close(out, baseline, rtol=5e-1, atol=1.5e-1)
 
-    opcheck(torch.ops._C.cutlass_scaled_mm, (out, a, b, scale_a, scale_b, bias))
+    # opcheck calls the raw C++ op directly, which requires 16-byte alignment.
+    # Skip it for shapes that rely on the Python-level padding wrapper.
+    cutlass_compatible_b = b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
+    if cutlass_compatible_b:
+        opcheck(torch.ops._C.cutlass_scaled_mm, (out, a, b, scale_a, scale_b, bias))
 
 
 def cutlass_int8_gemm_helper(
