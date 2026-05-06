@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -217,6 +218,58 @@ def test_select_common_block_size_uses_largest_shared_int():
 
     selected_size = select_common_block_size(256, [backend_a, backend_b])
     assert selected_size == 64
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("world_size", "is_last_rank", "expected_calls"),
+    [(1, True, 0), (2, True, 0), (2, False, 1)],
+)
+def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
+    monkeypatch: pytest.MonkeyPatch,
+    world_size: int,
+    is_last_rank: bool,
+    expected_calls: int,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.execute_model_state = None
+    runner.kv_connector_output = None
+    runner.use_async_scheduling = True
+    receive_calls = 0
+
+    def receive_prev_sampled_token_ids():
+        nonlocal receive_calls
+        receive_calls += 1
+
+    runner._pp_receive_prev_sampled_token_ids_to_input_batch = (
+        receive_prev_sampled_token_ids
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(world_size=world_size, is_last_rank=is_last_rank),
+    )
+
+    assert GPUModelRunner.sample_tokens(runner, None) is None
+    assert receive_calls == expected_calls
+
+
+@pytest.mark.skip_global_cleanup
+def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.execute_model_state = None
+    runner.kv_connector_output = None
+    runner.use_async_scheduling = False
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        pytest.fail,
+    )
+
+    assert GPUModelRunner.sample_tokens(runner, None) is None
 
 
 def test_select_common_block_size_no_valid_option():
