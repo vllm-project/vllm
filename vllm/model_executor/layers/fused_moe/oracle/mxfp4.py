@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
     RoutingMethodType,
     mxfp4_mxfp8_moe_quant_config,
-    mxfp4_w4a4_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
@@ -78,6 +77,8 @@ class Mxfp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     # Humming
     HUMMING = "HUMMING"
+    # Cutlass
+    CUTLASS_MXFP4 = "CUTLASS_MXFP4"
 
 
 # AITER backends group
@@ -200,6 +201,13 @@ def backend_to_kernel_cls(
 
         return [OCP_MXQuantizationEmulationTritonExperts]
 
+    elif backend == Mxfp4MoeBackend.CUTLASS_MXFP4:
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+            CutlassExpertsMxfp4,
+        )
+
+        return [CutlassExpertsMxfp4]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
@@ -220,6 +228,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
         "aiter_mxfp4_fp8": Mxfp4MoeBackend.AITER_MXFP4_FP8,
         "xpu": Mxfp4MoeBackend.XPU,
         "emulation": Mxfp4MoeBackend.EMULATION,
+        "cutlass_mxfp4": Mxfp4MoeBackend.CUTLASS_MXFP4,
     }
     if backend := mapping.get(runner_backend):
         return backend

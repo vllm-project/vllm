@@ -4,7 +4,6 @@
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -194,7 +193,6 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
-                _cache_permute_indices=self._cache_permute_indices,
             )
         )
 
