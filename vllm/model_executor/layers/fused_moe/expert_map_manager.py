@@ -455,7 +455,9 @@ class ExpertMapManager:
         """Calculate expert mappings based on placement strategy."""
         if self.ep_size == 1:
             # No EP, all experts are local
-            self._local_num_experts = self.global_num_experts
+            self._local_num_experts = (
+                self.global_num_experts + self.num_fused_shared_experts
+            )
             self._expert_map = None
             self._expert_mask = None
             return
