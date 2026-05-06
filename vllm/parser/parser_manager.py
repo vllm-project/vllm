@@ -307,8 +307,12 @@ def specialize_parser(
     specialized_name = parser_cls.__name__
     if reasoning_parser_cls is not None:
         specialized_name += f"_{reasoning_parser_cls.__name__}"
+    else:
+        specialized_name += "_NoReasoning"
     if tool_parser_cls is not None:
         specialized_name += f"_{tool_parser_cls.__name__}"
+    else:
+        specialized_name += "_NoTool"
 
     return type(
         specialized_name,
