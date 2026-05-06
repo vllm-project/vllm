@@ -717,7 +717,7 @@ class NixlConnectorWorker:
             )
             self._handshake_futures[engine_id] = fut
 
-            def done_cb(f: Future[dict[int, str]], eid=engine_id):
+            def done_callback(f: Future[dict[int, str]], eid=engine_id):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
@@ -730,7 +730,7 @@ class NixlConnectorWorker:
                             remote_engine_id=eid,
                         )
 
-            fut.add_done_callback(done_cb)
+            fut.add_done_callback(done_callback)
             return fut
 
     def _background_nixl_handshake(
@@ -745,8 +745,7 @@ class NixlConnectorWorker:
             meta.tp_size,
         )
         if fut is None:
-            # Already handshaked — should not happen (caller checks), but
-            # handle gracefully.
+            # Already handshaked — only happens if caller does not pre-check.
             self._ready_requests.put((req_id, meta))
             return
 
