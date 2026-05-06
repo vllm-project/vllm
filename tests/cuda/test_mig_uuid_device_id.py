@@ -11,8 +11,6 @@ already remaps the UUID to device 0.
 Regression test for https://github.com/vllm-project/vllm/issues/41848.
 """
 
-import pytest
-
 
 def test_device_id_integer_passthrough():
     """Standard integer CUDA_VISIBLE_DEVICES still works."""
