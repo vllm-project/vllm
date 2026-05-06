@@ -219,6 +219,73 @@ class FixFunctionalizationPass(VllmInductorPass):
 
                 self.insert_defunctionalized(graph, node)
                 self._remove(node)
+            elif (
+                hasattr(
+                    torch.ops.vllm, "fused_aiter_qk_rope_kvcache_q_concat_quant_mla"
+                )
+                and at_target
+                == torch.ops.vllm.fused_aiter_qk_rope_kvcache_q_concat_quant_mla.default
+            ):
+                # Same q_pe slice_scatter / k_pe in-place cleanup as
+                # fused_rope_unified_mla_kv_cache_update, plus an extra
+                # getitem(0) -> return-value (q_prepped) wiring because this
+                # op also returns a tensor (q_prepped) in addition to mutating
+                # q_pe / k_pe.
+                getitem_nodes = self.getitem_users(node)
+
+                # q_pe slice_scatter cleanup (same pattern as fused_rope_unified).
+                # Difference vs. fused_rope_unified_mla_kv_cache_update: the
+                # AITER fusion pass walks ``q_post = slice_scatter(view_3, ..)``
+                # back to ``view_3`` and uses it as its ``q`` input, so
+                # ``view_temp`` (= view_3) still has live users at this point
+                # and must NOT be erased.
+                if 1 in getitem_nodes:
+                    q_pe_out = getitem_nodes[1]
+                    copy_temp = None
+                    for user in list(q_pe_out.users):
+                        if is_func(user, torch.ops.aten.copy.default):
+                            copy_temp = user
+                    if copy_temp is not None:
+                        slice_temp = copy_temp.args[0]
+                        slice_scatter_temp = None
+                        for user in list(copy_temp.users):
+                            if is_func(user, torch.ops.aten.slice_scatter.default):
+                                slice_scatter_temp = user
+                        if slice_scatter_temp is not None:
+                            view_orig = slice_temp.args[0]
+                            slice_scatter_temp.replace_all_uses_with(view_orig)
+                            self._remove(slice_scatter_temp)
+                            self._remove(copy_temp)
+                            self._remove(slice_temp)
+                            # NOTE: view_temp intentionally NOT removed: it's
+                            # the q_orig input we fed into the fused AITER op.
+                    self._remove(q_pe_out)
+
+                # k_pe in-place: replace getitem(2) users with the input k_pe
+                if 2 in getitem_nodes:
+                    k_pe_in = node.kwargs["k_pe"]
+                    k_pe_out = getitem_nodes[2]
+                    k_pe_out.replace_all_uses_with(k_pe_in)
+                    self._remove(k_pe_out)
+
+                # getitem(0) is the return value (q_prepped). Insert a direct
+                # call to the underlying op that returns q_prepped, then rewire
+                # getitem(0) users to that return.
+                if 0 in getitem_nodes:
+                    q_prepped_out = getitem_nodes[0]
+                    with graph.inserting_before(node):
+                        new_call = graph.call_function(
+                            torch.ops.vllm.fused_aiter_qk_rope_kvcache_q_concat_quant_mla.default,
+                            kwargs=dict(node.kwargs),
+                        )
+                    q_prepped_out.replace_all_uses_with(new_call)
+                    self._remove(q_prepped_out)
+                else:
+                    # No return-value getitem present; just insert the direct
+                    # call for its side effects.
+                    self.insert_defunctionalized(graph, node)
+
+                self._remove(node)
 
             # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn
             elif (
