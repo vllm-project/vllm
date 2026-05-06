@@ -212,6 +212,118 @@ class TestExtractToolCalls:
         assert isinstance(args["enabled"], bool)
         assert isinstance(args["count"], int)
 
+    def test_string_attr_true_preserves_literal_despite_schema(self):
+        """string="true" must keep the value as a string even
+        if the schema says integer."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="score",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}score">\n'
+            f'{PARAM_START}value" string="true">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"value": "42"}
+        assert isinstance(args["value"], str)
+
+    def test_string_attr_false_allows_schema_conversion(self):
+        """string="false" allows the parser to convert via the tool schema."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="score",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}score">\n'
+            f'{PARAM_START}value" string="false">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"value": 42}
+        assert isinstance(args["value"], int)
+
+    def test_arguments_wrapper_repaired(self):
+        """A single 'arguments' wrapper parameter must be unwrapped when it
+        is not part of the tool schema and the inner object matches schema fields."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="get_weather",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}get_weather">\n'
+            f'{PARAM_START}arguments" string="false">'
+            f'{{"location":"Beijing"}}'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "Beijing"}
+
+    def test_input_wrapper_repaired(self):
+        """A single 'input' wrapper parameter must be unwrapped similarly."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="get_weather",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}get_weather">\n'
+            f'{PARAM_START}input" string="true">'
+            f'{{"location":"Beijing"}}'
+            f"{PARAM_END}\n"
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "Beijing"}
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_tool_calls_streaming
@@ -323,6 +435,33 @@ class TestExtractToolCallsStreaming:
         deltas = self._stream(parser, full_text)
         args_str = self._reconstruct_args(deltas)
         assert json.loads(args_str) == {"x": 3, "y": 4}
+
+    def test_string_attr_true_preserves_literal_in_streaming(self):
+        """Streaming: string='true' must keep the value literal despite schema."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="score",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "value": {"type": "integer"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}score">\n'
+            f'{PARAM_START}value" string="true">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
+        deltas = self._stream(parser, full_text)
+        args_str = self._reconstruct_args(deltas)
+        args = json.loads(args_str)
+        assert args == {"value": "42"}
+        assert isinstance(args["value"], str)
 
     def test_multiple_tools_streaming(self, parser):
         full_text = (
