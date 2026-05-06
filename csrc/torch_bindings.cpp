@@ -106,6 +106,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
 
+  // SwiGLU activation with input clamping.
+  ops.def(
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
+      "-> ()");
+  ops.impl("silu_and_mul_with_clamp", torch::kCUDA, &silu_and_mul_clamp);
+
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
@@ -177,7 +183,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
 
-#ifndef USE_ROCM
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
   // kernel launch.
@@ -188,7 +193,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float eps, int cache_block_size) -> ()");
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
            &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
-#endif
 
   // Apply repetition penalties to logits in-place
   ops.def(
