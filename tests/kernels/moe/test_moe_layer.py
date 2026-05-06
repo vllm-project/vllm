@@ -1260,7 +1260,7 @@ def _test_body_eplb(
         ),
     )
 
-    eplb_moe_layer.router.eplb_manager.state.should_record_tensor = torch.ones(
+    eplb_moe_layer.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
 

@@ -1,19 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from functools import partial
-from typing import TYPE_CHECKING
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
@@ -24,9 +23,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 
 
 def fused_grouped_topk(
@@ -261,12 +257,12 @@ class GroupedTopKRouter(BaseRouter):
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         num_fused_shared_experts: int = 0,
-        eplb_manager: "EplbManager | None" = None,
+        eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_manager=eplb_manager,
+            eplb_state=eplb_state,
         )
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group

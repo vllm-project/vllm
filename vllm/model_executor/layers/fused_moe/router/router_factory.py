@@ -5,8 +5,8 @@ from collections.abc import Callable
 import torch
 
 import vllm.envs as envs
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
@@ -47,7 +47,7 @@ def create_fused_moe_router(
     # custom routing parameters
     custom_routing_function: Callable | None = None,
     # eplb parameters
-    eplb_manager: EplbManager | None = None,
+    eplb_state: EplbLayerState | None = None,
     # zero expert parameters
     zero_expert_type: str | None = None,
     num_logical_experts: int | None = None,
@@ -86,7 +86,7 @@ def create_fused_moe_router(
         custom_routing_function: Optional custom routing function
 
     EPLB arguments:
-        eplb_manager: Optional EPLB (Expert Parallelism Load Balancing) manager
+        eplb_state: Optional EplbLayerState, None when EPLB is disabled.
 
     Zero expert arguments:
         zero_expert_type: Type of zero expert (e.g. identity). If not None,
@@ -106,7 +106,7 @@ def create_fused_moe_router(
         return RoutingSimulatorRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_manager=eplb_manager,
+            eplb_state=eplb_state,
         )
 
     if zero_expert_type is not None:
@@ -119,13 +119,13 @@ def create_fused_moe_router(
         return ZeroExpertRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
             e_score_correction_bias=e_score_correction_bias,
             num_logical_experts=num_logical_experts,
             zero_expert_type=zero_expert_type,
             scoring_func=scoring_func,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            eplb_manager=eplb_manager,
         )
 
     if use_grouped_topk:
@@ -138,6 +138,7 @@ def create_fused_moe_router(
         grouped_topk_router = GroupedTopKRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             renormalize=renormalize,
@@ -145,7 +146,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            eplb_manager=eplb_manager,
         )
         if (
             grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
@@ -164,9 +164,9 @@ def create_fused_moe_router(
         return CustomRoutingRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
-            eplb_manager=eplb_manager,
         )
 
     assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
@@ -175,10 +175,10 @@ def create_fused_moe_router(
         return FusedTopKBiasRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
             e_score_correction_bias=e_score_correction_bias,
             renormalize=renormalize,
             routed_scaling_factor=routed_scaling_factor,
-            eplb_manager=eplb_manager,
             scoring_func=scoring_func,
             hash_indices_table=hash_indices_table,
         )
@@ -186,7 +186,7 @@ def create_fused_moe_router(
     return FusedTopKRouter(
         top_k=top_k,
         global_num_experts=global_num_experts,
+        eplb_state=eplb_state,
         renormalize=renormalize,
         scoring_func=scoring_func,
-        eplb_manager=eplb_manager,
     )

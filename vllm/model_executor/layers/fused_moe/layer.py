@@ -13,13 +13,13 @@ from vllm.distributed import (
     get_pcp_group,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
 )
-from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
@@ -208,14 +208,16 @@ def FusedMoE(
     )
 
     # Initialize EPLB manager (or None?)
-    eplb_manager: EplbManager | None = None
+    eplb_state: EplbLayerState | None = None
     if enable_eplb:
-        eplb_manager = EplbManager(
-            ep_size=moe_parallel_config.ep_size,
-            global_num_experts=global_num_experts,
-            logical_num_experts=logical_num_experts,
-            num_redundant_experts=num_redundant_experts,
-        )
+        ep_size = moe_parallel_config.ep_size
+        if global_num_experts % ep_size != 0:
+            raise ValueError(
+                f"EPLB currently only supports even distribution of "
+                f"experts across ranks. Got {global_num_experts} experts "
+                f"and {ep_size} EP ranks."
+            )
+        eplb_state = EplbLayerState()
     else:
         assert num_redundant_experts == 0, (
             "Redundant experts are only supported with EPLB."
@@ -231,10 +233,9 @@ def FusedMoE(
         num_expert_group=num_expert_group,
         moe_parallel_config=moe_parallel_config,
         placement_strategy=vllm_config.parallel_config.expert_placement_strategy,
-        enable_eplb=eplb_manager is not None,
+        enable_eplb=eplb_state is not None,
         num_fused_shared_experts=num_fused_shared_experts,
         rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
-        device=vllm_config.device_config.device,
     )
 
     # TODO(bnell): we should not have to create a router if the kernel is
@@ -258,7 +259,7 @@ def FusedMoE(
         else 1.0,
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=num_fused_shared_experts,
-        eplb_manager=eplb_manager,
+        eplb_state=eplb_state,
         zero_expert_type=zero_expert_type,
         num_logical_experts=logical_num_experts,
         hash_indices_table=hash_indices_table,

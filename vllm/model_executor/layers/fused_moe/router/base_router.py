@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -148,7 +148,7 @@ class BaseRouter(FusedMoERouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_manager: EplbManager | None = None,
+        eplb_state: EplbLayerState | None = None,
     ):
         """
         Note: the indices dtype might not be available at router construction
@@ -159,18 +159,18 @@ class BaseRouter(FusedMoERouter):
         Args:
             top_k: Number of experts to select per token
             global_num_experts: Total number of experts
-            eplb_manager: Optional EPLB manager for load balancing
+            eplb_state: Optional EPLBLayerState for load balancing
             indices_type_getter: Optional callback to get indices dtype
         """
         super().__init__()
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self._eplb_manager = eplb_manager
+        self._eplb_state = eplb_state
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
     @property
-    def eplb_manager(self) -> EplbManager | None:
-        return self._eplb_manager
+    def eplb_state(self) -> EplbLayerState | None:
+        return self._eplb_state
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -178,8 +178,8 @@ class BaseRouter(FusedMoERouter):
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
-        if self.eplb_manager is not None:
-            eplb_state = self.eplb_manager.state
+        if self._eplb_state is not None:
+            eplb_state = self._eplb_state
             if eplb_state.expert_load_view is None:
                 raise ValueError("enable_eplb=True requires expert_load_view != None")
             if eplb_state.logical_to_physical_map is None:
@@ -197,8 +197,8 @@ class BaseRouter(FusedMoERouter):
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
-        if self.eplb_manager is not None:
-            eplb_state = self.eplb_manager.state
+        if self._eplb_state is not None:
+            eplb_state = self._eplb_state
             assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_to_physical_map is not None
             assert eplb_state.logical_replica_count is not None

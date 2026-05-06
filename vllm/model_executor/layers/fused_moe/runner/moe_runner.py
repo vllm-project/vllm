@@ -851,16 +851,12 @@ class MoERunner(MoERunnerInterface):
         """Map global expert ID to local expert ID."""
         return self.routed_experts._map_global_expert_id_to_local_expert_id(expert_id)
 
+    def get_expert_weights(self) -> Iterable[torch.Tensor]:
+        return self.routed_experts.get_expert_weights()
+
     #
     # EPLB
     #
-
-    def get_expert_weights(self) -> Iterable[torch.Tensor]:
-        """Delegate to EPLB manager."""
-        if self.router.eplb_manager is not None:
-            return self.router.eplb_manager.get_expert_weights(self.routed_experts)
-        else:
-            return []
 
     def set_eplb_state(
         self,
@@ -875,8 +871,8 @@ class MoERunner(MoERunnerInterface):
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
         """
-        if self.router.eplb_manager is not None:
-            self.router.eplb_manager.set_state(
+        if self.router.eplb_state is not None:
+            self.router.eplb_state.set_layer_state(
                 moe_layer_idx,
                 expert_load_view,
                 logical_to_physical_map,

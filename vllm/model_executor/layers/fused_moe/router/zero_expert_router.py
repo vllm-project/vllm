@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
-
 import torch
 
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     zero_experts_compute_triton,
 )
@@ -17,9 +15,6 @@ from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 
 
 class ZeroExpertRouter(BaseRouter):
@@ -41,12 +36,12 @@ class ZeroExpertRouter(BaseRouter):
         scoring_func: str = "softmax",
         renormalize: bool = False,
         routed_scaling_factor: float = 1.0,
-        eplb_manager: "EplbManager | None" = None,
+        eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_manager=eplb_manager,
+            eplb_state=eplb_state,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts

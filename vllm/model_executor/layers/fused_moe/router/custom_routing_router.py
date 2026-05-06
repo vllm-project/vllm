@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.eplb_manager import EplbManager
 
 
 class CustomRoutingRouter(BaseRouter):
@@ -21,13 +17,13 @@ class CustomRoutingRouter(BaseRouter):
         top_k: int,
         global_num_experts: int,
         custom_routing_function: Callable,
-        eplb_manager: "EplbManager | None" = None,
+        eplb_state: EplbLayerState | None = None,
         renormalize: bool = True,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
-            eplb_manager=eplb_manager,
+            eplb_state=eplb_state,
         )
         self.custom_routing_function = custom_routing_function
         self.renormalize = renormalize
