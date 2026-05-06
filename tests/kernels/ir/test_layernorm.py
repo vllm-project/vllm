@@ -29,7 +29,6 @@ from tests.kernels.allclose_default import get_default_rtol
 from vllm import ir
 from vllm.platforms import current_platform
 
-
 # ============================================================
 # RMSNorm
 # ============================================================
@@ -67,12 +66,15 @@ class TestRmsNorm:
 
     # --- Symbolic ---
 
-    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.rms_norm))
+    @pytest.mark.parametrize(
+        "provider", ["native"] + supported_providers(ir.ops.rms_norm)
+    )
     def test_supports_args_returns_bool(self, provider: str):
         """Verify supports_args returns bool with unbacked SymInts."""
         assert_supports_args_returns_bool(
             ir.ops.rms_norm,
             provider,
+            symbolic_params=["x"],
             num_tokens=8,
             hidden_size=64,
             dtype=torch.bfloat16,
@@ -205,7 +207,9 @@ class TestRmsNorm:
 
     # --- Lowering ---
 
-    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.rms_norm))
+    @pytest.mark.parametrize(
+        "provider", ["native"] + supported_providers(ir.ops.rms_norm)
+    )
     def test_e2e_correctness(self, provider: str, default_vllm_config):
         """Verify lowering produces correct results."""
         args = ir.ops.rms_norm.generate_inputs(
@@ -266,12 +270,15 @@ class TestFusedAddRmsNorm:
 
     # --- Symbolic ---
 
-    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.fused_add_rms_norm))
+    @pytest.mark.parametrize(
+        "provider", ["native"] + supported_providers(ir.ops.fused_add_rms_norm)
+    )
     def test_supports_args_returns_bool(self, provider: str):
         """Verify supports_args returns bool with unbacked SymInts."""
         assert_supports_args_returns_bool(
             ir.ops.fused_add_rms_norm,
             provider,
+            symbolic_params=["x", "x_residual"],
             num_tokens=8,
             hidden_size=64,
             dtype=torch.bfloat16,
@@ -488,7 +495,9 @@ class TestFusedAddRmsNorm:
 
     # --- Lowering ---
 
-    @pytest.mark.parametrize("provider", ["native"] + supported_providers(ir.ops.fused_add_rms_norm))
+    @pytest.mark.parametrize(
+        "provider", ["native"] + supported_providers(ir.ops.fused_add_rms_norm)
+    )
     def test_e2e_correctness(self, provider: str, default_vllm_config):
         """Verify lowering produces correct results."""
         args = ir.ops.fused_add_rms_norm.generate_inputs(
