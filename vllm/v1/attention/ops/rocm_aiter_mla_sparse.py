@@ -298,9 +298,7 @@ def fp8_paged_mqa_logits_torch(
         else:
             context_limit = context_len.to(device=q.device, dtype=torch.int32)
             q_offsets = context_limit - 1
-        weight_slice = (
-            weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
-        )
+        weight_slice = weights[i * next_n : (i + 1) * next_n, :].contiguous()
         max_context_len = int(context_limit.max().item())
         for block_rk in range(cdiv(max_context_len, block_size)):
             block_idx = block_tables[i][block_rk]
@@ -311,15 +309,13 @@ def fp8_paged_mqa_logits_torch(
             mask = (k_offsets[None, :] < context_limit[:, None]) & (
                 k_offsets[None, :] <= q_offsets[:, None]
             )
-            s = torch.where(
-                mask[None, :, :],
-                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
-                    logits.dtype
-                ),
-                float("-inf"),
+            scores = (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
+                logits.dtype
             )
-            s = torch.relu(s) * weight_slice[..., None]
-            s = s.sum(dim=0)
+            scores = scores.transpose(0, 1)
+            s = torch.where(mask.unsqueeze(1), scores, float("-inf"))
+            s = torch.relu(s) * weight_slice.unsqueeze(-1)
+            s = s.sum(dim=1)
             logits[
                 i * next_n : (i + 1) * next_n,
                 block_rk * block_size : (block_rk + 1) * block_size,
@@ -393,7 +389,7 @@ def rocm_fp8_paged_mqa_logits(
             out_logits = torch.full(
                 [batch_size * next_n, max_model_len],
                 float("-inf"),
-                device="cuda",
+                device=q_fp8.device,
                 dtype=torch.float32,
             )
             deepgemm_fp8_paged_mqa_logits(
@@ -417,7 +413,7 @@ def rocm_fp8_paged_mqa_logits(
         out_qk = torch.full(
             (heads, batch_size * next_n, max_model_len),
             float("-inf"),
-            device="cuda",
+            device=q_fp8.device,
             dtype=torch.float32,
         )
         deepgemm_fp8_paged_mqa_logits_stage1(
@@ -468,10 +464,10 @@ def fp8_mqa_logits_torch(
     q = q.to(torch.bfloat16)
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(0, seq_len_kv, device=q.device)[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(0, seq_len_kv, device=q.device)[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -1655,7 +1651,119 @@ def rocm_sparse_attn_prefill(
     output.copy_(output_chunk.to(output.dtype))
 
 
-def rocm_sparse_attn_decode(
+def rocm_dequantize_blocked_k_cache(
+    quant_k_cache: torch.Tensor,
+    head_dim: int,
+    nope_head_dim: int,
+    rope_head_dim: int,
+) -> torch.Tensor:
+    fp8_dtype = current_platform.fp8_dtype()
+    tile_size = 64
+    num_tiles = nope_head_dim // tile_size
+
+    num_blocks, block_size, _ = quant_k_cache.shape
+    quant_k_cache = quant_k_cache.view(num_blocks, -1)
+    input_nope_rope = quant_k_cache[
+        :, : block_size * (nope_head_dim + 2 * rope_head_dim)
+    ].view(num_blocks, block_size, nope_head_dim + 2 * rope_head_dim)
+    input_nope = input_nope_rope[:, :, :nope_head_dim].view(fp8_dtype)
+    input_rope = input_nope_rope[:, :, nope_head_dim:].view(torch.bfloat16)
+    input_scale = (
+        quant_k_cache[:, block_size * (nope_head_dim + 2 * rope_head_dim) :]
+        .view(num_blocks, block_size, 8)[:, :, :num_tiles]
+        .view(torch.float8_e8m0fnu)
+    )
+
+    result = torch.empty(
+        (num_blocks, block_size, 1, head_dim),
+        dtype=torch.bfloat16,
+        device=quant_k_cache.device,
+    )
+    result[..., nope_head_dim:] = input_rope.unsqueeze(2)
+    for tile_idx in range(num_tiles):
+        cur_nope = input_nope[
+            ..., tile_idx * tile_size : (tile_idx + 1) * tile_size
+        ].to(torch.bfloat16)
+        cur_scales = _decode_e8m0_scales(input_scale[:, :, tile_idx]).to(
+            torch.bfloat16
+        ).unsqueeze(-1)
+        result[..., tile_idx * tile_size : (tile_idx + 1) * tile_size] = (
+            cur_nope * cur_scales
+        ).unsqueeze(2)
+    return result
+
+
+def rocm_ref_sparse_attn_decode(
+    q: torch.Tensor,
+    blocked_k: torch.Tensor,
+    indices_in_kvcache: torch.Tensor,
+    topk_length: torch.Tensor | None,
+    scale: float,
+    head_dim: int,
+    attn_sink: torch.Tensor | None,
+    extra_blocked_k: torch.Tensor | None = None,
+    extra_indices_in_kvcache: torch.Tensor | None = None,
+    extra_topk_length: torch.Tensor | None = None,
+) -> torch.Tensor:
+    b, s_q, h_q, d_qk = q.shape
+
+    def process_scope(
+        cur_blocked_k: torch.Tensor,
+        cur_indices: torch.Tensor,
+        cur_topk_length: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cur_indices = cur_indices.reshape(b, s_q, -1)
+        topk = cur_indices.size(-1)
+        fixed_indices = torch.clamp_min(cur_indices, 0)
+        gathered_kv = (
+            cur_blocked_k.view(-1, d_qk)
+            .index_select(0, fixed_indices.view(-1))
+            .view(b, s_q, topk, d_qk)
+        )
+        invalid_mask = cur_indices == -1
+        if cur_topk_length is not None:
+            cur_topk_length = cur_topk_length.reshape(b)
+            invalid_mask |= torch.arange(0, topk, device=invalid_mask.device).view(
+                1, 1, topk
+            ) >= cur_topk_length.view(b, 1, 1)
+        return gathered_kv, invalid_mask
+
+    gathered_kv, invalid_mask = process_scope(
+        blocked_k, indices_in_kvcache, topk_length
+    )
+    if extra_blocked_k is not None:
+        assert extra_indices_in_kvcache is not None
+        gathered_kv1, invalid_mask1 = process_scope(
+            extra_blocked_k, extra_indices_in_kvcache, extra_topk_length
+        )
+        gathered_kv = torch.cat([gathered_kv, gathered_kv1], dim=2)
+        invalid_mask = torch.cat([invalid_mask, invalid_mask1], dim=2)
+
+    gathered_kv = gathered_kv.view(b * s_q, -1, d_qk).float()
+    gathered_kv[gathered_kv != gathered_kv] = 0.0
+    qf = q.float().view(b * s_q, h_q, d_qk)
+    attn_weight = qf @ gathered_kv.transpose(-1, -2)
+    attn_weight *= scale
+    attn_weight[
+        invalid_mask.view(b * s_q, 1, -1).expand(b * s_q, h_q, invalid_mask.size(-1))
+    ] = float("-inf")
+    lse = attn_weight.logsumexp(dim=-1)
+    attn_weight = torch.exp(attn_weight - lse.unsqueeze(-1))
+    output = attn_weight @ gathered_kv[..., :head_dim]
+    output = output.view(b, s_q, h_q, head_dim)
+    lse = lse.view(b, s_q, h_q)
+
+    if attn_sink is not None:
+        output *= (1.0 / (1.0 + torch.exp(attn_sink.view(1, 1, h_q) - lse))).unsqueeze(
+            -1
+        )
+
+    lonely_q_mask = lse == float("-inf")
+    output[lonely_q_mask.unsqueeze(-1).expand_as(output)] = 0.0
+    return output.squeeze(1).to(torch.bfloat16)
+
+
+def rocm_forward_decode_fallback(
     q: torch.Tensor,
     kv_cache: torch.Tensor | None,
     swa_k_cache: torch.Tensor,
