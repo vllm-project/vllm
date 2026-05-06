@@ -16,15 +16,11 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.batch_invariant import (
-    linear_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
     method_has_implemented_embedding,
 )
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -59,10 +55,20 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if current_platform.is_cpu():
-            from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
+        import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+        from vllm.model_executor.kernels.linear import choose_w16a16_kernel
 
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+        config = w16a16.Config(
+            weight_dtype=layer.weight.dtype,
+            weight_shape=tuple(layer.weight.shape),
+            batch_invariant=envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda_alike(),
+            is_weight_meta=layer.weight.is_meta,
+            weight_contiguous=layer.weight.is_contiguous(),
+            clear_weight_after_processing=False,
+        )
+        layer.w16a16_kernel = choose_w16a16_kernel(config)
+        layer.w16a16_kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -70,9 +76,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
-            return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return layer.w16a16_kernel.apply_weights(layer, x, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)

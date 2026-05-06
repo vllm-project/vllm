@@ -273,12 +273,19 @@ def _matmul_persistent(
     }
 
     _matmul_kernel_persistent[grid](
-        a, b, c,
+        a,
+        b,
+        c,
         bias,
-        M, N, K,
-        a.stride(0), a.stride(1),
-        b.stride(0), b.stride(1),
-        c.stride(0), c.stride(1),
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
         NUM_SMS=NUM_SMS,
         A_LARGE=a.numel() > 2**31,
         B_LARGE=b.numel() > 2**31,
@@ -304,19 +311,51 @@ def _bmm_batch_invariant(
     c = out if out is not None else torch.empty((B, M, N), device=a.device, dtype=dtype)
 
     configs = {
-        torch.bfloat16: {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "num_stages": 3, "num_warps": 8},
-        torch.float16:  {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": _fp16_block_size_n, "BLOCK_SIZE_K": 64, "num_stages": 3, "num_warps": 8},
-        torch.float32:  {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 32, "num_stages": 3, "num_warps": 8},
+        torch.bfloat16: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "num_stages": 3,
+            "num_warps": 8,
+        },
+        torch.float16: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": _fp16_block_size_n,
+            "BLOCK_SIZE_K": 64,
+            "num_stages": 3,
+            "num_warps": 8,
+        },
+        torch.float32: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 32,
+            "num_stages": 3,
+            "num_warps": 8,
+        },
     }
     cfg = configs[dtype]
-    grid = (B, triton.cdiv(M, cfg["BLOCK_SIZE_M"]) * triton.cdiv(N, cfg["BLOCK_SIZE_N"]))
+    grid = (
+        B,
+        triton.cdiv(M, cfg["BLOCK_SIZE_M"]) * triton.cdiv(N, cfg["BLOCK_SIZE_N"]),
+    )
 
     _bmm_kernel[grid](
-        a, b, c,
-        B, M, N, K,
-        a.stride(0), a.stride(1), a.stride(2),
-        b.stride(0), b.stride(1), b.stride(2),
-        c.stride(0), c.stride(1), c.stride(2),
+        a,
+        b,
+        c,
+        B,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        c.stride(0),
+        c.stride(1),
+        c.stride(2),
         A_LARGE=a.numel() > 2**31,
         B_LARGE=b.numel() > 2**31,
         C_LARGE=c.numel() > 2**31,
@@ -347,7 +386,8 @@ class Kernel(BaseKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w = layer.weight.t()
+        params = self._get_layer_params(layer)
+        w = params.processed_weight.t()
         if x.ndim == 2 and w.ndim == 2:
             output = _matmul_persistent(x, w)
         elif w.ndim == 2:

@@ -18,12 +18,14 @@ from typing import TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.logger import init_logger
-import vllm.model_executor.kernels.linear.cpu.w16a16 as cpu_w16a16
-import vllm.model_executor.kernels.linear.native.w16a16 as native_w16a16
+import vllm.model_executor.kernels.linear.aiter.w16a16 as aiter_w16a16
+import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+import vllm.model_executor.kernels.linear.onednn.w16a16 as onednn_w16a16
+import vllm.model_executor.kernels.linear.sgl.w16a16 as sgl_w16a16
 import vllm.model_executor.kernels.linear.triton.w16a16 as triton_w16a16
-import vllm.model_executor.kernels.linear.rocm.w16a16 as rocm_w16a16
-import vllm.model_executor.kernels.linear.base.w16a16 as base_w16a16
+import vllm.model_executor.kernels.linear.vllm_c.w16a16 as vllm_c_w16a16
+import vllm.model_executor.kernels.linear.zentorch.w16a16 as zentorch_w16a16
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
@@ -151,36 +153,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
-
-_POSSIBLE_W16A16_KERNELS: dict[PlatformEnum, list[type[base_w16a16.Kernel]]] = {
-    PlatformEnum.CUDA: [triton_w16a16.Kernel, native_w16a16.Kernel],
-    PlatformEnum.ROCM: [rocm_w16a16.Kernel],
-    PlatformEnum.CPU: [cpu_w16a16.Kernel],
-    PlatformEnum.XPU: [native_w16a16.Kernel],
-}
-
-
-def choose_w16a16_kernel(
-    config: base_w16a16.Config,
-    compute_capability: int | None = None,
-) -> type[base_w16a16.Kernel]:
-    if compute_capability is None:
-        _cc = current_platform.get_device_capability()
-        if _cc is not None:
-            compute_capability = _cc[0] * 10 + _cc[1]
-
-    failure_reasons = []
-    for cls in _POSSIBLE_W16A16_KERNELS.get(current_platform._enum, [native_w16a16.Kernel]):
-        selected, reason = cls.try_select(config, compute_capability)
-        if selected is not None:
-            return selected
-        failure_reasons.append(reason)
-
-    raise ValueError(
-        "Failed to find a w16a16 kernel. Reasons:\n"
-        + "\n".join(r for r in failure_reasons if r)
-    )
-
 
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
@@ -763,6 +735,84 @@ def register_linear_kernel(
         _POSSIBLE_NVFP4_KERNELS[platform].append(kernel_class)
     else:
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
+
+
+
+# ROCm chain (outermost → innermost → terminal):
+# WvSplitKrc -> aiter_triton -> WvSplitK -> LLMM1 -> F.linear
+_LLMM1Kernel = w16a16.make_predicated(
+    name="w16a16_llmm1",
+    predicate=vllm_c_w16a16._fits_llmm1,
+)(vllm_c_w16a16.LLMM1Kernel)
+
+_WvSplitKKernel = w16a16.make_predicated(
+    name="w16a16_wvsplitk",
+    predicate=vllm_c_w16a16._fits_wvsplitk,
+    fallback=_LLMM1Kernel,
+)(vllm_c_w16a16.WvSplitKKernel)
+
+_AiterKernel = w16a16.make_predicated(
+    name="w16a16_aiter_triton",
+    predicate=aiter_w16a16._fits_aiter_triton,
+    fallback=_WvSplitKKernel,
+)(aiter_w16a16.Kernel)
+
+_WvSplitKrcKernel = w16a16.make_predicated(
+    name="w16a16_wvsplkrc",
+    predicate=vllm_c_w16a16._fits_wvsplitkrc,
+    fallback=_AiterKernel,
+)(vllm_c_w16a16.WvSplitKrcKernel)
+
+_POSSIBLE_W16A16_KERNELS: dict[PlatformEnum, list[type[w16a16.Kernel]]] = {
+    # ROCm: each predicated kernel covers the remaining chain as its internal
+    # fallbacks, so the selector picks the deepest applicable entry at init time.
+    PlatformEnum.ROCM: [
+        triton_w16a16.Kernel,
+        _WvSplitKrcKernel,
+        _WvSplitKKernel,
+        _LLMM1Kernel,
+        w16a16.Kernel,
+    ],
+    PlatformEnum.CUDA: [triton_w16a16.Kernel, w16a16.Kernel],
+    PlatformEnum.CPU: [
+        zentorch_w16a16.Kernel,
+        sgl_w16a16.Kernel,
+        onednn_w16a16.Kernel,
+        w16a16.Kernel,
+    ],
+}
+
+
+def choose_w16a16_kernel(
+    config: w16a16.Config,
+    compute_capability: int | None = None,
+) -> w16a16.Kernel:
+    if compute_capability is None:
+        _cc = current_platform.get_device_capability()
+        if _cc is not None:
+            compute_capability = _cc[0] * 10 + _cc[1]
+
+    possible = _POSSIBLE_W16A16_KERNELS.get(current_platform._enum, [w16a16.Kernel])
+    failure_reasons = []
+
+    for kernel_cls in possible:
+        name = kernel_cls.get_name()
+        if name in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(f"{name} is disabled")
+            continue
+        ok, reason = kernel_cls.is_supported(compute_capability)
+        if not ok:
+            failure_reasons.append(f"{name}: {reason}")
+            continue
+        ok, reason = kernel_cls.can_implement(config)
+        if not ok:
+            failure_reasons.append(f"{name}: {reason}")
+            continue
+        return kernel_cls(config)
+
+    raise ValueError(
+        "Failed to find a w16a16 kernel. Reasons:\n" + "\n".join(failure_reasons)
+    )
 
 
 __all__ = [

@@ -22,7 +22,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.kernels.linear import choose_w16a16_kernel
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     BlockQuantScaleParameter,
@@ -207,10 +206,19 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if current_platform.is_cpu():
-            from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
+        import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+        from vllm.model_executor.kernels.linear import choose_w16a16_kernel
 
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+        config = w16a16.Config(
+            weight_dtype=layer.weight.dtype,
+            weight_shape=tuple(layer.weight.shape),
+            batch_invariant=envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_cuda_alike(),
+            is_weight_meta=layer.weight.is_meta,
+            weight_contiguous=layer.weight.is_contiguous(),
+        )
+        layer.w16a16_kernel = choose_w16a16_kernel(config)
+        layer.w16a16_kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -218,9 +226,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
-            return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return layer.w16a16_kernel.apply_weights(layer, x, bias)
 
 
 class LinearBase(PluggableLayer):

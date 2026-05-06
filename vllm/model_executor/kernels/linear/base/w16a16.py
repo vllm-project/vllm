@@ -1,63 +1,115 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
+# NOTE: do NOT add `from __future__ import annotations` to this file.
+# w16a16_dispatch_fn relies on PEP-3107 runtime annotations for infer_schema.
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+import functools
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import ClassVar
 
 import torch
+import torch.nn.functional as F
 from typing_extensions import Self
 
-from vllm import envs
+import vllm.model_executor.kernels.linear.base.common as common
 
 
 @dataclass
-class Config:
-    input_dtype: torch.dtype
+class Config(common.Config):
+    weight_dtype: torch.dtype
     weight_shape: tuple[int, int]
     batch_invariant: bool = False
+    is_weight_meta: bool = False
+    clear_weight_after_processing: bool = True
+    weight_contiguous: bool = False
 
 
-class Kernel(ABC):
-    @classmethod
-    def try_select(
-        cls,
-        config: Config,
-        compute_capability: int | None = None,
-    ) -> tuple[type[Self] | None, str | None]:
-        name = cls.get_name()
-        if name in envs.VLLM_DISABLED_KERNELS:
-            return None, f"{name} is disabled"
-        ok, reason = cls.is_supported(compute_capability)
-        if not ok:
-            return None, reason
-        ok, reason = cls.can_implement(config)
-        if not ok:
-            return None, reason
-        return cls, None
+@dataclass
+class Params:
+    weight: torch.Tensor
+    processed_weight: torch.Tensor | None
+    bias_f32: torch.Tensor | None
+    # kernel-specific state that doesn't fit the standard fields (e.g. opaque handles)
+    extra_kwargs: SimpleNamespace = field(default_factory=SimpleNamespace)
+
+    WEIGHT: ClassVar[str] = "weight"
+    PROCESSED_WEIGHT: ClassVar[str] = "processed_weight"
+    BIAS_F32: ClassVar[str] = "bias_f32"
+    EXTRA_KWARGS: ClassVar[str] = "extras"
 
     @classmethod
-    def get_name(cls) -> str:
-        module = cls.__module__.removeprefix("vllm.model_executor.kernels.")
-        return f"{module}.{cls.__name__}"
+    def from_layer(cls, layer: torch.nn.Module) -> Self:
+        return cls(
+            weight=getattr(layer, cls.WEIGHT),
+            processed_weight=getattr(layer, cls.PROCESSED_WEIGHT, None),
+            bias_f32=getattr(layer, cls.BIAS_F32, None),
+            extra_kwargs=getattr(layer, cls.EXTRA_KWARGS, SimpleNamespace()),
+        )
+
+
+class Kernel(common.Kernel):
+    def __init__(self, config: Config) -> None:
+        self.config = config
 
     @classmethod
-    @abstractmethod
     def is_supported(
         cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]: ...
+    ) -> tuple[bool, str | None]:
+        return True, None
 
     @classmethod
     def can_implement(cls, config: Config) -> tuple[bool, str | None]:
         return True, None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+    def _get_layer_params(self, layer: torch.nn.Module) -> Params:
+        return Params.from_layer(layer)
 
-    @abstractmethod
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        from vllm.model_executor.utils import replace_parameter
+
+        setattr(layer, Params.PROCESSED_WEIGHT, layer.weight)
+        if self.config.clear_weight_after_processing:
+            replace_parameter(layer, Params.WEIGHT, torch.empty(0))
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
-    ) -> torch.Tensor: ...
+    ) -> torch.Tensor:
+        params = self._get_layer_params(layer)
+        return type(self).apply(x, params.processed_weight, bias)
+
+    @staticmethod
+    def apply(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return F.linear(x, weight, bias)
+
+
+def dispatch_fn(
+    predicate,
+    primary: type[Kernel],
+    fallback_fn,
+):
+    def dispatch(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if predicate(x, weight, bias):
+            return primary.apply(x, weight, bias)
+        return fallback_fn(x, weight, bias)
+
+    return dispatch
+
+
+make_predicated = functools.partial(
+    common.make_predicated,
+    dispatcher_fn=dispatch_fn,
+    fake_impl=Kernel.apply,
+    fallback=Kernel,
+)
