@@ -469,11 +469,20 @@ class OpenAIServingCompletion(OpenAIServing):
         except GenerationError as e:
             if request.stream_format == "json":
                 yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            else:
+                # Binary path: send a terminal frame so the client knows the
+                # stream is over. Without this the client cannot distinguish a
+                # truncated stream from a server error.
+                yield encode_frame(request.stream_format, [], done=True,
+                                   finish_reason="error")
         except Exception as e:
             logger.exception("Error in completion stream generator.")
             if request.stream_format == "json":
                 data = self.create_streaming_error_response(e)
                 yield f"data: {data}\n\n"
+            else:
+                yield encode_frame(request.stream_format, [], done=True,
+                                   finish_reason="error")
         if request.stream_format == "json":
             yield "data: [DONE]\n\n"
 

@@ -125,6 +125,9 @@ def decode_protobuf_request(data: bytes) -> dict:
             val, pos = _decode_varint(data, pos)
             if field == 2:
                 result["max_tokens"] = val
+            # other varint fields: consumed and ignored
+        elif wt == 1:                            # 64-bit — skip (not used in CodecRequest)
+            pos += 8
         elif wt == 2:                            # length-delimited
             length, pos = _decode_varint(data, pos)
             payload = data[pos: pos + length]
@@ -140,9 +143,18 @@ def decode_protobuf_request(data: bytes) -> dict:
                 result.setdefault("stop", []).append(payload.decode())
             elif field == 5:                     # stream_format
                 result["stream_format"] = payload.decode()
+            # other len-delimited fields: consumed and ignored
         elif wt == 5:                            # 32-bit float
-            result.setdefault("temperature", _struct.unpack_from("<f", data, pos)[0])
+            val = _struct.unpack_from("<f", data, pos)[0]
             pos += 4
+            if field == 3:                       # temperature — last value wins (proto semantics)
+                result["temperature"] = val
+            # other 32-bit fields: consumed and ignored
+        else:
+            raise ValueError(
+                f"Unsupported protobuf wire type {wt} at pos {pos - 1}; "
+                "data may be corrupt or from an incompatible schema version."
+            )
     return result
 
 

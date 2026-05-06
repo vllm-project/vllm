@@ -349,6 +349,17 @@ class CompletionRequest(OpenAIBaseModel):
         if fmt != "json":
             # Binary formats require streaming — force it on silently.
             data["stream"] = True
+            # n > 1 is not supported for binary formats: CodecFrame has no
+            # choice index, so multiple sequences would be interleaved with no
+            # way for the client to demultiplex them.
+            n = data.get("n", 1)
+            if isinstance(n, int) and n > 1:
+                raise VLLMValidationError(
+                    f"stream_format='{fmt}' does not support n > 1. "
+                    "Binary CodecFrame has no choice index field; multiple "
+                    "completion sequences cannot be demultiplexed by the client. "
+                    "Use n=1 or stream_format='json'."
+                )
         return data
 
     @model_validator(mode="before")
