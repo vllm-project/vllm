@@ -8,8 +8,8 @@ import torch
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.layers.mamba.ops.cpu.causal_conv1d import (
-    causal_conv1d,
-    causal_conv1d_update,
+    causal_conv1d_torch,
+    causal_conv1d_update_torch,
 )
 from vllm.model_executor.layers.mamba.ops.cpu.recurrent_gated_delta_rule import (
     chunk_gated_delta_rule,
@@ -85,7 +85,7 @@ def cpu_gdn_attention_core(
         decode_state_indices = state_indices_tensor[:num_decodes]
         decode_conv_state = conv_state[decode_state_indices].contiguous()
 
-        decode_mixed_qkv = causal_conv1d_update(
+        decode_mixed_qkv = causal_conv1d_update_torch(
             # [B, dim] -> [B, dim, 1]
             x=decode_mixed_qkv.unsqueeze(-1),
             conv_state=decode_conv_state,
@@ -149,7 +149,7 @@ def cpu_gdn_attention_core(
             num_decodes : num_decodes + num_prefills
         ]
 
-        prefill_mixed_qkv = causal_conv1d(
+        prefill_mixed_qkv = causal_conv1d_torch(
             x=prefill_mixed_qkv.transpose(0, 1),
             weight=conv_weights,
             bias=layer.conv1d.bias,

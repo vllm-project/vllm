@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 
 # for prefill
-def causal_conv1d(
+def causal_conv1d_torch(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
@@ -61,7 +61,7 @@ def causal_conv1d(
 
 
 # for decode
-def causal_conv1d_update(
+def causal_conv1d_update_torch(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
