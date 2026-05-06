@@ -1644,9 +1644,19 @@ class NixlConnectorWorker:
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
-        # add requests that skipped transfer to done_recving
-        done_recving.update(self._failed_recv_reqs)
-        self._failed_recv_reqs.clear()
+        # Failed-recv requests (e.g. dead peer / zmq timeout) are included in
+        # done_recving so the scheduler can release them, but skip
+        # post-processing that requires successful KV transfer state. Snapshot
+        # the set because handshake callbacks can add failures concurrently.
+        # Transfer-state failures are consumed only after all active transfer
+        # handles for the request are gone.
+        failed_recving = {
+            req_id
+            for req_id in self._failed_recv_reqs
+            if req_id in done_recving or req_id not in self._recving_transfers
+        }
+        done_recving.update(failed_recving)
+        self._failed_recv_reqs.difference_update(failed_recving)
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -1664,6 +1674,11 @@ class NixlConnectorWorker:
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
             assert meta.remote is not None
+
+            if req_id in failed_recving:
+                # No KV transferred; skip post-processing.
+                continue
+
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
@@ -1822,6 +1837,7 @@ class NixlConnectorWorker:
             self._invalid_block_ids.update(meta.local_block_ids[0])
         self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
+        self._failed_recv_reqs.add(req_id)
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """

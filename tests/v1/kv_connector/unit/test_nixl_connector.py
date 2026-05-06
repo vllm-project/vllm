@@ -2241,6 +2241,131 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     assert request_id in done_recving
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FailingNixlWrapper,
+)
+def test_transfer_state_failure_returns_finished_without_post_processing(
+    default_vllm_config, dist_init
+):
+    """Test that failed transfers return via get_finished without receive cleanup."""
+    vllm_config = create_vllm_config()
+
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+    worker = connector.connector_worker
+    worker.nixl_wrapper.fail_transfer_state = True
+
+    request_id = "test_transfer_state_fail"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=([7, 8, 9],),
+        kv_transfer_params={
+            "remote_block_ids": ([10, 11, 12],),
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    # Wait for handshake to complete and process ready_requests.
+    connector.bind_connector_metadata(NixlConnectorMetadata())
+    time.sleep(0.1)
+    connector.start_load_kv(dummy_ctx)
+
+    # Failed transfers have no valid KV to sync or post-process.
+    worker.use_host_buffer = True
+    with patch.object(
+        worker,
+        "sync_recved_kv_to_device",
+        side_effect=AssertionError("failed transfer should skip receive sync"),
+    ):
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+
+    assert request_id in done_recving
+    assert connector.get_block_ids_with_load_errors() == {7, 8, 9}
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_handshake_recv_timeout_returns_finished(default_vllm_config, dist_init):
+    """Dead remote peer (zmq.Again before add_remote_agent) must not raise from get_finished."""
+    from zmq.error import Again
+
+    class RecvTimeoutWorker(FakeNixlConnectorWorker):
+        """Simulates dead remote peer: raises zmq.Again before add_remote_agent()."""
+
+        def _nixl_handshake(
+            self,
+            host: str,
+            port: int,
+            remote_tp_size: int,
+            expected_engine_id: str,
+        ) -> dict[int, str]:
+            raise Again("Simulated recv timeout: remote peer dead")
+
+    vllm_config = create_vllm_config()
+
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = RecvTimeoutWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0
+    )
+
+    request_id = "test_handshake_recv_timeout"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=([1, 2, 3],),
+        kv_transfer_params={
+            "remote_block_ids": ([4, 5, 6],),
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    # Wait for the handshake thread to raise Again.
+    time.sleep(0.3)
+
+    # Blocks must be marked invalid because no KV was received.
+    assert connector.get_block_ids_with_load_errors() == {1, 2, 3}
+
+    # get_finished() must return the request in done_recving without raising.
+    # Before the fix this raises KeyError: 'remote_engine' because
+    # the remote engine was never registered in TransferTopology.
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert request_id in done_recving
+
+
 @pytest.mark.parametrize(
     "mismatch_type,config_overrides,version_override,should_fail,enforce_handshake_compat",
     [
