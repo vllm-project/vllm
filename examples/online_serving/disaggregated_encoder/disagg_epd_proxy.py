@@ -24,8 +24,10 @@ import asyncio
 import logging
 import os
 import random
+import time
 import uuid
 from collections.abc import AsyncIterator
+from itertools import cycle
 
 import aiohttp
 import uvicorn
@@ -36,15 +38,14 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # FastAPI app & global state
 ###############################################################################
 
-logging.basicConfig(
-    level=logging.DEBUG, format="%(asctime)s %(levelname)s: %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("proxy")
 
 app = FastAPI()
 encode_session: aiohttp.ClientSession | None = None
 prefill_session: aiohttp.ClientSession | None = None
 decode_session: aiohttp.ClientSession | None = None
+http_connector: aiohttp.TCPConnector | None = None
 
 ###############################################################################
 # Utils
@@ -52,6 +53,35 @@ decode_session: aiohttp.ClientSession | None = None
 
 
 MM_TYPES = {"image_url", "audio_url", "input_audio"}
+SAMPLING_PARAM_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "stop_token_ids",
+    "ignore_eos",
+    "include_stop_str_in_output",
+)
+
+
+def copy_sampling_params(source: dict, target: dict) -> None:
+    for key in SAMPLING_PARAM_KEYS:
+        if key in source:
+            target[key] = source[key]
+
+
+def elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000
+
+
+def log_timing(req_id: str, message: str, *args) -> None:
+    if getattr(app.state, "log_request_timing", False):
+        logger.info("[%s] %s", req_id, message, *args)
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
@@ -77,20 +107,25 @@ async def fanout_encoder_primer(
     orig_request: dict,
     e_urls: list[str],
     req_id: str,
-) -> None:
+) -> dict[str, dict]:
     """
     1. Build one request *per MM item* with all text removed.
     2. Send them concurrently to the encode cluster.
     3. Raise if any of them fails.
-    """
-    logger.info("[%s] Processing multimodal items...", req_id)
+    4. Collect and aggregate ec_transfer_params by mm_hash.
 
+    Returns:
+        dict mapping mm_hash to ec_transfer_params dict
+    """
+    logger.debug("[%s] Processing multimodal items...", req_id)
+
+    started = time.perf_counter()
     mm_items = extract_mm_items(orig_request)
     if not mm_items:
         logger.info("[%s] No multimodal items, skipping encoder", req_id)
-        return  # nothing to do
+        return orig_request  # nothing to do
 
-    logger.info("[%s] got %d multimodal items...", req_id, len(mm_items))
+    logger.debug("[%s] got %d multimodal items...", req_id, len(mm_items))
 
     tasks = []
 
@@ -112,6 +147,7 @@ async def fanout_encoder_primer(
             "max_tokens": 1,
             "stream": False,
         }
+        copy_sampling_params(orig_request, encoder_req)
         tasks.append(
             encode_session.post(
                 f"{target_url}/v1/chat/completions",
@@ -120,7 +156,12 @@ async def fanout_encoder_primer(
             )
         )
 
+    request_started = time.perf_counter()
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    encoder_request_ms = elapsed_ms(request_started)
+
+    # Aggregate ec_transfer_params by mm_hash
+    aggregated_ec_transfer_params: dict[str, dict] = {}
 
     # Fail fast if any sub-request failed
     for idx, r in enumerate(results):
@@ -135,26 +176,94 @@ async def fanout_encoder_primer(
             raise HTTPException(
                 status_code=502, detail=f"Encoder request failed: {str(r)}"
             )
-        if r.status != 200:
-            try:
-                detail = await r.text()
-            except Exception:
-                detail = "<unable to read body>"
-            logger.error(
-                "[%s] Encoder request #%d returned status %s: %s",
+        try:
+            if r.status != 200:
+                try:
+                    detail = await r.text()
+                except Exception:
+                    detail = "<unable to read body>"
+                logger.error(
+                    "[%s] Encoder request #%d returned status %s: %s",
+                    req_id,
+                    idx,
+                    r.status,
+                    detail,
+                )
+                raise HTTPException(
+                    status_code=r.status,
+                    detail=f"Encoder request failed: {detail}",
+                )
+
+            # Extract ec_transfer_params from encoder response
+            response_json = await r.json()
+            encoder_ec_transfer_params = response_json.get("ec_transfer_params")
+            if encoder_ec_transfer_params:
+                # encoder_ec_transfer_params is a dict keyed by mm_hash
+                for mm_hash, mm_hash_params in encoder_ec_transfer_params.items():
+                    aggregated_ec_transfer_params[mm_hash] = {
+                        "do_remote_encode": mm_hash_params.get(
+                            "do_remote_encode", True
+                        ),
+                        "remote_host": mm_hash_params.get("remote_host"),
+                        "remote_port": mm_hash_params.get("remote_port"),
+                    }
+                    logger.debug(
+                        (
+                            "[%s] Collected ec_transfer_params for "
+                            "mm_hash %s from encoder #%d"
+                        ),
+                        req_id,
+                        mm_hash,
+                        idx,
+                    )
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                raise
+            logger.warning(
+                (
+                    "[%s] Failed to extract ec_transfer_params from encoder response "
+                    "#%d: %s"
+                ),
                 req_id,
                 idx,
-                r.status,
-                detail,
+                str(e),
             )
-            raise HTTPException(
-                status_code=r.status,
-                detail=f"Encoder request failed: {detail}",
-            )
+        finally:
+            r.release()
 
-    logger.info(
-        "[%s] All %d encoder requests completed successfully", req_id, len(mm_items)
+    logger.debug(
+        "[%s] All %d encoder requests completed successfully, collected %d mm_hashes",
+        req_id,
+        len(mm_items),
+        len(aggregated_ec_transfer_params),
     )
+
+    # Add aggregated ec_transfer_params to request data for prefill
+    req_data = orig_request
+    if aggregated_ec_transfer_params:
+        req_data["ec_transfer_params"] = aggregated_ec_transfer_params
+        logger.debug(
+            (
+                "[%s] Added aggregated_ec_transfer_params for %d mm_hashes "
+                "to prefill request"
+            ),
+            req_id,
+            len(aggregated_ec_transfer_params),
+        )
+
+    log_timing(
+        req_id,
+        (
+            "encoder_primer_timing mm_items=%d ec_hashes=%d "
+            "encoder_http_ms=%.2f total_ms=%.2f"
+        ),
+        len(mm_items),
+        len(aggregated_ec_transfer_params),
+        encoder_request_ms,
+        elapsed_ms(started),
+    )
+
+    return req_data
 
 
 async def maybe_prefill(
@@ -168,14 +277,26 @@ async def maybe_prefill(
     - Else, skip and return the original request data for decode
     """
     if p_url:
-        logger.info("[%s] Processing through prefill: %s", req_id, p_url)
+        logger.debug("[%s] Processing through prefill: %s", req_id, p_url)
 
+        started = time.perf_counter()
         prefill_response = await process_prefill_stage(req_data, p_url, req_id)
-        # for nixl connector to facilitate kv transfer...
-        prefill_response_json = await prefill_response.json()
-        kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
-        if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
+        kv_transfer_params = {}
+        try:
+            # for nixl connector to facilitate kv transfer...
+            prefill_response_json = await prefill_response.json()
+            kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
+            if kv_transfer_params:
+                req_data["kv_transfer_params"] = kv_transfer_params
+        finally:
+            prefill_response.release()
+
+        log_timing(
+            req_id,
+            "prefill_timing kv_params=%s total_ms=%.2f",
+            bool(kv_transfer_params),
+            elapsed_ms(started),
+        )
 
         return req_data
     else:
@@ -188,7 +309,7 @@ async def process_prefill_stage(
     req_id: str,
 ) -> dict:
     """Process request through Prefill stage and return kv_transfer_params"""
-    logger.info("[%s] Sending prefill request to: %s", req_id, p_url)
+    logger.debug("[%s] Sending prefill request to: %s", req_id, p_url)
 
     prefill_request = req_data.copy()
     prefill_request["kv_transfer_params"] = {
@@ -225,7 +346,7 @@ async def process_prefill_stage(
                 status_code=prefill_response.status,
                 detail={"error": "Prefill request failed", "message": error_text},
             )
-        logger.info("[%s] Prefill request completed successfully", req_id)
+        logger.debug("[%s] Prefill request completed successfully", req_id)
 
         return prefill_response
 
@@ -248,7 +369,7 @@ async def log_requests(request: Request, call_next):
     req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
     # Log incoming request
-    logger.info(
+    logger.debug(
         ">>> [%s] %s %s from %s",
         req_id,
         request.method,
@@ -261,7 +382,7 @@ async def log_requests(request: Request, call_next):
         response = await call_next(request)
 
         # Log response
-        logger.info(
+        logger.debug(
             "<<< [%s] %s %s completed with status %d",
             req_id,
             request.method,
@@ -289,25 +410,38 @@ async def log_requests(request: Request, call_next):
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    global encode_session, prefill_session, decode_session
+    global encode_session, prefill_session, decode_session, http_connector
     timeout = aiohttp.ClientTimeout(total=100_000)
-    connector = aiohttp.TCPConnector(limit=0, force_close=False)
-    encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+    http_connector = aiohttp.TCPConnector(limit=0, force_close=False)
+    encode_session = aiohttp.ClientSession(
+        timeout=timeout, connector=http_connector, connector_owner=False
+    )
     if app.state.p_urls:
         # only setup if prefill instance(s) exist
-        prefill_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-    decode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
+        prefill_session = aiohttp.ClientSession(
+            timeout=timeout, connector=http_connector, connector_owner=False
+        )
+    decode_session = aiohttp.ClientSession(
+        timeout=timeout, connector=http_connector, connector_owner=False
+    )
+
+    global e_cycle, p_cycle, d_cycle
+    e_cycle = cycle(app.state.e_urls)
+    p_cycle = cycle(app.state.p_urls) if app.state.p_urls else None
+    d_cycle = cycle(app.state.d_urls)
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global encode_session, prefill_session, decode_session
+    global encode_session, prefill_session, decode_session, http_connector
     if encode_session:
         await encode_session.close()
     if prefill_session:
         await prefill_session.close()
     if decode_session:
         await decode_session.close()
+    if http_connector:
+        await http_connector.close()
 
 
 ###############################################################################
@@ -318,23 +452,42 @@ async def on_shutdown() -> None:
 async def forward_non_stream(
     req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
 ) -> dict:
+    request_started = time.perf_counter()
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        encoder_started = time.perf_counter()
+        req_data = await fanout_encoder_primer(req_data, e_urls, req_id)
+        encoder_ms = elapsed_ms(encoder_started)
 
         # Step 2: Process through Prefill instance
+        prefill_started = time.perf_counter()
         req_data = await maybe_prefill(req_data, p_url, req_id)
+        prefill_ms = elapsed_ms(prefill_started)
 
         # Step 3: Process through Decode instance
-        logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
+        logger.debug("[%s] Forwarding to decode: %s", req_id, d_url)
         headers = {"x-request-id": req_id}
 
         # Non-streaming response
+        decode_started = time.perf_counter()
         async with decode_session.post(
             f"{d_url}/v1/chat/completions", json=req_data, headers=headers
         ) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            result = await resp.json()
+
+        log_timing(
+            req_id,
+            (
+                "request_timing mode=non_stream encoder_ms=%.2f "
+                "prefill_ms=%.2f decode_ms=%.2f total_ms=%.2f"
+            ),
+            encoder_ms,
+            prefill_ms,
+            elapsed_ms(decode_started),
+            elapsed_ms(request_started),
+        )
+        return result
 
     except HTTPException:
         raise
@@ -345,30 +498,67 @@ async def forward_non_stream(
 
 async def forward_stream(
     req_data: dict, req_id: str, e_urls: list[str], p_url: str, d_url: str
-) -> AsyncIterator[str]:
+) -> AsyncIterator[bytes]:
+    request_started = time.perf_counter()
+    encoder_ms = 0.0
+    prefill_ms = 0.0
+    decode_headers_ms = 0.0
+    first_chunk_ms: float | None = None
     try:
         # Step 1: Process through Encoder instance (if has MM input)
-        await fanout_encoder_primer(req_data, e_urls, req_id)
+        encoder_started = time.perf_counter()
+        req_data = await fanout_encoder_primer(req_data, e_urls, req_id)
+        encoder_ms = elapsed_ms(encoder_started)
 
         # Step 2: Process through Prefill instance
+        prefill_started = time.perf_counter()
         req_data = await maybe_prefill(req_data, p_url, req_id)
+        prefill_ms = elapsed_ms(prefill_started)
 
         # Step 3: Process through Decode instance
-        logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
+        logger.debug("[%s] Starting streaming from decode: %s", req_id, d_url)
         headers = {"x-request-id": req_id}
 
         # Streaming response
+        decode_started = time.perf_counter()
         async with decode_session.post(
             f"{d_url}/v1/chat/completions",
             json=req_data,
             headers=headers,
         ) as resp:
             resp.raise_for_status()
-            async for chunk in resp.content.iter_chunked(1024):
+            decode_headers_ms = elapsed_ms(decode_started)
+            async for chunk in resp.content.iter_any():
                 if chunk:
-                    yield chunk.decode("utf-8", errors="ignore")
+                    if first_chunk_ms is None:
+                        first_chunk_ms = elapsed_ms(request_started)
+                        log_timing(
+                            req_id,
+                            (
+                                "first_chunk_timing encoder_ms=%.2f "
+                                "prefill_ms=%.2f decode_headers_ms=%.2f "
+                                "first_chunk_ms=%.2f"
+                            ),
+                            encoder_ms,
+                            prefill_ms,
+                            decode_headers_ms,
+                            first_chunk_ms,
+                        )
+                    yield chunk
 
-        logger.info("[%s] Streaming completed", req_id)
+        log_timing(
+            req_id,
+            (
+                "request_timing mode=stream encoder_ms=%.2f prefill_ms=%.2f "
+                "decode_headers_ms=%.2f first_chunk_ms=%s total_ms=%.2f"
+            ),
+            encoder_ms,
+            prefill_ms,
+            decode_headers_ms,
+            f"{first_chunk_ms:.2f}" if first_chunk_ms is not None else "none",
+            elapsed_ms(request_started),
+        )
+        logger.debug("[%s] Streaming completed", req_id)
 
     except HTTPException:
         logger.exception("[%s] HTTPException in forward_stream", req_id)
@@ -392,8 +582,10 @@ async def chat_completions(request: Request):
         req_id = request.headers.get("x-request-id", str(uuid.uuid4()))
 
         e_urls = app.state.e_urls  # we want the full list for fan-out
-        p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
-        d_url = random.choice(app.state.d_urls)
+        # p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
+        # d_url = random.choice(app.state.d_urls)
+        p_url = next(p_cycle) if p_cycle else None
+        d_url = next(d_cycle)
 
         is_streaming = req_data.get("stream", False)
 
@@ -571,6 +763,11 @@ if __name__ == "__main__":
         required=True,
         help='Comma-separated decode URLs ("http://d1:8005,http://d2:8006")',
     )
+    parser.add_argument(
+        "--log-request-timing",
+        action="store_true",
+        help="Log per-request proxy timing for encoder, prefill, and decode stages.",
+    )
 
     args = parser.parse_args()
     app.state.e_urls = [
@@ -590,11 +787,13 @@ if __name__ == "__main__":
             u.strip() for u in args.prefill_servers_urls.split(",") if u.strip()
         ]
         logger.info("Disaggregated prefill phase is enabled. Running E + P + D...")
+    app.state.log_request_timing = args.log_request_timing
 
     logger.info("Proxy listening on %s:%s", args.host, args.port)
     logger.info("Encode servers: %s", app.state.e_urls)
     logger.info("Prefill instances %s", app.state.p_urls)
     logger.info("Decode servers: %s", app.state.d_urls)
+    logger.info("Request timing logs: %s", args.log_request_timing)
 
     uvicorn.run(
         app,

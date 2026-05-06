@@ -204,6 +204,18 @@ class EncoderCacheManager:
         self.num_free_slots -= num_encoder_embeds
         self.num_freeable_slots -= num_encoder_embeds
 
+    def has_cache(self, mm_hash: str) -> bool:
+        """Check if encoder cache exists in EncoderCacheManager for given mm_hash.
+
+        Args:
+            mm_hash: Multimodal data hash identifier
+
+        Returns:
+            True if cache exists in EncoderCacheManager (even if not
+            currently referenced)
+        """
+        return mm_hash in self.cached
+
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request.
 
