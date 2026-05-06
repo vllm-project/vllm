@@ -1015,44 +1015,86 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         torch.accelerator.empty_cache()
 
-    def _forward_core(
+    def _forward_core_rocm(
         self,
-        qkv_or_qkvz: torch.Tensor,
-        b_or_ba: torch.Tensor,
-        a_or_z_out: torch.Tensor,
+        qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        z_out: torch.Tensor,
         core_attn_out: torch.Tensor,
-        fast_kernel: bool,
     ):
-        """Core conv1d + recurrent attention, dispatched by ``fast_kernel``.
+        """ROCm AITER fast path: conv1d + recurrent attention from packed
+        qkvz/ba layout.
 
-        The parameter semantics depend on ``fast_kernel``:
-
-        When ``fast_kernel=False`` (standard path):
-            qkv_or_qkvz: packed [q, k, v] projection  (num_tokens, qkv_dim)
-            b_or_ba:      beta gating vector           (num_tokens, num_heads)
-            a_or_z_out:   alpha gating vector           (num_tokens, num_heads)
-
-        When ``fast_kernel=True`` (AITER Triton fast path):
-            qkv_or_qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
-            b_or_ba:      packed [b, a] gating vectors   (num_tokens, 2*num_heads)
-            a_or_z_out:   **output** buffer for z         (num_tokens, num_heads,
-                          head_dim); mutated in-place by the fused kernel.
+        For decode-only (no spec, no prefill), dispatches directly to
+        ``_forward_core_decode_fast``.  Otherwise unpacks the packed
+        layout and falls through to ``_forward_core``.
 
         Args:
+            qkvz: packed [q, k, v, z] projection (num_tokens, qkvz_dim)
+            ba:   packed [b, a] gating vectors    (num_tokens, 2*num_heads)
+            z_out: **output** buffer for z        (num_tokens, num_heads,
+                   head_dim); mutated in-place.
             core_attn_out: Pre-allocated output buffer for attention results.
-            fast_kernel: If True, use fused AITER Triton decode kernels that
-                consume the packed qkvz/ba layout directly.
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
         if attn_metadata_raw is None:
-            # V1 profile run — warm up prefill kernels so that
-            # autotuning completes before KV cache allocation.
-            v_dim = (
-                core_attn_out.shape[-1] * core_attn_out.shape[-2] if fast_kernel else 0
+            v_dim = core_attn_out.shape[-1] * core_attn_out.shape[-2]
+            self._warmup_prefill_kernels(qkvz, v_dim)
+            return
+
+        assert isinstance(attn_metadata_raw, dict)
+        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+
+        if (
+            attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+        ):
+            return self._forward_core_decode_fast(
+                qkvz=qkvz,
+                ba=ba,
+                z_out=z_out,
+                core_attn_out=core_attn_out,
+                attn_metadata=attn_metadata,
             )
-            self._warmup_prefill_kernels(qkv_or_qkvz, v_dim)
+
+        core_attn_out.zero_()
+        z_out.zero_()
+        num_tokens_all = qkvz.shape[0]
+        mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
+            qkvz, ba, num_tokens_all
+        )
+        z_out[:] = z
+        self._forward_core(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            core_attn_out=core_attn_out,
+        )
+
+    def _forward_core(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ):
+        """Core conv1d + recurrent attention (standard path).
+
+        Args:
+            mixed_qkv: packed [q, k, v] projection (num_tokens, qkv_dim)
+            b: beta gating vector                   (num_tokens, num_heads)
+            a: alpha gating vector                  (num_tokens, num_heads)
+            core_attn_out: Pre-allocated output buffer for attention results.
+        """
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+
+        if attn_metadata_raw is None:
+            self._warmup_prefill_kernels(mixed_qkv, 0)
             return
 
         assert isinstance(attn_metadata_raw, dict)
@@ -1064,43 +1106,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
-            and not fast_kernel
         ):
             return self._forward_core_decode_non_spec(
-                mixed_qkv=qkv_or_qkvz,
-                b=b_or_ba,
-                a=a_or_z_out,
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
                 core_attn_out=core_attn_out,
                 attn_metadata=attn_metadata,
             )
-
-        if fast_kernel:
-            qkvz = qkv_or_qkvz
-            ba = b_or_ba
-            z_out = a_or_z_out
-            if (
-                attn_metadata.spec_sequence_masks is None
-                and attn_metadata.num_prefills == 0
-                and attn_metadata.num_decodes > 0
-            ):
-                return self._forward_core_decode_fast(
-                    qkvz=qkvz,
-                    ba=ba,
-                    z_out=z_out,
-                    core_attn_out=core_attn_out,
-                    attn_metadata=attn_metadata,
-                )
-            core_attn_out.zero_()
-            z_out.zero_()
-            num_tokens_all = qkvz.shape[0]
-            mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
-                qkvz, ba, num_tokens_all
-            )
-            z_out[:] = z
-        else:
-            mixed_qkv = qkv_or_qkvz
-            b = b_or_ba
-            a = a_or_z_out
 
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -1456,26 +1469,36 @@ def gdn_attention_core(
     fast_kernel: bool,
     layer_name: LayerNameType,
 ) -> None:
-    """Custom op wrapping GatedDeltaNetAttention._forward_core.
+    """Custom op dispatching to _forward_core or _forward_core_rocm.
 
     Handles conv1d + recurrent attention only; input/output projections
-    are performed by the caller.  See ``_forward_core`` for the
-    ``fast_kernel``-dependent parameter semantics.
+    are performed by the caller.
 
-    ``a_or_z_out`` and ``core_attn_out`` are mutated in-place.
-    ``a_or_z_out`` is only written when ``fast_kernel=True`` (it serves
-    as the z output buffer); when ``fast_kernel=False`` it is read-only.
+    When ``fast_kernel=False`` (standard path):
+        qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
+    When ``fast_kernel=True`` (AITER Triton fast path, ROCm only):
+        qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
+        z output buffer (mutated in-place).
+
+    ``core_attn_out`` is always mutated in-place.
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self._forward_core(
-        qkv_or_qkvz=qkv_or_qkvz,
-        b_or_ba=b_or_ba,
-        a_or_z_out=a_or_z_out,
-        core_attn_out=core_attn_out,
-        fast_kernel=fast_kernel,
-    )
+    if fast_kernel:
+        self._forward_core_rocm(
+            qkvz=qkv_or_qkvz,
+            ba=b_or_ba,
+            z_out=a_or_z_out,
+            core_attn_out=core_attn_out,
+        )
+    else:
+        self._forward_core(
+            mixed_qkv=qkv_or_qkvz,
+            b=b_or_ba,
+            a=a_or_z_out,
+            core_attn_out=core_attn_out,
+        )
 
 
 def gdn_attention_core_fake(
