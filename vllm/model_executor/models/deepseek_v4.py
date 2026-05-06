@@ -1309,6 +1309,9 @@ class DeepseekV4Model(nn.Module):
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
         # refreshes it correctly across captured shapes.
+        # refreshes it correctly across captured shapes. Only allocated on
+        # the last PP rank — that's where MTP target hidden states are
+        # produced.
         if get_pp_group().is_last_rank:
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -1316,6 +1319,8 @@ class DeepseekV4Model(nn.Module):
                 dtype=vllm_config.model_config.dtype,
                 device=self.device,
             )
+        else:
+            self._mtp_hidden_buffer = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1326,6 +1331,10 @@ class DeepseekV4Model(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
+        # PP intermediate tensors carry the multi-stream hidden_states
+        # of shape (num_tokens, hc_mult, hidden_size) — V4 expands the
+        # token embedding to hc_mult streams before the first decoder
+        # layer and keeps that shape until hc_head() collapses it.
         return IntermediateTensors(
             {
                 "hidden_states": torch.zeros(
