@@ -25,14 +25,9 @@ fn serve_args_forward_python_flags_with_separator() {
             command: Serve(
                 ServeArgs {
                     headless: false,
-                    python: "../vllm/.venv/bin/python",
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
-                    handshake_host: "127.0.0.1",
-                    handshake_port: None,
-                    data_parallel_size: 1,
-                    data_parallel_size_local: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -51,10 +46,17 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_log_stats: false,
                         served_model_name: [],
                     },
-                    python_args: [
-                        "--dtype",
-                        "float16",
-                    ],
+                    managed_engine: ManagedEngineArgs {
+                        python: "../vllm/.venv/bin/python",
+                        handshake_host: "127.0.0.1",
+                        handshake_port: None,
+                        data_parallel_size: 1,
+                        data_parallel_size_local: None,
+                        python_args: [
+                            "--dtype",
+                            "float16",
+                        ],
+                    },
                 },
             ),
         }
@@ -78,7 +80,7 @@ fn serve_args_auto_forward_python_flags_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["--dtype", "float16"]);
+    assert_eq!(args.managed_engine.python_args, vec!["--dtype", "float16"]);
 }
 
 #[test]
@@ -88,7 +90,10 @@ fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["--tensor-parallel-size", "2"]);
+    assert_eq!(
+        args.managed_engine.python_args,
+        vec!["--tensor-parallel-size", "2"]
+    );
 }
 
 #[test]
@@ -427,7 +432,7 @@ fn serve_args_reject_flags_before_model() {
         .unwrap_err();
 
     expect![[r#"
-            error: serve requires the model to appear immediately after the subcommand
+            error: the model must appear immediately after the command
 
             Usage: vllm-rs serve <MODEL> [OPTIONS] [-- <PYTHON_ARGS>...]
 
@@ -466,7 +471,7 @@ fn serve_args_keep_python_passthrough_flags_after_separator() {
         panic!("expected serve args");
     };
     assert_eq!(
-        args.python_args,
+        args.managed_engine.python_args,
         vec!["--tensor-parallel-size", "2", "--dtype", "float16"]
     );
 }
@@ -490,7 +495,10 @@ fn serve_args_keep_python_multi_char_alias_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["-tp", "2", "--dtype", "float16"]);
+    assert_eq!(
+        args.managed_engine.python_args,
+        vec!["-tp", "2", "--dtype", "float16"]
+    );
 }
 
 #[test]
@@ -508,7 +516,10 @@ fn serve_args_keep_frontend_arg_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["--uds", "/tmp/vllm.sock"]);
+    assert_eq!(
+        args.managed_engine.python_args,
+        vec!["--uds", "/tmp/vllm.sock"]
+    );
 }
 
 #[test]
@@ -528,7 +539,10 @@ fn serve_args_keep_python_multi_char_engine_aliases_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["-dpr", "1", "-dpl", "2"]);
+    assert_eq!(
+        args.managed_engine.python_args,
+        vec!["-dpr", "1", "-dpl", "2"]
+    );
 }
 
 #[test]
@@ -538,7 +552,7 @@ fn serve_args_auto_forward_unknown_flags_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["--foo", "bar"]);
+    assert_eq!(args.managed_engine.python_args, vec!["--foo", "bar"]);
 }
 
 #[test]
@@ -549,7 +563,7 @@ fn serve_args_auto_forward_negative_value_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.python_args, vec!["--dtype", "-1"]);
+    assert_eq!(args.managed_engine.python_args, vec!["--dtype", "-1"]);
 }
 
 #[test]
@@ -574,16 +588,9 @@ fn serve_args_accept_handshake_aliases() {
             command: Serve(
                 ServeArgs {
                     headless: false,
-                    python: "python3",
                     host: "127.0.0.1",
                     port: 8000,
                     uds: None,
-                    handshake_host: "10.99.48.128",
-                    handshake_port: Some(
-                        13345,
-                    ),
-                    data_parallel_size: 4,
-                    data_parallel_size_local: None,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
@@ -600,7 +607,16 @@ fn serve_args_accept_handshake_aliases() {
                         disable_log_stats: false,
                         served_model_name: [],
                     },
-                    python_args: [],
+                    managed_engine: ManagedEngineArgs {
+                        python: "python3",
+                        handshake_host: "10.99.48.128",
+                        handshake_port: Some(
+                            13345,
+                        ),
+                        data_parallel_size: 4,
+                        data_parallel_size_local: None,
+                        python_args: [],
+                    },
                 },
             ),
         }
@@ -627,9 +643,9 @@ fn serve_args_accept_data_parallel_primary_flags() {
         panic!("expected serve args");
     };
     assert!(!args.headless);
-    assert_eq!(args.handshake_host, "10.99.48.128");
-    assert_eq!(args.handshake_port, Some(13345));
-    assert_eq!(args.data_parallel_size, 4);
+    assert_eq!(args.managed_engine.handshake_host, "10.99.48.128");
+    assert_eq!(args.managed_engine.handshake_port, Some(13345));
+    assert_eq!(args.managed_engine.data_parallel_size, 4);
 }
 
 #[test]

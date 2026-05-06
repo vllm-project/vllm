@@ -1,6 +1,5 @@
 mod cli;
 mod logging;
-mod managed_engine;
 
 use std::env;
 use std::process::ExitStatus;
@@ -8,9 +7,9 @@ use std::process::ExitStatus;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+use vllm_managed_engine::ManagedEngineHandle;
 
 use crate::cli::{Cli, Command};
-use crate::managed_engine::{ManagedEngineHandle, allocate_handshake_port};
 
 const TOKIO_WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
 const DEFAULT_MAX_TOKIO_WORKER_THREADS: usize = 32;
@@ -96,20 +95,17 @@ async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
         Command::Serve(args) => {
-            let handshake_port = match args.handshake_port {
-                Some(port) => port,
-                None => allocate_handshake_port(&args.handshake_host)?,
-            };
+            let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
-            if args.data_parallel_size_local == Some(0) {
+            if args.managed_engine.data_parallel_size_local == Some(0) {
                 if args.headless {
                     bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
                 }
 
-                let handshake_address = args.handshake_address(handshake_port);
+                let handshake_address = args.managed_engine.handshake_address(handshake_port);
                 info!(
                     %handshake_address,
-                    engine_count = args.data_parallel_size,
+                    engine_count = args.managed_engine.data_parallel_size,
                     "running Rust frontend without a managed local Python engine"
                 );
                 let config = args.to_frontend_config(handshake_address);
@@ -117,7 +113,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             }
 
             let shutdown_timeout = args.runtime.shutdown_timeout();
-            let engine_config = args.clone().into_managed_engine_config(handshake_port);
+            let engine_config = args.to_managed_engine_config(handshake_port);
             let handshake_address = engine_config.handshake_address();
 
             let engine = ManagedEngineHandle::spawn(engine_config)

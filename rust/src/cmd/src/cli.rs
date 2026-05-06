@@ -4,7 +4,6 @@
 //! - Engine args: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/engine/arg_utils.py#L657-L1311>
 //! - Environment variables: <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/envs.py#L472>
 
-mod serve_validate;
 mod unsupported;
 
 use std::collections::HashMap;
@@ -20,13 +19,14 @@ use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
+use vllm_managed_engine::ManagedEngineConfig;
+use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
     RendererSelection,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
-use crate::managed_engine::ManagedEngineConfig;
 
 /// Top-level parser for the `vllm-rs` binary.
 #[derive(Debug, Parser)]
@@ -50,7 +50,7 @@ impl Cli {
         T: Into<OsString>,
     {
         let args: Vec<OsString> = itr.into_iter().map(Into::into).collect();
-        let repartitioned_args = serve_validate::repartition_serve_args(&args)?;
+        let repartitioned_args = repartition_managed_engine_args::<Self>(&args, Some("serve"))?;
         <Self as Parser>::try_parse_from(&repartitioned_args).inspect(|cli| {
             if let Command::Serve(serve) = &cli.command
                 && serve.debug_cli
@@ -63,7 +63,10 @@ impl Cli {
                     "Repartitioned CLI args: {}\n",
                     repartitioned_args.join(OsStr::new(" ")).display()
                 );
-                println!("Passthrough Python args: {}", serve.python_args.join(" "));
+                println!(
+                    "Passthrough Python args: {}",
+                    serve.managed_engine.python_args.join(" ")
+                );
                 std::process::exit(0);
             }
         })
@@ -350,9 +353,6 @@ pub struct ServeArgs {
     /// frontend.
     #[arg(long)]
     pub headless: bool,
-    /// Python executable used to launch the managed headless vLLM engine.
-    #[arg(long, env = "VLLM_RS_PYTHON", default_value = "python3")]
-    pub python: String,
     /// HTTP bind host for the OpenAI-compatible server.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
@@ -362,30 +362,6 @@ pub struct ServeArgs {
     /// Unix domain socket path. If set, host and port arguments are ignored.
     #[arg(long)]
     pub uds: Option<String>,
-    /// Host/IP used both for the managed-engine handshake endpoint and the
-    /// frontend-advertised input/output ZMQ socket addresses.
-    #[arg(
-        long = "data-parallel-address",
-        visible_alias = "handshake-host",
-        default_value = "127.0.0.1"
-    )]
-    pub handshake_host: String,
-    /// Optional TCP port for the managed-engine handshake / data-parallel RPC
-    /// endpoint.
-    ///
-    /// When omitted, the CLI allocates an ephemeral port automatically.
-    #[arg(
-        long = "data-parallel-rpc-port",
-        visible_alias = "handshake-port",
-        value_parser = clap::value_parser!(u16).range(1..)
-    )]
-    pub handshake_port: Option<u16>,
-    /// Number of data parallel replicas across the whole deployment.
-    #[arg(long, default_value_t = 1)]
-    pub data_parallel_size: usize,
-    /// Number of data parallel replicas to run on this node.
-    #[arg(long)]
-    pub data_parallel_size_local: Option<usize>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -396,33 +372,18 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub runtime: SharedRuntimeArgs,
 
-    /// Additional arguments forwarded to `python -m vllm.entrypoints.cli.main
-    /// serve ...`.
-    ///
-    /// Arguments after an explicit `--` are forwarded verbatim. Before `--`,
-    /// `vllm-rs serve` automatically keeps recognized frontend options on
-    /// the Rust side and forwards everything else to Python.
-    #[arg(
-        last = true,
-        allow_hyphen_values = true,
-        help_heading = "Passthrough arguments"
-    )]
-    pub python_args: Vec<String>,
+    /// Managed Python headless-engine arguments.
+    #[command(flatten)]
+    pub managed_engine: ManagedEngineArgs,
 }
 
 impl ServeArgs {
-    /// Build the handshake address shared by the Rust frontend and managed
-    /// Python engine.
-    pub fn handshake_address(&self, handshake_port: u16) -> String {
-        format!("tcp://{}:{}", self.handshake_host, handshake_port)
-    }
-
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
-            self.frontend_local_only().then(frontend_ipc_addresses).unzip();
+            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -434,46 +395,21 @@ impl ServeArgs {
         self.runtime.clone().into_managed_config(
             listener_mode,
             handshake_address,
-            self.handshake_host.clone(),
-            self.data_parallel_size,
+            self.managed_engine.handshake_host.clone(),
+            self.managed_engine.data_parallel_size,
             local_input_address,
             local_output_address,
         )
     }
 
-    /// Build the managed Python-engine spawn configuration for one resolved
+    /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
-    pub fn into_managed_engine_config(self, handshake_port: u16) -> ManagedEngineConfig {
-        let mut python_args = self.python_args;
-        // Manually forward some args to the Python engine.
-        if let Some(max_model_len) = self.runtime.max_model_len {
-            python_args.push("--max-model-len".to_string());
-            python_args.push(max_model_len.to_string());
-        }
-        if let Some(data_parallel_size_local) = self.data_parallel_size_local {
-            python_args.push("--data-parallel-size-local".to_string());
-            python_args.push(data_parallel_size_local.to_string());
-        }
-
-        ManagedEngineConfig {
-            python: self.python,
-            model: self.runtime.model,
-            handshake_host: self.handshake_host,
+    pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+        self.managed_engine.clone().into_config(
+            self.runtime.model.clone(),
+            self.runtime.max_model_len,
             handshake_port,
-            data_parallel_size: self.data_parallel_size,
-            python_args,
-        }
-    }
-
-    fn local_engine_count(&self) -> usize {
-        self.data_parallel_size_local.unwrap_or(self.data_parallel_size)
-    }
-
-    /// Return whether the managed Rust frontend only needs to communicate with
-    /// colocated engines.
-    fn frontend_local_only(&self) -> bool {
-        self.data_parallel_size_local != Some(0)
-            && self.local_engine_count() == self.data_parallel_size
+        )
     }
 }
 
