@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import queue
 import socket
 import time
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -10,8 +11,10 @@ import zmq
 from msgspec import msgpack
 
 from vllm.config import FaultToleranceConfig, ParallelConfig
+from vllm.v1.engine import EngineCoreRequestType
 from vllm.v1.fault_tolerance import EngineCoreSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
+from vllm.v1.utils import get_engine_client_zmq_addr
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -40,6 +43,8 @@ def mock_parallel_config():
     config.data_parallel_index = 0
     config.data_parallel_size = 2
     config.data_parallel_size_local = 2
+    config.tensor_parallel_size = 1
+    config.pipeline_parallel_size = 1
     config.local_engines_only = False
 
     config.fault_tolerance_config = FaultToleranceConfig(engine_recovery_timeout_sec=10)
@@ -53,11 +58,15 @@ def create_engine_core_sentinel(
 ):
     engine = Mock()
     engine.engine_index = 0
+    worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
+    input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
     sentinel = EngineCoreSentinel(
         parallel_config,
         engine_fault_socket_addr=addr_dict["engine_fault_socket_addr"],
         sentinel_identity=sentinel_identity,
         engine=engine,
+        worker_cmd_addr=worker_cmd_addr,
+        engine_input_q=input_queue,
     )
     return sentinel
 
