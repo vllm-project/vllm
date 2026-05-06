@@ -38,7 +38,7 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
 ) -> None:
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
-    compiled = _compile_indexer_q_mxfp4(
+    compiled = IndexerQMxFp4Kernel.compile(
         index_q_head_dim,
         index_q_cos_sin_cache.shape[-1],
         num_index_q_heads,
@@ -59,32 +59,26 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
 
 @dsl_user_op
 def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [
-                Float32(a).ir_value(loc=loc, ip=ip),
-                Float32(b).ir_value(loc=loc, ip=ip),
-            ],
-            "cvt.rn.bf16x2.f32 $0, $2, $1;",
-            "=r,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
+    out = llvm.inline_asm(
+        T.i32(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        "cvt.rn.bf16x2.f32 $0, $2, $1;",
+        "=r,f,f",
+        has_side_effects=False,
+        is_align_stack=False,
     )
+    return Uint32(out)
 
 
 @dsl_user_op
 def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
     out = llvm.inline_asm(
         llvm.StructType.get_literal([T.f32(), T.f32()]),
-        [Uint32(data).ir_value(loc=loc, ip=ip)],
+        [data.ir_value(loc=loc, ip=ip)],
         "shl.b32 $0, $2, 16;\n\tand.b32 $1, $2, 0xFFFF0000;\n",
         "=f,=f,r",
         has_side_effects=False,
         is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
     )
     return (
         Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
@@ -94,35 +88,28 @@ def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float3
 
 @dsl_user_op
 def _bf16x2_abs(a: Uint32, *, loc=None, ip=None) -> Uint32:
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [Uint32(a).ir_value(loc=loc, ip=ip)],
-            "abs.bf16x2 $0, $1;",
-            "=r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
+    out = llvm.inline_asm(
+        T.i32(),
+        [a.ir_value(loc=loc, ip=ip)],
+        "abs.bf16x2 $0, $1;",
+        "=r,r",
+        has_side_effects=False,
+        is_align_stack=False,
     )
+    return Uint32(out)
 
 
 @dsl_user_op
 def _bf16x2_max(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            [
-                Uint32(a).ir_value(loc=loc, ip=ip),
-                Uint32(b).ir_value(loc=loc, ip=ip),
-            ],
-            "max.bf16x2 $0, $1, $2;",
-            "=r,r,r",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
+    out = llvm.inline_asm(
+        T.i32(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        "max.bf16x2 $0, $1, $2;",
+        "=r,r,r",
+        has_side_effects=False,
+        is_align_stack=False,
     )
+    return Uint32(out)
 
 
 @dsl_user_op
@@ -134,25 +121,23 @@ def _fp32x8_to_fp4x8(
     ip=None,
 ) -> Uint32:
     # Pack eight scaled FP32 values into four E2M1x2 bytes, returned as one b32.
-    operands = [Float32(vals[offset + i]).ir_value(loc=loc, ip=ip) for i in range(8)]
-    return Uint32(
-        llvm.inline_asm(
-            T.i32(),
-            operands,
-            "{\n\t"
-            ".reg .b8 x0, x1, x2, x3;\n\t"
-            "cvt.rn.satfinite.e2m1x2.f32 x0, $2, $1;\n\t"
-            "cvt.rn.satfinite.e2m1x2.f32 x1, $4, $3;\n\t"
-            "cvt.rn.satfinite.e2m1x2.f32 x2, $6, $5;\n\t"
-            "cvt.rn.satfinite.e2m1x2.f32 x3, $8, $7;\n\t"
-            "mov.b32 $0, {x0, x1, x2, x3};\n\t"
-            "}\n",
-            "=r,f,f,f,f,f,f,f,f",
-            has_side_effects=False,
-            is_align_stack=False,
-            asm_dialect=llvm.AsmDialect.AD_ATT,
-        )
+    assert vals.element_type is Float32
+    out = llvm.inline_asm(
+        T.i32(),
+        [vals[offset + i].ir_value(loc=loc, ip=ip) for i in range(8)],
+        "{\n\t"
+        ".reg .b8 x0, x1, x2, x3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 x0, $2, $1;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 x1, $4, $3;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 x2, $6, $5;\n\t"
+        "cvt.rn.satfinite.e2m1x2.f32 x3, $8, $7;\n\t"
+        "mov.b32 $0, {x0, x1, x2, x3};\n\t"
+        "}\n",
+        "=r,f,f,f,f,f,f,f,f",
+        has_side_effects=False,
+        is_align_stack=False,
     )
+    return Uint32(out)
 
 
 # Custom vectorized load to support cache modifiers. For some reason,
@@ -165,21 +150,21 @@ def _ldg_vec(
     coord: cute.Coord,
     vec_size: cutlass.Constexpr[int],
     modifier: cutlass.Constexpr[str] = "",
-    out_dtype: cutlass.Constexpr[type[cutlass.Numeric]] = Uint32,
+    ld_type: cutlass.Constexpr[type[cutlass.Numeric] | None] = None,
     *,
     loc=None,
     ip=None,
 ) -> cute.TensorSSA:
-    if const_expr(out_dtype is Float32):
-        mlir_ty = T.f32()
+    if ld_type is None:
+        ld_type = tensor.element_type
+    if const_expr(ld_type is Float32):
         ptx_ty = "f32"
         constraint = "=f"
-    elif const_expr(out_dtype is Uint32):
-        mlir_ty = T.i32()
-        ptx_ty = "b32"
+    elif const_expr(ld_type is Uint32):
+        ptx_ty = "u32"
         constraint = "=r"
     else:
-        raise TypeError(f"_ldg_vec only supports Uint32 and Float32, got {out_dtype}")
+        raise TypeError(f"_ldg_vec only supports Uint32 and Float32, got {ld_type}")
 
     # compute base pointer
     base_ptr = (
@@ -190,26 +175,29 @@ def _ldg_vec(
     ptx_str = f"ld.global{modifier}.v{vec_size}.{ptx_ty}"
     ptx_str += "{" + ", ".join(f"${i}" for i in range(vec_size)) + "}"
     ptx_str += f", [${vec_size}];"
+
     out = llvm.inline_asm(
-        llvm.StructType.get_literal([mlir_ty] * vec_size),
+        llvm.StructType.get_literal([ld_type.mlir_type] * vec_size),
         [Int64(base_ptr).ir_value(loc=loc, ip=ip)],
         ptx_str,
         ",".join([constraint] * vec_size + ["l"]),
         has_side_effects=False,
         is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
     )
     vec = vector.from_elements(
-        ir.VectorType.get([vec_size], mlir_ty, loc=loc),
-        [llvm.extractvalue(mlir_ty, out, [i], loc=loc, ip=ip) for i in range(vec_size)],
+        ir.VectorType.get([vec_size], ld_type.mlir_type, loc=loc),
+        [
+            llvm.extractvalue(ld_type.mlir_type, out, [i], loc=loc, ip=ip)
+            for i in range(vec_size)
+        ],
         loc=loc,
         ip=ip,
     )
-    return cute.TensorSSA(vec, vec_size, out_dtype)
+    return cute.TensorSSA(vec, vec_size, ld_type)
 
 
 @dsl_user_op
-def _stg_u32xN(
+def _stg_vec(
     tensor: cute.Tensor,
     coord: cute.Coord,
     values: cute.Tensor,
@@ -219,19 +207,34 @@ def _stg_u32xN(
     loc=None,
     ip=None,
 ) -> None:
+    # NOTE: st_type is derived from values tensor
+    st_type = values.element_type
+    if const_expr(st_type is Float32):
+        ptx_ty = "f32"
+        constraint = "f"
+    elif const_expr(st_type is Uint32):
+        ptx_ty = "u32"
+        constraint = "r"
+    else:
+        raise TypeError(f"_stg_vec only supports Uint32 and Float32, got {st_type}")
+
+    # compute base pointer
     base_ptr = (
         tensor.iterator + cute.crd2idx(coord, tensor.layout, loc=loc, ip=ip)
     ).toint()
-    value_operands = ", ".join(f"${i + 1}" for i in range(vec_size))
+
+    # build PTX string
+    ptx_str = f"st.global{modifier}.v{vec_size}.{ptx_ty} [$0], "
+    ptx_str += "{" + ", ".join(f"${i + 1}" for i in range(vec_size)) + "};"
+
     llvm.inline_asm(
         None,
         [Int64(base_ptr).ir_value(loc=loc, ip=ip)]
-        + [Uint32(values[i]).ir_value(loc=loc, ip=ip) for i in range(vec_size)],
-        f"st.global{modifier}.v{vec_size}.u32 [$0], {{{value_operands}}};",
-        ",".join(["l"] + ["r"] * vec_size),
+        + [values[i].ir_value(loc=loc, ip=ip) for i in range(vec_size)],
+        ptx_str,
+        ",".join(["l"] + [constraint] * vec_size),
         has_side_effects=True,
         is_align_stack=False,
-        asm_dialect=llvm.AsmDialect.AD_ATT,
     )
 
 
@@ -312,11 +315,15 @@ class IndexerQMxFp4Kernel:
         elem_base = sublane * 16
 
         # q layout: [num_tokens, num_heads, head_dim]
-        _q_bits = _ldg_vec(
-            q, (token_id, head_id, elem_base), 8, ".relaxed.cta.L1::no_allocate"
+        _q_bf16x2 = _ldg_vec(
+            q,
+            (token_id, head_id, elem_base),
+            8,
+            ".relaxed.cta.L1::no_allocate",
+            ld_type=Uint32,
         )
-        q_bits = cute.make_rmem_tensor(8, Uint32)
-        q_bits.store(_q_bits)  # copy to make it mutable
+        q_bf16x2 = cute.make_rmem_tensor(8, Uint32)
+        q_bf16x2.store(_q_bf16x2)  # copy to make it mutable
 
         # RoPE applies only to the trailing rope_dim values. We keep the rounded
         # BF16 result in q_bits so the later amax and quantization see BF16.
@@ -325,51 +332,48 @@ class IndexerQMxFp4Kernel:
             pos = positions[token_id]
             rope_idx = (elem_base - self.nope_dim) // 2
             if const_expr(self.cos_sin_dtype is Float32):
-                cos_vals = _ldg_vec(
-                    cos_sin_cache,
-                    (pos, rope_idx),
-                    8,
-                    out_dtype=Float32,
-                )
+                # fp32x8 loads
+                cos_vals = _ldg_vec(cos_sin_cache, (pos, rope_idx), 8)
                 sin_vals = _ldg_vec(
-                    cos_sin_cache,
-                    (pos, self.rope_dim // 2 + rope_idx),
-                    8,
-                    out_dtype=Float32,
+                    cos_sin_cache, (pos, self.rope_dim // 2 + rope_idx), 8
                 )
             else:
-                # Each BF16 cache load lane contains two adjacent values.
-                cos_loaded = _ldg_vec(cos_sin_cache, (pos, rope_idx), 4)
-                sin_loaded = _ldg_vec(
+                # bf16x2x4 loads
+                cos_bf16x2 = _ldg_vec(
+                    cos_sin_cache,
+                    (pos, rope_idx),
+                    4,
+                    ld_type=Uint32,
+                )
+                sin_bf16x2 = _ldg_vec(
                     cos_sin_cache,
                     (pos, self.rope_dim // 2 + rope_idx),
                     4,
+                    ld_type=Uint32,
                 )
                 cos_vals = cute.make_rmem_tensor(8, Float32)
                 sin_vals = cute.make_rmem_tensor(8, Float32)
                 for i in cutlass.range_constexpr(4):
                     cos_vals[i * 2], cos_vals[i * 2 + 1] = _bf16x2_to_fp32(
-                        cos_loaded[i]
+                        cos_bf16x2[i]
                     )
                     sin_vals[i * 2], sin_vals[i * 2 + 1] = _bf16x2_to_fp32(
-                        sin_loaded[i]
+                        sin_bf16x2[i]
                     )
 
             for i in cutlass.range_constexpr(8):
-                q0, q1 = _bf16x2_to_fp32(q_bits[i])
-                cos = cos_vals[i]
-                sin = sin_vals[i]
-                rot0 = q0 * cos - q1 * sin
-                rot1 = q0 * sin + q1 * cos
+                q0, q1 = _bf16x2_to_fp32(q_bf16x2[i])
+                rot0 = q0 * cos_vals[i] - q1 * sin_vals[i]
+                rot1 = q0 * sin_vals[i] + q1 * cos_vals[i]
                 # convert back to BF16 to match numerics
-                q_bits[i] = _fp32x2_to_bf16x2(rot0, rot1)
+                q_bf16x2[i] = _fp32x2_to_bf16x2(rot0, rot1)
 
         # compute amax in packed bf16x2 to save instructions
         # Each thread holds 16 elems. Two adjacent threads form one 32-elem
         # MXFP4 block, so a width-2 shuffle gives the block amax.
-        local_amax = _bf16x2_abs(q_bits[0])
+        local_amax = _bf16x2_abs(q_bf16x2[0])
         for i in cutlass.range_constexpr(1, 8):
-            local_amax = _bf16x2_max(local_amax, _bf16x2_abs(q_bits[i]))
+            local_amax = _bf16x2_max(local_amax, _bf16x2_abs(q_bf16x2[i]))
         amax_bits = cute_utils.warp_reduce(
             local_amax, _bf16x2_max, width=MXFP4_BLOCK_SIZE // 16
         )
@@ -395,7 +399,7 @@ class IndexerQMxFp4Kernel:
 
         vals = cute.make_rmem_tensor(16, Float32)
         for i in cutlass.range_constexpr(8):
-            vals[i * 2], vals[i * 2 + 1] = _bf16x2_to_fp32(q_bits[i])
+            vals[i * 2], vals[i * 2 + 1] = _bf16x2_to_fp32(q_bf16x2[i])
             vals[i * 2] = vals[i * 2] * inv_fp4_scale
             vals[i * 2 + 1] = vals[i * 2 + 1] * inv_fp4_scale
 
@@ -404,7 +408,7 @@ class IndexerQMxFp4Kernel:
         packed[0] = _fp32x8_to_fp4x8(vals, 0)
         packed[1] = _fp32x8_to_fp4x8(vals, 8)
         # Each thread writes the eight packed bytes corresponding to its 16 Q values.
-        _stg_u32xN(q_fp4, (token_id, head_id, elem_base // 2), packed, 2, ".cs")
+        _stg_vec(q_fp4, (token_id, head_id, elem_base // 2), packed, 2, ".cs")
 
         # Weight scaling is independent of the Q subwarp work. The first
         # num_tokens * num_heads logical threads cover one weight each.
@@ -415,40 +419,51 @@ class IndexerQMxFp4Kernel:
                 weights[weight_token_id, weight_head_id].to(Float32) * scale
             )
 
+    @cache
+    @staticmethod
+    def compile(
+        head_dim: int,
+        rope_dim: int,
+        num_heads: int,
+        cos_sin_dtype: type[cutlass.Numeric],
+    ):
+        num_tokens = cute.sym_int()
+        max_pos = cute.sym_int()
 
-@cache
-def _compile_indexer_q_mxfp4(
-    head_dim: int, rope_dim: int, num_heads: int, cos_sin_dtype: type[cutlass.Numeric]
-):
-    num_tokens = cute.sym_int()
-    max_pos = cute.sym_int()
+        q = make_fake_tensor(
+            BFloat16, (num_tokens, num_heads, head_dim), divisibility=8
+        )
+        positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
+        cos_sin_cache = make_fake_tensor(
+            cos_sin_dtype,
+            (max_pos, rope_dim),
+            divisibility=8,
+        )
+        weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
+        q_fp4 = make_fake_tensor(
+            Uint8,
+            (num_tokens, num_heads, head_dim // 2),
+            divisibility=16,
+        )
+        q_scale = make_fake_tensor(
+            Uint8,
+            (num_tokens, num_heads, head_dim // MXFP4_BLOCK_SIZE),
+            divisibility=4,
+        )
+        weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
 
-    q = make_fake_tensor(BFloat16, (num_tokens, num_heads, head_dim), divisibility=8)
-    positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
-    cos_sin_cache = make_fake_tensor(cos_sin_dtype, (max_pos, rope_dim), divisibility=8)
-    weights = make_fake_tensor(BFloat16, (num_tokens, num_heads), divisibility=8)
-    q_fp4 = make_fake_tensor(
-        Uint8, (num_tokens, num_heads, head_dim // 2), divisibility=16
-    )
-    q_scale = make_fake_tensor(
-        Uint8,
-        (num_tokens, num_heads, head_dim // MXFP4_BLOCK_SIZE),
-        divisibility=4,
-    )
-    weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
-
-    kernel = IndexerQMxFp4Kernel(head_dim, rope_dim, num_heads, cos_sin_dtype)
-    stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
-    return cute.compile(
-        kernel,
-        positions,
-        q,
-        cos_sin_cache,
-        weights,
-        q_fp4,
-        q_scale,
-        weights_out,
-        Float32(0.0),
-        stream,
-        options="--enable-tvm-ffi",
-    )
+        kernel = IndexerQMxFp4Kernel(head_dim, rope_dim, num_heads, cos_sin_dtype)
+        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
+        return cute.compile(
+            kernel,
+            positions,
+            q,
+            cos_sin_cache,
+            weights,
+            q_fp4,
+            q_scale,
+            weights_out,
+            Float32(0.0),
+            stream,
+            options="--enable-tvm-ffi",
+        )
