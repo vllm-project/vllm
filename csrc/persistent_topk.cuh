@@ -887,12 +887,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
   uint32_t* shared_ordered =
       reinterpret_cast<uint32_t*>(smem_raw + kFixedSmemLarge);
 
-  // RadixRowState for multi-CTA cooperative radix.
-  // Zero-initialization is done host-side via cudaMemsetAsync in topk.cu
-  // before launch — that gives a stream-ordered happens-before edge for all
-  // CTAs, which the previous in-kernel init (CTA-0 only + intra-CTA
-  // __syncthreads) did not provide and which manifested as a race against
-  // CTA-1+'s first red_release on arrival_counter.
   RadixRowState* state = &params.row_states[group_id];
 
   int barrier_phase = 0;
@@ -929,6 +923,22 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
         row_input, row_output, seq_len, my_chunk_start, chunk_size,
         local_histogram, suffix_sum, shared_scalars, shared_ordered, state,
         cta_in_group, ctas_per_group, barrier_phase, iter, tx);
+  }
+
+  if (params.max_seq_len > RADIX_THRESHOLD) {
+    if (cta_in_group == 0) {
+      for (uint32_t buf = 0; buf < 3; buf++) {
+        for (uint32_t i = tx; i < RADIX; i += kThreadsPerBlock) {
+          int* ptr = reinterpret_cast<int*>(&state->histogram[buf][i]);
+          asm volatile("st.global.cg.b32 [%0], %1;\n" : : "l"(ptr), "r"(0));
+        }
+      }
+
+      __syncthreads();
+      if (tx == 0) {
+        st_release(&state->arrival_counter, 0);
+      }
+    }
   }
 }
 

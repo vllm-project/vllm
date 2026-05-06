@@ -325,6 +325,15 @@ def sparse_attn_indexer(
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
+            # Workspace must be zeroed on first use; the kernel resets it
+            # at the end of each launch for subsequent calls/graph replays.
+            # Re-zero if the buffer was reallocated (different data_ptr).
+            if (
+                getattr(sparse_attn_indexer, "_topk_ws_ptr", None)
+                != topk_workspace.data_ptr()
+            ):
+                topk_workspace.zero_()
+                sparse_attn_indexer._topk_ws_ptr = topk_workspace.data_ptr()  # type: ignore[attr-defined]
             torch.ops._C.persistent_topk(
                 logits,
                 seq_lens,

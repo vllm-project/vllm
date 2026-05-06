@@ -366,7 +366,7 @@ def test_deepseek_persistent_topk(
         offsets = torch.arange(next_n, device=logits.device, dtype=torch.int32)
         lengths = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
-    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
     max_seq_len = int(seq_lens.max().item())
     torch.ops._C.persistent_topk(
         logits, lengths, indices, workspace, top_k, max_seq_len
@@ -449,7 +449,7 @@ def run_large_context_topk_test(
     # Create output tensor
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
-    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
     max_seq_len = max(seq_lens)
     torch.ops._C.persistent_topk(
         logits, lengths, indices, workspace, top_k, max_seq_len
@@ -818,7 +818,7 @@ def test_persistent_topk_padded_stride(top_k: int) -> None:
 
     lengths = torch.tensor(actual_seq_lens, dtype=torch.int32, device="cuda")
     indices = torch.empty((batch_size, top_k), dtype=torch.int32, device="cuda")
-    workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
+    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
 
     torch.ops._C.persistent_topk(
         logits, lengths, indices, workspace, top_k, max(actual_seq_lens)
@@ -843,3 +843,57 @@ def test_persistent_topk_padded_stride(top_k: int) -> None:
                 f"Row {i}: persistent_topk with padded stride doesn't match. "
                 f"seq_len={sl}, stride={padded_stride}"
             )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "batch_size,seq_len,top_k",
+    [
+        pytest.param(1, 65536, 512, id="bs1_64k_k512"),
+        pytest.param(4, 65536, 512, id="bs4_64k_k512"),
+        pytest.param(8, 128000, 512, id="bs8_128k_k512"),
+        pytest.param(1, 96000, 1024, id="bs1_96k_k1024"),
+        pytest.param(8, 65536, 1024, id="bs8_64k_k1024"),
+        pytest.param(4, 128000, 2048, id="bs4_128k_k2048"),
+        pytest.param(8, 163840, 2048, id="bs8_164k_k2048"),
+    ],
+)
+def test_persistent_topk_stale_workspace(
+    batch_size: int, seq_len: int, top_k: int
+) -> None:
+    """Verify persistent_topk produces correct results across repeated calls
+    with the same workspace buffer (stale RadixRowState from prior calls).
+
+    The radix path (seq_len > 32768) uses cooperative multi-CTA barriers
+    via arrival_counter in global memory. Without proper cleanup between
+    calls, stale counter values cause barrier malfunctions and wrong results.
+    """
+    num_iters = 100
+
+    logits = torch.randn((batch_size, seq_len), dtype=torch.float32, device="cuda")
+
+    min_len = int(seq_len * 0.8)
+    lengths = torch.randint(
+        min_len, seq_len + 1, (batch_size,), dtype=torch.int32, device="cuda"
+    )
+
+    # Mask invalid positions
+    positions = torch.arange(seq_len, device="cuda", dtype=torch.int32).unsqueeze(0)
+    mask = positions >= lengths.unsqueeze(1)
+    logits = logits.masked_fill(mask, float("-inf"))
+
+    output = torch.empty(batch_size, top_k, dtype=torch.int32, device="cuda")
+    workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
+
+    # Reference
+    _, ref_indices = torch.topk(logits, top_k, dim=-1)
+    ref_sorted = ref_indices.sort(dim=-1).values
+
+    for i in range(num_iters):
+        torch.ops._C.persistent_topk(logits, lengths, output, workspace, top_k, seq_len)
+        out_sorted = output.sort(dim=-1).values
+        assert torch.equal(ref_sorted, out_sorted), (
+            f"Stale workspace race at iter {i}: "
+            f"bs={batch_size} seq_len={seq_len} k={top_k} "
+            f"({(ref_sorted != out_sorted).sum().item()} indices differ)"
+        )
