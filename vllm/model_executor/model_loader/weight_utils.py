@@ -680,6 +680,14 @@ def filter_duplicate_safetensors_files(
     weight_files_in_index = set()
     for weight_name in weight_map:
         weight_files_in_index.add(os.path.join(hf_folder, weight_map[weight_name]))
+    # Check if files referenced in model.safetensors.index.json actually exist.
+    # Raise error if any file is missing.
+    hf_weights_files_set = set(hf_weights_files)
+    missing_files = weight_files_in_index - hf_weights_files_set
+    if missing_files:
+        raise FileNotFoundError(
+            f"Weight files referenced in index but missing: {missing_files}"
+        )
     # Filter out any fields that are not found in the index file.
     hf_weights_files = [f for f in hf_weights_files if f in weight_files_in_index]
     return hf_weights_files
@@ -1364,8 +1372,8 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
-            # reshape to match before copying
-            param.data.copy_(loaded_weight.view(param.shape))
+            # "broadcast" instead of copy
+            param.data.fill_(loaded_weight.item())
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
