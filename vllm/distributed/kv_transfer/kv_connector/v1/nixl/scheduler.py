@@ -186,22 +186,26 @@ class NixlConnectorScheduler:
         host = params.get("remote_host")
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
-        if all(
-            v is not None
-            for v in (remote_engine_id, remote_request_id, host, port, tp_size)
+        if (
+            remote_engine_id is None
+            or remote_request_id is None
+            or host is None
+            or port is None
+            or tp_size is None
         ):
-            if remote_engine_id not in self._heartbeat_by_engine:
-                self._heartbeat_by_engine[remote_engine_id] = HeartbeatInfo(
-                    req_ids=set(),
-                    host=host,
-                    port=port,
-                    tp_size=tp_size,
-                )
-            self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
-            self._heartbeat_req_engine[request.request_id] = (
-                remote_engine_id,
-                remote_request_id,
+            return
+        if remote_engine_id not in self._heartbeat_by_engine:
+            self._heartbeat_by_engine[remote_engine_id] = HeartbeatInfo(
+                req_ids=set(),
+                host=host,
+                port=port,
+                tp_size=tp_size,
             )
+        self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
+        self._heartbeat_req_engine[request.request_id] = (
+            remote_engine_id,
+            remote_request_id,
+        )
 
     def _stop_heartbeat(self, req_id: ReqId) -> None:
         """Remove *req_id* from heartbeat tracking (if tracked)."""
