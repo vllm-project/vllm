@@ -79,6 +79,7 @@ class ClientSentinel(BaseSentinel):
     async def _pub_engine_status(self):
         engine_status = self.engine_status_dict.copy()
         pub_msg = {
+            "schema_version": 1,
             "total_engines": len(engine_status),
             "engines": [
                 {"id": i, "status": status["status"]}

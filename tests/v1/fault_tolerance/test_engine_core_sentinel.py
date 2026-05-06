@@ -95,7 +95,7 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config
         assert len(parts) >= 2
         fault_info = msgpack.decode(parts[-1], type=FaultInfo)
         assert fault_info.type == "RuntimeError"
-        assert fault_info.engine_id == "0"
+        assert fault_info.engine_id == 0
         assert fault_info.message == "test exception"
     finally:
         engine_fault_receiver.close(linger=0)

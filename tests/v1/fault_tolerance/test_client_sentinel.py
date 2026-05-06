@@ -72,6 +72,24 @@ def client_sentinel(mock_parallel_config, mock_ft_addresses):
 
 
 # -------------------------- Test Cases --------------------------
+def test_engine_status_wire_format_is_pinned():
+    expected = {
+        EngineStatusType.HEALTHY: (0, "healthy"),
+        EngineStatusType.DEAD: (1, "dead"),
+        EngineStatusType.UNHEALTHY: (2, "unhealthy"),
+    }
+
+    missing = set(EngineStatusType) - set(expected)
+    assert not missing, (
+        "Add new EngineStatusType values to this pin table. "
+        f"Missing: {sorted(m.name for m in missing)}"
+    )
+
+    for member, (expected_int, expected_str) in expected.items():
+        assert int(member) == expected_int
+        assert member.name.lower() == expected_str
+
+
 @pytest.mark.asyncio
 async def test_client_sentinel_initialization(client_sentinel: ClientSentinel):
     """Test ClientSentinel initialization logic."""
@@ -110,10 +128,12 @@ async def test_monitor_and_report_on_fault(client_sentinel: ClientSentinel):
         client_sentinel.fault_state_pub_socket.send_multipart.await_args.args[0]
     )
     assert sent_topic == b"vllm_fault"
-    assert msgspec.msgpack.decode(sent_payload) == {
-        "total_engines": 2,
-        "engines": [{"id": 0, "status": "dead"}, {"id": 1, "status": "healthy"}],
-    }
+    payload = msgspec.msgpack.decode(sent_payload)
+    assert payload["total_engines"] == 2
+    assert payload["engines"] == [
+        {"id": 0, "status": "dead"},
+        {"id": 1, "status": "healthy"},
+    ]
 
 
 @pytest.mark.asyncio
