@@ -2,6 +2,7 @@
 name = "vllm-chat"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 test-util = []
