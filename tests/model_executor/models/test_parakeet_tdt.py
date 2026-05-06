@@ -174,6 +174,7 @@ def test_parakeet_tdt_greedy_decode_advances_blank_duration_zero():
             max_symbols_per_step=4,
         ),
         decoder=decoder,
+        encoder_projector=lambda encoder_output: encoder_output,
         _joint_logits=lambda encoder_frame, pred_state: torch.tensor(
             [[0.0, 0.0, 1.0, 1.0, 0.0]], device=encoder_frame.device
         ),
@@ -183,3 +184,81 @@ def test_parakeet_tdt_greedy_decode_advances_blank_duration_zero():
 
     assert token_ids == [1]
     assert decoder.calls == 2
+
+
+def test_parakeet_tdt_greedy_decode_projects_encoder_once():
+    class FakeDecoder:
+        def predict(self, token_id, state, device):
+            del token_id, state, device
+            return torch.zeros(1, 4), None
+
+    class FakeProjector:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, encoder_output):
+            self.calls += 1
+            return encoder_output
+
+    class FakeModel:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(
+                vocab_size=3,
+                blank_token_id=2,
+                eos_token_id=1,
+                durations=[0, 1],
+                max_symbols_per_step=4,
+            )
+            self.decoder = FakeDecoder()
+            self.encoder_projector = FakeProjector()
+
+        def joint(self, encoder_state, pred_state):
+            del pred_state
+            return torch.tensor(
+                [[0.0, 0.0, 1.0, 0.0, 1.0]],
+                device=encoder_state.device,
+            )
+
+        def _joint_logits(self, encoder_state, pred_state):
+            return ParakeetTDTModel._joint_logits(self, encoder_state, pred_state)
+
+    fake_model = FakeModel()
+
+    ParakeetTDTModel.greedy_decode(fake_model, torch.zeros(2, 4))
+
+    assert fake_model.encoder_projector.calls == 1
+
+
+def test_parakeet_tdt_greedy_decode_does_not_skip_after_positive_duration():
+    class FakeDecoder:
+        def predict(self, token_id, state, device):
+            del token_id, state, device
+            return torch.zeros(1, 4), None
+
+    def joint_logits(encoder_frame, pred_state):
+        del pred_state
+        token_id = int(encoder_frame[0, 0].item())
+        logits = torch.full((1, 11), -1.0, device=encoder_frame.device)
+        logits[0, token_id] = 1.0
+        logits[0, 10] = 1.0
+        return logits
+
+    fake_model = SimpleNamespace(
+        config=SimpleNamespace(
+            vocab_size=10,
+            blank_token_id=8,
+            eos_token_id=9,
+            durations=[1],
+            max_symbols_per_step=1,
+        ),
+        decoder=FakeDecoder(),
+        encoder_projector=lambda encoder_output: encoder_output,
+        _joint_logits=joint_logits,
+    )
+
+    token_ids = ParakeetTDTModel.greedy_decode(
+        fake_model,
+        torch.tensor([[0.0], [1.0], [2.0]]),
+    )
+
+    assert token_ids == [0, 1, 2, 9]
