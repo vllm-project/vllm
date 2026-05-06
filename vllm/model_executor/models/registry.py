@@ -484,6 +484,8 @@ _MULTIMODAL_MODELS = {
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
+    "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
+    "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
@@ -509,6 +511,10 @@ _MULTIMODAL_MODELS = {
     "Phi4ForCausalLMV": ("phi4siglip", "Phi4ForCausalLMV"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),
+    "QianfanOCRForConditionalGeneration": (
+        "qianfan_ocr",
+        "QianfanOCRForConditionalGeneration",
+    ),
     "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "Qwen2_5_VLForConditionalGeneration": (
