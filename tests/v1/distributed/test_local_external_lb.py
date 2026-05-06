@@ -58,14 +58,14 @@ def test_build_multi_port_external_lb_child_args_sets_external_rank_server():
 def test_multi_port_external_lb_supervisor_aggregates_health():
     supervisor = MultiPortExternalLBSupervisor(_make_args())
 
-    supervisor.child_health = [True, True, True, True]
+    supervisor.children_healthy = True
 
     assert supervisor.is_healthy() is True
 
 
 def test_multi_port_external_lb_supervisor_is_unhealthy_after_shutdown_requested():
     supervisor = MultiPortExternalLBSupervisor(_make_args())
-    supervisor.child_health = [True, True, True, True]
+    supervisor.children_healthy = True
     supervisor._stop_requested.set()
 
     assert supervisor.is_healthy() is False

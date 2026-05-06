@@ -225,7 +225,7 @@ class MultiPortExternalLBSupervisor:
             args.port + local_rank
             for local_rank in range(args.data_parallel_size_local)
         ]
-        self.child_health = [False] * len(self.child_ports)
+        self.children_healthy = False
         self.processes: list[BaseProcess] = []
         self._stop_requested = asyncio.Event()
         self._supervisor_server: uvicorn.Server | None = None
@@ -233,11 +233,7 @@ class MultiPortExternalLBSupervisor:
         self._shutdown_signal = signal.SIGTERM
 
     def is_healthy(self) -> bool:
-        return (
-            not self._stop_requested.is_set()
-            and len(self.child_health) == len(self.child_ports)
-            and all(self.child_health)
-        )
+        return not self._stop_requested.is_set() and self.children_healthy
 
     async def run(self) -> None:
         failed_process: BaseProcess | None = None
@@ -354,12 +350,13 @@ class MultiPortExternalLBSupervisor:
                 await self._raise_if_supervisor_server_stopped(
                     "Multi-port external LB supervisor exited unexpectedly"
                 )
-                self.child_health = await asyncio.gather(
+                child_health = await asyncio.gather(
                     *(
                         self._collect_child_health(session, port, process)
                         for port, process in zip(self.child_ports, self.processes)
                     )
                 )
+                self.children_healthy = all(child_health)
                 failed_process = next(
                     (
                         process
