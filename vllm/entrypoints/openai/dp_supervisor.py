@@ -32,8 +32,6 @@ from vllm.utils.system_utils import (
 
 logger = init_logger(__name__)
 
-HEALTHCHECK_INTERVAL_S = 5.0
-HEALTHCHECK_TIMEOUT_S = 5.0
 DEFAULT_CHILD_GRACEFUL_TERMINATION = 5.0
 
 
@@ -254,7 +252,9 @@ class DPSupervisor:
                 supervisor_server.serve(),
                 name="multi-port-external-lb-supervisor",
             )
-            deadline = time.monotonic() + 60.0
+            deadline = (
+                time.monotonic() + self.args.data_parallel_probe_startup_timeout_s
+            )
             while not supervisor_server.started:
                 if supervisor_server_task.done():
                     try:
@@ -323,7 +323,7 @@ class DPSupervisor:
         self,
         supervisor_server_task: asyncio.Task[None],
     ) -> BaseProcess | None:
-        timeout = aiohttp.ClientTimeout(total=HEALTHCHECK_TIMEOUT_S)
+        timeout = aiohttp.ClientTimeout(total=self.args.data_parallel_probe_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while not self._stop_requested.is_set():
                 if supervisor_server_task.done():
@@ -355,7 +355,7 @@ class DPSupervisor:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
                         self._stop_requested.wait(),
-                        timeout=HEALTHCHECK_INTERVAL_S,
+                        timeout=self.args.data_parallel_probe_interval_s,
                     )
         return None
 

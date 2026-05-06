@@ -235,6 +235,14 @@ class FrontendArgs(BaseFrontendArgs):
     data_parallel_supervisor_port: int = 9256
     """HTTP port for aggregated health endpoints in multi-port external LB
     mode."""
+    data_parallel_probe_interval_s: float = 5.0
+    """Seconds between aggregated health probes in multi-port external LB mode."""
+    data_parallel_probe_timeout_s: float = 5.0
+    """Timeout in seconds for each aggregated child health probe in
+    multi-port external LB mode."""
+    data_parallel_probe_startup_timeout_s: float = 60.0
+    """Maximum seconds to wait for the supervisor HTTP server to start in
+    multi-port external LB mode."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
