@@ -336,6 +336,17 @@ class RejectionSampler(nn.Module):
                     logits, metadata.num_draft_tokens
                 )
         if holder is not None and holder.has_tracked_requests():
+            # The bonus-token sampler above runs first and calls
+            # ``ThinkingBudgetStateHolder.update_state`` + ``apply_to_logits`` with
+            # ``predict_bonus_token=True``, which mutates ``force_index`` /
+            # ``bonus_token_forced``. Without a fresh ``update_state`` here, target
+            # draft rows would reuse stale forcing state and greedy argmax can diverge
+            # from plain (non-spec) decode.
+            holder.update_state(
+                output_token_ids,
+                sampling_metadata.spec_token_ids,
+                repeat_indices,
+            )
             logits = holder.apply_to_logits(
                 logits,
                 predict_bonus_token=False,
@@ -382,6 +393,7 @@ class RejectionSampler(nn.Module):
         result = []
         for out, spec in zip(output_token_ids, spec_token_ids):
             if len(spec) == 0:
+                result.append(out)
                 continue
             result.append(out)
             for i in range(len(spec) - 1):
