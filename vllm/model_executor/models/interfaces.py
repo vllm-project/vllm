@@ -1513,11 +1513,6 @@ class SupportsEncoderCudaGraph(Protocol):
     :class:`EncoderCudaGraphManager` with all model-specific logic
     (input handling, metadata computation, forward pass) without the
     manager needing to know model internals.
-
-    The modality of each request is auto-detected by the manager from
-    the keys present in ``mm_kwargs`` using the
-    ``input_key_by_modality`` mapping in
-    :class:`EncoderCudaGraphConfig`.
     """
 
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
