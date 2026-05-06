@@ -47,13 +47,17 @@ class AllPool(TokenPoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        hidden_states_lst = [
-            hidden_states[first : last + 1]
-            for first, last in zip(
-                pooling_cursor.first_token_indices_gpu.tolist(),
-                pooling_cursor.last_token_indices_gpu.tolist(),
-            )
-        ]
+        split_sizes = pooling_cursor.num_scheduled_tokens_cpu.tolist()
+        if split_sizes:
+            # DispatchPooler passes the full hidden_states tensor.
+            # slice out the subgroup once, then split it by
+            # per-request token counts
+            group_start = int(pooling_cursor.first_token_indices_gpu[0].item())
+            group_end = int(pooling_cursor.last_token_indices_gpu[-1].item()) + 1
+            hidden_states_group = hidden_states[group_start:group_end]
+            hidden_states_lst = list(hidden_states_group.split(split_sizes))
+        else:
+            hidden_states_lst = []
 
         if not self.enable_chunked_prefill:
             return hidden_states_lst
