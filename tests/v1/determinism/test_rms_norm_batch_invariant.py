@@ -12,7 +12,7 @@ import torch
 from utils import skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import rms_norm as triton_rms_norm
-from vllm.model_executor.layers.layernorm import RMSNorm, fused_add_rms_norm
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -104,6 +104,12 @@ def test_fused_add_rms_norm_batch_invariant_residual_path(
         ],
         dim=0,
     )
+
+    def fused_add_rms_norm(x, residual, w, e) -> tuple[torch.Tensor, torch.Tensor]:
+        import vllm._custom_ops as ops
+
+        ops.fused_add_rms_norm(x, residual, w, e)
+        return x, residual
 
     out_single, residual_out_single = fused_add_rms_norm(
         x_single.clone(),

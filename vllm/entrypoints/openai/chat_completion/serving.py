@@ -1307,8 +1307,8 @@ class OpenAIServingChat(OpenAIServing):
                 request.tool_choice
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
-                assert tool_calls is not None and len(tool_calls) > 0
                 tool_call_class_items = []
+                tool_calls = tool_calls or []
                 for idx, tc in enumerate(tool_calls):
                     # Use native ID if available (e.g., Kimi K2),
                     # otherwise generate ID with correct id_type

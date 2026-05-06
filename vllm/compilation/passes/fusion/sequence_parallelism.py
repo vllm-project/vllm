@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
+from .matcher_utils import MatcherQuantFP8
 
 logger = init_logger(__name__)
 
@@ -174,7 +174,6 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
     def get_inputs(self) -> list[torch.Tensor]:
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -195,7 +194,9 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             rms_norm_weights: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(mm_1)
-            rmsnorm = self.rmsnorm_matcher(all_reduce, rms_norm_weights, residual)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
+            )
             return rmsnorm[0], rmsnorm[1]
 
         def replacement(
@@ -208,7 +209,9 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
             residual = residual[0 : reduce_scatter.size(0), ...]
-            rmsnorm = self.rmsnorm_matcher(reduce_scatter, rms_norm_weights, residual)
+            rmsnorm = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
+            )
             all_gather = self._all_gather(rmsnorm[0])
             # shape of residual changes but that's fine,
             # next node is already slicing it, now becomes a noop
@@ -271,7 +274,6 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -290,8 +292,8 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(mm_1)
-            rms, residual_out = self.rmsnorm_matcher(
-                all_reduce, rms_norm_weights, residual
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                all_reduce, residual, rms_norm_weights, self.epsilon
             )
             quant, _ = self.quant_matcher(rms, scale)
             return quant, residual_out
@@ -308,8 +310,8 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             # once the seqpar pattern with the previous rmsnorm is replaced
             reduce_scatter = self._reduce_scatter(mm_1)
             residual = residual[0 : reduce_scatter.size(0), ...]
-            rms, residual_out = self.rmsnorm_matcher(
-                reduce_scatter, rms_norm_weights, residual
+            rms, residual_out = vllm.ir.ops.fused_add_rms_norm(
+                reduce_scatter, residual, rms_norm_weights, self.epsilon
             )
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
