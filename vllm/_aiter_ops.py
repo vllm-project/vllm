@@ -1407,20 +1407,16 @@ class rocm_aiter_ops:
         # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/aiter/dist/device_communicators/custom_all_reduce.py#L272-L273
         return int(cls._ALL_REDUCE_MAX_SIZE / 2)
 
-    @staticmethod
-    def are_gdn_triton_kernels_available() -> bool:
+    @classmethod
+    @if_aiter_supported
+    def are_gdn_triton_kernels_available(cls) -> bool:
         """Check if AITER Triton kernels for GDN attention are importable.
 
         These are optional Triton kernels (conv1d fast-path, gated delta net)
         used by GatedDeltaNetAttention's decode fast-path.  They may be absent
-        in older aiter builds.  Combine with ``is_enabled()`` to also gate on
-        the environment variable::
-
-            if rocm_aiter_ops.is_enabled() and \\
-               rocm_aiter_ops.are_gdn_triton_kernels_available():
-                ...
+        in older aiter builds.
         """
-        if not is_aiter_found_and_supported():
+        if not cls._AITER_ENABLED:
             return False
         try:
             import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401

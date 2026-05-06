@@ -69,9 +69,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
-GDN_AITER_TRITON_AVAILABLE = (
-    rocm_aiter_ops.is_enabled() and rocm_aiter_ops.are_gdn_triton_kernels_available()
-)
+GDN_AITER_TRITON_AVAILABLE = rocm_aiter_ops.are_gdn_triton_kernels_available()
 
 if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.causal_conv1d_update_single_token import (
@@ -296,7 +294,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
-        self._forward_method = self.forward_cuda
         if current_platform.is_xpu():
             self._forward_method = self.forward_xpu
         elif current_platform.is_cpu():
@@ -306,6 +303,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
             register_cpu_gdn_attention_ops()
             self._forward_method = self.forward_cpu
+        elif current_platform.is_rocm():
+            self._forward_method = self.forward_rocm
+        else:
+            self._forward_method = self.forward_cuda
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -680,22 +681,35 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     ):
         self._forward_method(hidden_states, output)
 
-    def forward_cuda(
+    def _output_projection(
+        self,
+        core_attn_out: torch.Tensor,
+        z: torch.Tensor,
+        output: torch.Tensor,
+        num_tokens: int,
+    ):
+        """Part 3: RMSNormGated + output linear projection.
+
+        The RMSNormGated + quant sequence is eligible for fusion
+        by the compilation pass when fuse_norm_quant is enabled.
+        """
+        z_shape_og = z.shape
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def forward_rocm(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        """
-        Forward pass with three parts:
-        1. Input projection
-        2. Core attention (custom op)
-        3. Output projection
-        """
-        num_tokens = hidden_states.size(0)
-        # ============================================================
-        # Fast path for with Triton decode kernels for part 1&2
-        # ============================================================
+        """ROCm forward using AITER Triton fused projection+attention when
+        available, otherwise falling back to the generic CUDA path."""
         if not self.has_lora_projections and GDN_AITER_TRITON_AVAILABLE:
+            num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
@@ -719,74 +733,82 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 fast_kernel=True,
                 layer_name=_encode_layer_name(self.prefix),
             )
+
+            self._output_projection(core_attn_out, z, output, num_tokens)
         else:
-            # ============================================================
-            # Part 1: Input Projection
-            # ============================================================
-            if self.has_lora_projections:
-                # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
-                mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-                ba, _ = self.in_proj_ba(hidden_states)
-                z, _ = self.in_proj_z(hidden_states)
+            self.forward_cuda(hidden_states, output)
+
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        """
+        Forward pass with three parts:
+        1. Input projection
+        2. Core attention (custom op)
+        3. Output projection
+        """
+        num_tokens = hidden_states.size(0)
+        # ============================================================
+        # Part 1: Input Projection
+        # ============================================================
+        if self.has_lora_projections:
+            # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
+            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            z, _ = self.in_proj_z(hidden_states)
+            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            b, a = ba.chunk(2, dim=-1)
+            b = b.contiguous()
+            a = a.contiguous()
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
+            if self.gqa_interleaved_layout:
+                # Qwen3-Next: unpack the interleaved GQA layout
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                    mixed_qkvz, ba
+                )
+                query, key, value = map(
+                    lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+                )
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 b, a = ba.chunk(2, dim=-1)
                 b = b.contiguous()
                 a = a.contiguous()
-            else:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                ba, _ = self.in_proj_ba(hidden_states)
 
-                if self.gqa_interleaved_layout:
-                    # Qwen3-Next: unpack the interleaved GQA layout
-                    query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                        mixed_qkvz, ba
-                    )
-                    query, key, value = map(
-                        lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-                    )
-                    mixed_qkv = torch.cat((query, key, value), dim=-1)
-                else:
-                    # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-                    qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                    z_size = self.value_dim // self.tp_size
-                    mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                    z = z.reshape(z.size(0), -1, self.head_v_dim)
-                    b, a = ba.chunk(2, dim=-1)
-                    b = b.contiguous()
-                    a = a.contiguous()
+        # ============================================================
+        # Part 2: Core Attention (Custom Op)
+        # ============================================================
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
 
-            # ============================================================
-            # Part 2: Core Attention (Custom Op)
-            # ============================================================
-            # Note: we should not use torch.empty here like other attention backends,
-            # see discussions in https://github.com/vllm-project/vllm/pull/28182
-            core_attn_out = torch.zeros(
-                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-            )
-
-            torch.ops.vllm.gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                core_attn_out,
-                fast_kernel=False,
-                layer_name=_encode_layer_name(self.prefix),
-            )
+        torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            fast_kernel=False,
+            layer_name=_encode_layer_name(self.prefix),
+        )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        # The RMSNormGated + quant sequence below is eligible for fusion
-        # by the compilation pass when fuse_norm_quant is enabled.
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        self._output_projection(core_attn_out, z, output, num_tokens)
 
     def forward_xpu(
         self,
