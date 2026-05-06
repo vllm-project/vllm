@@ -5,7 +5,7 @@ Start vLLM API server:
     vllm serve meta-llama/Llama-2-7b-chat-hf
 
 Start Gradio OpenAI Chatbot Webserver:
-    python examples/online_serving/gradio_openai_chatbot_webserver.py \
+    python examples/applications/chatbot/gradio_openai_chatbot_webserver.py \
                     -m meta-llama/Llama-2-7b-chat-hf
 
 Note that `pip install --upgrade gradio` is needed to run this example.

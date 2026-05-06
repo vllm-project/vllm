@@ -6,7 +6,7 @@ Start vLLM API server:
         --model meta-llama/Llama-2-7b-chat-hf
 
 Start Webserver:
-    python examples/online_serving/gradio_webserver.py
+    python examples/applications/chatbot/gradio_webserver.py
 
 Note that `pip install --upgrade gradio` is needed to run this example.
 More details: https://github.com/gradio-app/gradio
