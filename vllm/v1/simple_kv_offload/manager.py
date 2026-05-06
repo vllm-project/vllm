@@ -472,7 +472,8 @@ class SimpleCPUOffloadScheduler:
         Only considers blocks whose KV data has been **confirmed computed** by
         the GPU. This means blocks from the current step are NOT stored until the
         next step. If a request finishes in the same step as its last full block,
-        that block may be missed. (TODO: flush on finish.)
+        ``_flush_final_blocks_on_finish`` handles the offload via the pending
+        flush path in ``build_connector_meta``.
 
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids) for the store event.
