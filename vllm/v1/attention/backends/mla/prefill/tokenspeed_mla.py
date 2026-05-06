@@ -126,6 +126,13 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 
+        # `v` arrives as the second half of `kv_nope.split(...)` in
+        # mla_attention.forward_mha — a non-contiguous view of `kv_nope` along
+        # dim=-1. The kernel does `v.reshape(1, total_kv, h_k, 1, d_v)` which
+        # would silently copy on a non-contiguous tensor; force contiguity here
+        # so the copy (if any) happens once outside the kernel call.
+        v = v.contiguous()
+
         ret = tokenspeed_mla_prefill(
             query=q,
             key=k,
@@ -156,6 +163,10 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
 
         assert self._prefill_metadata.chunked_context is not None
         chunked = self._prefill_metadata.chunked_context
+
+        # See note in run_prefill_new_tokens — `v` is a split-view of `kv_nope`
+        # in `_compute_prefill_context` and arrives non-contiguous.
+        v = v.contiguous()
 
         attn_out, lse = tokenspeed_mla_prefill(
             query=q,
