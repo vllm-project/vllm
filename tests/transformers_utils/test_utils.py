@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.transformers_utils.gguf_utils import (
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
@@ -193,6 +194,35 @@ class TestSplitRemoteGGUF:
         # Cloud storage - is_remote_gguf returns False
         with pytest.raises(ValueError, match="Wrong GGUF model"):
             split_remote_gguf("s3://bucket/repo/model:Q2_K")
+
+
+class TestGetGGUFFilePathFromHF:
+    @patch("vllm.transformers_utils.gguf_utils.list_filtered_repo_files")
+    def test_get_gguf_file_path_matches_dot_quant_suffix(self, mock_list_files):
+        mock_list_files.return_value = [
+            "Qwen3.6-35B-A3B-Claude-4.6-Opus-Reasoning-Distilled.Q4_K_M.gguf"
+        ]
+
+        result = get_gguf_file_path_from_hf(
+            "hesamation/Qwen3.6-35B-A3B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+            "Q4_K_M",
+        )
+
+        assert result.endswith(".Q4_K_M.gguf")
+        mock_list_files.assert_called_once_with(
+            "hesamation/Qwen3.6-35B-A3B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+            allow_patterns=[
+                "*-Q4_K_M.gguf",
+                "*.Q4_K_M.gguf",
+                "*-Q4_K_M-*.gguf",
+                "*.Q4_K_M-*.gguf",
+                "*/*-Q4_K_M.gguf",
+                "*/*.Q4_K_M.gguf",
+                "*/*-Q4_K_M-*.gguf",
+                "*/*.Q4_K_M-*.gguf",
+            ],
+            revision=None,
+        )
 
 
 class TestIsGGUF:

@@ -476,24 +476,41 @@ def download_gguf(
     # Use patterns that snapshot_download can handle directly
     # Patterns to match:
     # - *-{quant_type}.gguf (root)
+    # - *.{quant_type}.gguf (root)
     # - *-{quant_type}-*.gguf (root sharded)
+    # - *.{quant_type}-*.gguf (root sharded)
     # - */*-{quant_type}.gguf (subdir)
+    # - */*.{quant_type}.gguf (subdir)
     # - */*-{quant_type}-*.gguf (subdir sharded)
+    # - */*.{quant_type}-*.gguf (subdir sharded)
     allow_patterns = [
         f"*-{quant_type}.gguf",
+        f"*.{quant_type}.gguf",
         f"*-{quant_type}-*.gguf",
+        f"*.{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
+        f"*/*.{quant_type}.gguf",
         f"*/*-{quant_type}-*.gguf",
+        f"*/*.{quant_type}-*.gguf",
     ]
 
-    # Use download_weights_from_hf which handles caching and downloading
-    folder = download_weights_from_hf(
-        model_name_or_path=repo_id,
-        cache_dir=cache_dir,
-        allow_patterns=allow_patterns,
-        revision=revision,
-        ignore_patterns=ignore_patterns,
-    )
+    if envs.VLLM_USE_MODELSCOPE:
+        folder = maybe_download_from_modelscope(
+            model=repo_id,
+            revision=revision,
+            download_dir=cache_dir,
+            ignore_patterns=ignore_patterns,
+            allow_patterns=allow_patterns,
+        )
+        assert folder is not None
+    else:
+        folder = download_weights_from_hf(
+            model_name_or_path=repo_id,
+            cache_dir=cache_dir,
+            allow_patterns=allow_patterns,
+            revision=revision,
+            ignore_patterns=ignore_patterns,
+        )
 
     # Find the downloaded file(s) in the folder
     local_files = []

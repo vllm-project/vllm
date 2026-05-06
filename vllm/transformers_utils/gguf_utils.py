@@ -313,9 +313,13 @@ def get_gguf_file_path_from_hf(
     repo_id = str(repo_id)
     gguf_patterns = [
         f"*-{quant_type}.gguf",
+        f"*.{quant_type}.gguf",
         f"*-{quant_type}-*.gguf",
+        f"*.{quant_type}-*.gguf",
         f"*/*-{quant_type}.gguf",
+        f"*/*.{quant_type}.gguf",
         f"*/*-{quant_type}-*.gguf",
+        f"*/*.{quant_type}-*.gguf",
     ]
     matching_files = list_filtered_repo_files(
         repo_id,

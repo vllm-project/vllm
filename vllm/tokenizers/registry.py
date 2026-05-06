@@ -101,6 +101,17 @@ def resolve_tokenizer_args(
 ):
     revision: str | None = kwargs.get("revision")
     download_dir: str | None = kwargs.get("download_dir")
+    remote_gguf_tokenizer_name: str | None = None
+    remote_gguf_file: str | None = None
+
+    if is_remote_gguf(tokenizer_name):
+        remote_gguf_tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
+        remote_gguf_file = get_gguf_file_path_from_hf(
+            remote_gguf_tokenizer_name,
+            quant_type,
+            revision=revision,
+        )
+        kwargs["gguf_file"] = remote_gguf_file
 
     if envs.VLLM_USE_MODELSCOPE:
         # download model from ModelScope hub,
@@ -111,17 +122,21 @@ def resolve_tokenizer_args(
         from vllm.model_executor.model_loader.weight_utils import get_lock
 
         # Only set the tokenizer here, model will be downloaded on the workers.
-        if not Path(tokenizer_name).exists():
+        modelscope_tokenizer_name = remote_gguf_tokenizer_name or tokenizer_name
+        if not Path(modelscope_tokenizer_name).exists():
             # Use file lock to prevent multiple processes from
             # downloading the same file at the same time.
-            with get_lock(tokenizer_name, download_dir):
+            with get_lock(str(modelscope_tokenizer_name), download_dir):
                 tokenizer_path = snapshot_download(
-                    model_id=str(tokenizer_name),
+                    model_id=str(modelscope_tokenizer_name),
                     cache_dir=download_dir,
                     revision=revision,
                     local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
                     # Ignore weights - we only need the tokenizer.
-                    ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
+                    ignore_file_pattern=None
+                    if remote_gguf_file is not None
+                    else [".*.pt", ".*.safetensors", ".*.bin"],
+                    allow_patterns=remote_gguf_file,
                 )
                 tokenizer_name = tokenizer_path
 
@@ -130,7 +145,7 @@ def resolve_tokenizer_args(
         if check_gguf_file(tokenizer_name):
             kwargs["gguf_file"] = Path(tokenizer_name).name
             tokenizer_name = Path(tokenizer_name).parent
-        elif is_remote_gguf(tokenizer_name):
+        elif remote_gguf_file is None and is_remote_gguf(tokenizer_name):
             tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
             # Get the HuggingFace Hub path for the GGUF file
             gguf_file = get_gguf_file_path_from_hf(

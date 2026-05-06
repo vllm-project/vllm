@@ -35,9 +35,13 @@ class TestGGUFDownload:
                 cache_dir=None,
                 allow_patterns=[
                     "*-IQ1_S.gguf",
+                    "*.IQ1_S.gguf",
                     "*-IQ1_S-*.gguf",
+                    "*.IQ1_S-*.gguf",
                     "*/*-IQ1_S.gguf",
+                    "*/*.IQ1_S.gguf",
                     "*/*-IQ1_S-*.gguf",
+                    "*/*.IQ1_S-*.gguf",
                 ],
                 revision=None,
                 ignore_patterns=None,
@@ -45,6 +49,68 @@ class TestGGUFDownload:
 
             # Verify result is the file path, not folder
             assert result == f"{mock_folder}/model-IQ1_S.gguf"
+
+    @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
+    def test_download_gguf_dot_quant_suffix(self, mock_download):
+        """Test GGUF repos whose quant suffix is separated by a dot."""
+        mock_folder = "/tmp/mock_cache"
+        mock_download.return_value = mock_folder
+
+        with patch("glob.glob") as mock_glob:
+            mock_glob.side_effect = lambda pattern, **kwargs: (
+                [f"{mock_folder}/model.Q4_K_M.gguf"] if ".Q4_K_M" in pattern else []
+            )
+
+            result = download_gguf("hesamation/model-GGUF", "Q4_K_M")
+
+            assert result == f"{mock_folder}/model.Q4_K_M.gguf"
+
+    @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
+    @patch(
+        "vllm.model_executor.model_loader.weight_utils.maybe_download_from_modelscope"
+    )
+    def test_download_gguf_modelscope_uses_selected_patterns(
+        self,
+        mock_modelscope_download,
+        mock_hf_download,
+        monkeypatch,
+    ):
+        """Test ModelScope downloads only the selected GGUF quant files."""
+        monkeypatch.setenv("VLLM_USE_MODELSCOPE", "True")
+        mock_folder = "/tmp/mock_cache"
+        mock_modelscope_download.return_value = mock_folder
+
+        with patch("glob.glob") as mock_glob:
+            mock_glob.side_effect = lambda pattern, **kwargs: (
+                [f"{mock_folder}/model.Q4_K_M.gguf"] if ".Q4_K_M" in pattern else []
+            )
+
+            result = download_gguf(
+                "hesamation/model-GGUF",
+                "Q4_K_M",
+                cache_dir="/cache",
+                revision="master",
+                ignore_patterns=["original/**/*"],
+            )
+
+            assert result == f"{mock_folder}/model.Q4_K_M.gguf"
+            mock_modelscope_download.assert_called_once_with(
+                model="hesamation/model-GGUF",
+                revision="master",
+                download_dir="/cache",
+                ignore_patterns=["original/**/*"],
+                allow_patterns=[
+                    "*-Q4_K_M.gguf",
+                    "*.Q4_K_M.gguf",
+                    "*-Q4_K_M-*.gguf",
+                    "*.Q4_K_M-*.gguf",
+                    "*/*-Q4_K_M.gguf",
+                    "*/*.Q4_K_M.gguf",
+                    "*/*-Q4_K_M-*.gguf",
+                    "*/*.Q4_K_M-*.gguf",
+                ],
+            )
+            mock_hf_download.assert_not_called()
 
     @patch("vllm.model_executor.model_loader.weight_utils.download_weights_from_hf")
     def test_download_gguf_sharded_files(self, mock_download):

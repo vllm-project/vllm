@@ -36,6 +36,7 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
     check_gguf_file,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
@@ -65,6 +66,60 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+_MODELSCOPE_CONFIG_PROBE_IGNORE_PATTERNS = [
+    "*.bin",
+    "*.safetensors",
+    "*.pth",
+    "*.pt",
+    "*.h5",
+    "*.ckpt",
+    "*.zip",
+    "*.onnx",
+    "*.tar",
+    "*.gz",
+    "*.gguf",
+]
+
+
+def _ignore_gguf_files_for_modelscope_config_probe(
+    ignore_file_pattern: str | list[str] | None,
+) -> list[str]:
+    if ignore_file_pattern is None:
+        return list(_MODELSCOPE_CONFIG_PROBE_IGNORE_PATTERNS)
+
+    if isinstance(ignore_file_pattern, str):
+        patterns = [ignore_file_pattern]
+    else:
+        patterns = list(ignore_file_pattern)
+
+    if "*.gguf" not in patterns:
+        patterns.append("*.gguf")
+    return patterns
+
+
+def _localize_modelscope_remote_gguf_for_config(
+    model: str | Path,
+    revision: str | None,
+    kwargs: dict[str, Any],
+) -> str:
+    repo_id, quant_type = split_remote_gguf(model)
+    gguf_file = get_gguf_file_path_from_hf(
+        repo_id,
+        quant_type,
+        revision=revision,
+    )
+    kwargs["gguf_file"] = gguf_file
+
+    from modelscope.hub.snapshot_download import snapshot_download
+
+    return snapshot_download(
+        model_id=repo_id,
+        revision=revision,
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        allow_patterns=gguf_file,
+    )
+
 
 if Version(version("transformers")) < Version("5.0.0"):
     logger.warning(
@@ -612,6 +667,12 @@ def maybe_override_with_speculators(
     elif is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
         gguf_model_repo = repo_id
+        if envs.VLLM_USE_MODELSCOPE:
+            kwargs["ignore_file_pattern"] = (
+                _ignore_gguf_files_for_modelscope_config_probe(
+                    kwargs.get("ignore_file_pattern")
+                )
+            )
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -665,9 +726,16 @@ def get_config(
             model = Path(model).parent
         elif _is_remote_gguf:
             # Remote GGUF - extract repo_id from repo_id:quant_type format
-            # The actual GGUF file will be downloaded later by GGUFModelLoader
-            # Keep model as repo_id:quant_type for download, but use repo_id for config
-            model, _ = split_remote_gguf(model)
+            # Use repo_id for HF config lookup. ModelScope GGUF repos may not
+            # provide config.json, so localize the selected file for parsing.
+            if envs.VLLM_USE_MODELSCOPE:
+                model = _localize_modelscope_remote_gguf_for_config(
+                    model,
+                    revision,
+                    kwargs,
+                )
+            else:
+                model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
@@ -679,8 +747,10 @@ def get_config(
                 model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
             ):
                 config_format = "mistral"
-            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
+            elif (
+                (_is_gguf and not _is_remote_gguf)
+                or (_is_remote_gguf and kwargs.get("gguf_file") is not None)
+                or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision)
             ):
                 config_format = "hf"
             # Remote GGUF models must have config.json in repo,
