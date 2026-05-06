@@ -125,7 +125,7 @@ steps:
   key: kernels-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   # optional: true
   source_file_dependencies:
   - csrc/quantization/fp4/
@@ -212,7 +212,7 @@ steps:
 - label: Kernels Fp4 MoE Test (B200)
   key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 60
-  device: b200
+  device: b200-k8s
   num_devices: 1
   optional: true
   commands:
