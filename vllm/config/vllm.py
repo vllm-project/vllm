@@ -121,6 +121,13 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        return (
+            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
+        )
+
     return (
         cfg.parallel_config.tensor_parallel_size > 1
         and current_platform.is_cuda()
@@ -129,12 +136,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         )
-        # tp-dp combination broken:
-        # https://github.com/vllm-project/vllm/issues/34458
-        and cfg.parallel_config.data_parallel_size == 1
-        # tp-pp combination broken:
-        # https://github.com/vllm-project/vllm/issues/35426
-        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -156,10 +157,9 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        rocm_aiter_ops.is_rmsnorm_enabled()
+        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -209,7 +209,9 @@ OPTIMIZATION_LEVEL_01 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "enable_flashinfer_autotune": True,
+        # Disabled for now due to correctness issues:
+        # https://github.com/flashinfer-ai/flashinfer/issues/3197
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_02 = {
@@ -229,7 +231,9 @@ OPTIMIZATION_LEVEL_02 = {
         "use_inductor_graph_partition": False,
     },
     "kernel_config": {
-        "enable_flashinfer_autotune": True,
+        # Disabled for now due to correctness issues:
+        # https://github.com/flashinfer-ai/flashinfer/issues/3197
+        "enable_flashinfer_autotune": False,
     },
 }
 OPTIMIZATION_LEVEL_03 = {
@@ -1604,11 +1608,16 @@ class VllmConfig:
         if compile_range_end is not None:
             computed_compile_ranges_endpoints.append(compile_range_end)
 
-        # Add the compile ranges for flashinfer
+        # Add the compile ranges for flashinfer/aiter.
         if compilation_config.pass_config.fuse_allreduce_rms:
             tp_size = self.parallel_config.tensor_parallel_size
-            max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
-            if max_size is not None:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled():
+                max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+            else:
+                max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+            if max_size is not None and self.model_config is not None:
                 assert isinstance(self.model_config.dtype, torch.dtype)
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size()
@@ -1883,6 +1892,18 @@ class VllmConfig:
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
             )
+
+    @model_validator(mode="after")
+    def validate_nvfp4_kv_cache_with_mla(self) -> "VllmConfig":
+        if self.model_config is None:
+            return self
+        if self.cache_config.cache_dtype == "nvfp4" and self.model_config.use_mla:
+            raise ValueError(
+                "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
+                "Attention) backends. Please use a different --kv-cache-dtype "
+                "(e.g., 'fp8' or 'auto') for MLA models such as DeepSeek."
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":

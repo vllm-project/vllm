@@ -49,6 +49,12 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    # To accumulate prompt logprobs tensor chunks across prefill steps.
+    in_progress_prompt_logprobs_cpu: LogprobsTensors | None = None
+
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). See `Request.prompt_is_token_ids`.
+    prompt_is_token_ids: list[bool] | None = None
 
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
@@ -251,9 +257,6 @@ class InputBatch:
         # More efficient than num_logprobs=-1 when only a few tokens are needed
         self.logprob_token_ids: dict[str, list[int]] = {}
 
-        # To accumulate prompt logprobs tensor chunks across prefill steps.
-        self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
-
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state
         # updates. Should reset each step.
@@ -356,7 +359,12 @@ class InputBatch:
         end_idx = start_idx + len(request.output_token_ids)
         if request.prompt_token_ids is not None:
             self.token_ids_cpu[req_index, :num_prompt_tokens] = request.prompt_token_ids
-            self.is_token_ids[req_index, :num_prompt_tokens] = True
+            if request.prompt_is_token_ids is not None:
+                self.is_token_ids[req_index, :num_prompt_tokens] = (
+                    request.prompt_is_token_ids
+                )
+            else:
+                self.is_token_ids[req_index, :num_prompt_tokens] = True
         else:
             self.is_token_ids[req_index, :num_prompt_tokens] = False
         if request.prompt_embeds is not None:
@@ -543,7 +551,6 @@ class InputBatch:
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.logprob_token_ids.pop(req_id, None)
-        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
 

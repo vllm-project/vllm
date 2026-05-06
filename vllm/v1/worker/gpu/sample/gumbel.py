@@ -76,6 +76,8 @@ def gumbel_block_argmax(
     pos_ptr,
     processed_logits_ptr,
     processed_logits_stride,
+    processed_logits_col_ptr,
+    vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -88,8 +90,15 @@ def gumbel_block_argmax(
 
     if processed_logits_ptr is not None:
         # Store the temperature-applied logits.
+        if processed_logits_col_ptr is not None:
+            col = tl.load(processed_logits_col_ptr)
+        else:
+            col = 0
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + block,
+            processed_logits_ptr
+            + req_state_idx * processed_logits_stride
+            + col * vocab_size
+            + block,
             logits,
             mask=mask,
         )
@@ -121,6 +130,7 @@ def _gumbel_sample_kernel(
     local_max_stride,
     processed_logits_ptr,
     processed_logits_stride,
+    processed_logits_col_ptr,
     logits_ptr,
     logits_stride,
     expanded_idx_mapping_ptr,
@@ -153,6 +163,8 @@ def _gumbel_sample_kernel(
         pos_ptr,
         processed_logits_ptr,
         processed_logits_stride,
+        processed_logits_col_ptr,
+        vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
     )
     token_id = block_idx * BLOCK_SIZE + idx
@@ -167,7 +179,8 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
+    output_processed_logits: torch.Tensor | None = None,
+    output_processed_logits_col: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
@@ -179,8 +192,9 @@ def gumbel_sample(
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        processed_logits_out,
-        processed_logits_out.stride(0) if processed_logits_out is not None else 0,
+        output_processed_logits,
+        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
+        output_processed_logits_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
