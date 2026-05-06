@@ -381,12 +381,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     Because the pattern matcher starts at the end of the graph, the replacement
     contains a slice that temporarily conforms the input residual to the correct size.
     After all patterns have been matched, we use a NoOpEliminationPass to clean up
-    what have now become no-op slices. We also apply an InputMutationSlicingPass to
-    fix shape-mismatched `copy_` nodes. AOT Autograd specifically inserts
-    these epilogues only when in-place operations (e.g., `fused_add_rms_norm`)
-    mutate direct graph inputs (like `inputs_embeds`). After SP sharding,
-    the source tensor is smaller than the destination placeholder; the pass
-    slices the destination to match, preserving the mutation for PP communication.
+    what have now become no-op slices.
 
     Note that an older version of the pass did not need this as it operated only on
     custom rms_norm and fused_add_rms_norm custom ops which did not complain about
