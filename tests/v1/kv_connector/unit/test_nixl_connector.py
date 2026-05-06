@@ -2256,7 +2256,10 @@ def test_failed_request_skips_kv_postprocessing(
     can apply kv_load_failure_policy), but sync_recved_kv_to_device and
     post-processing must NOT be called since no valid KV data was received.
     """
-    vllm_config = create_vllm_config()
+    # Use enable_permute_local_kv=True so that
+    # post_process_device_kv_on_receive would be called on the success path,
+    # making the assertion meaningful (not trivially true).
+    vllm_config = create_vllm_config(enable_permute_local_kv=True)
 
     connector = NixlConnector(
         vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
