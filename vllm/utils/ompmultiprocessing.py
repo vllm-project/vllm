@@ -69,12 +69,7 @@ class OMPProcessManager:
 
     @contextmanager
     def configure_omp_envs(self, rank: int, local_rank: int):
-        if (
-            not current_platform.is_cpu()
-            or self.skip_setup
-            or local_rank >= len(self.cpu_lists)
-            or not self.cpu_lists[local_rank]
-        ):
+        if not current_platform.is_cpu() or self.skip_setup:
             yield
             return
 
