@@ -1524,6 +1524,13 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        """Return the modality of the inputs."""
+        ...
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
