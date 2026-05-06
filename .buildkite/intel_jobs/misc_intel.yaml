@@ -52,4 +52,5 @@ steps:
       pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
-      pytest -v -s v1/test_outputs.py'
+      pytest -v -s v1/test_outputs.py &&
+      pytest -v -s v1/sample/test_topk_topp_sampler.py'
