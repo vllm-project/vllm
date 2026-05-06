@@ -13,6 +13,7 @@ MODELS = [
     "Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4",  # without g_idx
     "RedHatAI/Qwen3-1.7B-quantized.w4a16",  # with zp
     "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
+    "Qwen/Qwen3-0.6B-FP8",  # FP8 W8A16 block-quantized
 ]
 DTYPE = ["bfloat16"]
 

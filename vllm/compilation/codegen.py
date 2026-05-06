@@ -22,11 +22,17 @@ def generate_execution_code_with_name(
     split_gm: torch.fx.GraphModule,
     fn_name: str,
     with_submod: bool,
-) -> tuple[str, list[str]]:
+    consts: list[Any] | None = None,
+    const_index: dict[int, int] | None = None,
+) -> tuple[str, list[str], list[Any]]:
     lines: list[str] = []
     param_names: list[str] = []
     submod_names: list[str] = []
     submod_index: dict[str, int] = {}
+    if consts is None:
+        consts = []
+    if const_index is None:
+        const_index = {}
 
     # Build node ordering for liveness analysis.
     nodes = list(split_gm.graph.nodes)
@@ -48,6 +54,9 @@ def generate_execution_code_with_name(
             continue
         del_after.setdefault(node_order[last_user], []).append(node.name)
 
+    def ref(arg: Any) -> str:
+        return _node_ref(arg, consts, const_index)
+
     for i, node in enumerate(nodes):
         if node.op == "placeholder":
             param_names.append(node.name)
@@ -62,16 +71,18 @@ def generate_execution_code_with_name(
                 submod_index[target] = len(submod_names)
                 submod_names.append(target)
             idx = submod_index[target]
-            args_str = ", ".join(_node_ref(a) for a in node.args)
-            kwargs_str = ", ".join(
-                f"{k}={_node_ref(v)}" for k, v in node.kwargs.items()
-            )
+            args_str = ", ".join(ref(a) for a in node.args)
+            kwargs_str = ", ".join(f"{k}={ref(v)}" for k, v in node.kwargs.items())
             all_args = ", ".join(filter(None, [args_str, kwargs_str]))
             submod = getattr(split_gm, target)
             if isinstance(submod, torch.fx.GraphModule):
                 callable_name = f"__vllm_inlined_submods__{idx}"
-                inlined_code, _ = generate_execution_code_with_name(
-                    submod, callable_name, with_submod=False
+                inlined_code, _, _ = generate_execution_code_with_name(
+                    submod,
+                    callable_name,
+                    with_submod=False,
+                    consts=consts,
+                    const_index=const_index,
                 )
                 inlined_submods.append(inlined_code)
             else:
@@ -80,15 +91,13 @@ def generate_execution_code_with_name(
 
         elif node.op == "call_function":
             if node.target is operator.getitem:
-                source = _node_ref(node.args[0])
+                source = ref(node.args[0])
                 index = node.args[1]
                 assert isinstance(index, int)
                 lines.append(f"    {node.name} = {source}[{index}]")
             else:
-                args_str = ", ".join(_node_ref(a) for a in node.args)
-                kwargs_str = ", ".join(
-                    f"{k}={_node_ref(v)}" for k, v in node.kwargs.items()
-                )
+                args_str = ", ".join(ref(a) for a in node.args)
+                kwargs_str = ", ".join(f"{k}={ref(v)}" for k, v in node.kwargs.items())
                 all_args = ", ".join(filter(None, [args_str, kwargs_str]))
                 lines.append(
                     f"    {node.name} = {_get_qualified_name(node.target)}({all_args})"
@@ -96,7 +105,7 @@ def generate_execution_code_with_name(
 
         elif node.op == "output":
             assert len(node.args) == 1
-            ret = _node_ref(node.args[0])
+            ret = ref(node.args[0])
             lines.append(f"    return {ret}")
 
         else:
@@ -109,21 +118,28 @@ def generate_execution_code_with_name(
 
     assert len(param_names) > 0
     params = ", ".join(param_names)
-    header = (
-        f"\ndef {fn_name}({params}{', *, __vllm_submods__' if with_submod else ''}):"
+    kw_params = ", *, __vllm_submods__" if with_submod else ""
+    header = f"\ndef {fn_name}({params}{kw_params}):"
+    return (
+        "".join(inlined_submods) + "\n".join([header] + lines) + "\n",
+        submod_names,
+        consts,
     )
-    return "".join(inlined_submods) + "\n".join([header] + lines) + "\n", submod_names
 
 
 @dynamo_timed("vllm.generate_execution_code")
 def generate_execution_code(
     split_gm: torch.fx.GraphModule,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], list[Any]]:
     """Generate Python source code from a split_gm's stitching graph.
 
     Walks split_gm.graph.nodes and produces a function that calls
     submodules via a __vllm_submods__ list, avoiding FX GraphModule overhead
     and dict lookup cost.
+
+    Non-primitive constant arguments (e.g. torch.device, DTensor placement
+    types) are collected into a constants list and referenced by index
+    in the generated code, avoiding reliance on repr() being eval-able.
 
     If a submodule is a plain torch.fx.GraphModule, it is inlined directly
     in the generated code and we do not need to serialize it in the artifact.
@@ -132,15 +148,17 @@ def generate_execution_code(
         split_gm: The split graph module produced by split_graph().
 
     Returns:
-        A tuple of (code, submod_names) where code is the Python source
-        and submod_names is the ordered list of submodule target names
-        corresponding to list indices used in the generated code.
+        A tuple of (code, submod_names, consts) where code is the Python
+        source, submod_names is the ordered list of submodule target names
+        corresponding to list indices used in the generated code, and
+        consts is a list of non-primitive constant objects referenced
+        by the generated code via __vllm_consts__. These objects are
+        kept alive for the lifetime of the compiled function.
     """
-
-    code, submod_names = generate_execution_code_with_name(
+    code, submod_names, consts = generate_execution_code_with_name(
         split_gm, "execution_fn", with_submod=True
     )
-    return "import torch\nimport operator\n" + code, submod_names
+    return "import torch\nimport operator\n" + code, submod_names, consts
 
 
 @dynamo_timed("vllm.compile_execution_fn")
@@ -148,6 +166,7 @@ def compile_execution_fn(
     code: str,
     submod_callables: dict[str, Callable[..., Any]],
     submod_names: list[str],
+    consts: list[Any] | None = None,
 ) -> Callable[..., Any]:
     """Compile execution code and bind submodule callables.
 
@@ -156,6 +175,9 @@ def compile_execution_fn(
         submod_callables: Mapping of submodule names to their callables.
         submod_names: Ordered list of submodule names matching the indices
             used in the generated code.
+        consts: List of non-primitive constant objects referenced by the
+            generated code via __vllm_consts__. None for legacy cached
+            code that predates this feature.
 
     Returns:
         A callable that executes the stitching logic.
@@ -169,6 +191,8 @@ def compile_execution_fn(
         payload_fn=lambda: code,
     )
     namespace: dict[str, Any] = {}
+    if consts is not None:
+        namespace["__vllm_consts__"] = consts
     exec(code, namespace)  # noqa: S102
     fn = namespace["execution_fn"]
     # Using .get() is intentional here because only piecewise backend will
@@ -180,19 +204,32 @@ def compile_execution_fn(
     return partial(fn, __vllm_submods__=submods_list)
 
 
-def _node_ref(arg: Any) -> str:
-    """Convert an FX node argument to a source code reference recursively."""
+def _node_ref(arg: Any, consts: list[Any], const_index: dict[int, int]) -> str:
+    """Convert an FX node argument to a source code reference."""
     if isinstance(arg, torch.fx.Node):
         return arg.name
     if isinstance(arg, list):
-        return f"[{', '.join(_node_ref(x) for x in arg)}]"
+        return f"[{', '.join(_node_ref(x, consts, const_index) for x in arg)}]"
     if isinstance(arg, tuple):
-        items = ", ".join(_node_ref(x) for x in arg)
+        items = ", ".join(_node_ref(x, consts, const_index) for x in arg)
         return f"({items},)" if len(arg) == 1 else f"({items})"
     if isinstance(arg, dict):
         return (
             "{"
-            + ", ".join(f"{_node_ref(k)}: {_node_ref(v)}" for k, v in arg.items())
+            + ", ".join(
+                f"{_node_ref(k, consts, const_index)}: "
+                f"{_node_ref(v, consts, const_index)}"
+                for k, v in arg.items()
+            )
             + "}"
         )
-    return repr(arg)
+    if isinstance(arg, (int, float, bool, str, bytes, type(None))):
+        return repr(arg)
+    # Dedup by identity, not equality: safe because FX graph args
+    # are live for the entire code-generation pass. Objects stored
+    # here must be picklable (for compile-artifact caching).
+    key = id(arg)
+    if key not in const_index:
+        const_index[key] = len(consts)
+        consts.append(arg)
+    return f"__vllm_consts__[{const_index[key]}]"
