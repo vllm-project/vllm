@@ -170,14 +170,12 @@ async def _probe_endpoint(
     args: argparse.Namespace,
     port: int,
     path: str,
-) -> tuple[bool, str | None]:
+) -> bool:
     try:
         async with session.get(_child_base_url(args, port) + path) as response:
-            if response.status == HTTPStatus.OK:
-                return True, None
-            return False, f"HTTP {response.status}"
-    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError) as exc:
-        return False, str(exc)
+            return response.status == HTTPStatus.OK
+    except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError):
+        return False
 
 
 def _build_dp_supervisor_app(
@@ -334,15 +332,6 @@ class DPSupervisor:
             process.start()
             self.processes.append(process)
 
-    async def _collect_child_health(
-        self, session: aiohttp.ClientSession, port: int, process: BaseProcess
-    ) -> bool:
-        if process.exitcode is not None:
-            return False
-
-        healthy, _ = await _probe_endpoint(session, self.args, port, "/health")
-        return healthy
-
     async def _monitor_children(self) -> BaseProcess | None:
         timeout = aiohttp.ClientTimeout(total=HEALTHCHECK_TIMEOUT_S)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -352,8 +341,8 @@ class DPSupervisor:
                 )
                 child_health = await asyncio.gather(
                     *(
-                        self._collect_child_health(session, port, process)
-                        for port, process in zip(self.child_ports, self.processes)
+                        _probe_endpoint(session, self.args, port, "/health")
+                        for port in self.child_ports
                     )
                 )
                 self.children_healthy = all(child_health)
@@ -400,7 +389,6 @@ class DPSupervisor:
             for process in self.processes:
                 if process.is_alive() and (pid := process.pid) is not None:
                     kill_process_tree(pid)
-            self.processes = []
 
     async def _shutdown_supervisor_server(self) -> None:
         if self._supervisor_server is not None:
