@@ -309,6 +309,7 @@ steps:
         depends_on: ~
 
       - label: "Build release image - x86_64 - CPU"
+        key: build-cpu-release-image-x86
         depends_on:
           - block-cpu-release-image-build
           - input-release-version
@@ -327,7 +328,8 @@ steps:
         depends_on: ~
 
       - label: "Build release image - arm64 - CPU"
-        depends_on: 
+        key: build-cpu-release-image-arm64
+        depends_on:
           - block-arm64-cpu-release-image-build
           - input-release-version
         agents:
@@ -428,6 +430,41 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh cu129"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu129-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
+      - block: "Publish release images to DockerHub"
+        key: block-publish-release-images
+        depends_on:
+          - create-multi-arch-manifest
+          - create-multi-arch-manifest-cuda-12-9
+          - create-multi-arch-manifest-ubuntu2404
+          - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+          - build-rocm-release-image
+          - input-release-version
+          # Wait for CPU builds if their block steps were unblocked, so publish
+          # doesn't race the in-progress CPU build. allow_failure lets publish
+          # proceed when the operator legitimately leaves the CPU block steps
+          # unblocked or the CPU build fails.
+          - step: build-cpu-release-image-x86
+            allow_failure: true
+          - step: build-cpu-release-image-arm64
+            allow_failure: true
+        if: build.env("NIGHTLY") != "1"
+
+      - label: "Publish release images to DockerHub"
+        depends_on:
+          - block-publish-release-images
+        key: publish-release-images-dockerhub
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/publish-release-images.sh"
         plugins:
           - docker-login#v3.0.0:
               username: vllmbot
