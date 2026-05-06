@@ -203,7 +203,14 @@ class TestExtractToolCalls:
             ),
         )
         parser = make_parser(tools=[tool])
-        model_output = build_tool_call("toggle", {"enabled": "true", "count": "42"})
+        model_output = (
+            f"{FC_START}\n"
+            f'{INV_START}toggle">\n'
+            f'{PARAM_START}enabled" string="false">true{PARAM_END}\n'
+            f'{PARAM_START}count" string="false">42{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
         result = parser.extract_tool_calls(model_output, None)
         assert result.tools_called
         assert len(result.tool_calls) == 1
@@ -431,7 +438,14 @@ class TestExtractToolCallsStreaming:
             ),
         )
         parser = make_parser(tools=[tool])
-        full_text = build_tool_call("add", {"x": "3", "y": "4"})
+        full_text = (
+            f"{FC_START}\n"
+            f'{INV_START}add">\n'
+            f'{PARAM_START}x" string="false">3{PARAM_END}\n'
+            f'{PARAM_START}y" string="false">4{PARAM_END}\n'
+            f"{INV_END}\n"
+            f"{FC_END}"
+        )
         deltas = self._stream(parser, full_text)
         args_str = self._reconstruct_args(deltas)
         assert json.loads(args_str) == {"x": 3, "y": 4}
