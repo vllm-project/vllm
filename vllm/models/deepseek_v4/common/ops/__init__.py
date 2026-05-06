@@ -7,6 +7,7 @@ from .cache_utils import (
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
+    sparse_prefill_combined_topk_size,
 )
 from .fused_indexer_q import MXFP4_BLOCK_SIZE, fused_indexer_q_rope_quant
 from .fused_inv_rope_fp8_quant import fused_inv_rope_fp8_quant
@@ -27,4 +28,5 @@ __all__ = [
     "mtp_shared_head_rmsnorm",
     "quantize_and_insert_k_cache",
     "save_partial_states",
+    "sparse_prefill_combined_topk_size",
 ]
