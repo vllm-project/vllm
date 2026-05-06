@@ -299,10 +299,8 @@ async def test_streaming_with_thinking_disabled_stays_in_content(
         "messages": [
             {
                 "role": "user",
-                "content": (
-                    "Which is larger, 4 or 12? "
-                    "Output exactly one token: 4 or 12."
-                ),
+                "content": "Which is larger, 4 or 12?"
+                " Output exactly one token: 4 or 12.",
             }
         ],
         "max_tokens": 16,
