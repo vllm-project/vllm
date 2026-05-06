@@ -1704,6 +1704,7 @@ class EngineArgs:
                 TurboQuantConfig,
             )
 
+            num_layers = model_config.hf_text_config.num_hidden_layers
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             merged = sorted(existing | set(boundary), key=lambda x: int(x))
