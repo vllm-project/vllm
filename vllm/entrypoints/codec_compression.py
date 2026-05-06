@@ -14,14 +14,16 @@ single compression context spans many frames (much better ratio than
 per-frame compression for small frames).
 
 Supported encodings, in server preference order:
-  1. ``zstd``     — Zstandard. Best ratio + speed. Requires the optional
-                    ``zstandard`` package; gracefully skipped if absent.
-                    Browsers: Chrome 123+, Firefox 126+ (Content-Encoding
-                    only — there is no Web API for incremental decoding,
-                    but the browser handles the HTTP-level case fully).
-  2. ``gzip``     — Universal fallback. Pure stdlib, always available.
+  1. ``zstd``     — Zstandard. Best ratio, fastest streaming. Requires the
+                    optional ``zstandard`` package; gracefully skipped if
+                    absent. Browsers: Chrome 123+, Firefox 126+.
+  2. ``br``       — Brotli. Slightly better ratio than gzip, similar speed
+                    at quality 4-6. Universal browser support (Chrome 50+,
+                    Firefox 44+, Safari 11+). Requires the optional
+                    ``brotli`` package; gracefully skipped if absent.
+  3. ``gzip``     — Universal fallback. Pure stdlib, always available.
                     Supported in 100% of browsers and Node 18+ via fetch.
-  3. ``identity`` — No compression. Always available, used when neither of
+  4. ``identity`` — No compression. Always available, used when none of
                     the above appears in ``Accept-Encoding``.
 
 Usage:
@@ -45,14 +47,20 @@ from typing import AsyncIterable, Optional
 from fastapi import BackgroundTasks
 from fastapi.responses import StreamingResponse
 
-# Soft dep — most production vLLM deployments have it (it's pulled in by
-# msgspec extras and several common tools), but we don't require it.
+# Soft deps — both are graceful no-ops if the package isn't installed.
 try:
     import zstandard as zstd
 
     _ZSTD_AVAILABLE = True
 except ImportError:
     _ZSTD_AVAILABLE = False
+
+try:
+    import brotli
+
+    _BROTLI_AVAILABLE = True
+except ImportError:
+    _BROTLI_AVAILABLE = False
 
 
 def _parse_accept_encoding(header: str) -> list[str]:
@@ -76,9 +84,9 @@ def _parse_accept_encoding(header: str) -> list[str]:
 def negotiate_encoding(accept_encoding: str) -> Optional[str]:
     """Pick the best encoding both sides can speak.
 
-    Returns one of ``"zstd"``, ``"gzip"``, or ``None`` (identity).
-    Order of preference: zstd > gzip > identity. ``"*"`` in Accept-Encoding
-    is treated as accepting any encoding the server has.
+    Returns one of ``"zstd"``, ``"br"``, ``"gzip"``, or ``None`` (identity).
+    Order of preference: zstd > br > gzip > identity. ``"*"`` in
+    Accept-Encoding is treated as accepting any encoding the server has.
     """
     encs = _parse_accept_encoding(accept_encoding)
     if not encs:
@@ -87,6 +95,8 @@ def negotiate_encoding(accept_encoding: str) -> Optional[str]:
 
     if _ZSTD_AVAILABLE and ("zstd" in encs or has_wildcard):
         return "zstd"
+    if _BROTLI_AVAILABLE and ("br" in encs or has_wildcard):
+        return "br"
     if "gzip" in encs or has_wildcard:
         return "gzip"
     return None
@@ -117,6 +127,27 @@ async def _compress_gzip(stream: AsyncIterable[bytes]) -> AsyncIterable[bytes]:
         yield final
 
 
+async def _compress_brotli(stream: AsyncIterable[bytes]) -> AsyncIterable[bytes]:
+    """Stream-compress with Brotli. quality=4 balances speed/ratio for
+    server-side dynamic compression — ratio close to the default quality 11
+    but at gzip-level CPU cost (default 11 is 10-50x slower for streams)."""
+    compressor = brotli.Compressor(
+        quality=4, mode=brotli.MODE_GENERIC, lgwin=22
+    )
+    async for chunk in stream:
+        # `process` accumulates input; `flush` returns whatever output is
+        # ready so we can yield it incrementally (good for streaming TTFT).
+        out = compressor.process(chunk)
+        if out:
+            yield out
+        out = compressor.flush()
+        if out:
+            yield out
+    final = compressor.finish()
+    if final:
+        yield final
+
+
 def wrap_streaming_response(
     accept_encoding: str,
     body_stream: AsyncIterable[bytes],
@@ -140,6 +171,9 @@ def wrap_streaming_response(
     if encoding == "zstd":
         body = _compress_zstd(body_stream)
         headers["Content-Encoding"] = "zstd"
+    elif encoding == "br":
+        body = _compress_brotli(body_stream)
+        headers["Content-Encoding"] = "br"
     elif encoding == "gzip":
         body = _compress_gzip(body_stream)
         headers["Content-Encoding"] = "gzip"
