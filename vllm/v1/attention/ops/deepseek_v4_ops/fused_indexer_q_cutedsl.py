@@ -37,14 +37,17 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
     index_weights_out: torch.Tensor,
 ) -> None:
     num_tokens, num_heads, head_dim = index_q.shape
+    rope_dim = index_q_cos_sin_cache.shape[-1]
+    rope_type = _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype]
+
+    # compile all variants at first invocation
+    for tile_head in (1, 4):
+        IndexerQMxFp4Kernel.compile(head_dim, rope_dim, num_heads, rope_type, tile_head)
+
     # heuristic
     tile_head = 1 if num_tokens < 512 else 4
     compiled = IndexerQMxFp4Kernel.compile(
-        head_dim,
-        index_q_cos_sin_cache.shape[-1],
-        num_heads,
-        _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype],
-        tile_head,
+        head_dim, rope_dim, num_heads, rope_type, tile_head
     )
     scale = float(index_weights_softmax_scale * index_weights_head_scale)
     compiled(
