@@ -2068,8 +2068,7 @@ class NixlConnectorWorker:
             assert num_local_blocks <= num_remote_blocks
             # Partial prefix cache hit: just read uncomputed blocks. With HMA,
             # remote groups can include leading null/prefix-cached blocks while
-            # local groups contain only newly allocated transfer slots. This also
-            # applies to Mamba align-mode state blocks.
+            # local groups contain only newly allocated transfer slots.
             if num_local_blocks < num_remote_blocks:
                 remote_block_ids[i] = (
                     remote_group[-num_local_blocks:] if num_local_blocks else []
