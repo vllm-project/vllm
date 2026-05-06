@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._C  # noqa: E402, F401  # load custom ops
+import vllm._custom_ops as ops  # noqa: E402
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
@@ -211,7 +211,7 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
 
     # Test inplace=False against reference
-    out = torch.ops._C.fused_experts_cpu(
+    out = ops.fused_experts_cpu(
         a.clone(),
         pw1,
         pw2,
@@ -235,7 +235,7 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     )
 
     # Test inplace=True produces identical output
-    out_inplace = torch.ops._C.fused_experts_cpu(
+    out_inplace = ops.fused_experts_cpu(
         a.clone(),
         pw1,
         pw2,

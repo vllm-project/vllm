@@ -3172,6 +3172,40 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         return torch.empty_like(hidden_states)
 
 
+def fused_experts_cpu(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool,
+    use_int8_w8a8: bool,
+    use_fp8_w8a16: bool,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    block_size: list[int] | None,
+    a1_scale: torch.Tensor | None,
+    a2_scale: torch.Tensor | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fused_experts_cpu(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace,
+        use_int8_w8a8,
+        use_fp8_w8a16,
+        w1_scale,
+        w2_scale,
+        block_size,
+        a1_scale,
+        a2_scale,
+        is_vnni,
+    )
+
+
 if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
 
     @register_fake("_C::int8_scaled_mm_with_quant")
