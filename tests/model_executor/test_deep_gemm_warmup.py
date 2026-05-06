@@ -12,7 +12,6 @@ Regression test for https://github.com/vllm-project/vllm/issues/41849.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 
