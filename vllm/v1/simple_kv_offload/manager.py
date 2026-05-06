@@ -81,7 +81,10 @@ class SimpleCPUOffloadScheduler:
             and vllm_config.kv_events_config.enable_kv_cache_events
         )
         # NOTE: We use the same block size for both GPU and CPU.
-        self.block_size = vllm_config.cache_config.block_size
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.cp_world_size = dcp_world_size * pcp_world_size
+        self.block_size = vllm_config.cache_config.block_size * self.cp_world_size
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
@@ -104,9 +107,6 @@ class SimpleCPUOffloadScheduler:
         )
 
         # TODO (yifan): maybe need to enable kv_cache_events and metrics_collector here.
-        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        assert dcp_world_size == 1 and pcp_world_size == 1
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
@@ -139,6 +139,7 @@ class SimpleCPUOffloadScheduler:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
                 vllm_config.scheduler_config.max_num_batched_tokens,
+                self.cp_world_size,
             )
         else:
             self._target_free = 0
@@ -188,19 +189,22 @@ class SimpleCPUOffloadScheduler:
 
     @staticmethod
     def _estimate_lazy_target_blocks(
-        kv_cache_config: "KVCacheConfig", max_num_batched_tokens: int
+        kv_cache_config: "KVCacheConfig",
+        max_num_batched_tokens: int,
+        cp_world_size: int = 1,
     ) -> int:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
         for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
+            block_size = spec.block_size * cp_world_size
             if isinstance(spec, MambaSpec):
                 target += 2
             elif isinstance(spec, SlidingWindowSpec):
-                target += cdiv(spec.sliding_window, spec.block_size) + 1
+                target += cdiv(spec.sliding_window, block_size) + 1
             else:
-                target += cdiv(max_num_batched_tokens, spec.block_size)
+                target += cdiv(max_num_batched_tokens, block_size)
         return int(target * (1 + WATERMARK_RATIO))
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
@@ -286,7 +290,9 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             # Number of blocks in the computed range for this group.
-            g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+            g_block_size = (
+                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+            )
             n_computed_g = cdiv(total_computed_tokens, g_block_size)
 
             # Back-trace: ext blocks sit at the tail of the computed range.
@@ -509,7 +515,9 @@ class SimpleCPUOffloadScheduler:
                 group_gpu_ids = block_ids_by_group[g]
 
                 # Cap to blocks with confirmed KV data.
-                g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+                g_block_size = (
+                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+                )
                 ready_blocks_g = confirmed_tokens // g_block_size
                 scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 
