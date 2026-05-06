@@ -495,8 +495,8 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         if partial_rotary_factor is not None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
+        patch_legacy_rope_type(getattr(config, "rope_parameters", None))
         config.standardize_rope_params()
-        patch_legacy_rope_type(config.rope_parameters)
         config.validate_rope()
 
 
