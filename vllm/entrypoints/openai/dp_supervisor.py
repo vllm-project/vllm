@@ -104,16 +104,16 @@ def validate_multi_port_external_lb_args(args: argparse.Namespace) -> None:
         )
 
     supervisor_port = args.data_parallel_supervisor_port
-    child_port_min = args.port
-    child_port_max = args.port + local_size - 1
-    if child_port_min <= supervisor_port <= child_port_max:
+    vllm_port_min = args.port
+    vllm_port_max = args.port + local_size - 1
+    if vllm_port_min <= supervisor_port <= vllm_port_max:
         raise ValueError(
             f"Error: --data-parallel-supervisor-port {supervisor_port} "
-            f"overlaps with child rank ports {child_port_min}-{child_port_max}"
+            f"overlaps with vllm rank ports {vllm_port_min}-{vllm_port_max}"
         )
 
 
-def build_multi_port_external_lb_child_args(
+def build_vllm_dp_engine_args(
     args: argparse.Namespace, local_rank: int
 ) -> argparse.Namespace:
     child_args = copy.copy(args)
@@ -131,7 +131,7 @@ def build_multi_port_external_lb_child_args(
     return child_args
 
 
-def _build_multi_port_external_lb_child_env(
+def build_vllm_dp_engine_env(
     args: argparse.Namespace, local_rank: int
 ) -> dict[str, str]:
     # set visible devices for the child process
@@ -192,12 +192,13 @@ def _build_supervisor_app() -> FastAPI:
     return app
 
 
-def _run_multi_port_external_lb_child(
+def run_vllm_dp_server(
     child_args: argparse.Namespace, env_updates: dict[str, str]
 ) -> None:
     from vllm.entrypoints.openai.api_server import run_server
 
     rank = child_args.data_parallel_rank
+    # what does this do?
     os.setpgrp()
     update_environment_variables(env_updates)
     set_process_title("ExternalLBRank", str(rank))
@@ -205,65 +206,27 @@ def _run_multi_port_external_lb_child(
     uvloop.run(run_server(child_args))
 
 
-
-
-
 class DPSupervisor:
     def __init__(self, args: argparse.Namespace):
-        host = self.args.host or "0.0.0.0"
-        self.app = _build_supervisor_app()
-
         self.supervisor_port = args.data_parallel_supervisor_port
-        self.child_ports = [
+        self.vllm_ports = [
             args.port + local_rank
             for local_rank in range(args.data_parallel_size_local)
         ]
 
+        # Supervisor server uvicorn application.
+        self.app = _build_supervisor_app()
 
-        self.processes: list[BaseProcess] = []
-        self._failed_process: BaseProcess | None = None
+        # Background vLLM process.
+        self.vllm_processes: list[BaseProcess] = []
+
+        # Used to coordinate background coro shutdown.
         self._shutdown_event = asyncio.Event()
+
+        # Signal to use to shutdown the vLLM processes.
         self._shutdown_signal = signal.SIGTERM
 
-    async def run(self) -> None:
-        """
-        This is the main coroutine running on pid 1 in K8s.
-
-        K8s pod termination lifecycle will send a SIGTERM to pid 1
-        during shutdown, with a terminationGracePeriodSeconds to
-        enable things like request draining. This eventloop is
-        responsible for handling this signal and coordinating
-        with the background workers.
-
-        Additionally, the K8s API server will send health and
-        liveness probes to a single endpoint in the pod. This
-        coroutine is responsible for monitoring the background
-        vLLM servers and responding to those probes.
-        """
-
-        def _handle_signal(signum: int) -> None:
-            signal = signal.Signals(signum)
-            logger.info("Received %s, beginning shutdown", signal.name)
-            self._shutdown_event.set()
-            self._shutdown_signal = signal
-
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            loop.add_signal_handler(sig, _handle_signal, sig)
-
-        server, server_task = await self._start_supervisor_server()
-
-        try:
-            self._start_children()
-            await self._monitor_children()
-        finally:
-            await self._shutdown_children()
-
-            # Shutdown the supervisor server.
-            server.should_exit = True
-            await server_task
-
-    async def _start_supervisor_server(self) -> None:
+    async def start_supervisor(self) -> None:
         """
         Start the supervisor server, ensuring its on the event loop.
         """
@@ -302,20 +265,20 @@ class DPSupervisor:
         
         return server, server_task
 
-    def _start_children(self) -> None:
+    def start_vllm_servers(self) -> None:
         context = multiprocessing.get_context("spawn")
         for local_rank in range(self.args.data_parallel_size_local):
-            child_args = build_multi_port_external_lb_child_args(self.args, local_rank)
-            child_env = _build_multi_port_external_lb_child_env(self.args, local_rank)
+            vllm_args = build_vllm_dp_engine_args(self.args, local_rank)
+            vllm_env = build_vllm_dp_engine_env(self.args, local_rank)
             process = context.Process(
-                target=_run_multi_port_external_lb_child,
-                name=f"VLLM_DP_{child_args.data_parallel_rank}",
-                args=(child_args, child_env),
+                target=run_vllm_dp_server,
+                name=f"VLLM_DP_{vllm_args.data_parallel_rank}",
+                args=(vllm_args, vllm_env),
             )
             process.start()
-            self.processes.append(process)
+            self.vllm_processes.append(process)
 
-    async def _collect_child_health(
+    async def _collect_vllm_health(
         self, session: aiohttp.ClientSession, port: int, process: BaseProcess
     ) -> bool:
         # TODO: we need to implement some sort of retry system here.
@@ -323,9 +286,9 @@ class DPSupervisor:
         healthy, _ = await _probe_endpoint(session, self.args, port, "/health")
         return healthy
 
-    async def _monitor_children(self) -> None:
+    async def monitor_vllm_servers(self) -> None:
         """
-        Background asyncio task that monitors the vLLM servers.
+        Main asyncio task that monitors the vLLM servers.
 
         It works by:
         - A) sleeping for HEALTHCHECK_INTERVAL_S or until shutdown event
@@ -363,15 +326,15 @@ class DPSupervisor:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while await block_until_probe():
                 # 1) check if vLLM processes are still running.
-                failed = [p for p in self.processes is not p.is_alive()]
+                failed = [p for p in self.vllm_processes is not p.is_alive()]
                 if len(failed) > 0:
                     begin_shutdown(failed)
                     return
 
                 # 2) Gather readiness from the vLLM process API servers.
                 ready_status = await asyncio.gather(
-                    *(self._collect_child_health(session, port, process)
-                    for port, process in zip(self.child_ports, self.processes)),
+                    *(self._collect_vllm_health(session, port, process)
+                    for port, process in zip(self.vllm_ports, self.vllm_processes)),
                     return_exceptions=True,
                 )
                 unready_processes = [
@@ -395,12 +358,12 @@ class DPSupervisor:
                         begin_shutdown(unready_processes)
                         return
 
-    async def _shutdown_children(self) -> None:
+    async def shutdown_vllm_servers(self) -> None:
         """
         Shutdown the vLLM API server processes.
         """
         # 1. Send SIGTERM or SIGINT to all children
-        for process in self.processes:
+        for process in self.vllm_processes:
             logger.info(
                 "Forwarding %s to vLLM server pid: %s",
                 self._shutdown_signal.name, process.pid
@@ -409,13 +372,13 @@ class DPSupervisor:
                 os.kill(process, self._shutdown_signal)
         
         # 2. Wait briefly for them to exit gracefully
-        for process in self.processes:
+        for process in self.vllm_processes:
             await asyncio.to_thread(
                 process.join(timeout=DEFAULT_CHILD_GRACEFUL_TERMINATION)
             )
         
         # 3. Force kill the process tree if it exceeds the timeout.
-        for process in self.processes:
+        for process in self.vllm_processes:
             if process.is_alive():
                 logger.info(
                     "vLLM Server Process still alive after ", signal, process.pid
@@ -423,7 +386,45 @@ class DPSupervisor:
                 kill_process_tree(process.pid)
 
 
+async def main(supervisor: DPSupervisor) -> None:
+    """
+    This is the main coroutine running on pid 1 in K8s.
+
+    K8s pod termination lifecycle will send a SIGTERM to pid 1
+    during shutdown, with a terminationGracePeriodSeconds to
+    enable things like request draining. This eventloop is
+    responsible for handling this signal and coordinating
+    with the background workers.
+
+    Additionally, the K8s API server will send health and
+    liveness probes to a single endpoint in the pod. This
+    coroutine is responsible for monitoring the background
+    vLLM servers and responding to those probes.
+    """
+
+    def _handle_signal(signum: int) -> None:
+        signal = signal.Signals(signum)
+        logger.info("Received %s, beginning shutdown", signal.name)
+        supervisor._shutdown_event.set()
+        supervisor._shutdown_signal = signal
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _handle_signal, sig)
+    
+    # Launch supervisor server
+    server, server_task = await supervisor.start_supervisor()
+
+    try:
+        supervisor.start_vllm_servers()
+        await supervisor.monitor_vllm_servers()
+    finally:
+        await supervisor.shutdown_vllm_servers()
+
+        # Shutdown the supervisor server.
+        server.should_exit = True
+        await server_task
+
 def run_multi_port_external_lb_supervisor(args: argparse.Namespace) -> None:
     validate_multi_port_external_lb_args(args)
-    supervisor = DPSupervisor(args)
-    uvloop.run(supervisor.run())
+    uvloop.run(main(DPSupervisor(args)))

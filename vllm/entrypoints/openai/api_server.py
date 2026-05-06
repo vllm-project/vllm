@@ -716,10 +716,10 @@ if __name__ == "__main__":
     validate_parsed_serve_args(args)
 
     if args.data_parallel_multi_port_external_lb:
-        from vllm.entrypoints.openai.local_external_lb import (
-            run_multi_port_external_lb_supervisor,
+        from vllm.entrypoints.openai.dp_supervisor import (
+            run_dp_supervisor,
         )
 
-        run_multi_port_external_lb_supervisor(args)
+        run_dp_supervisor(args)
     else:
         uvloop.run(run_server(args))

@@ -394,7 +394,7 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
     if args.data_parallel_multi_port_external_lb:
-        from vllm.entrypoints.openai.local_external_lb import (
+        from vllm.entrypoints.openai.dp_supervisor import (
             validate_multi_port_external_lb_args,
         )
 
