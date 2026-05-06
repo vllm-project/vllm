@@ -32,7 +32,7 @@ from vllm.utils.system_utils import (
 
 logger = init_logger(__name__)
 
-DEFAULT_CHILD_GRACEFUL_TERMINATION = 5.0
+CHILD_EXIT_GRACE_S = 5.0
 
 
 def infer_multi_port_external_lb_start_rank(args: argparse.Namespace) -> int:
@@ -366,10 +366,7 @@ class DPSupervisor:
                 self._shutdown_signal,
                 len(self.processes),
             )
-            timeout = max(
-                self.args.shutdown_timeout,
-                DEFAULT_CHILD_GRACEFUL_TERMINATION,
-            )
+            timeout = self.args.shutdown_timeout + CHILD_EXIT_GRACE_S
             for process in self.processes:
                 if not process.is_alive() or (pid := process.pid) is None:
                     continue
