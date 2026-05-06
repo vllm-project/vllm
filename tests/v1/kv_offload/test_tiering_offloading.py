@@ -266,6 +266,9 @@ class TestTieringOffloadingManager:
             result = self.manager.lookup(block, _CTX)
             assert result is None  # Retry later (promotion initiated)
 
+        # Flush deferred submit_load() calls (normally done at end of engine step)
+        list(self.manager.take_events())
+
         # Process finished jobs to complete promotion
         self.manager._process_finished_jobs()
 
@@ -413,20 +416,75 @@ class TestTieringOffloadingManager:
             block = self.primary_tier._policy.get(block_hash)
             assert block.ref_cnt == 0
 
-    def test_req_context_propagated_to_submit_load(self, manager_setup):
-        """Test that req_context from lookup() is forwarded to submit_load."""
-        block = to_keys([0])[0]
-        self.secondary_tier1.blocks[block] = True  # simulate prior cascade
+    def test_lookup_batches_submit_load_per_request(self, manager_setup):
+        """lookup() defers submit_load until take_events(), one call per request.
+
+        Blocks from different requests each get their own submit_load call, each
+        carrying the correct req_context.
+        """
+        blocks = to_keys(range(4))
+        for block in blocks:
+            self.secondary_tier1.blocks[block] = True
 
         self.secondary_tier1.submit_load = MagicMock(
             wraps=self.secondary_tier1.submit_load
         )
-        ctx = ReqContext(kv_transfer_params={"priority": "high"})
-        self.manager.lookup(block, ctx)
 
+        ctx_a = ReqContext()
+        ctx_b = ReqContext()
+
+        # All lookups return None: secondary hit triggers promotion (in-flight)
+        assert self.manager.lookup(blocks[0], ctx_a) is None
+        assert self.manager.lookup(blocks[1], ctx_a) is None
+        assert self.manager.lookup(blocks[2], ctx_b) is None
+        assert self.manager.lookup(blocks[3], ctx_b) is None
+
+        # submit_load must not fire during lookup - only at end of step
+        self.secondary_tier1.submit_load.assert_not_called()
+
+        # simulate end of step
+        list(self.manager.take_events())
+
+        assert self.secondary_tier1.submit_load.call_count == 2
+        calls = self.secondary_tier1.submit_load.call_args_list
+        jm_a = calls[0].args[0]
+        jm_b = calls[1].args[0]
+        assert set(jm_a.keys) == {blocks[0], blocks[1]}
+        assert jm_a.req_context is ctx_a
+        assert set(jm_b.keys) == {blocks[2], blocks[3]}
+        assert jm_b.req_context is ctx_b
+
+    def test_lookup_shared_block_no_duplicate_promotion(self, manager_setup):
+        """A block looked up by two requests in the same step is promoted once.
+
+        The first lookup initiates promotion (returns None via secondary hit).
+        The second lookup sees ref_cnt=-1 on the primary slot and returns None
+        via the primary in-flight path — without triggering a second promotion.
+        """
+        shared_block = to_keys([0])[0]
+        self.secondary_tier1.blocks[shared_block] = True
+
+        self.secondary_tier1.submit_load = MagicMock(
+            wraps=self.secondary_tier1.submit_load
+        )
+
+        ctx_a = ReqContext()
+        ctx_b = ReqContext()
+
+        result_a = self.manager.lookup(shared_block, ctx_a)
+        result_b = self.manager.lookup(shared_block, ctx_b)
+
+        # Both see None (in-flight), but promotion is only queued once
+        assert result_a is None
+        assert result_b is None
+
+        list(self.manager.take_events())
+
+        # Only one submit_load call despite two lookups
         self.secondary_tier1.submit_load.assert_called_once()
-        job_metadata = self.secondary_tier1.submit_load.call_args[0][0]
-        assert job_metadata.req_context.kv_transfer_params == {"priority": "high"}
+        job_metadata = self.secondary_tier1.submit_load.call_args.args[0]
+        assert list(job_metadata.keys) == [shared_block]
+        assert job_metadata.req_context is ctx_a
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:

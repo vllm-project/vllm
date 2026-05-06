@@ -21,6 +21,9 @@ Key Design Principles:
 """
 
 from collections.abc import Collection, Iterable
+from dataclasses import dataclass, field
+
+import numpy as np
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
@@ -41,6 +44,15 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class _PendingPromotion:
+    """Accumulator for blocks awaiting submit_load() for one (tier, request)."""
+
+    keys: list[OffloadKey] = field(default_factory=list)
+    block_ids: list[int] = field(default_factory=list)
+    req_context: ReqContext = field(default_factory=ReqContext)
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -144,6 +156,14 @@ class TieringOffloadingManager(OffloadingManager):
         # Load jobs: secondary → primary transfers (promotions)
         self._load_jobs: dict[JobId, JobMetadata] = {}
 
+        # Pending promotion requests accumulated during lookup() calls; flushed
+        # as one batched submit_load() per (tier, request) in take_events().
+        # Outer key: tier. Inner key: id(req_context) — the same ReqContext
+        # object is reused for all block lookups of a given request per engine step.
+        self._pending_load_submissions: dict[
+            SecondaryTierManager, dict[int, _PendingPromotion]
+        ] = {}
+
         # Wire each secondary tier with a long-lived memoryview of the primary
         # CPU buffer. One view is shared across all tiers; released in shutdown().
         self._primary_kv_view = primary_tier.create_kv_memoryview()
@@ -234,7 +254,7 @@ class TieringOffloadingManager(OffloadingManager):
             return None
         elif hit_tier is not None:
             self._initiate_promotion(hit_tier, key, req_context)
-            return True
+            return None
         elif any_none:
             return None
         else:
@@ -247,41 +267,65 @@ class TieringOffloadingManager(OffloadingManager):
         req_context: ReqContext,
     ):
         """
-        Initiate promotion of a block from a secondary tier to the primary tier.
+        Queue a block for promotion from a secondary tier to the primary tier.
 
-        This method:
-        1. Calls primary.prepare_write() to allocate space in primary tier
-        2. Calls tier.submit_load() to start async transfer: secondary→primary
-        3. Tracks the job in _load_jobs dictionary
+        Allocates space in the primary tier immediately (sets ref_cnt=-1 so
+        subsequent lookups within the same step see the slot as in-flight),
+        then defers the actual submit_load() call to _flush_pending_promotions()
+        so all blocks queued during one engine step are submitted as a single
+        batched job.
 
         Args:
             tier: The secondary tier to promote from
             key: Block to promote
             req_context: Per-request context forwarded to primary.prepare_write().
         """
-        # Allocate space in primary tier for promoted block
+        # Allocate space in primary tier for promoted block.
+        # Must happen immediately so primary.lookup() returns None (in-flight)
+        # for this key on any subsequent lookup() call within the same step,
+        # preventing duplicate promotion attempts.
         primary_store_result = self.primary_tier.prepare_write([key], req_context)
 
         if primary_store_result is None:
-            # Cannot allocate space in primary tier (full)
-            # The next lookup() will retry
+            # Cannot allocate space in primary tier (full); retry next step.
             return
 
-        # Submit async load job: secondary→primary
-        job_id = self._next_job_id()
-
-        # Track this load job
         store_spec = primary_store_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
-        job_metadata = JobMetadata(
-            job_id=job_id,
-            keys=primary_store_result.keys_to_store,
-            block_ids=store_spec.block_ids,
-            req_context=req_context,
-        )
-        self._load_jobs[job_id] = job_metadata
+        # Defer submit_load to take_events(). Group by (tier, request) so each
+        # request's blocks are submitted as one batched job per tier.
+        tier_pending = self._pending_load_submissions.setdefault(tier, {})
+        ctx_id = id(req_context)
+        if ctx_id not in tier_pending:
+            tier_pending[ctx_id] = _PendingPromotion(
+                keys=[], block_ids=[], req_context=req_context
+            )
+        entry = tier_pending[ctx_id]
+        entry.keys.extend(primary_store_result.keys_to_store)
+        entry.block_ids.extend(store_spec.block_ids)
 
-        tier.submit_load(job_metadata)
+    def _flush_pending_promotions(self) -> None:
+        """Submit one batched submit_load() per (tier, request).
+
+        Called from take_events() at the end of each engine step, flushing
+        all promotion requests deferred during lookup().
+        """
+        if not self._pending_load_submissions:
+            return
+
+        for tier, pending_by_ctx in self._pending_load_submissions.items():
+            for entry in pending_by_ctx.values():
+                job_id = self._next_job_id()
+                job_metadata = JobMetadata(
+                    job_id=job_id,
+                    keys=entry.keys,
+                    block_ids=np.array(entry.block_ids, dtype=np.int64),
+                    req_context=entry.req_context,
+                )
+                self._load_jobs[job_id] = job_metadata
+                tier.submit_load(job_metadata)
+
+        self._pending_load_submissions.clear()
 
     def prepare_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
@@ -428,6 +472,13 @@ class TieringOffloadingManager(OffloadingManager):
         Yields:
             New OffloadingEvents collected since the last call.
         """
+        # TODO: Move _flush_pending_promotions() to a dedicated end_of_batch()
+        # hook once one exists. For now, take_events() serves as the flush
+        # point under the assumption that it is called at the end of each
+        # engine step (Scheduler.update_from_output() → connector.take_events()).
+        # Update the relevant tests the rely on take_events() to signal end of step.
+        self._flush_pending_promotions()
+
         if self.events is not None:
             yield from self.events
             self.events.clear()
