@@ -44,6 +44,9 @@ class TrtLlmMxfp4ExpertsBase:
             moe_config.intermediate_size_per_partition
         )
         self.hidden_dim = moe_config.hidden_dim
+        self.hidden_dim_unpadded = (
+            moe_config.hidden_dim_unpadded or moe_config.hidden_dim
+        )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
@@ -82,9 +85,6 @@ class TrtLlmMxfp4ExpertsBase:
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
 
-        # P1-5 fix: use public quant_dtype property instead of private _a1
-        self.use_mxfp8_input = quant_config.quant_dtype == "mxfp8"
-
     @staticmethod
     def _supports_current_device() -> bool:
         p = current_platform
@@ -121,8 +121,7 @@ class TrtLlmMxfp4ExpertsBase:
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # Expert handles MXFP8 quantization internally if needed
-        return True
+        return False
 
 
 class TrtLlmMxfp4ExpertsMonolithic(
@@ -181,24 +180,19 @@ class TrtLlmMxfp4ExpertsMonolithic(
     ) -> torch.Tensor:
         from flashinfer import trtllm_fp4_block_scale_moe
 
-        # Handle input quantization
-        if self.use_mxfp8_input:
-            from flashinfer import mxfp8_quantize
-
-            x_quant, x_scale = mxfp8_quantize(
-                hidden_states,
-                is_sf_swizzled_layout=False,
-                alignment=256,
-            )
-            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
-                *hidden_states.shape[:-1], -1
-            )
+        if a1q_scale is not None:
+            x_quant = hidden_states
+            x_scale = a1q_scale.view(torch.float8_e4m3fn)
         else:
             assert hidden_states.dtype == torch.bfloat16
             x_quant = hidden_states
             x_scale = None
-
-        output = torch.empty_like(hidden_states)
+        output = torch.empty(
+            *hidden_states.shape[:-1],
+            self.hidden_dim_unpadded,
+            dtype=torch.bfloat16,
+            device=hidden_states.device,
+        )
 
         from vllm.utils.flashinfer import _is_fi_autotuning, autotune
 
@@ -244,10 +238,6 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
     Moved from trtllm_moe.py.
     """
 
-    @property
-    def expects_unquantized_inputs(self) -> bool:
-        return True
-
     @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
@@ -284,7 +274,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
-        output = (M, K)
+        output = (M, self.hidden_dim_unpadded)
         return (workspace1, workspace2, output)
 
     def apply(
@@ -310,18 +300,9 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         intermediate_size = self.intermediate_size_per_partition
         local_expert_offset = self.moe_config.ep_rank * local_num_experts
 
-        # Handle input quantization
-        if self.use_mxfp8_input:
-            from flashinfer import mxfp8_quantize
-
-            x_quant, x_scale = mxfp8_quantize(
-                hidden_states,
-                is_sf_swizzled_layout=False,
-                alignment=256,
-            )
-            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
-                *hidden_states.shape[:-1], -1
-            )
+        if a1q_scale is not None:
+            x_quant = hidden_states
+            x_scale = a1q_scale.view(torch.float8_e4m3fn)
         else:
             assert hidden_states.dtype == torch.bfloat16
             x_quant = hidden_states
