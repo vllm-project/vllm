@@ -2714,3 +2714,25 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     assert conversation == expected_conversation
     _assert_mm_data_is_vision_chunk_input(mm_data, 1)
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[video_uuid], modality="vision_chunk")
+
+
+def test_parse_chat_messages_developer_role_merges_with_system(kimi_k2_5_model_config):
+    """Developer (OpenAI Responses) must become system and merge for Qwen-style templates."""
+    messages = [
+        {"role": "system", "content": "Base policy."},
+        {
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Extra from agent."}],
+        },
+        {"role": "user", "content": "Hi"},
+    ]
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+    assert len(conversation) == 2
+    assert conversation[0]["role"] == "system"
+    assert "Base policy." in conversation[0]["content"]
+    assert "Extra from agent." in conversation[0]["content"]
+    assert conversation[1]["role"] == "user"

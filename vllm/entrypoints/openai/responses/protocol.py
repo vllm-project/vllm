@@ -513,8 +513,12 @@ class ResponsesRequest(OpenAIBaseModel):
                 continue
 
             item_type = item.get("type")
-            if item.get("role") == "developer" and (
-                item_type is None or item_type == "message"
+            # Fold every developer item: Codex uses type "message"; other clients
+            # may omit ``type``. Do not require type so mis-tagged payloads still work.
+            if item.get("role") == "developer" and item_type not in (
+                "function_call",
+                "function_call_output",
+                "reasoning",
             ):
                 developer_chunks.extend(
                     _text_chunks_from_responses_message_content(item.get("content"))

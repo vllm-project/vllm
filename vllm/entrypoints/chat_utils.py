@@ -1748,7 +1748,12 @@ def _parse_chat_message_content(
     interleave_strings: bool,
     mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> list[ConversationMessage]:
-    role = message["role"]
+    original_role = message["role"]
+    role = original_role
+    # OpenAI Responses API uses role "developer" for instruction-like content.
+    # Qwen and other chat templates only allow system/user/assistant/tool.
+    if role == "developer":
+        role = "system"
     content = message.get("content")
     reasoning = message.get("reasoning")
 
@@ -1813,9 +1818,35 @@ def _parse_chat_message_content(
         if "task" in message and isinstance(message["task"], str):
             result_msg["task"] = message["task"]
 
-        if role == "developer":
+        if original_role == "developer":
             result_msg["tools"] = message.get("tools", None)
     return result
+
+
+def _merge_consecutive_system_messages(messages: list[ConversationMessage]) -> None:
+    """Combine adjacent system messages into one (string content only).
+
+    After mapping developer -> system, the conversation may contain two system
+    blocks (e.g. instructions + developer note). Many templates (Qwen) allow
+    only one system message at the start.
+    """
+    i = 0
+    while i < len(messages) - 1:
+        a, b = messages[i], messages[i + 1]
+        if a.get("role") != "system" or b.get("role") != "system":
+            i += 1
+            continue
+        c1, c2 = a.get("content"), b.get("content")
+        if isinstance(c1, str) and isinstance(c2, str):
+            a["content"] = f"{c1}\n\n{c2}" if c1 else c2
+            messages.pop(i + 1)
+        elif isinstance(c1, str) and not c2:
+            messages.pop(i + 1)
+        elif (not c1) and isinstance(c2, str):
+            a["content"] = c2
+            messages.pop(i + 1)
+        else:
+            i += 1
 
 
 def _postprocess_messages(messages: list[ConversationMessage]) -> None:
@@ -1876,6 +1907,7 @@ def parse_chat_messages(
 
         conversation.extend(sub_messages)
 
+    _merge_consecutive_system_messages(conversation)
     _postprocess_messages(conversation)
 
     mm_data, mm_uuids = mm_tracker.resolve_items()
@@ -1915,6 +1947,7 @@ async def parse_chat_messages_async(
 
         conversation.extend(sub_messages)
 
+    _merge_consecutive_system_messages(conversation)
     _postprocess_messages(conversation)
 
     mm_data, mm_uuids = await mm_tracker.resolve_items()
