@@ -29,7 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.network_utils import make_zmq_path
+from vllm.utils.network_utils import get_ip, make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -59,7 +59,7 @@ class NixlConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
-        self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        self.side_channel_host = self._resolve_side_channel_host(vllm_config)
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             + vllm_config.parallel_config.data_parallel_index
@@ -209,6 +209,7 @@ class NixlConnectorScheduler:
                     encoded_data,
                     ready_event,
                     self._stop_event,
+                    self.side_channel_host,
                     self.side_channel_port,
                 ),
                 daemon=True,
@@ -218,10 +219,36 @@ class NixlConnectorScheduler:
             ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     @staticmethod
+    def _resolve_side_channel_host(vllm_config: "VllmConfig") -> str:
+        configured_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        if vllm_config.parallel_config.data_parallel_backend != "ray":
+            return configured_host
+
+        try:
+            import ray
+
+            actor_host = ray.util.get_node_ip_address()
+        except Exception:
+            logger.warning(
+                "Failed to resolve Ray actor-local IP for NIXL side "
+                "channel host. Falling back to vLLM host IP resolution.",
+                exc_info=True,
+            )
+            actor_host = get_ip()
+        logger.info(
+            "Using Ray actor-local NIXL side channel host %s "
+            "(configured VLLM_NIXL_SIDE_CHANNEL_HOST=%s)",
+            actor_host,
+            configured_host,
+        )
+        return actor_host
+
+    @staticmethod
     def _nixl_handshake_listener(
         encoded_data: dict[int, Any],
         ready_event: threading.Event,
         stop_event: threading.Event,
+        host: str,
         port: int,
     ):
         """Background thread for getting new NIXL handshakes."""
@@ -229,7 +256,6 @@ class NixlConnectorScheduler:
         # to a better approach via HTTP endpoint soon.
 
         # Listen for new requests for metadata.
-        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:

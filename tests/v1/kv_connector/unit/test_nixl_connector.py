@@ -1857,6 +1857,123 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
+def test_nixl_side_channel_host_uses_ray_actor_ip(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "ray"
+    vllm_config.parallel_config.data_parallel_size = 8
+    vllm_config.parallel_config.data_parallel_size_local = 4
+
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.12")
+
+    assert (
+        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
+        == "10.0.0.12"
+    )
+
+
+def test_nixl_side_channel_host_uses_ray_actor_ip_after_dp_reset(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "ray"
+    # Non-MoE Ray DP actors reset DP size before constructing the scheduler.
+    vllm_config.parallel_config.data_parallel_size = 1
+    vllm_config.parallel_config.data_parallel_size_local = 1
+    vllm_config.parallel_config.data_parallel_index = 3
+
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.13")
+
+    assert (
+        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
+        == "10.0.0.13"
+    )
+
+
+def test_nixl_side_channel_host_keeps_env_for_non_ray_dp(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "mp"
+    vllm_config.parallel_config.data_parallel_size = 8
+    vllm_config.parallel_config.data_parallel_size_local = 4
+
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "rank-local-node")
+
+    assert (
+        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
+        == "rank-local-node"
+    )
+
+
+def test_nixl_side_channel_host_falls_back_when_ray_lookup_fails(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "ray"
+
+    def raise_ray_error():
+        raise RuntimeError("ray lookup failed")
+
+    monkeypatch.setattr(ray.util, "get_node_ip_address", raise_ray_error)
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.get_ip",
+        lambda: "10.0.0.14",
+    )
+
+    assert (
+        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
+        == "10.0.0.14"
+    )
+
+
+def test_nixl_scheduler_uses_resolved_side_channel_host(monkeypatch):
+    vllm_config = create_vllm_config()
+    vllm_config.parallel_config.data_parallel_backend = "ray"
+    vllm_config.parallel_config.data_parallel_index = 2
+
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.15")
+
+    scheduler = NixlConnectorScheduler(
+        vllm_config,
+        vllm_config.kv_transfer_config.engine_id,
+        make_kv_cache_config(block_size=16),
+    )
+
+    created_threads: list[dict[str, Any]] = []
+
+    class FakeEvent:
+        def wait(self):
+            pass
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            created_threads.append(kwargs)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.threading.Event",
+        FakeEvent,
+    )
+    monkeypatch.setattr(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.threading.Thread",
+        FakeThread,
+    )
+
+    scheduler.set_xfer_handshake_metadata(
+        {0: NixlHandshakePayload("compat-hash", b"agent-metadata")}
+    )
+    listener_args = created_threads[0]["args"]
+    assert listener_args[3] == "10.0.0.15"
+    assert listener_args[4] == scheduler.side_channel_port
+
+    request = create_request(request_id=1, do_remote_decode=True, max_tokens=1)
+    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+    delay, kv_transfer_params = scheduler.request_finished(request, ([1, 2],))
+
+    assert delay
+    assert kv_transfer_params is not None
+    assert kv_transfer_params["remote_host"] == "10.0.0.15"
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
     FakeNixlWrapper,
