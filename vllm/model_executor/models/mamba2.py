@@ -30,6 +30,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
     SupportsMambaPrefixCaching,
+    SupportsQuant,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -188,8 +189,10 @@ class Mamba2Model(nn.Module):
 
 
 class Mamba2ForCausalLM(
-    nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
+    nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching, SupportsQuant
 ):
+    packed_modules_mapping = {}
+
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
