@@ -23,17 +23,17 @@ from vllm.v1.capture.consumers.filesystem.types import (
     FilesystemCaptureRequest,
     FilesystemConsumerParams,
 )
+from vllm.v1.capture.consumers.filesystem.writer import (
+    ActivationWriter,
+    FinalizeTask,
+    WriteTask,
+)
 from vllm.v1.capture.types import (
     CaptureChunk,
     CaptureFinalize,
     CaptureKey,
     CaptureResult,
     CaptureSpec,
-)
-from vllm.v1.capture.consumers.filesystem.writer import (
-    ActivationWriter,
-    FinalizeTask,
-    WriteTask,
 )
 
 if TYPE_CHECKING:

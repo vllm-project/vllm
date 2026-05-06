@@ -571,6 +571,18 @@ class EngineArgs:
     enable_steering: bool = False
     max_steering_configs: int = SteeringConfig.max_steering_configs
 
+    # Capture consumers fields
+    # --capture-consumers is repeatable (action="append"); when unset the
+    # whole capture-consumer pipeline stays disabled.
+    capture_consumers: list[str] | None = None
+
+    # Programmatic override: Python callers (``LLM(capture_consumers=[...])``)
+    # pre-build a ``CaptureConsumersConfig`` directly and skip the CLI
+    # shorthand parser. When set, takes precedence over ``capture_consumers``.
+    # Typed as ``Any`` to avoid importing the capture config at module
+    # load time (the v1 capture package imports torch).
+    capture_consumers_config_override: Any = None
+
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
@@ -1268,6 +1280,25 @@ class EngineArgs:
         steering_group.add_argument(
             "--max-steering-configs",
             **steering_kwargs["max_steering_configs"],
+        )
+
+        # Capture consumers arguments
+        capture_consumers_group = parser.add_argument_group(
+            title="CaptureConsumersConfig",
+            description="Configuration for the capture-consumer framework. "
+            "Consumers receive activation data produced during the forward "
+            "pass. Repeat the flag to register multiple consumers.",
+        )
+        capture_consumers_group.add_argument(
+            "--capture-consumers",
+            action="append",
+            default=None,
+            metavar="SPEC",
+            help="Register a capture consumer using shorthand "
+            "'name:key=val,key=val'. Repeat the flag for multiple "
+            "consumers (e.g. --capture-consumers filesystem:root=/tmp "
+            "--capture-consumers logging). Use YAML config for complex "
+            "parameter values.",
         )
 
         # Observability arguments
@@ -2025,6 +2056,26 @@ class EngineArgs:
             else None
         )
 
+        # Capture consumers config — materialized from either the Python
+        # programmatic override (``LLM(capture_consumers=[...])``) or the
+        # repeatable ``--capture-consumers`` CLI flag.  The override takes
+        # precedence when both are set.
+        capture_consumers_config = None
+        if self.capture_consumers_config_override is not None:
+            capture_consumers_config = self.capture_consumers_config_override
+        elif self.capture_consumers:
+            from vllm.v1.capture.config import (
+                CaptureConsumersConfig,
+                parse_consumer_spec,
+                validate_consumer_specs,
+            )
+
+            specs = [parse_consumer_spec(s) for s in self.capture_consumers]
+            validate_consumer_specs(specs)
+            capture_consumers_config = CaptureConsumersConfig(
+                consumers=specs,
+            )
+
         if (
             lora_config is not None
             and speculative_config is not None
@@ -2187,6 +2238,7 @@ class EngineArgs:
             kernel_config=kernel_config,
             lora_config=lora_config,
             steering_config=steering_config,
+            capture_consumers_config=capture_consumers_config,
             speculative_config=speculative_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,

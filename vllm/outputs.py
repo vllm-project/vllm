@@ -13,6 +13,7 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.v1.capture.types import CaptureResult
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -121,6 +122,7 @@ class RequestOutput:
         num_cached_tokens: int | None = None,
         *,
         kv_transfer_params: dict[str, Any] | None = None,
+        capture_results: dict[str, CaptureResult] | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -141,12 +143,30 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        # Per-consumer capture results from the capture-consumer
+        # framework. Keyed by consumer instance name; empty dict when
+        # no consumer produced a result for this request. Threaded in
+        # from the engine core on the terminal output.
+        self.capture_results: dict[str, CaptureResult] = (
+            capture_results if capture_results is not None else {}
+        )
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
 
         self.finished |= next_output.finished
         self.kv_transfer_params = next_output.kv_transfer_params
+        # Per-consumer capture results from the capture-consumer
+        # framework arrive on the terminal EngineCoreOutput. Union the
+        # dicts so entries from earlier streaming chunks are preserved
+        # alongside entries from the finalize step; same-key entries
+        # from the later output win.
+        next_capture_results = getattr(next_output, "capture_results", None)
+        if next_capture_results:
+            if not self.capture_results:
+                self.capture_results = dict(next_capture_results)
+            else:
+                self.capture_results.update(next_capture_results)
 
         for next_completion in next_output.outputs:
             for i, completion in enumerate(self.outputs):

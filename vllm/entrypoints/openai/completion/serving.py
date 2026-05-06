@@ -6,12 +6,18 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    CaptureResultResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import (
+    _build_capture_results_response as _build_capture_results_response_chat,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -42,11 +48,30 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.v1.capture import (
+    CaptureConsumer,
+    CaptureContext,
+    CaptureValidationError,
+)
+from vllm.v1.capture import registry as capture_registry
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
+
+
+def _build_capture_results_response(
+    request: CompletionRequest,
+    final_res: RequestOutput,
+) -> dict[str, CaptureResultResponse] | None:
+    """Convert per-consumer capture results into the legacy-completion response.
+
+    Thin adapter over
+    :func:`vllm.entrypoints.openai.chat_completion.serving._build_capture_results_response`
+    so the two endpoints share a single payload-coercion code path.
+    """
+    return _build_capture_results_response_chat(request, final_res)  # type: ignore[arg-type]
 
 
 class OpenAIServingCompletion(OpenAIServing):
@@ -79,6 +104,100 @@ class OpenAIServingCompletion(OpenAIServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
+
+        # Capture-consumer instance cache — mirrors
+        # ``OpenAIServingChat.__init__``.
+        self._capture_consumers: dict[str, CaptureConsumer] = {}
+        capture_config = getattr(
+            self.engine_client.vllm_config, "capture_consumers_config", None
+        )
+        if capture_config is not None:
+            for spec in capture_config.consumers:
+                key = spec.instance_name or spec.name
+                self._capture_consumers[key] = capture_registry.build_consumer(
+                    spec.name,
+                    self.engine_client.vllm_config,
+                    spec.params,
+                )
+
+    def _admit_capture(
+        self,
+        *,
+        sampling_params: SamplingParams,
+        engine_input: EngineInput,
+        request_id: str,
+    ) -> ErrorResponse | None:
+        """Run admission validation for the per-request capture dict.
+
+        Mirrors :meth:`OpenAIServingChat._admit_capture`.
+        """
+        if sampling_params.capture is None:
+            return None
+
+        vllm_config = self.engine_client.vllm_config
+        parallel_config = vllm_config.parallel_config
+        model_config = vllm_config.model_config
+
+        try:
+            num_prompt_tokens = self._extract_prompt_len(engine_input)
+        except Exception as exc:
+            return self.create_error_response(
+                f"capture: failed to determine prompt length: {exc}",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="capture",
+            )
+
+        try:
+            num_hidden_layers = model_config.get_total_num_hidden_layers()
+            hidden_size = model_config.get_hidden_size()
+            dt = model_config.dtype
+            element_size_bytes = getattr(dt, "itemsize", None)
+            if element_size_bytes is None:
+                import torch
+
+                element_size_bytes = torch.tensor([], dtype=dt).element_size()
+        except Exception as exc:
+            return self.create_error_response(
+                f"capture: failed to read model shape: {exc}",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="capture",
+            )
+
+        ctx = CaptureContext(
+            vllm_internal_request_id=request_id,  # type: ignore[arg-type]
+            num_prompt_tokens=num_prompt_tokens,
+            num_computed_tokens=0,
+            num_hidden_layers=num_hidden_layers,
+            hidden_size=hidden_size,
+            element_size_bytes=int(element_size_bytes),
+            tensor_parallel_size=parallel_config.tensor_parallel_size,
+            pipeline_parallel_size=parallel_config.pipeline_parallel_size,
+        )
+
+        validated: dict[str, Any] = {}
+        for name, raw_spec in sampling_params.capture.items():
+            consumer = self._capture_consumers.get(name)
+            if consumer is None:
+                available = sorted(self._capture_consumers.keys())
+                return self.create_error_response(
+                    (
+                        f"capture: no consumer named {name!r} is registered. "
+                        f"Available consumers: {available}."
+                    ),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param=f"capture.{name}",
+                )
+            try:
+                validated[name] = consumer.validate_client_spec(raw_spec, ctx)
+            except CaptureValidationError as exc:
+                return self.create_error_response(
+                    str(exc),
+                    status_code=HTTPStatus.BAD_REQUEST,
+                    param=f"capture.{name}",
+                )
+
+        sampling_params.capture = validated
+        return None
 
     async def render_completion_request(
         self,
@@ -202,6 +321,18 @@ class OpenAIServingCompletion(OpenAIServing):
                     sampling_params.steering_module_ref = steering_module_ref
 
             request_id_item = f"{request_id}-{i}"
+
+            # Per-request capture-consumer admission validation. Each
+            # prompt admits separately against the same shared spec dict
+            # because each prompt has its own engine input / token length.
+            if isinstance(sampling_params, SamplingParams) and sampling_params.capture:
+                error_response = self._admit_capture(
+                    sampling_params=sampling_params,
+                    engine_input=engine_input,
+                    request_id=request_id_item,
+                )
+                if error_response is not None:
+                    return error_response
 
             self._log_inputs(
                 request_id_item,
@@ -601,8 +732,12 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        capture_results: dict[str, CaptureResultResponse] | None = None
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            capture_results = _build_capture_results_response(
+                request, final_res_batch[0]
+            )
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -611,6 +746,7 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
+            capture_results=capture_results,
         )
 
     def _create_completion_logprobs(

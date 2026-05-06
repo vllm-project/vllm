@@ -43,12 +43,12 @@ from vllm.v1.capture.plan import (
 )
 from vllm.v1.capture.sink import CaptureSink
 from vllm.v1.capture.types import (
-    CaptureKey,
     CaptureChunk,
     CaptureFinalize,
+    CaptureKey,
     CaptureResult,
-    CaptureStatus,
     CaptureSpec,
+    CaptureStatus,
     VllmInternalRequestId,
 )
 
@@ -548,7 +548,9 @@ class CaptureManager:
                     # Slice rows for this consumer on the CPU.  All
                     # consumers share the same already-transferred tensor.
                     row_indices = [e.scratch_row for e in chunk_entries]
-                    idx_tensor = torch.tensor(row_indices, dtype=torch.long, device=scratch.device)
+                    idx_tensor = torch.tensor(
+                        row_indices, dtype=torch.long, device=scratch.device
+                    )
                     chunk_tensor = scratch.index_select(0, idx_tensor).cpu()
 
                     step_index = chunk_entries[0].step_index

@@ -350,6 +350,25 @@ class SamplingParams(
     hash bit-for-bit identically to today, preserving prefix-cache
     reuse."""
 
+    capture: dict[str, Any] | None = None
+    """Per-request opt-in for capture consumers, keyed by consumer name.
+
+    Each value is an opaque raw spec that the corresponding consumer's
+    ``validate_client_spec`` understands (filesystem expects a
+    ``FilesystemCaptureRequest`` or dict, other consumers expose their
+    own schemas). Only consumers with ``reads_client_spec = True`` accept
+    per-request specs.
+
+    Validation at ``SamplingParams`` construction is strictly structural:
+    the field must be either ``None`` or a ``dict[str, Any]`` (with
+    string keys). Per-consumer validation — shape, layer-in-range,
+    byte-budget, prefix-cache positions — runs at the OpenAI entrypoint
+    against the active consumer registry and is *not* performed here.
+
+    The entrypoint mutates this dict in place after validation, replacing
+    each raw value with the consumer-produced :class:`CaptureSpec`. The
+    runner tolerates both shapes."""
+
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
@@ -393,6 +412,7 @@ class SamplingParams(
         prefill_steering_vectors: SteeringVectorSpec | None = None,
         decode_steering_vectors: SteeringVectorSpec | None = None,
         steering_module_ref: tuple[str, float] | None = None,
+        capture: dict[str, Any] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -438,6 +458,7 @@ class SamplingParams(
             prefill_steering_vectors=prefill_steering_vectors,
             decode_steering_vectors=decode_steering_vectors,
             steering_module_ref=steering_module_ref,
+            capture=capture,
         )
 
     def __post_init__(self) -> None:
@@ -589,6 +610,32 @@ class SamplingParams(
             )
 
         self._validate_steering_vectors()
+        self._validate_capture()
+
+    def _validate_capture(self) -> None:
+        """Structural check on ``capture``.
+
+        Only verifies the shape at construction time (``dict[str, Any]``
+        with string keys). Per-consumer validation — against the active
+        consumer registry, with access to the request context — happens
+        in the OpenAI entrypoint (``_admit_capture``). Leaving full
+        validation out of ``SamplingParams`` keeps the module free of
+        any capture-framework imports.
+        """
+        capture = self.capture
+        if capture is None:
+            return
+        if not isinstance(capture, dict):
+            raise ValueError(
+                "capture must be a dict keyed by consumer name, got "
+                f"{type(capture).__name__}"
+            )
+        for key in capture:
+            if not isinstance(key, str):
+                raise ValueError(
+                    "capture keys must be strings (consumer names), got "
+                    f"{type(key).__name__} ({key!r})"
+                )
 
     def _validate_steering_vectors(self) -> None:
         """Validate all steering vector fields if provided.

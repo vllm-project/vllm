@@ -52,6 +52,33 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+class CaptureResultResponse(OpenAIBaseModel):
+    """Per-consumer capture result surfaced on the API response.
+
+    Thin pydantic mirror of :class:`vllm.v1.capture.types.CaptureResult`
+    used for serialization on OpenAI chat/completion responses. The
+    framework keeps each consumer's terminal result around — a
+    ``CaptureResultResponse`` is emitted per consumer name under the
+    response body's ``capture_results`` dict.
+
+    Fields:
+
+    - ``status``: the capture lifecycle state (``"pending"`` / ``"ok"`` /
+      ``"partial_error"`` / ``"error"`` / ``"not_requested"``). Consumers
+      should not return terminal ``"pending"``; it is included here for
+      completeness.
+    - ``error``: first error message, or ``None``.
+    - ``payload``: consumer-specific opaque dict. The filesystem consumer
+      writes ``{"paths": [...]}``; other consumers may expose their own
+      schema.
+    """
+
+    status: Literal["pending", "ok", "partial_error", "error", "not_requested"]
+    error: str | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+
 class ChatMessage(OpenAIBaseModel):
     role: str
     content: str | None = None
@@ -111,6 +138,15 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    capture_results: dict[str, CaptureResultResponse] | None = Field(
+        default=None,
+        description=(
+            "Per-consumer capture results from the capture-consumer "
+            "framework. Keyed by consumer instance name. Omitted when no "
+            "consumer produced a result for this request (keeps the "
+            "payload small for the common uncaptured case)."
+        ),
+    )
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -135,6 +171,16 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    capture_results: dict[str, CaptureResultResponse] | None = Field(
+        default=None,
+        description=(
+            "Per-consumer capture results from the capture-consumer "
+            "framework. Keyed by consumer instance name. Emitted only on "
+            "the final SSE frame when at least one consumer produced a "
+            "result for this request; omitted otherwise so the streamed "
+            "envelope stays small for the uncaptured common case."
+        ),
+    )
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -412,6 +458,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "composed with any inline steering vector fields.",
     )
 
+    capture: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Per-request opt-in for capture consumers, keyed by consumer "
+            "instance name. Each value is an opaque raw spec that the "
+            "corresponding consumer's ``validate_client_spec`` interprets "
+            "(the filesystem consumer expects a ``FilesystemCaptureRequest``-"
+            "shaped dict; other consumers expose their own schema). The "
+            "response body returns a sibling ``capture_results`` dict with "
+            "per-consumer status/payload. Rejected with HTTP 400 when a "
+            "name does not match any registered consumer or when the raw "
+            "spec fails the consumer's admission validator."
+        ),
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     @model_validator(mode="before")
@@ -591,7 +652,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
-        return SamplingParams.from_optional(
+        sampling_params = SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
@@ -626,6 +687,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             prefill_steering_vectors=self.prefill_steering_vectors,
             decode_steering_vectors=self.decode_steering_vectors,
         )
+        # Attach the capture dict (keyed by consumer name). The
+        # entrypoint's ``_admit_capture`` mutates each value in place
+        # from the raw shape to a ``CaptureSpec`` once the consumer
+        # validator accepts it. Copy to avoid sharing the pydantic
+        # internal reference across requests.
+        if self.capture is not None:
+            sampling_params.capture = dict(self.capture)
+        return sampling_params
 
     @model_validator(mode="before")
     @classmethod

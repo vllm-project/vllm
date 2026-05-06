@@ -15,6 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
+from vllm.v1.capture.types import CaptureResult
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
@@ -174,6 +175,12 @@ class EngineCoreOutput(
 
     finish_reason: FinishReason | None = None
     stop_reason: int | str | None = None
+    # Per-request activation capture results, keyed by consumer name
+    # and populated on the step the request finalizes (for any finish
+    # reason).  Empty for every other step and for requests that never
+    # opted into activation capture.  The output processor threads
+    # this onto ``RequestOutput.capture_results``.
+    capture_results: dict[str, CaptureResult] = msgspec.field(default_factory=dict)
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
 
