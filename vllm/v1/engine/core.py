@@ -64,6 +64,10 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.kv_consumer_validation import (
+    KVConsumerRequestError,
+    validate_kv_consumer_request,
+)
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -338,6 +342,14 @@ class EngineCore:
         if request.kv_transfer_params is not None and (
             not self.scheduler.get_kv_connector()
         ):
+            if (
+                self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+            ):
+                raise KVConsumerRequestError(
+                    "kv_consumer instance requires an initialized KVConnector "
+                    f"for request {request.request_id!r}; refusing local prefill."
+                )
             logger.warning(
                 "Got kv_transfer_params, but no KVConnector found. "
                 "Disabling KVTransfer for this request."
@@ -777,6 +789,7 @@ class EngineCore:
             )
 
         req = Request.from_engine_core_request(request, self.request_block_hasher)
+        validate_kv_consumer_request(req, self.vllm_config.kv_transfer_config)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -1274,7 +1287,11 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
-            self.add_request(req, request_wave)
+            try:
+                self.add_request(req, request_wave)
+            except KVConsumerRequestError:
+                logger.exception("Rejecting request %s", req.request_id)
+                self._send_error_outputs_to_client([req.request_id], req.client_index)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:

@@ -41,6 +41,7 @@ from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.engine.kv_consumer_validation import validate_kv_consumer_request
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.executor import Executor
@@ -366,6 +367,7 @@ class AsyncLLM(EngineClient):
             request.reasoning_parser_kwargs = reasoning_parser_kwargs
 
         self.input_processor.assign_request_id(request)
+        validate_kv_consumer_request(request, self.vllm_config.kv_transfer_config)
 
         # We start the output_handler on the first call to add_request() so
         # we can call __init__ before the event loop, which enables us
