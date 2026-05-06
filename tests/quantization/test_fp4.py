@@ -8,15 +8,17 @@ Run `pytest tests/quantization/test_fp4.py`.
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    FP4ScaledMMLinearKernel,
-    FP4ScaledMMLinearLayerConfig,
+from vllm.model_executor.kernels.linear import (
     init_fp4_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    FP4ScaledMMLinearKernel,
+    FP4ScaledMMLinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFP4ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
+from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP4ScaledMMLinearKernel,
 )
 from vllm.platforms import current_platform
@@ -398,7 +400,7 @@ class TestMarlinSpecialCase:
         """Test that Marlin is not included in the FP4 kernel registry."""
         # Marlin doesn't fit the kernel abstraction, so it should be handled
         # separately in the quantization methods (modelopt.py, compressed_tensors)
-        from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+        from vllm.model_executor.kernels.linear import (
             _POSSIBLE_FP4_KERNELS,
         )
 
@@ -408,23 +410,6 @@ class TestMarlinSpecialCase:
                 assert "Marlin" not in kernel.__name__, (
                     "Marlin should not be in FP4 kernel registry - it uses special path"
                 )
-
-    @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-    def test_marlin_handled_in_quantization_methods(self):
-        """Test that Marlin is handled in quantization method level, not kernel level"""
-        # This is a documentation test - verifies the design decision
-        # Marlin has different calling convention(takes BF16 input, not quantized FP4)
-        # So it should be handled at the ModelOptNvFp4LinearMethod.apply() level
-        # with a special path that bypasses the kernel abstraction
-
-        # Import to verify the special case exists
-        from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-            NvFp4LinearBackend,
-        )
-
-        assert hasattr(NvFp4LinearBackend, "MARLIN"), (
-            "NvFp4LinearBackend should have MARLIN enum value"
-        )
 
 
 class TestWeightProcessing:

@@ -96,6 +96,8 @@ from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
+    FP4ScaledMMLinearKernel,
+    FP4ScaledMMLinearLayerConfig,
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -114,6 +116,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFP4ScaledMMLinearKernel,
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
@@ -122,6 +125,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
     DeepGemmFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    FlashInferFP4ScaledMMLinearKernel,
     FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
 )
@@ -273,6 +277,13 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
+    ],
+}
+
+_POSSIBLE_FP4_KERNELS: dict[PlatformEnum, list[type[FP4ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        FlashInferFP4ScaledMMLinearKernel,
+        CutlassFP4ScaledMMLinearKernel,
     ],
 }
 
@@ -473,6 +484,48 @@ def init_int8_linear_kernel(
             "azp_adj",
         ],
     )
+
+
+def init_fp4_linear_kernel(
+    group_size: int | None,
+    is_checkpoint_fp4_serialized: bool,
+    out_dtype: torch.dtype | None,
+    force_kernel: type[FP4ScaledMMLinearKernel] | None = None,
+    backend: str | None = None,
+    module_name: str | None = None,
+) -> FP4ScaledMMLinearKernel:
+    config = FP4ScaledMMLinearLayerConfig(
+        group_size=group_size,
+        is_checkpoint_fp4_serialized=is_checkpoint_fp4_serialized,
+        out_dtype=out_dtype,
+    )
+
+    kernel_type = choose_scaled_mm_linear_kernel(
+        config, _POSSIBLE_FP4_KERNELS, force_kernel=force_kernel
+    )
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
+        )
+
+    param_names = [
+        "weight",
+        "weight_scale",
+        "weight_scale_2",
+        "input_scale_inv",
+        "alpha",
+    ]
+
+    if kernel_type is FlashInferFP4ScaledMMLinearKernel:
+        return FlashInferFP4ScaledMMLinearKernel(
+            config, param_names, backend=backend or "cutlass"
+        )
+
+    return kernel_type(config, param_names)
 
 
 def choose_mp_linear_kernel(
