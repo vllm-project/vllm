@@ -1,0 +1,47 @@
+[run]
+# Track the installed vllm package (this is what actually gets imported during tests)
+# Use wildcard pattern to match the installed location
+source =
+    vllm
+    */dist-packages/vllm
+    */site-packages/vllm
+omit =
+    */tests/*
+    */test_*
+    */__pycache__/*
+    */build/*
+    */dist/*
+    */vllm.egg-info/*
+    */third_party/*
+    */examples/*
+    */benchmarks/*
+    */docs/*
+
+[paths]
+# Map all possible vllm locations to a canonical "vllm" path
+# This ensures coverage.combine properly merges data from different test runs
+source =
+    vllm
+    /vllm-workspace/src/vllm
+    /vllm-workspace/vllm
+    */site-packages/vllm
+    */dist-packages/vllm
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if self.debug:
+    if settings.DEBUG
+    raise AssertionError
+    raise NotImplementedError
+    if 0:
+    if __name__ == .__main__.:
+    class .*\bProtocol\):
+    @(abc\.)?abstractmethod
+
+[html]
+directory = htmlcov
+
+[xml]
+output = coverage.xml

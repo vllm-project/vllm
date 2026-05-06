@@ -1,0 +1,12 @@
+# For vllm script, with -t option (tensor parallel size).
+# bash .buildkite/lm-eval-harness/run-lm-eval-chartqa-vllm-vlm-baseline.sh -m Qwen/Qwen2.5-VL-7B-Instruct -l 2500 -t 1
+
+model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+backend: "vllm-vlm"
+tasks:
+- name: "chartqa"
+  metrics:
+  - name: "relaxed_accuracy,none"
+    value: 0.855
+limit: 2500
+num_fewshot: 0
