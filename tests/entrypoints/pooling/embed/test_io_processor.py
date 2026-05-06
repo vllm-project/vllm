@@ -112,6 +112,58 @@ class TestApplyStPrompt:
         assert handler._apply_task_instruction(texts, "passage") is texts
 
 
+class TestMixedInputToMessages:
+    """Unit tests for EmbedIOProcessor._mixed_input_to_messages."""
+
+    def test_task_prefix_uses_system_message(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(content=[CohereEmbedContent(type="text", text="hello")]),
+            task_prefix="query: ",
+        )
+
+        assert messages == [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "query: "}],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}],
+            },
+        ]
+
+    def test_task_prefix_keeps_mixed_payload_in_user_message(self):
+        messages = EmbedIOProcessor._mixed_input_to_messages(
+            CohereEmbedInput(
+                content=[
+                    CohereEmbedContent(type="text", text="describe this"),
+                    CohereEmbedContent(
+                        type="image_url",
+                        image_url={"url": "data:image/png;base64,AAA"},
+                    ),
+                ]
+            ),
+            task_prefix="query: ",
+        )
+
+        assert messages == [
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "query: "}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/png;base64,AAA"},
+                    },
+                ],
+            },
+        ]
+
+
 class TestLoadTaskInstructions:
     """Unit tests for EmbedIOProcessor._load_task_instructions."""
 
@@ -316,6 +368,62 @@ class TestPreProcessCohereOnline:
                             CohereEmbedInput(
                                 content=[CohereEmbedContent(type="text", text="hello")]
                             ),
+                            task_prefix="query: ",
+                        )
+                    ],
+                    "truncate_prompt_tokens": -1,
+                    "truncation_side": None,
+                },
+            )
+        ]
+
+    def test_mixed_inputs_with_task_prefix_use_system_message(self):
+        handler = self._make_handler()
+        mixed_input = CohereEmbedInput(
+            content=[
+                CohereEmbedContent(type="text", text="describe this"),
+                CohereEmbedContent(
+                    type="image_url",
+                    image_url={"url": "data:image/png;base64,AAA"},
+                ),
+            ]
+        )
+        ctx = self._make_context(inputs=[mixed_input], input_type="query")
+        calls: list[tuple[str, object]] = []
+
+        def batch_render_chat(
+            request,
+            all_messages,
+            truncate_prompt_tokens,
+            truncation_side,
+        ):
+            calls.append(
+                (
+                    "chat",
+                    {
+                        "request": request,
+                        "all_messages": all_messages,
+                        "truncate_prompt_tokens": truncate_prompt_tokens,
+                        "truncation_side": truncation_side,
+                    },
+                )
+            )
+            return ["chat"]
+
+        handler._get_task_instruction_prefix = lambda _input_type: "query: "
+        handler._batch_render_chat = batch_render_chat
+
+        handler._pre_process_cohere_online(ctx)
+
+        assert ctx.engine_inputs == ["chat"]
+        assert calls == [
+            (
+                "chat",
+                {
+                    "request": ctx.request,
+                    "all_messages": [
+                        handler._mixed_input_to_messages(
+                            mixed_input,
                             task_prefix="query: ",
                         )
                     ],

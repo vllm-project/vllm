@@ -450,15 +450,27 @@ The `truncate` parameter controls how inputs exceeding the model's maximum seque
 
 #### Input type and prompt prefixes
 
-The `input_type` field selects a prompt prefix to prepend to each text input. The available values
-depend on the model:
+The `input_type` field selects a model-specific prompt prefix. The available values depend on
+the model:
 
 - **Models with `task_instructions` in `config.json`**: The keys from the `task_instructions` dict are
-  the valid `input_type` values and the corresponding value is prepended to each text.
+  the valid `input_type` values.
 - **Models with `config_sentence_transformers.json` prompts**: The keys from the `prompts` dict are
   the valid `input_type` values. For example, `Snowflake/snowflake-arctic-embed-xs` defines `"query"`,
   so setting `input_type: "query"` prepends `"Represent this sentence for searching relevant passages: "`.
 - **Other models**: `input_type` is not accepted and will raise a validation error if passed.
+
+For text-only requests without a chat template, vLLM prepends the selected prompt prefix to each
+text before tokenization. When a chat template is used, including for multimodal embedding models,
+vLLM passes the selected prompt prefix as a `system` message and keeps the embedding input in one
+`user` message. A multimodal embedding chat template that supports `/v2/embed` with `input_type`
+should therefore accept an optional leading `system` message for the task prefix and exactly one
+non-system payload message containing the text and image parts to embed.
+
+This is the same message shape callers can use directly with `/v1/embeddings` `messages`: a
+`system` task-prefix message followed by one `user` payload message. For example, `/v2/embed` with
+`input_type: "query"` should render equivalently to a `/v1/embeddings` request whose first message
+contains the model's query prefix.
 
 ## More examples
 
