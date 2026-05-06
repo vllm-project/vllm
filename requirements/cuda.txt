@@ -18,7 +18,7 @@ tilelang==0.1.9
 nvidia-cudnn-frontend>=1.13.0,<1.19.0
 
 # Required for faster safetensors model loading
-fastsafetensors >= 0.2.2
+fastsafetensors >= 0.3.1
 
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
 nvidia-cutlass-dsl>=4.4.2
