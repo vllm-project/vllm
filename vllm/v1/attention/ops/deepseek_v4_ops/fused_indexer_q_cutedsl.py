@@ -36,13 +36,15 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
     index_q_scale: torch.Tensor,
     index_weights_out: torch.Tensor,
 ) -> None:
-    num_index_q_heads = index_q.shape[1]
-    index_q_head_dim = index_q.shape[2]
+    num_tokens, num_heads, head_dim = index_q.shape
+    # heuristic
+    tile_head = 1 if num_tokens < 512 else 4
     compiled = IndexerQMxFp4Kernel.compile(
-        index_q_head_dim,
+        head_dim,
         index_q_cos_sin_cache.shape[-1],
-        num_index_q_heads,
+        num_heads,
         _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype],
+        tile_head,
     )
     scale = float(index_weights_softmax_scale * index_weights_head_scale)
     compiled(
@@ -246,7 +248,8 @@ class IndexerQMxFp4Kernel:
         head_dim: int = 128,
         rope_dim: int = 64,
         num_heads: int = 64,
-        cos_sin_dtype: type[cutlass.Numeric] = cutlass.Float32,
+        cos_sin_dtype: type[cutlass.Numeric] = Float32,
+        tile_head: int = 4,
     ):
         self.head_dim = head_dim
         self.rope_dim = rope_dim
@@ -254,11 +257,16 @@ class IndexerQMxFp4Kernel:
         self.num_heads = num_heads
         self.cos_sin_dtype = cos_sin_dtype
 
+        # process multiple heads at the same time to armotize RoPE load costs
+        assert num_heads % tile_head == 0
+        self.tile_head = tile_head
+
         # later we will use 32B load = 16 BF16 elems
         # thus, head_dim=128 requires 8 threads to handle.
         # let's call subwarp = 8 threads.
         self.subwarp_size = head_dim // 16
-        self.tb_size = 256
+        self.tb_size = 128
+        self.threads_per_token = (self.num_heads // self.tile_head) * self.subwarp_size
 
     @cute.jit
     def __call__(
@@ -273,9 +281,8 @@ class IndexerQMxFp4Kernel:
         scale: Float32,
         stream: CUstream,
     ):
-        num_tokens, num_heads, _ = q.shape
-        total_threads = num_tokens * num_heads * self.subwarp_size
-        grid = [cute.ceil_div(total_threads, self.tb_size), 1, 1]
+        total_threads = q.shape[0] * self.threads_per_token
+        grid = (cute.ceil_div(total_threads, self.tb_size), 1, 1)
         self.kernel(
             positions,
             q,
@@ -285,7 +292,7 @@ class IndexerQMxFp4Kernel:
             q_scale,
             weights_out,
             scale,
-        ).launch(grid=grid, block=[self.tb_size, 1, 1], stream=stream)
+        ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
 
     @cute.kernel
     def kernel(
@@ -300,35 +307,47 @@ class IndexerQMxFp4Kernel:
         scale: Float32,
     ):
         block_id, _, _ = cute.arch.block_idx()
-        tidx, _, _ = cute.arch.thread_idx()
+        tid, _, _ = cute.arch.thread_idx()
 
         num_token_heads = q.shape[0] * self.num_heads
-        global_tid = block_id * self.tb_size + tidx
+        global_tid = block_id * self.tb_size + tid
 
         global_subwarp_id = global_tid // self.subwarp_size
-        sublane = tidx % self.subwarp_size
+        sublane = tid % self.subwarp_size
 
-        token_id = global_subwarp_id // self.num_heads
-        head_id = global_subwarp_id - token_id * self.num_heads
+        token_id = global_subwarp_id // (self.num_heads // self.tile_head)
+        head_start = (
+            global_subwarp_id % (self.num_heads // self.tile_head)
+        ) * self.tile_head
+
+        # NOTE: token_id may exceed bounds, hence we need to add load/store guards
+        # we can't do early exit because CuteDSL doesn't support it. and we also need
+        # all threads in a warp to be active since we utilize warp shuffle later.
+        # must_in_bounds is constexpr, True when 1 threadblock fit within 1 token
+        # position. the compiler will remove bounds check when that happens.
+        must_in_bounds = cutlass.const_expr(self.tb_size % self.threads_per_token == 0)
+        in_bounds = must_in_bounds or (token_id < q.shape[0])
 
         # each thread loads 16 BF16 elems
         elem_base = sublane * 16
 
-        # q layout: [num_tokens, num_heads, head_dim]
-        _q_bf16x2 = _ldg_vec(
-            q,
-            (token_id, head_id, elem_base),
-            8,
-            ".relaxed.cta.L1::no_allocate",
-            ld_type=Uint32,
-        )
-        q_bf16x2 = cute.make_rmem_tensor(8, Uint32)
-        q_bf16x2.store(_q_bf16x2)  # copy to make it mutable
+        q_bf16x2 = cute.make_rmem_tensor((self.tile_head, 8), Uint32)
+        if in_bounds:
+            for i in cutlass.range_constexpr(self.tile_head):
+                # q layout: [num_tokens, num_heads, head_dim]
+                _q_bf16x2 = _ldg_vec(
+                    q,
+                    (token_id, head_start + i, elem_base),
+                    8,
+                    ".relaxed.cta.L1::no_allocate",
+                    ld_type=Uint32,
+                )
+                q_bf16x2[i, None].store(_q_bf16x2)  # copy to make it mutable
 
         # RoPE applies only to the trailing rope_dim values. We keep the rounded
         # BF16 result in q_bits so the later amax and quantization see BF16.
         # cos_sin_cache layout: [max_pos, rope_dim]
-        if elem_base >= self.nope_dim:
+        if in_bounds and elem_base >= self.nope_dim:
             pos = positions[token_id]
             rope_idx = (elem_base - self.nope_dim) // 2
             if const_expr(self.cos_sin_dtype is Float32):
@@ -361,60 +380,74 @@ class IndexerQMxFp4Kernel:
                         sin_bf16x2[i]
                     )
 
-            for i in cutlass.range_constexpr(8):
-                q0, q1 = _bf16x2_to_fp32(q_bf16x2[i])
-                rot0 = q0 * cos_vals[i] - q1 * sin_vals[i]
-                rot1 = q0 * sin_vals[i] + q1 * cos_vals[i]
-                # convert back to BF16 to match numerics
-                q_bf16x2[i] = _fp32x2_to_bf16x2(rot0, rot1)
+            for i in cutlass.range_constexpr(self.tile_head):
+                for j in cutlass.range_constexpr(8):
+                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    rot0 = q0 * cos_vals[j] - q1 * sin_vals[j]
+                    rot1 = q0 * sin_vals[j] + q1 * cos_vals[j]
+                    # convert back to BF16 to match numerics
+                    q_bf16x2[i, j] = _fp32x2_to_bf16x2(rot0, rot1)
 
-        # compute amax in packed bf16x2 to save instructions
-        # Each thread holds 16 elems. Two adjacent threads form one 32-elem
-        # MXFP4 block, so a width-2 shuffle gives the block amax.
-        local_amax = _bf16x2_abs(q_bf16x2[0])
-        for i in cutlass.range_constexpr(1, 8):
-            local_amax = _bf16x2_max(local_amax, _bf16x2_abs(q_bf16x2[i]))
-        amax_bits = cute_utils.warp_reduce(
-            local_amax, _bf16x2_max, width=MXFP4_BLOCK_SIZE // 16
-        )
-        amax0, amax1 = _bf16x2_to_fp32(amax_bits)
-        amax = cute_utils.fmax(amax0, amax1)
+        for i in cutlass.range_constexpr(self.tile_head):
+            # compute amax in packed bf16x2 to save instructions
+            # Each thread holds 16 elems. Two adjacent threads form one 32-elem
+            # MXFP4 block, so a width-2 shuffle gives the block amax.
+            amax_bf16x2 = _bf16x2_abs(q_bf16x2[i, 0])
+            for j in cutlass.range_constexpr(1, 8):
+                amax_bf16x2 = _bf16x2_max(amax_bf16x2, _bf16x2_abs(q_bf16x2[i, j]))
+            amax_bf16x2 = cute_utils.warp_reduce(
+                amax_bf16x2, _bf16x2_max, width=MXFP4_BLOCK_SIZE // 16
+            )
+            amax0, amax1 = _bf16x2_to_fp32(amax_bf16x2)
+            amax = cute_utils.fmax(amax0, amax1)
 
-        # compute block scale with bit manipulation
-        # UE8M0 stores ceil(log2(fp4_scale)) + 127. Adding the mantissa mask
-        # increments the exponent whenever fp4_scale is not exactly a power of 2.
-        fp4_scale = cute_utils.fmax(amax, float.fromhex("0x6p-126")) * (1.0 / 6.0)
-        bits = Uint32(llvm.bitcast(T.i32(), fp4_scale.ir_value()))
-        ue8m0 = cute_utils.shr_u32(bits + Uint32(0x7FFFFF), Uint32(23)) & Uint32(0xFF)
+            if in_bounds:
+                # compute block scale with bit manipulation
+                # UE8M0 stores ceil(log2(fp4_scale)) + 127. Adding the mantissa mask
+                # increments the exponent whenever fp4_scale is not exactly a power of 2
+                fp4_scale = cute_utils.fmax(amax, float.fromhex("0x6p-126")) * Float32(
+                    1.0 / 6.0
+                )
+                bits = Uint32(llvm.bitcast(T.i32(), fp4_scale.ir_value()))
+                ue8m0 = cute_utils.shr_u32(
+                    bits + Uint32(0x7FFFFF), Uint32(23)
+                ) & Uint32(0xFF)
 
-        # Only one of the two threads in an MXFP4 block writes the shared scale.
-        if tidx % 2 == 0:
-            mx_block = sublane // (MXFP4_BLOCK_SIZE // 16)
-            q_scale[token_id, head_id, mx_block] = Uint8(ue8m0)
+                # Only one of the two threads in an MXFP4 block writes the shared scale.
+                if tid % 2 == 0:
+                    mx_block = sublane // 2
+                    q_scale[token_id, head_start + i, mx_block] = Uint8(ue8m0)
 
-        # If scale = 2^A and ue8m0 = A + 127, then inverse scale has exponent
-        # -A + 127 = 254 - ue8m0.
-        inv_scale_bits = (Uint32(254) - ue8m0) << Uint32(23)
-        inv_fp4_scale = Float32(llvm.bitcast(T.f32(), inv_scale_bits.ir_value()))
+                # If scale = 2^A and ue8m0 = A + 127, then inverse scale has exponent
+                # -A + 127 = 254 - ue8m0.
+                inv_scale_bits = (Uint32(254) - ue8m0) << Uint32(23)
+                inv_fp4_scale = Float32(
+                    llvm.bitcast(T.f32(), inv_scale_bits.ir_value())
+                )
 
-        vals = cute.make_rmem_tensor(16, Float32)
-        for i in cutlass.range_constexpr(8):
-            vals[i * 2], vals[i * 2 + 1] = _bf16x2_to_fp32(q_bf16x2[i])
-            vals[i * 2] = vals[i * 2] * inv_fp4_scale
-            vals[i * 2 + 1] = vals[i * 2 + 1] * inv_fp4_scale
+                vals = cute.make_rmem_tensor(16, Float32)
+                for j in cutlass.range_constexpr(8):
+                    vals[j * 2], vals[j * 2 + 1] = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    vals[j * 2] = vals[j * 2] * inv_fp4_scale
+                    vals[j * 2 + 1] = vals[j * 2 + 1] * inv_fp4_scale
 
-        # pack to FP4
-        packed = cute.make_rmem_tensor(2, Uint32)
-        packed[0] = _fp32x8_to_fp4x8(vals, 0)
-        packed[1] = _fp32x8_to_fp4x8(vals, 8)
-        # Each thread writes the eight packed bytes corresponding to its 16 Q values.
-        _stg_vec(q_fp4, (token_id, head_id, elem_base // 2), packed, 2, ".cs")
+                # pack to FP4
+                packed = cute.make_rmem_tensor(2, Uint32)
+                packed[0] = _fp32x8_to_fp4x8(vals, 0)
+                packed[1] = _fp32x8_to_fp4x8(vals, 8)
+                _stg_vec(
+                    q_fp4,
+                    (token_id, head_start + i, elem_base // 2),
+                    packed,
+                    2,
+                    modifier=".cs",
+                )
 
         # Weight scaling is independent of the Q subwarp work. The first
         # num_tokens * num_heads logical threads cover one weight each.
         if global_tid < num_token_heads:
             weight_token_id = global_tid // self.num_heads
-            weight_head_id = global_tid - weight_token_id * self.num_heads
+            weight_head_id = global_tid % self.num_heads
             weights_out[weight_token_id, weight_head_id] = (
                 weights[weight_token_id, weight_head_id].to(Float32) * scale
             )
@@ -422,10 +455,11 @@ class IndexerQMxFp4Kernel:
     @cache
     @staticmethod
     def compile(
-        head_dim: int,
-        rope_dim: int,
-        num_heads: int,
-        cos_sin_dtype: type[cutlass.Numeric],
+        head_dim: int = 128,
+        rope_dim: int = 64,
+        num_heads: int = 64,
+        cos_sin_dtype: type[cutlass.Numeric] = Float32,
+        tile_head: int = 4,
     ):
         num_tokens = cute.sym_int()
         max_pos = cute.sym_int()
@@ -452,7 +486,9 @@ class IndexerQMxFp4Kernel:
         )
         weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
 
-        kernel = IndexerQMxFp4Kernel(head_dim, rope_dim, num_heads, cos_sin_dtype)
+        kernel = IndexerQMxFp4Kernel(
+            head_dim, rope_dim, num_heads, cos_sin_dtype, tile_head
+        )
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
             kernel,
