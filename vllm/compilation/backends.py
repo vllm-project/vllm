@@ -23,6 +23,7 @@ from torch._logging._internal import trace_structured
 from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.codegen import (
     compile_execution_fn,
     generate_execution_code,
@@ -929,20 +930,23 @@ class VllmBackend:
     def configure_post_pass(self) -> None:
         # TODO proper PassManager?
         pre_grad_pass_key = "pre_grad_custom_pass"
-        assert self.pass_key != pre_grad_pass_key
-        assert pre_grad_pass_key not in self.inductor_config
-        self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
-            self.vllm_config
-        )
+        # Keep the regular pre-grad pass pipeline for other backends. ROCm
+        # AITER skips this pass to avoid HIP graph replay corruption.
+        if not rocm_aiter_ops.is_enabled():
+            assert self.pass_key != pre_grad_pass_key
+            assert pre_grad_pass_key not in self.inductor_config
+            self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
+                self.vllm_config
+            )
 
-        # Make sure pre_grad_custom_pass is not pickled
-        # as part of AOTAutograd built-in cache key
-        # TODO(luka) is there a cleaner way to do this
-        import torch._inductor.config as inductor_config
+            # Make sure pre_grad_custom_pass is not pickled
+            # as part of AOTAutograd built-in cache key
+            # TODO(luka) is there a cleaner way to do this
+            import torch._inductor.config as inductor_config
 
-        ignore = inductor_config._cache_config_ignore_prefix + [pre_grad_pass_key]
-        assert "_cache_config_ignore_prefix" not in self.inductor_config
-        self.inductor_config["_cache_config_ignore_prefix"] = ignore
+            ignore = inductor_config._cache_config_ignore_prefix + [pre_grad_pass_key]
+            assert "_cache_config_ignore_prefix" not in self.inductor_config
+            self.inductor_config["_cache_config_ignore_prefix"] = ignore
 
         # Configure the (nominally post-grad) pass manager
         self.pass_manager.configure(self.vllm_config)

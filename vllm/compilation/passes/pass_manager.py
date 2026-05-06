@@ -18,10 +18,10 @@ from .ir.clone_elimination import UnsafeCloneEliminationPass
 from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
+if rocm_aiter_ops.is_enabled() or current_platform.is_cuda():
+    from .fusion.allreduce_rms_fusion import AllReduceFusionPass
+
 if rocm_aiter_ops.is_enabled():
-    from .fusion.allreduce_rms_fusion import (
-        RocmAiterAllReduceFusionPass,
-    )
     from .fusion.rocm_aiter_fusion import (
         MLADualRMSNormFusionPass,
         RocmAiterRMSNormQuantFusionPass,
@@ -41,7 +41,6 @@ if current_platform.is_cuda_alike():
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda():
-    from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
     from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
@@ -116,8 +115,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         # DCE handles mutating ops correctly as well.
         self.ir_lowering(graph)
         VllmInductorPass.dump_prefix += 1
-        self.clone_elimination(graph)
-        VllmInductorPass.dump_prefix += 1
+        # ROCm AITER relies on HIP graph replay; this unsafe pass can alter
+        # aliases in ways that corrupt replayed decode graphs.
+        if not rocm_aiter_ops.is_enabled():
+            self.clone_elimination(graph)
+            VllmInductorPass.dump_prefix += 1
 
         # clean up after lowering again
         self.post_cleanup(graph)
@@ -143,10 +145,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                     self.passes += [AsyncTPPass(config)]
 
             if self.pass_config.fuse_allreduce_rms:
-                if rocm_aiter_ops.is_enabled():
-                    self.passes += [RocmAiterAllReduceFusionPass(config)]
-                else:
-                    self.passes += [AllReduceFusionPass(config)]
+                # The ROCm AITER allreduce fusion path can corrupt HIP graph
+                # replay; use the standard pass when AITER is enabled.
+                self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.fuse_minimax_qk_norm:
                 self.passes += [MiniMaxQKNormPass(config)]
@@ -205,7 +206,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
-        passes.append(self.clone_elimination.uuid())
+        if not rocm_aiter_ops.is_enabled():
+            passes.append(self.clone_elimination.uuid())
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
