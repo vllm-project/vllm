@@ -29,7 +29,12 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 logger = init_logger(__name__)
 
-_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.S390X)
+_CPU_ARCH_PREFER_MIXED_BATCH = (
+    CpuArchEnum.X86,
+    CpuArchEnum.ARM,
+    CpuArchEnum.S390X,
+    CpuArchEnum.POWERPC,
+)
 
 
 class CPUAttentionBackend(AttentionBackend):
@@ -510,8 +515,10 @@ def _get_attn_isa(
             )
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
-    supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-    supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
+    arch = current_platform.get_cpu_architecture()
+    supports_arm = arch == CpuArchEnum.ARM
+    supports_vxe = arch == CpuArchEnum.S390X
+    supports_vsx = arch == CpuArchEnum.POWERPC
     supports_avx512 = torch.cpu._is_avx512_supported()
     if fp8_kv and not supports_amx and not supports_avx512:
         raise NotImplementedError(
@@ -525,6 +532,8 @@ def _get_attn_isa(
             return "neon"
         elif supports_vxe:
             return "vxe"
+        elif supports_vsx:
+            return "vsx"
         else:
             return "vec"
     else:
