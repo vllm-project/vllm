@@ -21,7 +21,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -51,7 +50,6 @@ class MambaDecoderLayer(nn.Module):
         self,
         config: MambaConfig,
         vllm_config: VllmConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         is_lora_enabled: bool | None = False,
         prefix: str = "",
     ) -> None:

@@ -580,7 +580,6 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.config = config
         self.vision_config = config.encoder
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         with self._mark_tower_model(vllm_config, "image"):
@@ -591,10 +590,8 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         with self._mark_language_model(vllm_config):
             self.decoder = MBartDecoderNoPos(
                 config.decoder,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.decoder",
-                model_config=vllm_config.model_config,
             )
 
         self.vocab_size = config.decoder.vocab_size

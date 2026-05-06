@@ -844,7 +844,6 @@ class MolmoModel(nn.Module, SupportsQuant):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -857,7 +856,6 @@ class MolmoModel(nn.Module, SupportsQuant):
             quant_config=quant_config,
         )
 
-        model_config = vllm_config.model_config
         decoder_layer = (
             MolmoDecoderNormAfterLayer if config.norm_after else MolmoDecoderLayer
         )
@@ -865,9 +863,7 @@ class MolmoModel(nn.Module, SupportsQuant):
             config.num_hidden_layers,
             lambda prefix: decoder_layer(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

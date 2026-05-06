@@ -525,7 +525,6 @@ class CLIPEncoder(nn.Module):
         attn_cls: type[Attention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
-        model_config = vllm_config.model_config if vllm_config is not None else None
 
         self.config = config
 
@@ -539,7 +538,6 @@ class CLIPEncoder(nn.Module):
                 CLIPEncoderLayer(
                     config=config,
                     vllm_config=vllm_config,
-                    model_config=model_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -575,7 +573,6 @@ class CLIPTextTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        model_config = vllm_config.model_config if vllm_config is not None else None
 
         self.config = config
         embed_dim = config.hidden_size
@@ -585,7 +582,6 @@ class CLIPTextTransformer(nn.Module):
         self.encoder = CLIPEncoder(
             config=config,
             vllm_config=vllm_config,
-            model_config=model_config,
             prefix=f"{prefix}.encoder",
             attn_cls=Attention,
         )
@@ -831,7 +827,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         super().__init__()
 
         config: CLIPConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
@@ -847,7 +842,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             self.text_model = CLIPTextTransformer(
                 text_config,
                 vllm_config=vllm_config,
-                model_config=model_config,
                 prefix=maybe_prefix(prefix, "text_model"),
             )
             self.text_projection = nn.Linear(

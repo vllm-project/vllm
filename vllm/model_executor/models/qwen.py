@@ -205,7 +205,6 @@ class QWenModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -220,7 +219,6 @@ class QWenModel(nn.Module):
                 config,
                 vllm_config=vllm_config,
                 prefix=prefix,
-                model_config=model_config,
             ),
             prefix=f"{prefix}.h",
         )

@@ -418,7 +418,6 @@ class Step3p5DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
@@ -457,8 +456,6 @@ class Step3p5DecoderLayer(nn.Module):
                 rms_norm_eps=config.rms_norm_eps,
                 qkv_bias=getattr(config, "attention_bias", False),
                 head_dim=head_dim if head_dim else getattr(config, "head_dim", None),
-                model_config=model_config,
-                cache_config=cache_config,
                 vllm_config=vllm_config,
                 rope_scaling=getattr(config, "rope_scaling", None),
                 sliding_window=getattr(config, "sliding_window", None),

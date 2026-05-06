@@ -362,14 +362,12 @@ class ExtractHiddenStatesModel(nn.Module):
         # and head_size <- hidden_size so that we can insert
         # the hidden states directly into the cache without
         # reshaping
-        model_config = vllm_config.model_config
         self.cache_only_layers = nn.ModuleDict(
             {
                 str(self.target_num_hidden_layers): CacheOnlyAttentionLayer(
                     num_heads=self.num_hidden_states,
                     head_size=self.hidden_size,
-                    cache_config=cache_config,
-                    model_config=model_config,
+                    vllm_config=vllm_config,
                     prefix=maybe_prefix(
                         prefix, f"cache_only_layers.{self.target_num_hidden_layers}"
                     ),

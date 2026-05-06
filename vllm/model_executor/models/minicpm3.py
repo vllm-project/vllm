@@ -198,10 +198,8 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             q_lora_rank=self.config.q_lora_rank,
             kv_lora_rank=self.config.kv_lora_rank,
             max_position_embeddings=self.max_position_embeddings,
-            cache_config=self.cache_config,
-            quant_config=self.quant_config,
+            vllm_config=self.vllm_config,
             prefix=f"{self.prefix}.self_attn",
-            model_config=self.model_config,
         )
 
 

@@ -213,9 +213,9 @@ class ModernBertEncoderLayer(nn.Module):
             [
                 ModernBertLayer(
                     config=config,
+                    vllm_config=vllm_config,
                     layer_id=layer_id,
                     prefix=f"{prefix}.layers.{layer_id}",
-                    model_config=vllm_config.model_config,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]

@@ -136,10 +136,8 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
                 str(idx): Glm4MoeMultiTokenPredictorLayer(
                     config,
                     f"{prefix}.layers.{idx}",
-                    cache_config=vllm_config.cache_config,
-                    quant_config=vllm_config.quant_config,
+                    vllm_config=vllm_config,
                     parallel_config=vllm_config.parallel_config,
-                    model_config=vllm_config.model_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

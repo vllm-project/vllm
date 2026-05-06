@@ -29,7 +29,6 @@ from transformers import PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -47,7 +46,6 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
 

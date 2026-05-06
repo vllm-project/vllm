@@ -245,8 +245,6 @@ class JAISModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        model_config = vllm_config.model_config
 
         self.config = config
         assert not config.scale_attn_by_inverse_layer_idx
@@ -267,9 +265,7 @@ class JAISModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: JAISBlock(
                 config=config,
-                cache_config=cache_config,
                 vllm_config=vllm_config,
-                model_config=model_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.h",

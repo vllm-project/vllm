@@ -619,7 +619,6 @@ class Plamo2AttentionMixer(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            model_config=vllm_config.model_config,
             vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )

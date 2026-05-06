@@ -411,15 +411,12 @@ class BertWithRopeEncoder(nn.Module):
         super().__init__()
         model_config = vllm_config.model_config
         config = model_config.hf_config
-        cache_config = vllm_config.cache_config
         every_n = getattr(config, "moe_every_n_layers", 0)
         self.layers = nn.ModuleList(
             [
                 BertWithRopeBlock(
                     config=config,
-                    cache_config=cache_config,
                     vllm_config=vllm_config,
-                    model_config=model_config,
                     bias=bias,
                     moe=every_n > 0 and (layer_idx % every_n == 1),
                     rotary_kwargs=rotary_kwargs,

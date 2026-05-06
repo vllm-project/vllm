@@ -337,7 +337,6 @@ class DbrxModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.quant_config = quant_config
@@ -345,13 +344,10 @@ class DbrxModel(nn.Module):
             config.vocab_size,
             config.d_model,
         )
-        model_config = vllm_config.model_config
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
             lambda prefix: DbrxBlock(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
             ),

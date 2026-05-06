@@ -422,7 +422,6 @@ class Param2MoEDecoderLayer(nn.Module):
         self.self_attn = Param2MoEAttention(
             config=config,
             vllm_config=vllm_config,
-            model_config=vllm_config.model_config,
             prefix=f"{prefix}.self_attn",
         )
         self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.rms_norm_eps)

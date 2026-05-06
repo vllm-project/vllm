@@ -148,9 +148,7 @@ class HYV3MultiTokenPredictor(nn.Module):
                 str(idx): HYV3MultiTokenPredictorLayer(
                     config,
                     f"{prefix}.layers.{idx}",
-                    model_config=vllm_config.model_config,
-                    cache_config=vllm_config.cache_config,
-                    quant_config=vllm_config.quant_config,
+                    vllm_config=vllm_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

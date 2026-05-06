@@ -483,7 +483,6 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         vllm_config: VllmConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
@@ -528,14 +527,12 @@ class SiglipEncoder(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         vllm_config: VllmConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
     ) -> None:
         super().__init__()
-        model_config = vllm_config.model_config if vllm_config is not None else None
 
         self.config = config
 
@@ -549,7 +546,6 @@ class SiglipEncoder(nn.Module):
                 SiglipEncoderLayer(
                     config,
                     vllm_config=vllm_config,
-                    model_config=model_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -585,7 +581,6 @@ class SiglipTextTransformer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        model_config = vllm_config.model_config if vllm_config is not None else None
 
         self.config = config
         embed_dim = config.hidden_size
@@ -595,7 +590,6 @@ class SiglipTextTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config=config,
             vllm_config=vllm_config,
-            model_config=model_config,
             prefix=f"{prefix}.encoder",
             attn_cls=EncoderOnlyAttention,
         )
@@ -1054,7 +1048,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         super().__init__()
 
         config: SiglipConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
         self.config = config
 
         if hasattr(config, "num_labels"):
@@ -1071,7 +1064,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             self.text_model = SiglipTextTransformer(
                 text_config,
                 vllm_config=vllm_config,
-                model_config=model_config,
                 prefix=maybe_prefix(prefix, "text_model"),
             )
 
