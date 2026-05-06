@@ -32,18 +32,23 @@ else()
         "-DVLLM_CPU_EXTENSION")
 
     # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-    # and create a local shim dir with it
+    # and create a local shim dir with it. When PyTorch is built from source or packaged
+    # by a distro (common on RISC-V, s390x, Fedora/RHEL aarch64), no vendored libgomp
+    # exists and the shim dir is empty; fall back to the system libgomp in that case.
     vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
 
-    find_library(OPEN_MP
-        NAMES gomp
-        PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
-        NO_DEFAULT_PATH
-        REQUIRED
-    )
-    # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
-    if (OPEN_MP)
+    if(VLLM_TORCH_GOMP_SHIM_DIR)
+        find_library(OPEN_MP
+            NAMES gomp
+            PATHS "${VLLM_TORCH_GOMP_SHIM_DIR}"
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        # Use the same libgomp as PyTorch at runtime
         set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+    else()
+        # Fall back to system / toolchain libgomp
+        find_library(OPEN_MP NAMES gomp REQUIRED)
     endif()
 endif()
 
@@ -321,14 +326,6 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     set(ONEDNN_VERBOSE "ON")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
-    # TODO: Refactor this
-    if (ENABLE_X86_ISA)
-        # Note: only enable oneDNN for AVX512
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512})
-    else()
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS})
-    endif()
-
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
     FetchContent_MakeAvailable(oneDNN)
@@ -341,8 +338,14 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
     target_link_libraries(dnnl_ext dnnl torch)
-    target_compile_options(dnnl_ext PRIVATE ${DNNL_COMPILE_FLAGS} -fPIC)
+    if (ENABLE_X86_ISA)
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
+    else()
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
+    endif()
     list(APPEND LIBS dnnl_ext)
+
+
     set(USE_ONEDNN ON)
 else()
     set(USE_ONEDNN OFF)
@@ -430,10 +433,11 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-    set(VLLM_EXT_SRC_AVX2 
+    set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
@@ -448,7 +452,7 @@ if (ENABLE_X86_ISA)
 
     set(_C_LIBS numa dnnl_ext)
     set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa)
+    set(_C_AVX2_LIBS numa dnnl_ext)
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(

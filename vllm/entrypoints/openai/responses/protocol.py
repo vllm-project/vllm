@@ -23,7 +23,9 @@ from openai.types.responses import (
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
     ResponsePrompt,
+    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -451,18 +453,21 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def function_call_parsing(cls, data):
-        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
-        This ensures Pydantic can properly resolve union types in the input field.
-        Function calls provided as dicts are converted to ResponseFunctionToolCall
-        objects before validation, while invalid structures are left for Pydantic
-        to reject with appropriate error messages.
-        """
+    def input_item_parsing(cls, data):
+        """Parse input items that are missing required fields or that Pydantic
+        cannot disambiguate in a Union of TypedDict / BaseModel types.
 
+        Specifically handles:
+        - function_call -> ResponseFunctionToolCall
+        - reasoning     -> ResponseReasoningItem (auto-generates id)
+        - message(role=assistant) -> ResponseOutputMessage (auto-generates
+          id/status and annotations)
+
+        Invalid structures are left for Pydantic to reject.
+        """
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
-        # (strings are iterable but shouldn't be processed)
         if input_data is None or isinstance(input_data, (str, bytes)):
             return data
 
@@ -476,16 +481,61 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            if not isinstance(item, dict):
+                processed_input.append(item)
+                continue
+
+            item_type = item.get("type")
+
+            if item_type == "function_call":
                 try:
                     processed_input.append(ResponseFunctionToolCall(**item))
                 except ValidationError:
-                    # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
                     processed_input.append(item)
+
+            elif item_type == "reasoning":
+                if "id" not in item:
+                    item = {**item, "id": f"rs_{random_uuid()}"}
+                try:
+                    processed_input.append(ResponseReasoningItem(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse reasoning to ResponseReasoningItem, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
+            elif item_type == "message" and item.get("role") == "assistant":
+                item = dict(item)
+                if "id" not in item:
+                    item["id"] = f"msg_{random_uuid()}"
+                if "status" not in item:
+                    item["status"] = "completed"
+                # ResponseOutputText requires annotations
+                if isinstance(item.get("content"), list):
+                    new_content = []
+                    for c in item["content"]:
+                        if (
+                            isinstance(c, dict)
+                            and c.get("type") == "output_text"
+                            and "annotations" not in c
+                        ):
+                            c = {**c, "annotations": []}
+                        new_content.append(c)
+                    item["content"] = new_content
+                try:
+                    processed_input.append(ResponseOutputMessage(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse assistant message to ResponseOutputMessage, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
             else:
                 processed_input.append(item)
 
