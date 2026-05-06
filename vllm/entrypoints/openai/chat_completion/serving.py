@@ -281,23 +281,15 @@ class OpenAIServingChat(OpenAIServing):
                 request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
             )
 
-            input_length = self._extract_prompt_len(engine_input)
-            if request.truncate_prompt_tokens is not None:
-                truncated_length = (
-                    max_model_len
-                    if request.truncate_prompt_tokens == -1
-                    else request.truncate_prompt_tokens
-                )
-                input_length = min(input_length, truncated_length)
-
             max_tokens = get_max_tokens(
                 max_model_len,
                 request.max_completion_tokens
                 if request.max_completion_tokens is not None
                 else request.max_tokens,
-                input_length,
+                self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
 
             sampling_params: SamplingParams | BeamSearchParams

@@ -177,7 +177,14 @@ def get_max_tokens(
     input_length: int,
     default_sampling_params: dict,
     override_max_tokens: int | None = None,
+    truncate_prompt_tokens: int | None = None,
 ) -> int:
+    if truncate_prompt_tokens is not None:
+        limit = truncate_prompt_tokens
+        input_length = min(
+            input_length,
+            max_model_len if limit == -1 else limit,
+        )
     if max_model_len < input_length:
         raise ValueError(
             f"Input length ({input_length}) exceeds model's maximum "
