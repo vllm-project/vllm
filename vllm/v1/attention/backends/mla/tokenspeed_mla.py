@@ -187,6 +187,19 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.softmax_scale: float | None = None
         self.output_scale: float | None = None
 
+        # Pre-JIT BF16 and FP8 prefill kernels here too — decode impl always
+        # runs when tokenspeed is selected, prefill backend may not (user can
+        # pair with flash_attn / trtllm). Idempotent.
+        from tokenspeed_mla import warmup_compile_prefill
+
+        for q_dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            warmup_compile_prefill(
+                q_dtype=q_dtype,
+                d_qk=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                d_v=self.v_head_dim,
+                enable_pdl=False,
+            )
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
