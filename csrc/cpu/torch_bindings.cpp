@@ -77,6 +77,13 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+// Adapted from sglang: FP8 W8A16 kernel
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
+                             at::Tensor& scales2,
+                             std::vector<int64_t> block_size,
+                             const std::optional<at::Tensor>& bias,
+                             at::ScalarType out_dtype, bool is_vnni);
+
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
     at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
@@ -376,6 +383,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
       "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
   ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
+
+  // Adapted from sglang: FP8 W8A16 kernel
+  ops.def(
+      "fp8_scaled_mm_cpu(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!) "
+      "scales2, SymInt[] block_size, Tensor? bias, ScalarType out_dtype, "
+      "bool is_vnni) -> Tensor");
+  ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 #endif
 
   // CPU attention kernels
