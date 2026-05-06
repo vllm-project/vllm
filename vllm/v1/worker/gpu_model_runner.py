@@ -5961,7 +5961,7 @@ class GPUModelRunner(
         gc.collect()
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        from vllm.v1.core.kv_cache_utils import (
+        from vllm.v1.core.kv_cache_planning import (
             get_kv_cache_config_from_groups,
             get_kv_cache_groups,
         )

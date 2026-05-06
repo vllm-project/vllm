@@ -13,8 +13,8 @@ Increase the number of GPUs and nodes until there is enough GPU memory for the m
 After you provision sufficient resources to fit the model, run `vllm`. Look for log messages like:
 
 ```text
-INFO 07-23 13:56:04 [kv_cache_utils.py:775] GPU KV cache size: 643,232 tokens
-INFO 07-23 13:56:04 [kv_cache_utils.py:779] Maximum concurrency for 40,960 tokens per request: 15.70x
+INFO 07-23 13:56:04 [kv_cache_planning.py:885] GPU KV cache size: 643,232 tokens
+INFO 07-23 13:56:04 [kv_cache_planning.py:887] Maximum concurrency for 40,960 tokens per request: 15.70x
 ```
 
 The `GPU KV cache size` line reports the total number of tokens that can be stored in the GPU KV cache at once. The `Maximum concurrency` line provides an estimate of how many requests can be served concurrently if each request requires the specified number of tokens (40,960 in the example above). The tokens-per-request number is taken from the model configuration's maximum sequence length, `ModelConfig.max_model_len`. If these numbers are lower than your throughput requirements, add more GPUs or nodes to your cluster.
