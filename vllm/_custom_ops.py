@@ -907,18 +907,20 @@ def _cutlass_scaled_mm_maybe_padded(
 
     if pad_k > 0 or pad_n > 0:
         # b is column-major [K, N] (stride (1, K)).  Transpose to
-        # row-major [N, K], pad, then transpose back so the result
-        # keeps column-major layout with stride (1, K_padded).
-        b_row = b.t().contiguous()
-        b_row = _pad_to_alignment(b_row, dim=1, alignment=16)  # pad K
-        b_row = _pad_to_alignment(b_row, dim=0, alignment=16)  # pad N
-        b = b_row.t()  # back to column-major [K_padded, N_padded]
+        # row-major [N, K], pad both dims in one call, then transpose
+        # back so the result keeps column-major layout with stride
+        # (1, K_padded).
+        b = torch.nn.functional.pad(b.t().contiguous(), (0, pad_k, 0, pad_n)).t()
 
         if pad_k > 0:
             a = _pad_to_alignment(a, dim=1, alignment=16)
         if pad_n > 0:
             if bias is not None:
                 bias = _pad_to_alignment(bias, dim=0, alignment=16)
+            # scale_b is either per-tensor (numel==1) or per-channel
+            # (numel==N).  Block-wise 2D scales (e.g. DeepSeek V3) take
+            # a separate code path through CutlassFp8BlockScaledMMKernel
+            # and never reach this function.
             if scale_b.numel() > 1:
                 scale_b = _pad_to_alignment(
                     scale_b.view(-1), dim=0, alignment=16, value=1.0
@@ -930,7 +932,7 @@ def _cutlass_scaled_mm_maybe_padded(
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     if pad_n > 0:
-        out = out[:, :N]
+        out = out[:, :N].contiguous()
     return out
 
 
@@ -3278,6 +3280,39 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
 
 
 _supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_cpu"):
+
+    @register_fake("_C::fp8_scaled_mm_cpu")
+    def fp8_scaled_mm_cpu_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        block_size: list[int],
+        bias: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype, device=mat1.device)
+
+
+_supports_cpu_fp8_w8a16 = bool(hasattr(torch.ops._C, "fp8_scaled_mm_cpu"))
+
+
+def fp8_scaled_mm_cpu(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scales2: torch.Tensor,
+    block_size: list[int],
+    bias: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
 
 
 class CPUDNNLGEMMHandler:
