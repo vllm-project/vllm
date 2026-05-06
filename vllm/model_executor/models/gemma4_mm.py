@@ -14,6 +14,7 @@ processor inserts ``mm:ss`` timestamps between frames so the model can
 reason about temporal order.
 """
 
+import dataclasses
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
@@ -54,9 +55,12 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    MultiModalProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -83,6 +87,71 @@ logger = init_logger(__name__)
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+# Gemma 4's vision tower only supports these five soft-token budgets.
+# See transformers.models.gemma4.image_processing_pil_gemma4._SUPPORTED_SOFT_TOKENS.
+_SUPPORTED_SOFT_TOKENS: tuple[int, ...] = (70, 140, 280, 560, 1120)
+
+# Sentinel value for ``mm_processor_kwargs.max_soft_tokens`` that asks the
+# server to pick the smallest supported budget whose native resize target
+# area covers the image area.  Avoids both info loss from downscaling and
+# wasted tokens from upscaling.  See ``_pick_auto_soft_tokens``.
+_AUTO_SOFT_TOKENS: str = "auto"
+
+
+def _pick_auto_soft_tokens(
+    image_width: int,
+    image_height: int,
+    patch_size: int,
+    pooling_kernel_size: int,
+) -> int:
+    """Pick the smallest supported ``max_soft_tokens`` whose native resize
+    target area covers the input image area.
+
+    Rationale
+    ---------
+    ``get_aspect_ratio_preserving_size`` in transformers
+    (``models/gemma4/image_processing_pil_gemma4.py``) resizes by a uniform
+    factor ``sqrt(target_px / image_px)`` with
+    ``target_px = max_soft_tokens * patch_size**2 * pooling_kernel_size**2``.
+    A factor ``>= 1`` means the image is upscaled or left alone — no spatial
+    information is dropped.  A factor ``< 1`` means a downscale and info
+    loss.  This helper picks the smallest budget that keeps the factor
+    ``>= 1``, avoiding both info loss and the wasted tokens of a larger-
+    than-needed budget.  Images too large to fit the biggest supported
+    budget fall through to that budget (identical to the current fixed
+    behavior for oversized inputs).
+    """
+    pixels_per_token = (patch_size**2) * (pooling_kernel_size**2)
+    area = image_width * image_height
+    for budget in _SUPPORTED_SOFT_TOKENS:
+        if budget * pixels_per_token >= area:
+            return budget
+    return _SUPPORTED_SOFT_TOKENS[-1]
+
+
+def _resolve_auto_over_images(
+    image_sizes: Iterable[tuple[int, int]],
+    patch_size: int,
+    pooling_kernel_size: int,
+) -> int:
+    """Resolve ``max_soft_tokens="auto"`` to a single integer that is
+    shared by every image in the request.
+
+    Gemma 4 requires all images in one prompt to use the same soft-token
+    budget (the HF processor accepts a single ``max_soft_tokens`` per
+    batch and the vision tower emits a fixed number of tokens per image
+    at that budget).  We pick the largest per-image adaptive budget so
+    no image is downscaled; smaller images are upscaled to match, which
+    is the same behavior as today's fixed-budget configuration.
+    """
+    resolved = _SUPPORTED_SOFT_TOKENS[0]
+    for width, height in image_sizes:
+        resolved = max(
+            resolved,
+            _pick_auto_soft_tokens(width, height, patch_size, pooling_kernel_size),
+        )
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +326,19 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
         if max_soft_tokens is None:
             max_soft_tokens = vision_cfg.default_output_length
+
+        # Invariant: ``"auto"`` must already have been canonicalized to a
+        # concrete integer by
+        # ``Gemma4MultiModalProcessor._cached_apply_hf_processor``
+        # upstream of any path that reaches this method.  Per-image
+        # resolution here would produce placeholder counts that disagree
+        # with the vision tower's actual output and crash embedding
+        # merge.
+        if max_soft_tokens == _AUTO_SOFT_TOKENS:
+            raise ValueError(
+                f"max_soft_tokens={_AUTO_SOFT_TOKENS!r} reached "
+                "_compute_num_soft_tokens without being canonicalized."
+            )
 
         unit = patch_size * pooling_kernel_size
         max_patches = max_soft_tokens * pooling_kernel_size**2
@@ -485,6 +567,96 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
 
 
 class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
+    def _canonicalize_auto_soft_tokens(
+        self,
+        inputs: ProcessorInputs,
+    ) -> ProcessorInputs:
+        """Resolve ``max_soft_tokens="auto"`` into a concrete integer on
+        ``inputs.hf_processor_mm_kwargs`` before anything downstream
+        consumes it.
+
+        Rationale
+        ---------
+        Two downstream consumers assume a numeric ``max_soft_tokens``:
+
+        1. ``ProcessorInputs.get_mm_hashes()`` hashes the raw
+           ``hf_processor_mm_kwargs`` per-item.  Leaving the string
+           ``"auto"`` in the kwargs makes the same image share a cache
+           entry across requests whose *effective* budget differs, which
+           corrupts the per-item mm-processor cache.
+        2. ``_apply_hf_processor_main`` instantiates
+           ``get_hf_processor(**hf_processor_mm_kwargs)``; the HF
+           processor's validator rejects anything outside
+           ``_SUPPORTED_SOFT_TOKENS``.
+
+        Canonicalizing here — before ``super()._cached_apply_hf_processor``
+        runs ``get_mm_hashes()`` and constructs the HF processor — makes
+        both consumers safe.  The resolved budget is the largest
+        per-image adaptive budget, so every image in the request shares
+        one budget (required by Gemma 4) and no image is downscaled.
+        """
+        merged = self.info.ctx.get_merged_mm_kwargs(inputs.hf_processor_mm_kwargs)
+        effective = merged.get("max_soft_tokens")
+        if effective is None:
+            images_k = merged.get("images_kwargs") or {}
+            if isinstance(images_k, Mapping):
+                effective = images_k.get("max_soft_tokens")
+        if effective != _AUTO_SOFT_TOKENS:
+            return inputs
+
+        if "image" in inputs.mm_data_items:
+            image_items = inputs.mm_data_items.get_items(
+                "image", ImageProcessorItems
+            )
+            image_sizes: list[tuple[int, int]] = [
+                (
+                    image_items.get_image_size(i).width,
+                    image_items.get_image_size(i).height,
+                )
+                for i in range(len(image_items))
+            ]
+        else:
+            image_sizes = []
+
+        vision_cfg = self.info.get_hf_config().vision_config
+        resolved = _resolve_auto_over_images(
+            image_sizes,
+            vision_cfg.patch_size,
+            vision_cfg.pooling_kernel_size,
+        )
+
+        # Build a canonical kwargs dict with no string "auto" in either
+        # the top-level or the ``images_kwargs`` slot.
+        new_kwargs: dict[str, object] = dict(inputs.hf_processor_mm_kwargs)
+        if new_kwargs.get("max_soft_tokens") == _AUTO_SOFT_TOKENS:
+            new_kwargs["max_soft_tokens"] = resolved
+        elif "max_soft_tokens" not in new_kwargs:
+            # Server-level default case: neither slot exists in the raw
+            # request kwargs.  Promote the resolved integer to the
+            # top-level so downstream sees a concrete value.
+            new_kwargs["max_soft_tokens"] = resolved
+
+        images_k = new_kwargs.get("images_kwargs")
+        if isinstance(images_k, Mapping) and images_k.get("max_soft_tokens") == (
+            _AUTO_SOFT_TOKENS
+        ):
+            images_k = dict(images_k)
+            images_k["max_soft_tokens"] = resolved
+            new_kwargs["images_kwargs"] = images_k
+
+        return dataclasses.replace(inputs, hf_processor_mm_kwargs=new_kwargs)
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        # Canonicalize ``max_soft_tokens="auto"`` BEFORE hashing and HF
+        # processor construction.  See ``_canonicalize_auto_soft_tokens``.
+        return super()._cached_apply_hf_processor(
+            self._canonicalize_auto_soft_tokens(inputs), timing_ctx
+        )
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -492,18 +664,44 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Validate max_soft_tokens early and exit cleanly on bad values.
-        _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
-
+        # ``"auto"`` is resolved earlier in
+        # ``_canonicalize_auto_soft_tokens``.  Any value reaching here
+        # via a normal path is numeric.  The one exception is
+        # ``_apply_hf_processor_text_only`` which hardcodes
+        # ``hf_processor_mm_kwargs={}`` — that bypasses our
+        # canonicalizer, and ``"auto"`` then surfaces via the
+        # config-level default at merge time.  That path has no images
+        # so the value is unused; normalize it to the smallest
+        # supported budget and proceed.  With images present, ``"auto"``
+        # here means the canonicalizer was skipped and we fail loud.
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
         val = merged_kwargs.get("max_soft_tokens")
+        images_kwargs_dict = merged_kwargs.get("images_kwargs", {})
         if val is None:
-            val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
+            val = images_kwargs_dict.get("max_soft_tokens")
+
+        if val == _AUTO_SOFT_TOKENS:
+            if mm_data.get("images"):
+                raise ValueError(
+                    f"max_soft_tokens={_AUTO_SOFT_TOKENS!r} reached "
+                    "_call_hf_processor with image mm_data but without "
+                    "being canonicalized. The canonicalization pass in "
+                    "Gemma4MultiModalProcessor._cached_apply_hf_processor "
+                    "should have resolved it to an integer."
+                )
+            val = _SUPPORTED_SOFT_TOKENS[0]
+            # Propagate the normalized integer so that the HF processor
+            # downstream does not re-merge and see "auto" from the
+            # config-level default.  The text-only path hardcodes
+            # mm_kwargs={} so it is safe to mutate here.
+            if isinstance(mm_kwargs, dict):
+                mm_kwargs["max_soft_tokens"] = val
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
             raise ValueError(
-                f"Unsupported max_soft_tokens value: {val}. "
-                f"Valid values are {_SUPPORTED_SOFT_TOKENS}."
+                f"Unsupported max_soft_tokens value: {val!r}. "
+                f"Valid values are {_SUPPORTED_SOFT_TOKENS} "
+                f"or the sentinel {_AUTO_SOFT_TOKENS!r}."
             )
 
         mm_data = dict(mm_data)
@@ -743,24 +941,36 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             # (boi + N×image_token + eoi, where N = max_soft_tokens).
             image_token = hf_processor.image_token
 
+            # Resolve the effective max_soft_tokens once per request by
+            # merging per-prompt kwargs with config-level defaults,
+            # consistent with how _call_hf_processor resolves it.
+            # Without this merge, a missing per-prompt override would
+            # fall back to vision_cfg.default_output_length instead of
+            # the config's mm_processor_kwargs default.
+            #
+            # ``"auto"`` is canonicalized upstream in
+            # ``_cached_apply_hf_processor`` so it must not be seen here.
+            merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
+                hf_processor_mm_kwargs,
+            )
+            resolved_max_soft_tokens = merged_kwargs.get("max_soft_tokens")
+            if resolved_max_soft_tokens == _AUTO_SOFT_TOKENS:
+                raise ValueError(
+                    f"max_soft_tokens={_AUTO_SOFT_TOKENS!r} reached "
+                    "_get_prompt_updates without being canonicalized. "
+                    "The canonicalization pass in "
+                    "Gemma4MultiModalProcessor._cached_apply_hf_processor "
+                    "should have resolved it to an integer."
+                )
+
             def get_replacement_image(item_idx: int):
                 images = mm_items.get_items("image", ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
-                # Resolve the effective max_soft_tokens by merging
-                # per-prompt kwargs with the config-level defaults,
-                # consistent with how _call_hf_processor resolves it.
-                # Without this merge, a missing per-prompt override
-                # would fall back to vision_cfg.default_output_length
-                # instead of the config's mm_processor_kwargs default.
-                merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
-                    hf_processor_mm_kwargs,
-                )
-                max_soft_tokens = merged_kwargs.get("max_soft_tokens")
                 return self.info.get_image_repl(
                     image_width=image_size.width,
                     image_height=image_size.height,
                     processor=hf_processor,
-                    max_soft_tokens=max_soft_tokens,
+                    max_soft_tokens=resolved_max_soft_tokens,
                 )
 
             prompt_updates.append(
