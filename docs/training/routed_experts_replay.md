@@ -250,6 +250,10 @@ The overhead is dominated by the per-layer `.copy_()` during the forward pass. T
 
 - **Streaming**: Routing data is only available when the request finishes (not streamed incrementally).
 - **V1 engine only**: Routing replay is implemented for the vLLM V1 engine.
+- **Preempted requests**: When a request is preempted by the scheduler (and later resumed via re-prefill), any routing already accumulated in the worker's host cache for that request is dropped without being emitted. The consumer sees `routed_experts=None` for the resumed request with no other signal. Partial-rollout and async-RL pipelines that rely on routing for preempted requests should either disable preemption (`--no-enable-chunked-prefill` / sufficient KV headroom) or reconstruct routing on the resumed prefill.
+- **Async scheduling**: Not supported; rejected at config time. The worker-side stop predicate reads `req_state.output_token_ids[-1]`, which under async scheduling is the placeholder `-1` until `AsyncGPUModelRunnerOutput` resolves the real sampled token, so EOS / stop-token finishes would silently drop routing. Use sync scheduling (the default when `--enable-return-routed-experts` is set, or set explicitly with the appropriate scheduler config).
+- **Sequence parallelism / naive DP MoE dispatch**: Not supported on the FusedMoE layer; rejected at bind time. SP shards `topk_ids` along dim 0 across the TP group so each rank only captures `1/sp_size` of the rows; naive DP dispatch all-gathers tokens across DP ranks before routing, so `topk_ids.shape[0]` exceeds the per-rank buffer size. Both raise `NotImplementedError` from `bind_routing_capture_to_model`.
+- **Pipeline / prefill-context / decode-context parallelism**: Not yet validated; rejected at config time.
 
 ## CLI Reference
 

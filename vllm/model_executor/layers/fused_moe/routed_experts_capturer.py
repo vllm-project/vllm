@@ -589,7 +589,17 @@ def free_routing_buffers(
     """Free host cache buffers for finished and preempted requests.
 
     Finished requests had their routing data extracted in the previous
-    step; preempted requests will be re-prefilled from scratch.
+    step.
+
+    Preempted requests are re-prefilled from scratch when they resume,
+    so their host-cache buffer is freed here. This means any routing
+    already accumulated in the host cache for the preempted request is
+    dropped without being emitted on a ``ModelRunnerOutput`` --
+    consumers see ``routed_experts=None`` for those requests with no
+    other signal. Partial-rollout / async-RL pipelines that depend on
+    receiving routing for preempted requests should treat preemption
+    as a routing-data loss event and either keep preemption disabled
+    or reconstruct routing on the resumed prefill.
     """
     capturer = get_global_experts_capturer()
     if capturer is None:

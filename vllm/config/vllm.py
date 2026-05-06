@@ -1859,7 +1859,8 @@ class VllmConfig:
         routing lands at the correct positions during the main forward).
 
         Out-of-scope (block until validated): PP > 1, prefill context
-        parallelism (PCP) > 1, decode context parallelism (DCP) > 1.
+        parallelism (PCP) > 1, decode context parallelism (DCP) > 1,
+        async scheduling.
         """
         unsupported: list[str] = []
 
@@ -1881,6 +1882,8 @@ class VllmConfig:
                 f"(decode_context_parallel_size="
                 f"{self.parallel_config.decode_context_parallel_size})"
             )
+        if self.scheduler_config.async_scheduling:
+            unsupported.append("async scheduling")
 
         if unsupported:
             raise ValueError(
