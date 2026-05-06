@@ -3,12 +3,13 @@
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -30,6 +31,11 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
+
+
+class CapturedAttentionState(NamedTuple):
+    attn_metadata: dict[str, Any]
+    slot_mappings: dict[str, torch.Tensor]
 
 
 @dataclass(frozen=True)
@@ -94,13 +100,8 @@ class CudaGraphManager:
         self.decode_query_len = decode_query_len
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
-        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        if self.pp_size > 1:
-            self.is_first_pp_rank = get_pp_group().is_first_rank
-            self.is_last_pp_rank = get_pp_group().is_last_rank
-        else:
-            self.is_first_pp_rank = True
-            self.is_last_pp_rank = True
+        self.is_first_pp_rank = get_pp_group().is_first_rank
+        self.is_last_pp_rank = get_pp_group().is_last_rank
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
@@ -182,16 +183,20 @@ class CudaGraphManager:
     def capture(
         self,
         create_forward_fn: Callable[
-            [BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]
+            [BatchExecutionDescriptor],
+            tuple[Callable[[CUDAGraphMode], None], CapturedAttentionState],
         ],
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> None:
+    ) -> dict[BatchExecutionDescriptor, CapturedAttentionState]:
         """Capture CUDA graphs.
 
         Args:
             create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
-                returns a function that runs forward with a given CUDAGraphMode.
+                returns a tuple of (forward_fn, captured_attn_state).
         """
+        captured_attn_states: dict[
+            BatchExecutionDescriptor, CapturedAttentionState
+        ] = {}
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
             # activations so FULL activations should fit in already allocated
@@ -205,7 +210,8 @@ class CudaGraphManager:
                     descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
                 for desc in descs:
                     # Prepare inputs and get forward function
-                    forward_fn = create_forward_fn(desc)
+                    forward_fn, attn_state = create_forward_fn(desc)
+                    captured_attn_states[desc] = attn_state
 
                     # Warmup
                     forward_fn(CUDAGraphMode.NONE)
@@ -232,7 +238,9 @@ class CudaGraphManager:
                             # the next forward pass.
                             get_offloader().join_after_forward()
                         self.graphs[desc] = graph
+                        compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
+        return captured_attn_states
 
     def dispatch(
         self,
@@ -294,13 +302,16 @@ class ModelCudaGraphManager(CudaGraphManager):
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
         progress_bar_desc: str = "Capturing CUDA graphs",
-    ) -> None:
+    ) -> dict[BatchExecutionDescriptor, CapturedAttentionState]:
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor,
-        ) -> Callable[[CUDAGraphMode], None]:
+        ) -> tuple[
+            Callable[[CUDAGraphMode], None],
+            CapturedAttentionState,
+        ]:
             num_tokens = desc.num_tokens
             num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
             num_tokens_across_dp = (
@@ -371,21 +382,18 @@ class ModelCudaGraphManager(CudaGraphManager):
                         self.aux_hidden_states[i][:num_tokens] = aux
                 else:
                     # Non-last PP rank.
+                    assert isinstance(model_output, IntermediateTensors)
                     intermediate_tensors = model_output
-                    assert isinstance(intermediate_tensors, IntermediateTensors)
                     if self.intermediate_tensors is None:
-                        self.intermediate_tensors = IntermediateTensors(
-                            {
-                                k: torch.empty_like(v)
-                                for k, v in intermediate_tensors.tensors.items()
-                            }
+                        self.intermediate_tensors = IntermediateTensors.empty_like(
+                            intermediate_tensors
                         )
                     for k, v in intermediate_tensors.tensors.items():
                         self.intermediate_tensors[k][:num_tokens] = v
 
-            return forward_fn
+            return forward_fn, CapturedAttentionState(attn_metadata, slot_mappings)
 
-        super().capture(create_forward_fn, progress_bar_desc)
+        return super().capture(create_forward_fn, progress_bar_desc)
 
     def run_fullgraph(
         self, desc: BatchExecutionDescriptor
@@ -411,7 +419,7 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+) -> CapturedAttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
@@ -440,4 +448,4 @@ def prepare_inputs_to_capture(
         kv_cache_config,
         for_capture=True,
     )
-    return attn_metadata, slot_mappings_by_layer
+    return CapturedAttentionState(attn_metadata, slot_mappings_by_layer)

@@ -29,13 +29,16 @@ from vllm.distributed.elastic_ep.standby_state import (
     get_standby_ep_group,
     pop_standby_groups,
 )
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.parallel_state import (
     _replace_active_groups,
+    get_eplb_group,
     prepare_communication_buffer_for_model,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
@@ -317,10 +320,7 @@ class ElasticEPScalingExecutor:
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
+            if is_moe_layer(module)
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(
@@ -399,6 +399,7 @@ class ElasticEPScalingExecutor:
                 eplb_model_state.logical_to_physical_map,
                 eplb_model_state.logical_replica_count,
             )
+            eplb_state._init_should_record_tensor(model)
             model.update_physical_experts_metadata(
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
@@ -407,9 +408,15 @@ class ElasticEPScalingExecutor:
             # for the new EP size by resetting quant_method to base
             for module in moe_modules:
                 if hasattr(module.quant_method, "old_quant_method"):
-                    module.quant_method = module.quant_method.old_quant_method
-                    module.runner = module._init_runner()
+                    module._replace_quant_method(module.quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
+
+        eplb_model_state.communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend=parallel_config.eplb_config.communicator,
+            expert_weights=model.expert_weights[0],
+        )
+
         if (
             self.worker.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
