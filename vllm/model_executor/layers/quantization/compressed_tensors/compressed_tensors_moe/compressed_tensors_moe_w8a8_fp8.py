@@ -337,7 +337,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def maybe_make_prepare_finalize(

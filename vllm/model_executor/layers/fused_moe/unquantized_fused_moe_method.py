@@ -23,26 +23,21 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalizeModular,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.routed_experts import (
-        RoutedExperts,
-    )
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -197,7 +192,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 moe_config=self.moe,
                 backend=self.unquantized_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:

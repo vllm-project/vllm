@@ -839,10 +839,10 @@ class MoERunner(MoERunnerInterface):
     def expert_map(self) -> torch.Tensor | None:
         return self.routed_experts.expert_map
 
-    def _maybe_init_expert_routing_tables(
+    def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        return self.routed_experts._maybe_init_expert_routing_tables()
+        return self.routed_experts._expert_routing_tables()
 
     def update_expert_map(self):
         self.routed_experts.update_expert_map()

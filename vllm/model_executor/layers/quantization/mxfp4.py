@@ -363,7 +363,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
                 moe_config=self.moe,
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -691,7 +691,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 moe_config=self.moe,
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def process_weights_after_loading(self, layer):

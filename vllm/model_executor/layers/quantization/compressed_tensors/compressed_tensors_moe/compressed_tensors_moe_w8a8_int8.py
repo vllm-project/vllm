@@ -148,7 +148,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
         )
 
     def maybe_make_prepare_finalize(

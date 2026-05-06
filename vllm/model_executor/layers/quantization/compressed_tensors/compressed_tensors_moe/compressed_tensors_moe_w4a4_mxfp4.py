@@ -194,7 +194,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
                 mxfp4_backend=self.mxfp4_backend,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def apply(

@@ -3,15 +3,12 @@
 
 from collections.abc import Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 from torch.nn.parameter import UninitializedParameter
 
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (
-    get_dp_group,
-)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -75,11 +72,7 @@ class RoutedExperts(PluggableLayer):
         self.local_num_experts = moe_config.num_local_experts
 
         # Register buffers for state_dict compatibility
-        if self.expert_map_manager.expert_map is not None:
-            self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
-
-        if self.expert_map_manager.expert_mask is not None:
-            self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
+        self.update_expert_map_info()
 
         self.rocm_aiter_fmoe_enabled = moe_config.rocm_aiter_fmoe_enabled
 
@@ -203,43 +196,46 @@ class RoutedExperts(PluggableLayer):
             else self.expert_map_manager.expert_mask
         )
 
-    def _maybe_init_expert_routing_tables(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """Get routing tables (already initialized by manager)."""
-        # Return routing tables from manager
+    def update_expert_map_info(self):
+        # Update local attributes from ExpertMapManager
+        self.local_num_experts = self.expert_map_manager.local_num_experts
+        self.expert_placement_strategy = self.expert_map_manager.placement_strategy
+        self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
+        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
+
+        # Get routing tables from ExpertMapManager
         routing_tables = self.expert_map_manager.routing_tables
-
-        if routing_tables is None:
-            return None
-
-        # Register buffers for backward compatibility if not already registered
-        if not hasattr(self, "expert_global_to_physical"):
+        if routing_tables is not None:
+            # Register routing tables as buffers for this layer
             global_to_physical, physical_to_global, local_global = routing_tables
             self.register_buffer("expert_global_to_physical", global_to_physical)
             self.register_buffer("expert_physical_to_global", physical_to_global)
             self.register_buffer("expert_local_to_global", local_global)
 
-        return routing_tables
+    def _expert_routing_tables(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        # Return cached routing tables if already registered as buffers
+        if hasattr(self, "expert_global_to_physical"):
+            return cast(
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+                (
+                    self.expert_global_to_physical,
+                    self.expert_physical_to_global,
+                    self.expert_local_to_global,
+                ),
+            )
+        return None
 
     def update_expert_map(self):
-        """Update expert mappings for new EP configuration."""
-        # ep_size and ep_rank should already be updated in moe_parallel_config
+        # ep_size and ep_rank should already be updated
+        # Update ExpertMapManager with new EP configuration
+        # Note: ExpertMapManager.update() recalculates expert maps and
+        # reinitializes routing tables internally.
         self.expert_map_manager.update()
 
-        # Re-register buffers for state_dict compatibility
-        self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
-        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
-
-        # Update routing table buffers if needed
-        self._maybe_init_expert_routing_tables()
-
-        # Handle AITER shared experts if needed
-        if self.aiter_fmoe_shared_expert_enabled:
-            self._init_aiter_shared_experts_topK_buffer(
-                vllm_config=get_current_vllm_config(),
-                dp_size=get_dp_group().world_size,
-            )
+        # Update local attributes from ExpertMapManager
+        self.update_expert_map_info()
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         """Map global expert ID to local expert ID."""

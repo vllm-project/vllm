@@ -70,6 +70,7 @@ def determine_expert_map(
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+
     # Create an expert map for the local experts
     if expert_placement_strategy == "linear":
         start_idx = ep_rank * base_experts + min(ep_rank, remainder)
@@ -212,7 +213,7 @@ class ExpertMapManager:
         self._calculate_expert_maps()
 
         # Initialize routing tables if needed
-        self._maybe_init_routing_tables()
+        self._ensure_routing_tables_initialized()
 
         self._init_aiter_shared_experts_topK_buffer(
             dp_size=self.moe_parallel_config.dp_size,
@@ -226,7 +227,7 @@ class ExpertMapManager:
                 (expert_mask == 0) | (expert_mask == 1)
             ), "Aiter Fused MoE kernel only supports expert_map with 0 and 1s."
 
-        # Log EP configuration (move into EMM?)
+        # Log EP configuration
         if self.use_ep:
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Expert "
@@ -248,7 +249,7 @@ class ExpertMapManager:
         elif self._expert_mask is not None:
             return self._expert_mask.device
         else:
-            raise RuntimeError("no device found")
+            raise RuntimeError("no device available")
 
     def _init_aiter_shared_experts_topK_buffer(
         self,
@@ -384,7 +385,7 @@ class ExpertMapManager:
             dp_size: New DP size (if changed, for AITER buffer reinitialization)
             top_k: New top_k (if changed, for AITER buffer reinitialization)
             max_num_batched_tokens: New max batched tokens (if changed, for AITER
-            buffer reinitialization)
+                                    buffer reinitialization)
         """
         with self.device:
             if new_ep_size is not None:
@@ -398,7 +399,7 @@ class ExpertMapManager:
             )
 
             self._calculate_expert_maps()
-            self._maybe_init_routing_tables()
+            self._ensure_routing_tables_initialized()
 
             # Reinitialize AITER buffer if needed and parameters provided
             if self.num_fused_shared_experts > 0 and all(
@@ -455,7 +456,9 @@ class ExpertMapManager:
         """Calculate expert mappings based on placement strategy."""
         if self.ep_size == 1:
             # No EP, all experts are local
-            self._local_num_experts = self.global_num_experts
+            self._local_num_experts = (
+                self.global_num_experts + self.num_fused_shared_experts
+            )
             self._expert_map = None
             self._expert_mask = None
             return
@@ -476,7 +479,7 @@ class ExpertMapManager:
 
         self._local_num_experts += self.num_fused_shared_experts
 
-    def ensure_routing_tables_initialized(self) -> None:
+    def _ensure_routing_tables_initialized(self) -> None:
         """
         Ensure routing tables are initialized if needed for round-robin.
 
@@ -496,10 +499,6 @@ class ExpertMapManager:
         # Only initialize if not already initialized
         if not hasattr(self, "_routing_tables"):
             self._routing_tables = self._ensure_round_robin_expert_routing_tables()
-
-    def _maybe_init_routing_tables(self):
-        """Initialize routing tables if needed for round-robin (internal)."""
-        self.ensure_routing_tables_initialized()
 
     def _ensure_round_robin_expert_routing_tables(
         self,

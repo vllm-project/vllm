@@ -118,7 +118,7 @@ class MoERunnerInterface(PluggableLayer):
         raise NotImplementedError
 
     @abstractmethod
-    def _maybe_init_expert_routing_tables(
+    def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         raise NotImplementedError
