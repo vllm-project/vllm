@@ -1302,6 +1302,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1312,7 +1313,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             self.vision_model = Ernie4_5_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                vllm_config=vllm_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.resampler_model = VariableResolutionResamplerModel(

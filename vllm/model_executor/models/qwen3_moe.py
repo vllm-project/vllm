@@ -396,7 +396,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
             self.mlp = Qwen3MoeSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
+                quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
         else:
             self.mlp = Qwen3MoeMLP(

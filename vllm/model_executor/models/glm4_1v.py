@@ -1419,6 +1419,7 @@ class Glm4vForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        quant_config = vllm_config.quant_config
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1431,7 +1432,7 @@ class Glm4vForConditionalGeneration(
                 config.text_config,
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
-                vllm_config=vllm_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

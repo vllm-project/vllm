@@ -452,6 +452,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
 
         config = vllm_config.model_config.hf_config
 
@@ -486,7 +487,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             self.visual = Qwen2_5_VisionTransformer(
                 vision_config=vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                vllm_config=vllm_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
             self.mm_projector = nn.Linear(out_hidden, text_hidden_size)

@@ -117,7 +117,6 @@ class Mamba2Model(nn.Module):
             config.num_hidden_layers,
             lambda prefix: Mamba2DecoderLayer(
                 config,
-                vllm_config=vllm_config,
                 quant_config=quant_config,
                 prefix=prefix,
             ),

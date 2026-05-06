@@ -351,7 +351,6 @@ class FalconH1ParallelHybrid(nn.Module):
         # Instantiate the SSM branch
         self.mamba = FalconH1SSMDecoderLayer(
             config=config,
-            vllm_config=vllm_config,
             quant_config=quant_config,
             prefix=ssm_prefix,
         )

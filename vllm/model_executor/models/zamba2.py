@@ -615,7 +615,7 @@ class Zamba2HybridLayer(nn.Module):
             config,
             model_config=vllm_config.model_config if vllm_config is not None else None,
             cache_config=vllm_config.cache_config if vllm_config is not None else None,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=prefix,
         )
 

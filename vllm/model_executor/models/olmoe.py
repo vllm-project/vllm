@@ -225,6 +225,7 @@ class OlmoeAttention(nn.Module):
 class OlmoeDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
         config = vllm_config.model_config.hf_config
 
         self.hidden_size = config.hidden_size
@@ -239,7 +240,7 @@ class OlmoeDecoderLayer(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)

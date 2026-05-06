@@ -579,6 +579,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        quant_config = vllm_config.quant_config
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
         self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
@@ -595,7 +596,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self.visual = Qwen3_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                vllm_config=vllm_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

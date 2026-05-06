@@ -255,7 +255,7 @@ class Step3TextDecoderLayer(nn.Module):
 
         if layer_idx in moe_layers_idx:
             self.moe = FusedMoEBlock(
-                config=config, vllm_config=vllm_config, prefix=f"{prefix}.moe"
+                config=config, quant_config=quant_config, prefix=f"{prefix}.moe"
             )
             self.share_expert = Step3TextMLP(
                 hidden_size=self.hidden_size,

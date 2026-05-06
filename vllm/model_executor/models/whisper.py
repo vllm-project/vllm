@@ -394,6 +394,7 @@ class WhisperEncoderLayer(nn.Module):
 class WhisperDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        quant_config = vllm_config.quant_config
         config = vllm_config.model_config.hf_config
 
         self.self_attn = WhisperAttention(
@@ -415,7 +416,7 @@ class WhisperDecoderLayer(nn.Module):
             embed_dim=config.d_model,
             ffn_dim=config.decoder_ffn_dim,
             act_fn=config.activation_function,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.final_layer_norm = nn.LayerNorm(config.d_model)

@@ -1232,6 +1232,7 @@ class Qwen2VLForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        quant_config = vllm_config.quant_config
         config: Qwen2VLConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1243,7 +1244,7 @@ class Qwen2VLForConditionalGeneration(
             self.visual = Qwen2VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                vllm_config=vllm_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 

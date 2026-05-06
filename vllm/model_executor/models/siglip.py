@@ -659,6 +659,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
         # TODO(ChristopherCho): Implement vLLM version of MultiheadAttention
@@ -668,7 +669,7 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config=config,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 

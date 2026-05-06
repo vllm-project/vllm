@@ -576,9 +576,10 @@ class InternS1ForConditionalGeneration(
         prefix: str,
     ):
         num_hidden_layers = config.vision_config.num_hidden_layers
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         return InternS1VisionModel(
             config.vision_config,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
             prefix=prefix,
         )

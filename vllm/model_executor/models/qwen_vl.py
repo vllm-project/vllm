@@ -254,6 +254,7 @@ class VisualAttentionBlock(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config
 
         self.ln_1 = norm_layer(d_model)
         self.ln_2 = norm_layer(d_model)
@@ -262,7 +263,7 @@ class VisualAttentionBlock(nn.Module):
         self.mlp = QwenVLMLP(
             hidden_size=d_model,
             intermediate_size=mlp_width,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -371,7 +372,7 @@ class VisionTransformer(nn.Module):
             heads,
             mlp_ratio,
             norm_layer=norm_layer,
-            vllm_config=vllm_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.transformer",
         )
 
@@ -428,10 +429,11 @@ class QwenVLModel(QWenModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
+        quant_config = vllm_config.quant_config
         config = vllm_config.model_config.hf_config
 
         self.visual = VisionTransformer(
-            **config.visual, vllm_config=vllm_config, prefix=f"{prefix}.visual"
+            **config.visual, quant_config=quant_config, prefix=f"{prefix}.visual"
         )
 
 

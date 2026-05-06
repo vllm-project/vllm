@@ -392,7 +392,7 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         self.is_layer_sparse = self.is_moe_layer(layer_id)
         if self.is_layer_sparse:
             self.mlp = MiMoV2MoE(
-                vllm_config=vllm_config,
+                quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
         else:

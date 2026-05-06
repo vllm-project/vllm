@@ -684,6 +684,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        quant_config = vllm_config.quant_config
         self.vit_layers = VIT_LAYERS
         self.image_num_patch = vision_config.image_num_patch
         self.llm_patches_per_crop = (
@@ -691,7 +692,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
             (self.image_num_patch[1] + 1) // POOLING_SIZE,
         )
         self.image_vit = VisionTransformer(
-            vision_config, vllm_config=vllm_config, prefix=f"{prefix}.image_vit"
+            vision_config, quant_config=quant_config, prefix=f"{prefix}.image_vit"
         )
         self.num_prefix_tokens = self.image_vit.num_prefix_tokens
         assert self.num_prefix_tokens in {0, 1}, (
