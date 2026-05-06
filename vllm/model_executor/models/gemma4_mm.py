@@ -265,7 +265,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         target_h = max(unit, int(math.floor(image_height * scale / unit)) * unit)
         target_w = max(unit, int(math.floor(image_width * scale / unit)) * unit)
         num_patches = (target_h // patch_size) * (target_w // patch_size)
-        return num_patches // (pooling_kernel_size**2)
+        # Clamp to ``max_soft_tokens``: extreme aspect ratios (e.g. 3x900)
+        # cause the floor() above to round one dim up to ``unit`` while the
+        # other scales freely, which over-shoots ``max_patches``. The HF
+        # Gemma 4 image processor caps its vision-tower output at
+        # ``max_soft_tokens``, so without this clamp the prompt-side
+        # placeholder count exceeds the encoder output and
+        # ``_merge_multimodal_embeddings`` crashes.
+        return min(num_patches // (pooling_kernel_size**2), max_soft_tokens)
 
     def get_image_repl(
         self,

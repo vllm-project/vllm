@@ -193,7 +193,7 @@ class SpecDecodeBaseProposer:
 
         if self.needs_extra_input_slots:
             self._raise_if_padded_drafter_batch_disabled()
-            self._raise_if_multimodal()
+            self._warn_if_multimodal()
             self._raise_if_mrope()
 
         self.is_rejected_token_mask: torch.Tensor | None = None
@@ -309,11 +309,12 @@ class SpecDecodeBaseProposer:
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
-    def _raise_if_multimodal(self):
+    def _warn_if_multimodal(self):
         if self.supports_mm_inputs:
-            raise NotImplementedError(
+            logger.warning(
                 "Speculative Decoding with draft models or parallel drafting "
-                "does not support multimodal models yet"
+                "does not fully support multimodal models yet. "
+                "Proceeding with text-only speculative decoding."
             )
 
     def _raise_if_mrope(self):
@@ -883,16 +884,12 @@ class SpecDecodeBaseProposer:
         is not sampled and comes from `request.get_token_id()` instead. This is denoted
         the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-        # Precompute get_token_id for when there is no valid next token
+        # Precompute backup token IDs for discarded requests.
         num_reqs = gpu_input_batch.num_reqs
-        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
-                for i in range(num_reqs)
-            ],
-            dtype=np.int32,
-        )
+        for i in range(num_reqs):
+            self.backup_next_token_ids.np[i] = requests[
+                gpu_input_batch.req_ids[i]
+            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
         backup_tokens_gpu = self.backup_next_token_ids.gpu
 
@@ -1276,15 +1273,29 @@ class SpecDecodeBaseProposer:
         Subclasses may override to apply additional config changes.
         """
         spec_cfg = self.speculative_config
+        base = self.vllm_config
+
         if spec_cfg.moe_backend is not None:
-            return replace(
-                self.vllm_config,
+            base = replace(
+                base,
                 kernel_config=replace(
-                    self.vllm_config.kernel_config,
+                    base.kernel_config,
                     moe_backend=spec_cfg.moe_backend,
                 ),
             )
-        return self.vllm_config
+
+        # Note (matt): Never inherit the attention backend from base, because there are
+        # many opportunities for incompatibility, so we always independently autoselect
+        # unless explicitly specified in the speculative config.
+        base = replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                backend=spec_cfg.attention_backend,
+            ),
+        )
+
+        return base
 
     def _get_model(self) -> nn.Module:
         """

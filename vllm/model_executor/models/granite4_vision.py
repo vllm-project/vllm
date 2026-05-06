@@ -887,9 +887,10 @@ class Granite4VisionForConditionalGeneration(
             and get_pp_group().is_first_rank
             and self._ds_layer_indices
         ):
+            n = inputs_embeds.size(0)
             ds: IntermediateTensors | None = IntermediateTensors(
                 {
-                    f"ds_{llm_layer}": self._ds_buffers[lvl]
+                    f"ds_{llm_layer}": self._ds_buffers[lvl][:n]
                     for lvl, llm_layer in enumerate(self._ds_layer_indices)
                 }
             )
