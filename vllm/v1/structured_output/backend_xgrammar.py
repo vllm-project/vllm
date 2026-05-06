@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -41,25 +40,6 @@ class _XgrammarDraftTree:
     _branch_indices_cache: dict[int, list[tuple[int, ...] | None]] = field(
         default_factory=dict, init=False, repr=False
     )
-
-    @classmethod
-    def from_speculative_config(
-        cls, speculative_config: Any | None, num_speculative_tokens: int
-    ) -> "_XgrammarDraftTree | None":
-        if num_speculative_tokens <= 0:
-            return None
-
-        speculative_token_tree = None
-        if speculative_config is not None:
-            speculative_token_tree = speculative_config.speculative_token_tree
-
-        if speculative_token_tree is None:
-            tree_choices = tuple((0,) * (i + 1) for i in range(num_speculative_tokens))
-        else:
-            tree_choices = tuple(
-                tuple(path) for path in ast.literal_eval(speculative_token_tree)
-            )
-        return cls(tree_choices=tree_choices)
 
     @property
     def num_draft_tokens(self) -> int:
@@ -161,9 +141,8 @@ class XgrammarBackend(StructuredOutputBackend):
             self.num_speculative_tokens = (
                 self.vllm_config.speculative_config.num_speculative_tokens or 0
             )
-        self.draft_tree = _XgrammarDraftTree.from_speculative_config(
-            self.vllm_config.speculative_config,
-            self.num_speculative_tokens,
+        self.draft_tree = _XgrammarDraftTree(
+            tree_choices=self.vllm_config.speculative_config.speculative_token_tree
         )
 
     def compile_grammar(
