@@ -106,3 +106,45 @@ def test_deep_gemm_warmup_noop_when_unavailable():
             "No deep_gemm calls expected for a bf16 model "
             "when deep_gemm is unavailable"
         )
+
+
+def _make_mock_fused_moe():
+    """A minimal mock that looks like a FusedMoE module."""
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    m = MagicMock(spec=FusedMoE)
+    return m
+
+
+def test_fused_moe_returns_false_when_deep_gemm_unavailable():
+    """
+    _fused_moe_grouped_gemm_may_use_deep_gemm must return False (not raise)
+    for any FusedMoE-like module when is_deep_gemm_supported() is False.
+
+    Before the fix: only VLLM_USE_DEEP_GEMM / VLLM_MOE_USE_DEEP_GEMM env
+    vars were checked — has_deep_gemm() (part of is_deep_gemm_supported())
+    was never consulted, so the function could proceed to call
+    get_mk_alignment_for_contiguous_layout() and raise RuntimeError on
+    machines without the deep_gemm package.
+
+    After the fix: is_deep_gemm_supported() is the first guard, so the
+    function returns False immediately and never touches deep_gemm internals.
+    """
+    with patch(
+        "vllm.model_executor.warmup.deep_gemm_warmup.is_deep_gemm_supported",
+        return_value=False,
+    ), patch(
+        "vllm.model_executor.warmup.deep_gemm_warmup"
+        ".get_mk_alignment_for_contiguous_layout"
+    ) as mock_align:
+        from vllm.model_executor.warmup.deep_gemm_warmup import (
+            _fused_moe_grouped_gemm_may_use_deep_gemm,
+        )
+
+        module = _make_mock_fused_moe()
+        result = _fused_moe_grouped_gemm_may_use_deep_gemm(module)
+        assert result is False
+        mock_align.assert_not_called(), (
+            "get_mk_alignment_for_contiguous_layout should not be called "
+            "when is_deep_gemm_supported() is False"
+        )
