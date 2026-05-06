@@ -68,6 +68,13 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
             return CompressedTensorsW4A4Mxfp4MoEMethod(layer.moe_config)
 
+        if quant_config._is_mxfp8(weight_quant):
+            from .compressed_tensors_moe_w8a8_mxfp8 import (
+                CompressedTensorsW8A8Mxfp8MoEMethod,
+            )
+
+            return CompressedTensorsW8A8Mxfp8MoEMethod(layer.moe_config)
+
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             # group_size=None means channelwise
             group_size = weight_quant.group_size or -1

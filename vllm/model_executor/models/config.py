@@ -107,7 +107,49 @@ class Gemma4Config(VerifyAndUpdateConfig):
             )
 
 
+class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "fp8":
+            model_type = getattr(model_config.hf_config, "model_type", None)
+            if model_type == "deepseek_v4":
+                model_config.hf_config.quantization_config["quant_method"] = (
+                    "deepseek_v4_fp8"
+                )
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "fp8"
+        ):
+            model_type = getattr(model_config.hf_text_config, "model_type", None)
+            if model_type == "deepseek_v4":
+                model_config.hf_text_config.quantization_config["quant_method"] = (
+                    "deepseek_v4_fp8"
+                )
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "mxfp4":
+            model_config.hf_config.quantization_config["quant_method"] = "gpt_oss_mxfp4"
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "mxfp4"
+        ):
+            model_config.hf_text_config.quantization_config["quant_method"] = (
+                "gpt_oss_mxfp4"
+            )
+
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config
@@ -192,6 +234,12 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class JinaForRankingConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.embedding_size = 512
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -226,8 +274,8 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
-        if pooler_config.logit_bias is None:
-            pooler_config.logit_bias = 2.65
+        if pooler_config.logit_mean is None:
+            pooler_config.logit_mean = 2.65
 
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
@@ -302,15 +350,26 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
-                )
-                logger.warning(
-                    "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching is enabled",
-                    cache_config.mamba_cache_mode,
-                    model_config.architecture,
-                )
+                if (
+                    model_config.supports_mamba_prefix_caching
+                    and vllm_config.speculative_config is not None
+                ):
+                    cache_config.mamba_cache_mode = "align"
+                    logger.warning(
+                        "Mamba cache mode is set to 'align' for %s by default "
+                        "when prefix caching and speculative decoding are enabled",
+                        model_config.architecture,
+                    )
+                else:
+                    cache_config.mamba_cache_mode = (
+                        "all" if model_config.supports_mamba_prefix_caching else "align"
+                    )
+                    logger.warning(
+                        "Mamba cache mode is set to '%s' for %s by default "
+                        "when prefix caching is enabled",
+                        cache_config.mamba_cache_mode,
+                        model_config.architecture,
+                    )
             if (
                 cache_config.mamba_cache_mode == "all"
                 and not model_config.supports_mamba_prefix_caching
@@ -458,7 +517,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
                     "Nomic context extension is disabled. "
                     "Changing max_model_len from %s to %s. "
                     "To enable context extension, see: "
-                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.py",
+                    "https://github.com/vllm-project/vllm/tree/main/examples/features/context_extension/context_extension_offline.py",
                     max_model_len_before,
                     model_config.max_model_len,
                 )
@@ -601,6 +660,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
+    "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
@@ -612,6 +672,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,

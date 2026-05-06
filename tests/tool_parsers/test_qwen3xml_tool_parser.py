@@ -64,9 +64,6 @@ class TestQwen3xmlToolParser(ToolParserTests):
                 "test_empty_arguments": "Qwen3XML streaming has systematic issues",
                 "test_surrounding_text": "Qwen3XML streaming has systematic issues",
                 "test_escaped_strings": "Qwen3XML streaming has systematic issues",
-                "test_malformed_input": (
-                    "Qwen3XML parser is lenient with malformed input"
-                ),
                 "test_streaming_reconstruction": (
                     "Qwen3XML streaming reconstruction has known issues"
                 ),

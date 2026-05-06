@@ -29,7 +29,7 @@ if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
         TORCH_INDEX_URL=""
     fi
 else
-    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu129"
+    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 fi
 echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
 
