@@ -2803,7 +2803,7 @@ def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     )
 
 
-def test_deepseek_v4_mla_keeps_prompt_blocks_after_decode_pressure():
+def test_deepseek_v4_mla_prompt_cache_survives_decode_pressure():
     hash_block_size = 2
     full_block_size = 8
     swa_block_size = 2
@@ -2919,10 +2919,9 @@ def test_deepseek_v4_mla_keeps_prompt_blocks_after_decode_pressure():
     assert num_computed_tokens == expected_hit_tokens
 
 
-def test_deepseek_v4_mla_protected_prompt_blocks_do_not_block_admission():
+def test_deepseek_v4_mla_cached_prompts_do_not_block_admission():
     block_size = 8
     prompt_tokens = 4 * block_size + 3
-    protected_blocks_per_prompt = (prompt_tokens - 1) // block_size
     num_prompts = 10
     num_blocks = 80
     manager = KVCacheManager(
@@ -2948,7 +2947,6 @@ def test_deepseek_v4_mla_protected_prompt_blocks_do_not_block_admission():
         enable_caching=True,
         hash_block_size=block_size,
     )
-    mla_manager = manager.coordinator.single_type_managers[0]
 
     for i in range(num_prompts):
         prompt = list(range(i * 1000, i * 1000 + prompt_tokens))
@@ -2957,9 +2955,6 @@ def test_deepseek_v4_mla_protected_prompt_blocks_do_not_block_admission():
         req.num_computed_tokens = prompt_tokens
         manager.free(req)
 
-    assert len(mla_manager._protected_prompt_block_ids) == (
-        num_prompts * protected_blocks_per_prompt
-    )
     assert manager.block_pool.get_num_free_blocks() < 64
 
     long_req = make_request(
@@ -2974,7 +2969,7 @@ def test_deepseek_v4_mla_protected_prompt_blocks_do_not_block_admission():
     )
 
 
-def test_reset_prefix_cache_releases_deepseek_v4_mla_protected_blocks():
+def test_reset_prefix_cache_after_deepseek_v4_mla_prompt_cache():
     block_size = 8
     prompt_tokens = 4 * block_size + 3
     manager = KVCacheManager(
@@ -3006,7 +3001,6 @@ def test_reset_prefix_cache_releases_deepseek_v4_mla_protected_blocks():
     req.num_computed_tokens = prompt_tokens
     manager.free(req)
 
-    assert manager.coordinator.single_type_managers[0]._protected_prompt_block_ids
     assert manager.reset_prefix_cache()
 
 
