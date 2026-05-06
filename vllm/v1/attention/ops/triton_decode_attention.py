@@ -551,6 +551,7 @@ def _fwd_kernel_stage2(
     NUM_KV_SPLITS: tl.constexpr,
     BLOCK_DV: tl.constexpr,
     Lv: tl.constexpr,
+    OUTPUT_FP16: tl.constexpr = 0,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -587,9 +588,12 @@ def _fwd_kernel_stage2(
             e_sum = e_sum * old_scale + exp_logic
             e_max = n_e_max
 
+    result = acc / e_sum
+    if OUTPUT_FP16:
+        result = result.to(tl.float16)
     tl.store(
         o + cur_batch * stride_obs + cur_head * stride_oh + offs_d,
-        acc / e_sum,
+        result,
         mask=mask_d,
     )
     lse_val = e_max + tl.log(e_sum)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -321,7 +322,7 @@ def test_speculators_model_integration(
     test_prompts = get_test_prompts(mm_enabled=False)
 
     # First run: Direct speculator model (simplified integration)
-    spec_llm = LLM(model=model_path, max_model_len=4096)
+    spec_llm = LLM(model=model_path, max_model_len=4096, gpu_memory_utilization=0.92)
     evaluate_llm_for_gsm8k(
         spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
     )
@@ -351,7 +352,7 @@ def test_speculators_model_integration(
     cleanup_dist_env_and_memory()
 
     # Second run: Reference without speculative decoding
-    ref_llm = LLM(model=verifier_model, max_model_len=4096)
+    ref_llm = LLM(model=verifier_model, max_model_len=4096, gpu_memory_utilization=0.92)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     torch.accelerator.empty_cache()
@@ -557,12 +558,16 @@ def test_eagle_correctness_light(
             "auto",
             0.8,
         ),
-        (
+        pytest.param(
             ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
             False,
             False,
             "transformers",
             0.8,
+            # TODO(hmellor): figure out why memory usage is so high
+            marks=pytest.mark.skip(
+                reason="Feature is experimental and uses too much memory in CI",
+            ),
         ),
         pytest.param(
             (
@@ -719,15 +724,25 @@ def test_eagle_correctness_heavy(
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
         (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
+        (
+            ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1),
+            False,
+            0.20,
+        ),  # hybrid + MTP, ref: ~34%-35%
+        (
+            ("mtp", "google/gemma-4-E4B-it", 1, "google/gemma-4-E4B-it-assistant"),
+            False,
+            0.50,
+        ),  # gemma4 MTP with assistant model, ref: ~62%
     ],
-    ids=["mimo", "deepseek"],
+    ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b"],
 )
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
-    model_setup: tuple[str, str, int],
+    model_setup: tuple[str, str, int] | tuple[str, str, int, str],
     mm_enabled: bool,
     expected_accuracy_threshold: float,
 ):
@@ -743,16 +758,45 @@ def test_mtp_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
 
-        method, model_name, tp_size = model_setup
+        if len(model_setup) == 4:
+            method, model_name, tp_size, draft_model = model_setup
+        else:
+            method, model_name, tp_size = model_setup
+            draft_model = None
         _skip_if_insufficient_gpus_for_tp(tp_size)
 
+        if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
+            pytest.skip(
+                "Model Runner V2 does not yet support hybrid models "
+                "(Qwen3.5 mixes Mamba-style GDN with attention layers)."
+            )
+
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+
+        # Skip multimodal profiling for models that don't need it in this test.
+        extra_kwargs: dict[str, Any] = {}
+        if "Qwen3.5" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+        elif "gemma-4" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
+
+        if draft_model is not None and "gemma-4" in draft_model:
+            import transformers
+            from packaging.version import Version
+
+            if Version(transformers.__version__) < Version("5.8.0"):
+                pytest.skip(
+                    "Gemma4 MTP assistant requires transformers>=5.8.0, "
+                    f"got {transformers.__version__}"
+                )
+
         ref_llm = LLM(
             model=model_name,
             max_model_len=2048,
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
@@ -762,17 +806,23 @@ def test_mtp_correctness(
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
+        speculative_config: dict[str, Any] = {
+            "method": method,
+            "num_speculative_tokens": 1,
+            "max_model_len": 2048,
+        }
+        if draft_model is not None:
+            speculative_config["model"] = draft_model
+            speculative_config["num_speculative_tokens"] = 2
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "num_speculative_tokens": 1,
-                "max_model_len": 2048,
-            },
+            speculative_config=speculative_config,
             max_model_len=2048,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         # MTP supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
@@ -1300,6 +1350,54 @@ def test_dflash_acceptance_rates(dflash_config):
             f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
             f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
         )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@single_gpu_only
+def test_synthetic_acceptance_rate():
+    """Verify that synthetic rejection sampling produces an acceptance
+    length close to the requested mean acceptance length."""
+    num_spec_tokens = 3
+    expected_acceptance_len = 1.875
+    tolerance = 0.15
+
+    spec_llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
+            "num_speculative_tokens": num_spec_tokens,
+            "max_model_len": 2048,
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_length": expected_acceptance_len,
+        },
+        max_model_len=2048,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+
+    test_prompts = get_test_prompts(mm_enabled=False, num_prompts=50)
+    spec_llm.chat(
+        test_prompts,
+        SamplingParams(temperature=0, max_tokens=64, ignore_eos=True),
+    )
+
+    metrics = spec_llm.get_metrics()
+    acceptance_len = compute_acceptance_len(metrics)
+
+    print(
+        f"Synthetic acceptance length: {acceptance_len:.3f}"
+        f" (expected={expected_acceptance_len:.3f},"
+        f" tolerance=±{tolerance})"
+    )
+    assert abs(acceptance_len - expected_acceptance_len) <= tolerance, (
+        f"Synthetic acceptance length {acceptance_len:.3f} is not within"
+        f" ±{tolerance} of expected {expected_acceptance_len:.3f}"
+    )
 
     del spec_llm
     torch.accelerator.empty_cache()

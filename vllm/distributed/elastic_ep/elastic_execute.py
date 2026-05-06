@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
+from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
@@ -319,10 +320,7 @@ class ElasticEPScalingExecutor:
         moe_modules = [
             module
             for module in self.worker.model_runner.model.modules()
-            if (
-                module.__class__.__name__ == "FusedMoE"
-                or module.__class__.__name__ == "SharedFusedMoE"
-            )
+            if is_moe_layer(module)
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(

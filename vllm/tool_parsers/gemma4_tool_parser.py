@@ -66,6 +66,10 @@ def _parse_gemma4_value(value_str: str) -> object:
     if value_str == "false":
         return False
 
+    # Null
+    if value_str.lower() in ("null", "none", "nil"):
+        return None
+
     # Number (int or float)
     try:
         if "." in value_str:
@@ -356,12 +360,13 @@ class Gemma4ToolParser(ToolParser):
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
-        if (
-            isinstance(request, ChatCompletionRequest)
-            and request.tools
-            and request.tool_choice != "none"
-        ):
-            # Don't skip special tokens — <|tool_call> etc. are needed
+        if request.tools and request.tool_choice != "none":
+            # Don't skip special tokens — <|tool_call> etc. are needed for
+            # the parser to detect tool calls. Apply to BOTH
+            # ChatCompletionRequest and ResponsesRequest (the previous
+            # isinstance(ChatCompletionRequest) guard caused tool-call
+            # delimiters to be stripped on /v1/responses, leaking raw
+            # `call:fn{...}` text via output_text.delta).
             request.skip_special_tokens = False
         return request
 
