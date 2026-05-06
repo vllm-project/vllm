@@ -5,18 +5,10 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    FP4ScaledMMLinearKernel,
-    init_fp4_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    NvFp4LinearBackend,
-    apply_nvfp4_linear,
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -24,31 +16,16 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 
+logger = init_logger(__name__)
+
+
 __all__ = ["CompressedTensorsW4A4Fp4"]
 
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
-        self.backend = select_nvfp4_linear_backend()
+        self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
-
-        # Initialize the appropriate FP4 kernel (unless using Marlin)
-        self.kernel: FP4ScaledMMLinearKernel | None
-        if self.backend != NvFp4LinearBackend.MARLIN:
-            # Extract backend name for FlashInfer variants
-            backend_name = None
-            if self.backend.value.startswith("flashinfer-"):
-                backend_name = self.backend.value[len("flashinfer-") :]
-
-            self.kernel = init_fp4_linear_kernel(
-                group_size=self.group_size,
-                is_checkpoint_fp4_serialized=True,
-                out_dtype=None,
-                backend=backend_name,
-                module_name="CompressedTensorsW4A4Fp4",
-            )
-        else:
-            self.kernel = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -112,6 +89,19 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Rename CT checkpoint names to standardized names
         layer.weight = layer.weight_packed
         del layer.weight_packed
+
+        if (
+            torch.unique(layer.input_global_scale).numel() != 1
+            or torch.unique(layer.weight_global_scale).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely result in reduced accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for fused layers."
+            )
+
         # Process global scales (CT stores as divisors, i.e. 1/scale)
         input_global_scale_inv = layer.input_global_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(
@@ -130,12 +120,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.input_global_scale * layer.weight_global_scale, requires_grad=False
         )
 
-        # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
-
-        # Initialize kernel weights if using kernel abstraction
-        if self.kernel is not None:
-            self.kernel.process_weights_after_loading(layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -143,16 +128,4 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Marlin uses a special path
-        if self.backend == NvFp4LinearBackend.MARLIN:
-            return apply_nvfp4_linear(
-                backend=self.backend,
-                layer=layer,
-                x=x,
-                bias=bias,
-            )
-
-        # Use kernel abstraction for other backends
-        if self.kernel is None:
-            raise RuntimeError("FP4 kernel not initialized for non-Marlin backend")
-        return self.kernel.apply_weights(layer, x, bias)
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

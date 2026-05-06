@@ -7,7 +7,10 @@ import torch
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    get_routing_method_type,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -135,10 +138,12 @@ class FusedTopKRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
+        return get_routing_method_type(
+            scoring_func=self.scoring_func,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+            num_expert_group=None,
+            has_e_score_bias=False,
         )
 
     def _compute_routing(
@@ -146,6 +151,8 @@ class FusedTopKRouter(BaseRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using standard fused top-k."""
         topk_weights, topk_ids, token_expert_indices = fused_topk(

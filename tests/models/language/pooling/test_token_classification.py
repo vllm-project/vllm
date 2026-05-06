@@ -1,35 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import random
 
-import numpy as np
 import pytest
 import torch
 from transformers import AutoModelForTokenClassification
 
 from tests.models.utils import softmax
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 @pytest.fixture(autouse=True)
 def seed_everything():
     """Seed all random number generators for reproducibility."""
     seed = 0
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+    set_random_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     yield
 
 
-@pytest.mark.parametrize("model", ["boltuix/NeuroBERT-NER"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "boltuix/NeuroBERT-NER",
+        "gyr66/Ernie-3.0-base-chinese-finetuned-ner",
+    ],
+)
 # The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
-def test_bert_models(
+def test_bert_like_models(
     hf_runner,
     vllm_runner,
     example_prompts,

@@ -83,13 +83,13 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Hardware
 
-| Hardware         | Status                                        |
-|------------------|-----------------------------------------------|
-| **NVIDIA**       | <nobr>🟢</nobr>                               |
-| **AMD**          | <nobr>🟢</nobr>                               |
-| **INTEL GPU**    | <nobr>🟢</nobr>                               |
-| **TPU**          | <nobr>🟢</nobr>                               |
-| **CPU**          | <nobr>🟢</nobr>                               |
+| Hardware      | Status          |
+| --------------| --------------- |
+| **NVIDIA**    | <nobr>🟢</nobr> |
+| **AMD**       | <nobr>🟢</nobr> |
+| **INTEL GPU** | <nobr>🟢</nobr> |
+| **TPU**       | <nobr>🟢</nobr> |
+| **CPU**       | <nobr>🟢</nobr> |
 
 !!! note
 
@@ -104,13 +104,13 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Models
 
-| Model Type                  | Status                                                                  |
-|-----------------------------|-------------------------------------------------------------------------|
-| **Decoder-only Models**     | <nobr>🟢</nobr>                                                         |
-| **Encoder-Decoder Models**  | <nobr>🟢 (Whisper), 🔴 (Others) </nobr>                                |
-| **Pooling Models**          | <nobr>🟢</nobr>                                                         |
-| **Mamba Models**            | <nobr>🟢</nobr>                                                         |
-| **Multimodal Models**       | <nobr>🟢</nobr>                                                         |
+| Model Type                 | Status                                  |
+| -------------------------- | --------------------------------------- |
+| **Decoder-only Models**    | <nobr>🟢</nobr>                         |
+| **Encoder-Decoder Models** | <nobr>🟢 (Whisper), 🔴 (Others) </nobr> |
+| **Pooling Models**         | <nobr>🟢</nobr>                         |
+| **Mamba Models**           | <nobr>🟢</nobr>                         |
+| **Multimodal Models**      | <nobr>🟢</nobr>                         |
 
 See below for the status of models that are not yet supported or have more features planned in V1.
 
@@ -134,14 +134,18 @@ Please note that prefix caching is not yet supported for any of the above models
 
 #### Encoder-Decoder Models
 
-Whisper is supported. Other models requiring cross-attention between separate
-encoder and decoder (e.g., `BartForConditionalGeneration`,
-`MllamaForConditionalGeneration`) are no longer supported.
+Whisper is supported natively. Other encoder-decoder models are supported via the plugin system:
+
+- **BART**: `BartForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
+- **Florence-2**: `Florence2ForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
+
+For other encoder-decoder models (e.g., `MllamaForConditionalGeneration`), we recommend
+following a similar pattern by implementing support through the [plugin system](../design/plugin_system.md).
 
 ### Features
 
 | Feature                                     | Status                                                                            |
-|---------------------------------------------|-----------------------------------------------------------------------------------|
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
 | **Prefix Caching**                          | <nobr>🟢 Functional</nobr>                                                        |
 | **Chunked Prefill**                         | <nobr>🟢 Functional</nobr>                                                        |
 | **LoRA**                                    | <nobr>🟢 Functional</nobr>                                                        |

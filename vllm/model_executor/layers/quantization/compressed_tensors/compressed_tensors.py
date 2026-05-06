@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
@@ -62,6 +63,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -179,6 +181,15 @@ class CompressedTensorsConfig(QuantizationConfig):
             else:
                 return quant_method
 
+        if isinstance(layer, ParallelLMHead):
+            try:
+                quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            except ValueError:
+                quant_scheme = None
+            if quant_scheme is not None:
+                layer.scheme = quant_scheme
+                return CompressedTensorsLinearMethod(self)
+
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
@@ -191,7 +202,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
-        targetting 'Linear' needs to also match
+        targeting 'Linear' needs to also match
         FusedMoE modules.
         """
         if (
@@ -207,18 +218,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
         # checkpoint, they will be used properly.
-        grps_without_attn_quant = {}
-        for k, v in config["config_groups"].items():
-            # e.g. LlamaAttention, Qwen3Attention, etc.
-            if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
-                logger.warning(
-                    "Skipping CompressedTensors config group for %s. Attention quant "
-                    "is coupled with KV-cache quantization in vLLM.",
-                    v["targets"][0],
-                )
-                continue
-            grps_without_attn_quant[k] = v
-        config["config_groups"] = grps_without_attn_quant
+        if "config_groups" in config:
+            grps_without_attn_quant = {}
+            for k, v in config["config_groups"].items():
+                # e.g. LlamaAttention, Qwen3Attention, etc.
+                if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
+                    logger.warning(
+                        "Skipping CompressedTensors config group for %s. Attention "
+                        "quant is coupled with KV-cache quantization in vLLM.",
+                        v["targets"][0],
+                    )
+                    continue
+                grps_without_attn_quant[k] = v
+            config["config_groups"] = grps_without_attn_quant
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
@@ -390,6 +402,27 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_4_bits
             and is_group_size_32
             and is_symmetric
+        )
+
+    @staticmethod
+    def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
+        if quant_args is None:
+            return False
+
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = quant_args.symmetric
+        is_group_size_32 = quant_args.group_size == 32
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_8_bits = quant_args.num_bits == 8
+        is_mxfp8_scale_dtype = quant_args.scale_dtype == torch.uint8
+
+        return (
+            is_group_quant
+            and is_float_type
+            and is_8_bits
+            and is_group_size_32
+            and is_symmetric
+            and is_mxfp8_scale_dtype
         )
 
     @staticmethod
@@ -594,6 +627,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A16Mxfp4()
+
+        if self._is_mxfp8(weight_quant):
+            return CompressedTensorsW8A8Mxfp8()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
@@ -950,11 +986,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 f"received num_bits={num_bits}, type={type_}"
             )
 
-        # TODO: delegate validation to compressed-tensors library so that we have a
-        # single source of truth. Right now this is not possible until the next release
-        # of compressed-tensors.
-        strategy = kv_cache_scheme.get("strategy")
-        supported_strategies = ("tensor", "attn_head")
+        strategy = QuantizationStrategy(kv_cache_scheme.get("strategy"))
+        supported_strategies = (
+            QuantizationStrategy.TENSOR,
+            QuantizationStrategy.ATTN_HEAD,
+        )
         if strategy not in supported_strategies:
             raise NotImplementedError(
                 "Invalid strategy for compressed-tensors KV cache. "
@@ -980,16 +1016,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             hasattr(self.quant_config, "kv_cache_scheme")
             and self.quant_config.kv_cache_scheme is not None
         ):
-            strategy = self.quant_config.kv_cache_scheme["strategy"]
-
-        if strategy == "attn_head":
-            assert layer.impl.supports_per_head_quant_scales, (
-                f"Layer {layer.__class__.__name__} with implementation "
-                f"{layer.impl.__class__.__name__} does not support per-head scales."
+            strategy = QuantizationStrategy(
+                self.quant_config.kv_cache_scheme["strategy"]
             )
-            n_scales = int(layer.num_kv_heads)
-        else:
-            n_scales = 1
+
+        n_scales = int(layer.num_kv_heads) if strategy == "attn_head" else 1
 
         layer.k_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
@@ -1019,7 +1050,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # - q_scale is partitioned over query heads.
         # - k/v_scale is partitioned over kv heads when total_kv_heads >= tp_size,
         #   and replicated when total_kv_heads < tp_size.
-        if strategy == "attn_head":
+        if strategy == QuantizationStrategy.ATTN_HEAD:
 
             def _tp_aware_loader(
                 param: torch.Tensor,
@@ -1091,6 +1122,17 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer._k_scale = layer.k_scale
         layer._v_scale = layer.v_scale
         layer._q_scale = layer.q_scale
+
+        # Set the _float variants that the attention backend uses.
+        def _to_scalar(tensor: torch.Tensor) -> float:
+            # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
+            if tensor.numel() > 1:
+                return tensor.max().item()
+            return tensor.item()
+
+        layer._k_scale_float = _to_scalar(layer.k_scale)
+        layer._v_scale_float = _to_scalar(layer.v_scale)
+        layer._q_scale_float = _to_scalar(layer.q_scale)
 
         # Discard all placeholders.
         del layer.k_scale

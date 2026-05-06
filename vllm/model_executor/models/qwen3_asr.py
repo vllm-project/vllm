@@ -23,9 +23,8 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal
+from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
@@ -33,10 +32,12 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -59,8 +60,6 @@ from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -146,7 +145,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
@@ -160,7 +159,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -268,7 +267,21 @@ class Qwen3ASRForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     SupportsTranscription,
+    SupportsLoRA,
 ):
+    # LoRA support
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -296,19 +309,21 @@ class Qwen3ASRForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = thinker_config
         self.multimodal_config = multimodal_config
-
-        self.audio_tower = Qwen3OmniMoeAudioEncoder(
-            thinker_config.audio_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
         self.quant_config = quant_config
 
-        self.language_model = Qwen3ForCausalLM(
-            vllm_config=vllm_config.with_hf_config(
-                thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = Qwen3OmniMoeAudioEncoder(
+                thinker_config.audio_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = Qwen3ForCausalLM(
+                vllm_config=vllm_config.with_hf_config(
+                    thinker_config.text_config, architectures=["Qwen3ForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -348,8 +363,6 @@ class Qwen3ASRForConditionalGeneration(
     def _process_audio_input(
         self,
         audio_input: Qwen2_5OmniAudioFeatureInputs,
-        audio_hashes: list[str] | None = None,
-        cached_audio_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -362,9 +375,6 @@ class Qwen3ASRForConditionalGeneration(
             aftercnn_lens=audio_output_lengths,
         )
         return audio_features.split(audio_output_lengths.tolist())
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -390,13 +400,11 @@ class Qwen3ASRForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -518,6 +526,17 @@ class Qwen3ASRForConditionalGeneration(
             tower_model=["audio_tower."],
         )
 
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        """Return the number of tokens processed by the audio tower encoder.
+
+        Required for LoRA support on the tower module.
+        """
+        # For Qwen3-ASR, the audio tower produces one embedding per audio
+        # placeholder token inserted into the prompt (no additional
+        # merge/downsample step like vision towers). Therefore, the encoder
+        # token budget is identity.
+        return num_audio_tokens
+
     @classmethod
     def get_speech_to_text_config(
         cls, model_config: ModelConfig, task_type: str
@@ -530,17 +549,12 @@ class Qwen3ASRForConditionalGeneration(
         )
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        model_config: ModelConfig,
-        stt_config: SpeechToTextConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """Get the generation prompt to be used for transcription requests."""
+        audio = stt_params.audio
+        model_config = stt_params.model_config
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_placeholder = cls.get_placeholder_str("audio", 0)
 

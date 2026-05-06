@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, overload
 
@@ -58,6 +59,10 @@ class TokenizerLike(Protocol):
         raise NotImplementedError
 
     @property
+    def max_chars_per_token(self) -> int:
+        raise NotImplementedError
+
+    @property
     def truncation_side(self) -> str:
         raise NotImplementedError
 
@@ -112,12 +117,14 @@ class TokenizerLike(Protocol):
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         raise NotImplementedError
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         raise NotImplementedError
 
     def convert_ids_to_tokens(
         self,
-        ids: list[int],
+        ids: Sequence[int],
         skip_special_tokens: bool = False,
     ) -> list[str]:
         raise NotImplementedError

@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import base64
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 from uuid import uuid4
 
 import numpy as np
+import pybase64 as base64
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
@@ -48,7 +48,6 @@ class RealtimeConnection:
         self.generation_task: asyncio.Task | None = None
 
         self._is_connected = False
-        self._is_input_finished = False
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
@@ -103,7 +102,14 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            self._check_model(event["model"])
+            model = event.get("model")
+            if model is None:
+                await self.send_error("Missing required field: model", "invalid_event")
+                return
+            err = self._check_model(model)
+            if err is not None:
+                await self.send_error(err.error.message, "model_not_found")
+                return
             self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
@@ -141,11 +147,12 @@ class RealtimeConnection:
                     err_msg,
                     "model_not_validated",
                 )
+                return
 
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
             if commit_event.final:
-                self._is_input_finished = True
+                self.audio_queue.put_nowait(None)
             else:
                 await self.start_generation()
         else:
@@ -206,7 +213,7 @@ class RealtimeConnection:
 
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
-                max_tokens=1,
+                max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
             )
@@ -237,11 +244,6 @@ class RealtimeConnection:
 
                 if not self._is_connected:
                     # finish because websocket connection was killed
-                    break
-
-                if self.audio_queue.empty() and self._is_input_finished:
-                    # finish because client signals that audio input
-                    # is finished
                     break
 
             usage = UsageInfo(

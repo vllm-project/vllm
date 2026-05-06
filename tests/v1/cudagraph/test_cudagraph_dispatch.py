@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,6 +22,8 @@ from vllm.config.lora import LoRAConfig
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+
+DEVICE_TYPE = current_platform.device_type
 
 
 # Helper MLP for testing
@@ -132,36 +135,39 @@ class TestCudagraphDispatcher:
 
         # Test dispatch logic
         # 1. non-uniform batch, size in cudagraph size list
-        desc_full_exact = BatchDescriptor(
-            num_tokens=8,
-            uniform=False,
-        )
+        # FULL mode uses exact keys with num_reqs set
+        desc_full_with_reqs = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
+        # PIECEWISE mode uses relaxed keys with num_reqs=None
+        desc_piecewise = BatchDescriptor(num_tokens=8, num_reqs=None, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=False, has_lora=False
         )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_full_exact
+            assert key == desc_full_with_reqs
         elif cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact
+            assert key == desc_piecewise
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 2. uniform decode batch, size in cudagraph size list
         desc_uniform_exact = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=True)
+        desc_non_uniform = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
             num_tokens=8, uniform_decode=True, has_lora=False
         )
         if cudagraph_mode_str == "FULL":
+            # Pure FULL mode uses non-uniform keys for all batches
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == desc_non_uniform
         elif cudagraph_mode_str in ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"]:
+            # These modes have separate uniform decode keys
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact
         elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == replace(desc_uniform_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
@@ -172,17 +178,31 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. disable_full should have a fall back mode (e.g., cascade attention)
+        # 4. invalid_modes={FULL} should have a fall back mode
+        #    (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            invalid_modes={CUDAGraphMode.FULL},
         )
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact.relax_for_mixed_batch_cudagraphs()
+            assert key == replace(desc_full_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
+
+        # 5. valid_modes={NONE} always returns NONE even when keys exist
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            valid_modes={CUDAGraphMode.NONE},
+        )
+        assert rt_mode == CUDAGraphMode.NONE
+        assert key == BatchDescriptor(num_tokens=8)
 
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,expected_modes",
@@ -251,9 +271,9 @@ class TestCudagraphDispatcher:
 class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
-        self.model = SimpleMLP().to("cuda")
-        self.persistent_input_buffer = torch.zeros(1, 10, device="cuda")
-        self.input_tensor = torch.randn(1, 10, device="cuda")
+        self.model = SimpleMLP().to(DEVICE_TYPE)
+        self.persistent_input_buffer = torch.zeros(1, 10, device=DEVICE_TYPE)
+        self.input_tensor = torch.randn(1, 10, device=DEVICE_TYPE)
 
     def test_capture_and_replay(self):
         wrapper = CUDAGraphWrapper(
@@ -410,10 +430,10 @@ class TestCudagraphIntegration:
 
     @create_new_process_for_each_test("spawn")
     def test_capture_replay_bypass_logic(self):
-        model = SimpleMLP().to("cuda")
+        model = SimpleMLP().to(DEVICE_TYPE)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
         max_bs = 16
-        persistent_input_buffer = torch.zeros(max_bs, 10, device="cuda")
+        persistent_input_buffer = torch.zeros(max_bs, 10, device=DEVICE_TYPE)
         input_1 = persistent_input_buffer[:1]
         input_2 = persistent_input_buffer[:2]
         input_3 = persistent_input_buffer[:3]
@@ -468,17 +488,17 @@ class TestCudagraphIntegration:
     @create_new_process_for_each_test("spawn")
     def test_nested_wrappers(self):
         """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
-        model = SimpleMLP().to("cuda")
+        model = SimpleMLP().to(DEVICE_TYPE)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
-        input_1 = torch.randn(1, 10, device="cuda")
+        input_1 = torch.randn(1, 10, device=DEVICE_TYPE)
 
         # Setup: Inner model is wrapped with PIECEWISE, outer with FULL
-        inner_model = SimpleMLP().to("cuda")
+        inner_model = SimpleMLP().to(DEVICE_TYPE)
         piecewise_wrapper = CUDAGraphWrapper(
             inner_model, self.vllm_config, CUDAGraphMode.PIECEWISE
         )
         inner_model.forward = MagicMock(wraps=inner_model.forward)
-        outer_model = SimpleMLP().to("cuda")
+        outer_model = SimpleMLP().to(DEVICE_TYPE)
         # When outer model is called, it calls the piecewise_wrapper
         outer_model.forward = MagicMock(
             wraps=outer_model.forward, side_effect=piecewise_wrapper

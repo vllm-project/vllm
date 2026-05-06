@@ -582,7 +582,6 @@ class Siglip2VisionTransformer(nn.Module):
         hidden_states = self.embeddings(pixel_values, grid_thws)
 
         last_hidden_state = self.encoder(hidden_states, grid_thws)
-        last_hidden_state = self.post_layernorm(last_hidden_state)
 
         return last_hidden_state
 

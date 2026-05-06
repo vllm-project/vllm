@@ -6,14 +6,24 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
+from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.parameter import (
+    GroupQuantScaleParameter,
+    PackedvLLMParameter,
+    RowvLLMParameter,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -402,16 +412,52 @@ class INCConfig(QuantizationConfig):
 
         return None
 
-    def apply_ipex_quant_layer(self, layer, prefix: str):
+    def apply_xpu_w4a16_quant_layer(self, layer, prefix: str):
+        weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
+
+        if not self.check_quantized(weight_bits):
+            if isinstance(layer, (LinearBase, ParallelLMHead)):
+                return UnquantizedLinearMethod()
+            else:
+                return None
+
+        if weight_bits != 4:
+            raise NotImplementedError(
+                f"INC on XPU only supports 4-bit quantization, "
+                f"got weight_bits={weight_bits}."
+            )
+        if not sym:
+            raise NotImplementedError(
+                "INC W4A16 on XPU only supports symmetric quantization for now."
+            )
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
+            return INCXPULinearMethod(
+                weight_bits=weight_bits,
+                group_size=group_size,
+                sym=sym,
+            )
+        return None
+
+    def apply_cpu_w4a16_quant_layer(self, layer, prefix: str):
         weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
         if not self.check_quantized(weight_bits):
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             else:
                 return None
-        raise NotImplementedError(
-            "INC quantization is not supported during xpu kernel migration."
-        )
+
+        if weight_bits != 4:
+            raise NotImplementedError(
+                f"INC on CPU only supports 4-bit quantization, "
+                f"got weight_bits={weight_bits}."
+            )
+        if not sym:
+            raise NotImplementedError(
+                "INC W4A16 on CPU only supports symmetric quantization for now."
+            )
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
+            return self.apply_gptq_quant_layer(layer, prefix)
+        return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
         if prefix and self.extra_config:
@@ -420,23 +466,162 @@ class INCConfig(QuantizationConfig):
                     layer_name == prefix or layer_name == f"model.{prefix}"
                 ) and self.extra_config[layer_name].get("bits", 16) >= 16:
                     return UnquantizedLinearMethod()
-        if (
-            current_platform.is_cpu()
-            or current_platform.is_xpu()
-            or self.backend == "ipex"
-        ):
-            return self.apply_ipex_quant_layer(layer, prefix)
-        if "gptq" in self.packing_format or "gptq" in self.backend:
+        if current_platform.is_xpu():
+            return self.apply_xpu_w4a16_quant_layer(layer, prefix)
+        is_gptq = "gptq" in self.packing_format or "gptq" in self.backend
+        if current_platform.is_cpu() and is_gptq:
+            return self.apply_cpu_w4a16_quant_layer(layer, prefix)
+        if is_gptq:
             return self.apply_gptq_quant_layer(layer, prefix)
         if "awq" in self.packing_format or "awq" in self.backend:
             return self.apply_awq_quant_layer(layer, prefix)
 
+        raise NotImplementedError(
+            f"Unsupported quantization configuration for layer '{prefix}'. "
+            f"Platform: CPU={current_platform.is_cpu()}. "
+            f"Platform: XPU={current_platform.is_xpu()}. "
+            f"Format: {self.packing_format}, Backend: {self.backend}."
+        )
+
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> "QuantizationMethods | None":
         """Override the `auto-round` method to `inc`."""
         is_auto_round_format = hf_quant_cfg.get("quant_method", None) == "auto-round"
         if is_auto_round_format:
             return cls.get_name()
         return None
+
+
+class INCXPULinearMethod(LinearMethodBase):
+    """XPU linear method for INC w4a16 GPTQ quantization (symmetric only).
+
+    Repacks GPTQ weights from [in_packed, out] to oneDNN [out, in_packed]
+    layout and calls torch.ops._xpu_C.int4_gemm_w4a16.
+
+    GPTQ format: qweight [in_packed, out] with sequential nibble order.
+
+    Note: Asymmetric quantization (sym=false) is not for now.
+
+    FIXME(yiliu30): Refine the implementation to reuse XPUwNa16LinearKernel.
+    """
+
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        self.weight_bits = weight_bits
+        self.group_size = group_size
+        self.sym = sym
+        self.pack_factor = 32 // weight_bits
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del output_size  # Unused.
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        scales_and_zp_size = input_size_per_partition // self.group_size
+
+        # GPTQ: qweight [in // pack_factor, out] packed along input dim
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // self.pack_factor,
+                output_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=self.pack_factor,
+            weight_loader=weight_loader,
+        )
+        # scales: [num_groups, out] params_dtype
+        scales = GroupQuantScaleParameter(
+            data=torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
+        # qzeros: [num_groups, out // pack_factor] int32
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition // self.pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("scales", scales)
+        layer.register_parameter("qzeros", qzeros)
+
+        # GPTQ checkpoints may include g_idx for activation reordering.
+        # Register it so the weight loader doesn't error on unexpected keys.
+        g_idx = RowvLLMParameter(
+            data=torch.tensor(
+                [i // self.group_size for i in range(input_size_per_partition)],
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("g_idx", g_idx)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Repack GPTQ weights into kernel-ready NT layout."""
+        device = layer.qweight.data.device
+
+        # oneDNN int4 kernel requires strides[0]==1 ("NT format"), but GPTQ
+        # checkpoint is [K_packed, N] contiguous with strides (N, 1).
+        # Two transposes are needed — neither alone can achieve this:
+        #   1. .t().contiguous() → [N, K_packed] contiguous in memory
+        #   2. .t()              → [K_packed, N] view with strides (1, K_packed)
+        # The result has the same logical shape but strides[0]==1 as required.
+        qweight_ct = layer.qweight.data.t().contiguous()
+        layer.qweight = Parameter(qweight_ct.t(), requires_grad=False)
+
+        # Scales: [num_groups, out] — no change needed
+        layer.scales = Parameter(layer.scales.data, requires_grad=False)
+
+        # Symmetric: GPTQ v1 stores qzeros=7, effective zp = 7+1 = 8
+        # Kernel expects int8 scalar = 8
+        layer.qzeros = Parameter(
+            torch.tensor([8], dtype=torch.int8, device=device),
+            requires_grad=False,
+        )
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # qweight is already in NT layout [K_packed, N] (strides (1, K_packed))
+        # from process_weights_after_loading — pass directly to kernel.
+        out_shape = x.shape[:-1] + (layer.qweight.shape[1],)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+        out = torch.ops._xpu_C.int4_gemm_w4a16(
+            reshaped_x,
+            layer.qweight,
+            bias,
+            layer.scales,
+            layer.qzeros,
+            self.group_size,
+            None,  # g_idx not needed: desc_act is always False for INC models
+        )
+        return out.reshape(out_shape)

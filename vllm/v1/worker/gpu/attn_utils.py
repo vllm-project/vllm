@@ -1,23 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, cast
 
+import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionMetadataBuilder,
+    AttentionCGSupport,
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+
+
+@dataclass(frozen=True)
+class AttentionCGSupportInfo:
+    min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend: str | None = None
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -32,32 +42,87 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def init_attn_backend(
-    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig, device: torch.device
-):
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+    active_layer_names: set[str] | None = None,
+) -> tuple[
+    dict[str, type[AttentionBackend]],
+    list[list[AttentionGroup]],
+    AttentionCGSupportInfo,
+]:
     attn_backends: dict[str, type[AttentionBackend]] = {}
-    attn_metadata_builders: list[AttentionMetadataBuilder] = []
-    flashinfer_workspace: torch.Tensor | None = None
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    attn_groups: list[list[AttentionGroup]] = []
+    attn_backend_workspace: torch.Tensor | None = None
+    # Find minimum cudagraph support across all attention backends
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        kv_cache_config.kv_cache_groups
+    ):
         layer_names = kv_cache_group_spec.layer_names
-        any_layer_name = next(iter(layer_names))
+        if active_layer_names is not None:
+            layer_names = list(active_layer_names.intersection(layer_names))
 
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
-        attn_backend = attn_layers[any_layer_name].get_attn_backend()
+
+        group_map: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
+        group_order: list[tuple[tuple[str, str], KVCacheSpec]] = []
+
         for layer_name in layer_names:
+            attn_backend = attn_layers[layer_name].get_attn_backend()
             attn_backends[layer_name] = attn_backend
 
-        attn_metadata_builder = attn_backend.get_builder_cls()(
-            kv_cache_group_spec.kv_cache_spec, layer_names, vllm_config, device
-        )
-        attn_metadata_builders.append(attn_metadata_builder)  # type: ignore
+            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
 
-        if attn_backend.get_name() == "FLASHINFER":
-            if flashinfer_workspace is None:
-                flashinfer_workspace = attn_metadata_builder._get_workspace_buffer()
+            key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
+            if key not in group_map:
+                group_map[key] = AttentionGroup(
+                    attn_backend,
+                    [layer_name],
+                    layer_kv_cache_spec,
+                    kv_cache_group_id,
+                )
+                group_order.append(key)
             else:
-                attn_metadata_builder.set_workspace_buffer(flashinfer_workspace)
-    return attn_backends, attn_metadata_builders
+                group_map[key].layer_names.append(layer_name)
+
+        groups = [group_map[key] for key in group_order]
+        for group in groups:
+            group.create_metadata_builders(
+                vllm_config=vllm_config,
+                device=device,
+                kernel_block_size=None,
+                num_metadata_builders=1,
+            )
+            builder = group.get_metadata_builder(0)
+            if attn_backend_workspace is None:
+                if hasattr(builder, "_get_workspace_buffer"):
+                    attn_backend_workspace = builder._get_workspace_buffer()
+            else:
+                if hasattr(builder, "set_workspace_buffer"):
+                    builder.set_workspace_buffer(attn_backend_workspace)
+            # Check cudagraph support for the attention backend
+            cg_support = builder.get_cudagraph_support(
+                vllm_config,
+                cast(AttentionSpec, kv_cache_group_spec.kv_cache_spec),
+            )
+            if cg_support.value < min_cg_support.value:
+                min_cg_support = cg_support
+                min_cg_attn_backend = attn_backend.__name__
+        attn_groups.append(groups)
+
+    return (
+        attn_backends,
+        attn_groups,
+        AttentionCGSupportInfo(
+            min_cg_support=min_cg_support,
+            min_cg_attn_backend=min_cg_attn_backend,
+        ),
+    )
 
 
 def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
@@ -80,13 +145,17 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
 def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
+    cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-        kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-        assert isinstance(kv_cache_spec, AttentionSpec)
         for layer_name in kv_cache_group_spec.layer_names:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+            assert isinstance(kv_cache_spec, AttentionSpec)
+
             raw_tensor = kv_cache_raw_tensors[layer_name]
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
@@ -94,9 +163,10 @@ def _reshape_kv_cache(
             attn_backend = attn_backends[layer_name]
             kv_cache_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
-                kv_cache_spec.block_size,
+                kv_cache_spec.storage_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size,
+                cache_dtype,
             )
 
             # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
@@ -114,8 +184,28 @@ def _reshape_kv_cache(
 
             dtype = kv_cache_spec.dtype
             raw_tensor = raw_tensor.view(dtype)
-            raw_tensor = raw_tensor.view(kv_cache_shape)
-            kv_caches[layer_name] = raw_tensor.permute(*inv_order)
+            if kv_cache_spec.page_size_padded is not None:
+                # Use strided view to handle page_size_bytes that
+                # include padding. This follows the same pattern as
+                # MambaSpec handling in gpu_model_runner.py.
+                # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                # (i.e. the first physical dimension is the block
+                # index), which holds for MLA backends but NOT for
+                # standard attention backends whose shape starts with
+                # a K/V dimension of size 2.
+                dtype_size = get_dtype_size(dtype)
+                page_stride = kv_cache_spec.page_size_bytes // dtype_size
+                strides = list(torch.empty(kv_cache_shape).stride())
+                strides[inv_order[0]] = page_stride
+                kv_cache = torch.as_strided(
+                    raw_tensor,
+                    size=kv_cache_shape,
+                    stride=tuple(strides),
+                )
+            else:
+                # No padding — safe to use a contiguous view.
+                kv_cache = raw_tensor.view(kv_cache_shape)
+            kv_caches[layer_name] = kv_cache.permute(*inv_order)
     return kv_caches
 
 
@@ -123,11 +213,14 @@ def init_kv_cache(
     runner_kv_caches: list[torch.Tensor],
     forward_context: dict[str, Any],
     kv_cache_config: KVCacheConfig,
-    attn_backends: dict[str, AttentionBackend],
+    attn_backends: dict[str, type[AttentionBackend]],
     device: torch.device,
+    cache_dtype: str,
 ) -> dict[str, torch.Tensor]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
+    kv_caches = _reshape_kv_cache(
+        kv_cache_config, kv_cache_raw_tensors, attn_backends, cache_dtype
+    )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 
@@ -144,23 +237,31 @@ def build_slot_mappings_by_layer(
 
 
 def build_attn_metadata(
-    attn_metadata_builders: list[AttentionMetadataBuilder],
+    attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
+    max_query_len: int,
     seq_lens: torch.Tensor,
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    dcp_local_seq_lens: torch.Tensor | None = None,
+    encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]] | None = None,
+    positions: torch.Tensor | None = None,
 ) -> dict[str, Any]:
-    max_query_len = int(query_start_loc_cpu.max())
     seq_lens = seq_lens[:num_reqs]
+    if dcp_local_seq_lens is not None:
+        dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
+    if seq_lens_cpu_upper_bound is not None:
+        seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
-    kv_cache_groups = kv_cache_config.kv_cache_groups
-    for i, kv_cache_spec in enumerate(kv_cache_groups):
+    num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+    for i in range(num_kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
 
@@ -168,6 +269,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             max_seq_len=max_seq_len,
             num_reqs=num_reqs,
             num_actual_tokens=num_tokens,
@@ -175,12 +277,19 @@ def build_attn_metadata(
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             causal=True,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+            positions=positions,
         )
+        if encoder_seq_lens and i in encoder_seq_lens:
+            encoder_seq_lens_gpu, encoder_seq_lens_cpu = encoder_seq_lens[i]
+            common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
+            common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
-        attn_metadata_builder = attn_metadata_builders[i]
-        metadata = attn_metadata_builder.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata
-        )
-        for layer_name in kv_cache_spec.layer_names:
-            attn_metadata[layer_name] = metadata
+        for attn_group in attn_groups[i]:
+            attn_metadata_builder = attn_group.get_metadata_builder(0)
+            metadata = attn_metadata_builder.build(
+                common_prefix_len=0, common_attn_metadata=common_attn_metadata
+            )
+            for layer_name in attn_group.layer_names:
+                attn_metadata[layer_name] = metadata
     return attn_metadata

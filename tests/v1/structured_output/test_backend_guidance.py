@@ -11,12 +11,21 @@ from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tokenizers import get_tokenizer
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
 
 TOKENIZER = "gpt2"
+
+
+@pytest.fixture(scope="module")
+def mistral_tokenizer():
+    return get_tokenizer(
+        tokenizer_name="mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        tokenizer_mode="mistral",
+    )
 
 
 def test_backend_guidance_rollback_terminated():
@@ -83,6 +92,7 @@ def test_grammar_bitmask_with_specdec():
             ),
         )
         sampling_params.structured_outputs._backend = "guidance"
+        sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
         my_req_id = f"my_req_id_{i}"
         request = Request(
@@ -90,7 +100,6 @@ def test_grammar_bitmask_with_specdec():
             prompt_token_ids=prompt[:i],
             sampling_params=sampling_params,
             pooling_params=None,
-            eos_token_id=tokenizer.eos_token_id,
         )
 
         structured_output_manager.grammar_init(request)
@@ -147,13 +156,13 @@ def test_grammar_init_async_and_sync(async_grammar):
         ),
     )
     sampling_params.structured_outputs._backend = "guidance"
+    sampling_params.update_from_generation_config({}, tokenizer.eos_token_id)
 
     request = Request(
         "test_request",
         prompt_token_ids=prompt,
         sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=tokenizer.eos_token_id,
     )
 
     structured_output_manager.grammar_init(request)
@@ -187,3 +196,38 @@ def test_grammar_init_async_and_sync(async_grammar):
 
     # Verify the grammar can accept valid tokens
     assert grammar.accept_tokens(request.request_id, prompt)
+
+
+@pytest.mark.parametrize(
+    "request_type,grammar_spec",
+    [
+        pytest.param(
+            StructuredOutputOptions.JSON,
+            '{"type": "object"}',
+            id="json",
+        ),
+        pytest.param(
+            StructuredOutputOptions.GRAMMAR,
+            'start: "hello" | "world"',
+            id="lark",
+        ),
+    ],
+)
+def test_mistral_tokenizer_compile_grammar(
+    mistral_tokenizer,
+    request_type: StructuredOutputOptions,
+    grammar_spec: str,
+) -> None:
+    vllm_config = VllmConfig(
+        structured_outputs_config=StructuredOutputsConfig(backend="guidance"),
+    )
+    backend = GuidanceBackend(
+        vllm_config,
+        tokenizer=mistral_tokenizer,
+        vocab_size=mistral_tokenizer.vocab_size,
+    )
+    assert backend.ll_tokenizer is mistral_tokenizer.llg_tokenizer
+
+    grammar = backend.compile_grammar(request_type, grammar_spec)
+    assert grammar is not None
+    assert not grammar.is_terminated()

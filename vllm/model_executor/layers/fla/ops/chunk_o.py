@@ -16,7 +16,7 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_GDN_FIX_BT, check_shared_mem, is_nvidia_hopper
+from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
@@ -85,7 +85,7 @@ def chunk_fwd_kernel_o(
     k += (bos * Hg + i_h // (H // Hg)) * K
     v += (bos * H + i_h) * V
     o += (bos * H + i_h) * V
-    h += (i_tg * H + i_h).to(tl.int64) * K * V
+    h += (i_tg * H + i_h).to(tl.int64) * V * K
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     b_A = tl.zeros([BT, BT], dtype=tl.float32)
@@ -98,17 +98,17 @@ def chunk_fwd_kernel_o(
             k, (K, T), (1, Hg * K), (i_k * BK, i_t * BT), (BK, BT), (0, 1)
         )
         p_h = tl.make_block_ptr(
-            h, (K, V), (V, 1), (i_k * BK, i_v * BV), (BK, BV), (1, 0)
+            h, (V, K), (K, 1), (i_v * BV, i_k * BK), (BV, BK), (1, 0)
         )
         # [BT, BK]
         b_q = tl.load(p_q, boundary_check=(0, 1))
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        # [BK, BV]
+        # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
 
         # [BT, BK] @ [BK, BV] -> [BT, BV]
-        b_o += tl.dot(b_q, b_h)
+        b_o += tl.dot(b_q, tl.trans(b_h))
         # [BT, BK] @ [BK, BT] -> [BT, BT]
         b_A += tl.dot(b_q, b_k)
 
@@ -145,15 +145,15 @@ def chunk_fwd_o(
     h: torch.Tensor,
     g: torch.Tensor | None = None,  # cumsum of log decay
     scale: float | None = None,
-    cu_seqlens: torch.LongTensor | None = None,
-    chunk_size: int = 64,
+    cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_size: int = FLA_CHUNK_SIZE,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
-    BT = 64 if FLA_GDN_FIX_BT else min(chunk_size, max(16, triton.next_power_of_2(T)))
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    BT = chunk_size
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
         scale = k.shape[-1] ** -0.5
