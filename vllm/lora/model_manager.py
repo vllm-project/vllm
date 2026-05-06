@@ -3,11 +3,10 @@
 
 import math
 from collections.abc import Callable
-from typing import Protocol, TypeVar, runtime_checkable
+from typing import TypeVar
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
@@ -35,6 +34,7 @@ from vllm.lora.utils import (
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
+    SupportsMultiModal,
     is_pooling_model,
     supports_multimodal,
 )
@@ -51,15 +51,10 @@ T = TypeVar("T")
 DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
 
 
-@runtime_checkable
-class _MultiModalLoRAModel(Protocol):
-    def get_mm_mapping(self) -> MultiModelKeys: ...
-    def get_num_mm_encoder_tokens(self, budget: int) -> int: ...
+class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
 
 
-@runtime_checkable
-class _ConnectorLoRAModel(Protocol):
-    def get_num_mm_connector_tokens(self, num_encoder_tokens: int) -> int: ...
+class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -78,13 +73,13 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -97,20 +92,29 @@ class LoRAModelManager:
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
         """
-        self.model = model
+        self.model: SupportsLoRAModel = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
         assert self.supported_lora_modules, (
             f"No supported LoRA modules found in {self.model.__class__.__name__}."
         )
 
-        self._registered_adapters: dict[int, LoRAModel] = {}
-        # Dict instead of a set for compatibility with LRUCache.
-        self._active_adapters: dict[int, None] = {}
-        self.adapter_type = "LoRA"
+        # Initialize lora_config early since capacity and lora_slots properties
+        # depend on it
         self.lora_config = lora_config
+
+        assert self.capacity >= self.lora_slots, (
+            f"The capacity of the manager ({self.capacity=}) must be "
+            f"greater than or equal to the number of LoRA slots ({self.lora_slots=})."
+        )
+        self._registered_adapters = AdapterLRUCache[LoRAModel](
+            self.capacity, self.deactivate_adapter
+        )
+        self._active_adapters = AdapterLRUCache[None](
+            self.lora_slots, self._deactivate_adapter
+        )
+        self.adapter_type = "LoRA"
         self.device = device
         self.max_num_seqs = max_num_seqs
-        assert self.capacity >= self.lora_slots
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
         self.vocab_size = vocab_size
@@ -149,18 +153,18 @@ class LoRAModelManager:
         self.model.lora_manager = self
 
     def _init_punica_wrapper(
-        self, max_num_batched_tokens: int, vllm_config: VllmConfig | None
+        self, max_num_batched_tokens: int, vllm_config: VllmConfig
     ) -> None:
-        mm_model = self._get_mm_model()
         # Used to indicate whether the model is a multimodal model
-        self.supports_mm = mm_model is not None
+        self.supports_mm: bool = (
+            supports_multimodal(self.model)
+            # In case the model only supports LoRA for
+            # text modules (e.g. ChatGLM)
+            and hasattr(self.model, "get_mm_mapping")
+        )
         self.punica_wrapper_mapping: dict[str, PunicaWrapperBase] = {}
-        if mm_model is not None:
-            if vllm_config is None:
-                raise ValueError(
-                    "vllm_config must be provided for multimodal LoRA models."
-                )
-            self._maybe_init_mm(mm_model, vllm_config, max_num_batched_tokens)
+        if self.supports_mm:
+            self._maybe_init_mm(vllm_config, max_num_batched_tokens)
         else:
             llm_punica_wrapper = get_punica_wrapper(
                 max_num_batched_tokens,
@@ -175,14 +179,13 @@ class LoRAModelManager:
 
     def _maybe_init_mm(
         self,
-        mm_model: _MultiModalLoRAModel,
         vllm_config: VllmConfig,
         max_num_batched_tokens: int,
     ) -> None:
         mm_registry = MULTIMODAL_REGISTRY
 
         self.supports_tower_connector_lora = False
-        self.mm_mapping = mm_model.get_mm_mapping()
+        self.mm_mapping: MultiModelKeys = self.model.get_mm_mapping()
 
         # Only one language model can be included in the model.
         assert len(self.mm_mapping.language_model) == 1
@@ -199,7 +202,9 @@ class LoRAModelManager:
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
         # First, determine if the model supports tower connector LoRA.
-        self.supports_tower_connector_lora = True
+        self.supports_tower_connector_lora = self.supports_mm and hasattr(
+            self.model, "get_num_mm_encoder_tokens"
+        )
 
         # Then, handle the case where the feature is disabled in the config.
         if not self.lora_config.enable_tower_connector_lora:
@@ -243,7 +248,7 @@ class LoRAModelManager:
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
         limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
-        num_encoder_tokens = mm_model.get_num_mm_encoder_tokens(
+        num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
             mm_budget.get_encoder_budget()
         )
 
@@ -259,8 +264,8 @@ class LoRAModelManager:
 
         # Use wrapper for connector if present.
         if self.mm_mapping.connector:
-            if isinstance(mm_model, _ConnectorLoRAModel):
-                connector_tokens = mm_model.get_num_mm_connector_tokens(
+            if hasattr(self.model, "get_num_mm_connector_tokens"):
+                connector_tokens = self.model.get_num_mm_connector_tokens(
                     num_encoder_tokens
                 )
                 connector_punica_wrapper = get_punica_wrapper(
@@ -283,10 +288,8 @@ class LoRAModelManager:
 
     @property
     def capacity(self) -> int:
-        max_cpu_loras = self.lora_config.max_cpu_loras
-        if max_cpu_loras is None:
-            raise ValueError("LoRA max_cpu_loras must be configured.")
-        return max_cpu_loras
+        assert self.lora_config.max_cpu_loras is not None
+        return self.lora_config.max_cpu_loras
 
     @property
     def lora_slots(self) -> int:
@@ -460,7 +463,7 @@ class LoRAModelManager:
                     self.lora_slots,
                     self.lora_config,
                     packed_moduled_lst,
-                    self._model_config,
+                    self.model.config,
                 ),
             )
             if isinstance(new_module, BaseLayerWithLoRA):
@@ -488,7 +491,7 @@ class LoRAModelManager:
                         module,
                         self.lora_slots,
                         self.lora_config,
-                        self._model_config,
+                        self.model.config,
                     ),
                 )
 
@@ -1169,54 +1172,22 @@ class LoRAModelManager:
         return self._registered_adapters.get(adapter_id)
 
 
-class LoRALRUCache(AdapterLRUCache[LoRAModel]):
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], object]):
-        super().__init__(capacity, deactivate_lora_fn)
-
-
 class LRUCacheLoRAModelManager(LoRAModelManager):
     """A model manager that manages multiple LoRAs with LRU cache."""
 
-    def __init__(
-        self,
-        model: nn.Module,
-        max_num_seqs: int,
-        max_num_batched_tokens: int,
-        vocab_size: int,
-        lora_config: LoRAConfig,
-        device: torch.device,
-        vllm_config: VllmConfig | None = None,
-    ):
-        super().__init__(
-            model,
-            max_num_seqs,
-            max_num_batched_tokens,
-            vocab_size,
-            lora_config,
-            device,
-            vllm_config,
-        )
-        self._registered_adapter_cache = LoRALRUCache(
-            self.capacity, self.deactivate_adapter
-        )
-        self._active_adapter_cache = LoRALRUCache(
-            self.lora_slots, self._deactivate_adapter
-        )
-
     def list_adapters(self) -> dict[int, LoRAModel]:
         """List all registered LoRAModels."""
-        return dict(self._registered_adapter_cache.cache)
+        return dict(self._registered_adapters.cache)
 
-    def add_adapter(self, adapter: LoRAModel) -> bool:
+    def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""
-        logger.debug("Adding lora. Model id: %d, int id: %d", adapter.id, adapter.id)
-        if adapter.id not in self._registered_adapter_cache:
-            self._add_adapter(adapter)
-            self._registered_adapter_cache[adapter.id] = adapter
+        logger.debug("Adding lora. Model id: %d, int id: %d", lora.id, lora.id)
+        if lora.id not in self._registered_adapters:
+            self._add_adapter(lora)
             was_added = True
         else:
             # We always touch to update the LRU cache order
-            self._registered_adapter_cache.touch(adapter.id)
+            self._registered_adapters.touch(lora.id)
             was_added = False
         return was_added
 
@@ -1225,25 +1196,18 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         lora_id: int,
     ) -> bool:
         if (
-            lora_id not in self._active_adapter_cache
-            and len(self._active_adapter_cache) >= self.lora_slots
+            lora_id not in self._active_adapters
+            and len(self._active_adapters) >= self.lora_slots
         ):
-            self._active_adapter_cache.remove_oldest()
+            self._active_adapters.remove_oldest()
         result = super().activate_adapter(lora_id)
-        if result:
-            # Newly activated — insert into cache. cachetools __setitem__
-            # already moves the entry to the MRU end, so no separate touch needed.
-            self._active_adapter_cache[lora_id] = self._registered_adapters[lora_id]
-        else:
-            # Already active — refresh its position in the LRU order.
-            self._active_adapter_cache.touch(lora_id)
+        # We always touch to update the LRU cache order
+        self._active_adapters.touch(lora_id)
         return result
 
     def remove_oldest_adapter(self) -> bool:
-        if len(self._registered_adapter_cache) > 0:
-            oldest_key = next(iter(self._registered_adapter_cache.cache))
-            self._registered_adapter_cache.remove_oldest()
-            self._registered_adapters.pop(oldest_key, None)
+        if len(self._registered_adapters) > 0:
+            self._registered_adapters.remove_oldest()
             return True
         return False
 
@@ -1255,22 +1219,22 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def _pin_lora_in_cpu_cache(self, lora_id: int):
         try:
-            self._registered_adapter_cache.pin(lora_id)
+            self._registered_adapters.pin(lora_id)
         except ValueError as err:
             raise ValueError(
                 f"Pinning failed. LoRA {lora_id} is not registered."
             ) from err
 
     def _pin_lora_in_gpu_cache(self, lora_id: int):
-        if lora_id not in self._active_adapter_cache:
+        if lora_id not in self._active_adapters:
             # move lora to gpu if not already active
             self.activate_adapter(lora_id)
 
-        self._active_adapter_cache.pin(lora_id)
+        self._active_adapters.pin(lora_id)
 
 
 def create_lora_manager(
-    model: nn.Module,
+    model: SupportsLoRAModel,
     max_num_seqs: int,
     max_num_batched_tokens: int,
     vocab_size: int,
@@ -1283,14 +1247,6 @@ def create_lora_manager(
     """Create a LoRA adapter for a given model."""
     if not isinstance(model, SupportsLoRA):
         raise ValueError(f"Model {type(model)} is not supported for LoRA.")
-    if (
-        not hasattr(model, "config")
-        or not hasattr(model, "named_modules")
-        or not hasattr(model, "get_submodule")
-    ):
-        raise ValueError(
-            f"Model {type(model)} is missing required module interfaces for LoRA."
-        )
     lora_manager = lora_manager_cls(
         model=model,
         max_num_seqs=max_num_seqs,
@@ -1301,7 +1257,4 @@ def create_lora_manager(
         device=device,
         **kwargs,
     )
-    # model is SupportsLoRA here (narrowed by the isinstance check above),
-    # so this assignment is statically verified.
-    model.lora_manager = lora_manager
     return lora_manager
