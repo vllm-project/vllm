@@ -130,8 +130,24 @@ class SpeculatorsConfig(PretrainedConfig):
                 f"Missing 'speculative_tokens' in proposal method. Got: {first_method}"
             )
 
-        # Build base vLLM speculative configuration
-        return {
-            "method": config_dict.get("speculators_model_type"),
+        speculators_model_type = config_dict.get("speculators_model_type")
+
+        # Map speculators model types to vLLM speculative methods.
+        # Some speculators types (e.g. peagle) are variants of existing
+        # methods (eagle3) with additional config like parallel_drafting.
+        METHOD_MAP: dict[str, dict[str, object]] = {
+            "peagle": {
+                "method": "eagle3",
+                "parallel_drafting": True,
+            },
+        }
+        overrides = METHOD_MAP.get(speculators_model_type, {})
+
+        result: dict[str, object] = {
+            "method": overrides.get("method", speculators_model_type),
             "num_speculative_tokens": num_speculative_tokens,
         }
+        if "parallel_drafting" in overrides:
+            result["parallel_drafting"] = overrides["parallel_drafting"]
+
+        return result
