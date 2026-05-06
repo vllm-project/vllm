@@ -502,7 +502,7 @@ def extract_routed_experts_for_current_batch(
     req_id_to_index: dict[str, int],
     num_tokens_no_spec: np.ndarray,
     max_model_len: int,
-) -> dict[str, tuple] | None:
+) -> dict[str, np.ndarray] | None:
     """Extract routed experts for requests predicted to finish this step.
 
     Checks all stop conditions the scheduler will check (max_tokens,
@@ -570,14 +570,14 @@ def extract_routed_experts_for_current_batch(
     # copy has been scattered into the host cache.
     capturer.finalize_pending_copy()
 
-    result: dict[str, tuple] = {}
+    result: dict[str, np.ndarray] = {}
     for req_id in finishing_req_ids:
         seqlen = host_cache.get_filled_len(req_id)
         if seqlen <= 0:
             continue
         experts = capturer.get_routed_experts(req_id, seqlen=seqlen, free_slot=False)
         if experts is not None:
-            result[req_id] = (experts.shape, experts.tobytes())
+            result[req_id] = experts
 
     return result if result else None
 

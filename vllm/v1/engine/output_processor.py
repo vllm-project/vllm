@@ -643,10 +643,6 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
 
-            if routed_experts is not None:
-                shape, data = routed_experts
-                routed_experts = np.frombuffer(data, dtype=np.int16).reshape(shape)
-
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:
                     req_state.num_cached_tokens = (
