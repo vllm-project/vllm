@@ -168,16 +168,14 @@ class DeepseekSparseSWAMetadata:
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
-    refresh_tile_scheduler: bool = False
-    scheduler_valid_count: torch.Tensor | None = None  # CUDA int32 scalar [1]
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """Builds metadata for DeepseekV4 SWA cache.
 
     This keeps the decode/prefill split counts for compatibility with other
-    DeepseekV4 metadata builders, but produces a single set of token metadata
-    consumed by FlashMLA's direct KV-cache path.
+    DeepseekV4 metadata builders, and produces token metadata consumed by
+    FlashMLA's direct KV-cache path.
 
     Supports:
     - Mixed decode/prefill batches
@@ -249,19 +247,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.bool,
             device=self.device,
         )
-        self.scheduler_valid_count = torch.zeros(
-            (1,),
-            dtype=torch.int32,
-            device=self.device,
-        )
-
-        compilation_config = self.vllm_config.compilation_config
-        self._use_cudagraph_tile_scheduler = (
-            compilation_config.cudagraph_mode.has_full_cudagraphs()
-        )
-        self._max_cudagraph_capture_size = (
-            compilation_config.max_cudagraph_capture_size or 0
-        )
 
     def build(
         self,
@@ -271,8 +256,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     ) -> DeepseekSparseSWAMetadata:
         """Build SWA metadata for mixed decode/prefill batches.
 
-        The batch is assumed to be reordered with decodes first by the scheduler,
-        but all actual tokens are processed by a single FlashMLA call.
+        The batch is assumed to be reordered with decodes first by the scheduler.
         """
         num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
@@ -338,20 +322,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
             )
 
-        # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
-        # per present DeepseekV4 layer type; the first flash_mla_with_kvcache call of
-        # each type triggers the planner and all same-type layers reuse the
-        # resulting plan for the rest of the step.
-        refresh_tile_scheduler = (
-            self._use_cudagraph_tile_scheduler
-            and num_prefills == 0
-            and 0 < num_swa_tokens <= self._max_cudagraph_capture_size
-        )
-        scheduler_valid_count = None
-        if refresh_tile_scheduler:
-            self.scheduler_valid_count[0] = int(query_start_loc_cpu[-1])
-            scheduler_valid_count = self.scheduler_valid_count
-
+        # Per-layer-type tile-scheduler plan holders. The direct KV-cache
+        # prefill path uses one FlashMLA decode-kernel call for all tokens, so
+        # the scheduler is built for the same token count as swa_indices.
         tile_sched = self.build_tile_scheduler(num_swa_tokens)
 
         return DeepseekSparseSWAMetadata(
@@ -372,8 +345,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
-            refresh_tile_scheduler=refresh_tile_scheduler,
-            scheduler_valid_count=scheduler_valid_count,
             **deepseek_v4_fields,
         )
 

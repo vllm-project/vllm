@@ -683,11 +683,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self_kv_cache = self.kv_cache if not swa_only else None
         swa_kv_cache = self.swa_cache_layer.kv_cache
 
-        if not self.use_flashmla_direct_kvcache_prefill:
-            num_decodes = swa_metadata.num_decodes
-            num_prefills = swa_metadata.num_prefills
-            num_decode_tokens = swa_metadata.num_decode_tokens
+        num_decodes = swa_metadata.num_decodes
+        num_prefills = swa_metadata.num_prefills
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        num_prefill_tokens = swa_metadata.num_prefill_tokens
 
+        if not self.use_flashmla_direct_kvcache_prefill:
             if num_prefills > 0:
                 self._forward_prefill(
                     q=q[num_decode_tokens:],
@@ -712,17 +713,19 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 )
             return
 
-        self._forward_decode(
-            q=q,
-            kv_cache=self_kv_cache,
-            swa_k_cache=swa_kv_cache,
-            swa_metadata=swa_metadata,
-            attn_metadata=flashmla_metadata,
-            swa_only=swa_only,
-            output=output,
-            token_slice=slice(0, q.shape[0]),
-            tile_metadata=None,
-        )
+        num_tokens = num_decode_tokens + num_prefill_tokens
+        if num_tokens > 0:
+            self._forward_decode(
+                q=q[:num_tokens],
+                kv_cache=self_kv_cache,
+                swa_k_cache=swa_kv_cache,
+                swa_metadata=swa_metadata,
+                attn_metadata=flashmla_metadata,
+                swa_only=swa_only,
+                output=output[:num_tokens],
+                token_slice=slice(0, num_tokens),
+                tile_metadata=None,
+            )
 
     def _forward_decode(
         self,
@@ -759,13 +762,23 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 topk_indices = global_indices.view(num_tokens, 1, -1)
             elif self.compress_ratio == 128:
-                # C128A: pre-computed during metadata build for all tokens.
-                c128a_topk_indices = attn_metadata.c128a_global_topk_indices
-                c128a_topk_lens = attn_metadata.c128a_topk_lens
-                assert c128a_topk_indices is not None
-                assert c128a_topk_lens is not None
-                topk_indices = c128a_topk_indices[token_slice]
-                topk_lens = c128a_topk_lens[token_slice]
+                total_tokens = (
+                    swa_metadata.num_decode_tokens + swa_metadata.num_prefill_tokens
+                )
+                is_full_mixed_slice = (
+                    token_slice.start == 0
+                    and token_slice.stop == total_tokens
+                    and attn_metadata.c128a_global_topk_indices is not None
+                )
+                if is_full_mixed_slice:
+                    topk_indices = attn_metadata.c128a_global_topk_indices
+                    topk_lens = attn_metadata.c128a_topk_lens
+                    assert topk_lens is not None
+                else:
+                    topk_indices = attn_metadata.c128a_global_decode_topk_indices
+                    topk_lens = attn_metadata.c128a_decode_topk_lens
+                    assert topk_indices is not None
+                    assert topk_lens is not None
             else:
                 raise ValueError(
                     f"Unsupported compress_ratio={self.compress_ratio}; "
@@ -814,10 +827,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             "DeepseekSparseSWAMetadataBuilder.build_tile_scheduler did not "
             "allocate one for this layer type."
         )
-        scheduler_valid_count = None
-        if swa_metadata.refresh_tile_scheduler and not tile_metadata.have_initialized:
-            scheduler_valid_count = swa_metadata.scheduler_valid_count
-            assert scheduler_valid_count is not None
         out, _ = flash_mla_with_kvcache(
             q=q,
             k_cache=swa_cache,
@@ -833,7 +842,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             extra_k_cache=extra_k_cache,
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
-            scheduler_valid_count=scheduler_valid_count,
             out=output.unsqueeze(1),
         )
 
