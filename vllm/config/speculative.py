@@ -50,6 +50,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
+    "gemma4_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -490,6 +491,17 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
+
+        if hf_config.model_type == "gemma4_assistant":
+            hf_config.model_type = "gemma4_mtp"
+            text_config = getattr(hf_config, "text_config", hf_config)
+            # The assistant runs all decoder layers in a single forward
+            # call to produce one draft token, so n_predict=1.
+            # num_kv_shared_layers must be 0: cross-model KV sharing is
+            # set up by the proposer after model construction.
+            if hasattr(text_config, "num_kv_shared_layers"):
+                text_config.num_kv_shared_layers = 0
+            hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
 
         return hf_config
 
@@ -1039,6 +1051,14 @@ class SpeculativeConfig:
             # Since we do not slice the draft tokens
             slots_per_req += 1
         return slots_per_req
+
+    def use_gemma4_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "gemma4_mtp"
+        )
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp", "dflash")
