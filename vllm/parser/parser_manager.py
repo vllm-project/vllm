@@ -279,29 +279,39 @@ class ParserManager:
             except KeyError:
                 continue
 
-            success, kwargs = parser_cls.specialize(
-                reasoning_parser_cls, tool_parser_cls
+            specialized_parser = specialize_parser(
+                parser_cls, reasoning_parser_cls, tool_parser_cls
             )
-            if not success:
-                continue
-
-            # Dynamically create subclass with specialized class variables
-            # Set the class-level attributes on the specialized parser class
-            return type(
-                f"{parser_cls}_{reasoning_parser_cls}_{tool_parser_cls}",
-                (parser_cls,),
-                kwargs,
-            )
+            if specialized_parser is not None:
+                return specialized_parser
 
         # Fallback: Specialize a _WrappedParser with the individual parser classes
         from vllm.parser.abstract_parser import _WrappedParser
 
-        success, kwargs = _WrappedParser.specialize(
-            reasoning_parser_cls, tool_parser_cls
+        specialized_parser = specialize_parser(
+            _WrappedParser, reasoning_parser_cls, tool_parser_cls
         )
-        assert success
-        return type(
-            f"_WrappedParser_{reasoning_parser_cls}_{tool_parser_cls}",
-            (_WrappedParser,),
-            kwargs,
-        )
+        assert specialized_parser is not None
+        return specialized_parser
+
+
+def specialize_parser(
+    parser_cls: type[Parser],
+    reasoning_parser_cls: type[ReasoningParser] | None,
+    tool_parser_cls: type[ToolParser] | None,
+) -> type[Parser] | None:
+    success, kwargs = parser_cls.specialize(reasoning_parser_cls, tool_parser_cls)
+    if not success:
+        return None
+
+    specialized_name = parser_cls.__name__
+    if reasoning_parser_cls is not None:
+        specialized_name += f"_{reasoning_parser_cls.__name__}"
+    if tool_parser_cls is not None:
+        specialized_name += f"_{tool_parser_cls.__name__}"
+
+    return type(
+        specialized_name,
+        (parser_cls,),
+        kwargs,
+    )

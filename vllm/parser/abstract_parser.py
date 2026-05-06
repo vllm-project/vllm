@@ -104,7 +104,7 @@ class Parser:
         Returns:
             A tuple of (success, kwargs) where success is a boolean indicating
             whether the specialization was successful and kwargs is a dictionary
-            of keyword arguments to pass to the parser's __init__ method.
+            of class-level attributes to set on the parser class.
         """
 
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
