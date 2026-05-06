@@ -1021,7 +1021,6 @@ def make_fake_moe_layer(
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
-        # eplb_state=None, # TODO
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
@@ -1254,7 +1253,7 @@ def _test_body_eplb(
         ),
     )
 
-    eplb_moe_layer.eplb_manager.state.should_record_tensor = torch.ones(
+    eplb_moe_layer.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
 
