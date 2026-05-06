@@ -21,3 +21,6 @@ timm>=1.0.17
 # amd-quark: required for Quark quantization on ROCm 
 # To be consistent with test_quark.py
 amd-quark>=0.8.99
+# tilelang has to be installed for mhc module to be
+# imported correctly.
+tilelang==0.1.9
