@@ -212,7 +212,7 @@ class ExpertMapManager:
         self._calculate_expert_maps()
 
         # Initialize routing tables if needed
-        self._maybe_init_routing_tables()
+        self._ensure_routing_tables_initialized()
 
         self._init_aiter_shared_experts_topK_buffer(
             dp_size=self.moe_parallel_config.dp_size,
@@ -398,7 +398,7 @@ class ExpertMapManager:
             )
 
             self._calculate_expert_maps()
-            self._maybe_init_routing_tables()
+            self._ensure_routing_tables_initialized()
 
             # Reinitialize AITER buffer if needed and parameters provided
             if self.num_fused_shared_experts > 0 and all(
@@ -476,7 +476,7 @@ class ExpertMapManager:
 
         self._local_num_experts += self.num_fused_shared_experts
 
-    def ensure_routing_tables_initialized(self) -> None:
+    def _ensure_routing_tables_initialized(self) -> None:
         """
         Ensure routing tables are initialized if needed for round-robin.
 
@@ -496,10 +496,6 @@ class ExpertMapManager:
         # Only initialize if not already initialized
         if not hasattr(self, "_routing_tables"):
             self._routing_tables = self._ensure_round_robin_expert_routing_tables()
-
-    def _maybe_init_routing_tables(self):
-        """Initialize routing tables if needed for round-robin (internal)."""
-        self.ensure_routing_tables_initialized()
 
     def _ensure_round_robin_expert_routing_tables(
         self,

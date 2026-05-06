@@ -253,11 +253,7 @@ class FusedMoE(PluggableLayer):
             rocm_aiter_enabled=self.rocm_aiter_fmoe_enabled,
         )
 
-        # Extract properties from ExpertMapManager
-        self.local_num_experts = self.expert_map_manager.local_num_experts
-        self.expert_placement_strategy = self.expert_map_manager.placement_strategy
-        self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
-        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
+        self.update_expert_map_info()
 
         self.top_k = top_k
 
@@ -458,9 +454,8 @@ class FusedMoE(PluggableLayer):
         self.ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
-        routing_tables = self._maybe_init_expert_routing_tables()
         prepare_finalize = self.base_quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
+            routing_tables=self._expert_routing_tables()
         )
         if prepare_finalize is not None:
             logger.debug(
@@ -512,7 +507,23 @@ class FusedMoE(PluggableLayer):
         # By default, router/gate is called before FusedMoE forward pass
         return self.runner.is_internal_router()
 
-    def _maybe_init_expert_routing_tables(
+    def update_expert_map_info(self):
+        # Update local attributes from ExpertMapManager
+        self.local_num_experts = self.expert_map_manager.local_num_experts
+        self.expert_placement_strategy = self.expert_map_manager.placement_strategy
+        self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
+        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
+
+        # Get routing tables from ExpertMapManager
+        routing_tables = self.expert_map_manager.routing_tables
+        if routing_tables is not None:
+            # Register routing tables as buffers for this layer
+            global_to_physical, physical_to_global, local_global = routing_tables
+            self.register_buffer("expert_global_to_physical", global_to_physical)
+            self.register_buffer("expert_physical_to_global", physical_to_global)
+            self.register_buffer("expert_local_to_global", local_global)
+
+    def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         # Return cached routing tables if already registered as buffers
@@ -525,31 +536,13 @@ class FusedMoE(PluggableLayer):
                     self.expert_local_to_global,
                 ),
             )
-
-        # Delegate to ExpertMapManager to initialize routing tables if needed
-        # (ExpertMapManager determines if routing tables are needed based on
-        # placement strategy and backend configuration)
-        self.expert_map_manager._maybe_init_routing_tables()
-
-        # Get routing tables from ExpertMapManager
-        routing_tables = self.expert_map_manager.routing_tables
-        if routing_tables is None:
-            return None
-
-        # Register routing tables as buffers for this layer
-        global_to_physical, physical_to_global, local_global = routing_tables
-        self.register_buffer("expert_global_to_physical", global_to_physical)
-        self.register_buffer("expert_physical_to_global", physical_to_global)
-        self.register_buffer("expert_local_to_global", local_global)
-
-        return routing_tables
+        return None
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
         # Update ExpertMapManager with new EP configuration
         # Note: ExpertMapManager.update() recalculates expert maps and
-        # reinitializes routing tables internally, so no need to call
-        # _maybe_init_expert_routing_tables() again
+        # reinitializes routing tables internally.
         vllm_config = get_current_vllm_config()
         self.expert_map_manager.update(
             new_ep_size=self.ep_size,
@@ -564,19 +557,7 @@ class FusedMoE(PluggableLayer):
         )
 
         # Update local attributes from ExpertMapManager
-        self.local_num_experts = self.expert_map_manager.local_num_experts
-        self.expert_placement_strategy = self.expert_map_manager.placement_strategy
-        self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
-        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
-
-        # Update routing table buffers if they exist
-        # Note: Routing tables are already initialized by ExpertMapManager.update()
-        routing_tables = self.expert_map_manager.routing_tables
-        if routing_tables is not None:
-            global_to_physical, physical_to_global, local_global = routing_tables
-            self.register_buffer("expert_global_to_physical", global_to_physical)
-            self.register_buffer("expert_physical_to_global", physical_to_global)
-            self.register_buffer("expert_local_to_global", local_global)
+        self.update_expert_map_info()
 
     def _load_per_tensor_weight_scale(
         self,
