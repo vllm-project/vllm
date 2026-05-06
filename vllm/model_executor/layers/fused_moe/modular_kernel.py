@@ -1250,6 +1250,7 @@ class FusedMoEKernelModularImpl:
         # double-copy MoE write-back path).
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
+
             if (
                 rocm_aiter_ops.is_fused_moe_enabled()
                 and output_alias is not None
