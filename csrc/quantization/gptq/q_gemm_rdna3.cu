@@ -694,25 +694,20 @@ torch::Tensor gptq_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                               torch::Tensor b_qzeros, torch::Tensor b_scales,
                               torch::Tensor b_g_idx, bool use_v2_format) {
 #if defined(USE_ROCM)
-  // Dispatch to the WMMA kernel for bf16 prefill / batched (M >= 16). The
-  // branch lives in C++ rather than in Python apply_weights to keep the
+  // Dispatch to the WMMA kernel for prefill / batched decode.
+  // The branch lives in C++ rather than in Python apply_weights to keep the
   // torch.compile'd graph branch-free (an `if x.size(0) >= 16` inside the
   // traced fwd previously caused a 7x decode regression — see git log).
   //
-  // bf16-only gating rationale: a microbench sweep (M ∈ {1..256} × 5
-  // Qwen-class shapes) showed the scalar fp16 kernel beats the current WMMA
-  // implementation at every M because the fp16 dequant bit-trick keeps the
-  // scalar path memory-bound. bf16 scalar pays a tax for the missing
-  // v_pk_fma_bf16 on gfx11, so WMMA wins from M=16 onward. The fp16 WMMA
-  // path stays available via the standalone op gptq_gemm_rdna3_wmma for
-  // direct callers / future kernel tuning, but is not auto-dispatched
-  // here — end-to-end serving showed the WMMA path matched the fp16
-  // scalar+fdot2 path within run-to-run variance (440.7 vs 445.7 tk/s at
-  // max-num-seqs=32) despite a 47% kernel-microbench advantage; the
-  // scalar path's lower complexity wins.
-  if (a.scalar_type() == torch::kBFloat16 && a.dim() == 2 &&
-      b_q_weight.dim() == 2 && a.size(0) >= 16 && a.size(1) % 16 == 0 &&
-      b_q_weight.size(1) % 16 == 0) {
+  // bf16 M≥16: scalar pays a tax for the missing v_pk_fma_bf16 on gfx11,
+  // so WMMA wins from M=16 onward.
+  // fp16 M≥64: with WMMA V7 (128M×64N, 8 waves), fp16 WMMA beats scalar
+  // by 1.2-2.2× at M≥64 across Qwen-class shapes. Below M=64 the scalar
+  // fp16 dequant bit-trick keeps the scalar path faster.
+  if (a.dim() == 2 && b_q_weight.dim() == 2 && a.size(1) % 16 == 0 &&
+      b_q_weight.size(1) % 16 == 0 &&
+      ((a.scalar_type() == torch::kBFloat16 && a.size(0) >= 16) ||
+       (a.scalar_type() == torch::kHalf && a.size(0) >= 64))) {
     return gptq_gemm_rdna3_wmma(a, b_q_weight, b_qzeros, b_scales, b_g_idx,
                                 use_v2_format);
   }
