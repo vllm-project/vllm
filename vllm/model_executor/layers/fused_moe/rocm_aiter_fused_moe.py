@@ -6,6 +6,7 @@ from functools import lru_cache
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -446,6 +447,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output.is_contiguous()
             and result.is_contiguous()
             and output._base is None
+            and disable_inplace()
         ):
             output.data = result
         else:
