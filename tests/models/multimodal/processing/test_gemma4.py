@@ -66,6 +66,38 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
     )
 
 
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_image_tokens"),
+    [
+        ({}, 280),
+        ({"max_soft_tokens": 70}, 70),
+        ({"max_soft_tokens": 280}, 280),
+        ({"max_soft_tokens": 1120}, 1120),
+        ({"images_kwargs": {"max_soft_tokens": 560}}, 560),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
+    expected_image_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"image": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["image"] == expected_image_tokens
+
+
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_limit_mm_per_prompt(
     image_assets: ImageTestAssets,

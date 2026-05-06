@@ -81,6 +81,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
+_SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
 
@@ -216,10 +217,16 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         config = self.get_hf_config()
-        # Upper bound: the pooler outputs default_output_length slots
-        # per image (280).  After padding is stripped the actual count
-        # is ≤ this value, but vLLM needs the max for memory planning.
+        # Upper bound: the pooler outputs max_soft_tokens slots per image.
+        # After padding is stripped the actual count is ≤ this value, but
+        # vLLM needs the max for memory planning.
         tokens_per_image = config.vision_config.default_output_length
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val = merged_kwargs.get("max_soft_tokens")
+        if val is None:
+            val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
         if config.audio_config is not None:
             # Audio max tokens from the processor's audio_seq_length.
@@ -492,9 +499,6 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Validate max_soft_tokens early and exit cleanly on bad values.
-        _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
-
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
         val = merged_kwargs.get("max_soft_tokens")
         if val is None:
