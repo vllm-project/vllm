@@ -407,7 +407,7 @@ class Gemma4Attention(nn.Module):
         self.scaling = 1.0
 
         # For k_eq_v global attention layers the checkpoint has no v_proj —
-        # skip_v=True removes the V slot from the weight matrix entirely,
+        # v_head_size=0 drops the V slot from the packed weight matrix,
         # saving memory and eliminating the redundant V GEMM.  V is derived
         # from the K projection output in forward() instead.
         self.qkv_proj = QKVParallelLinear(
@@ -418,7 +418,7 @@ class Gemma4Attention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-            skip_v=self.use_k_eq_v,
+            v_head_size=0 if self.use_k_eq_v else None,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -521,7 +521,7 @@ class Gemma4Attention(nn.Module):
         q = q.flatten(-2, -1)
 
         if self.use_k_eq_v:
-            # qkv_proj has skip_v=True: output is [Q, K] only.
+            # qkv_proj has v_head_size=0: output is [Q, K] only.
             # Derive V from the same pre-norm K tensor via v_norm (no
             # learnable scale), which is mathematically identical to the
             # old approach of loading K weights into the V slot.
@@ -1531,7 +1531,7 @@ class Gemma4ForCausalLM(
             ".moe.experts.down_proj": ".moe.down_proj",
         },
     )
-    # Note: k_eq_v global attention layers use qkv_proj with skip_v=True
+    # Note: k_eq_v global attention layers use qkv_proj with v_head_size=0
     # (no V slot).  LoRA targeting qkv_proj.v_proj on those layers is
     # not supported and requires separate handling.
     packed_modules_mapping = {
