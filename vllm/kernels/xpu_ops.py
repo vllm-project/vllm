@@ -64,3 +64,44 @@ def fused_add_rms_norm(
     assert variance_size is None
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
+
+
+@ir.ops.rotary_embedding.register_impl(
+    "xpu_kernels",
+    supported=XPU_KERNELS_SUPPORTED,
+    inplace=True,
+)
+def rotary_embedding(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+) -> tuple[Tensor, Tensor]:
+    if cos_sin_format == "standard":
+        torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox_style,
+        )
+        return query, key
+
+    if cos_sin_format != "deepseek":
+        raise ValueError(f"Unsupported cos_sin_format={cos_sin_format!r}")
+
+    return torch.ops.vllm.xpu_ops_deepseek_scaling_rope(
+        positions,
+        query,
+        key,
+        offsets,
+        cos_sin_cache,
+        rotary_dim,
+        is_neox_style,
+    )

@@ -214,21 +214,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             )
             return query, key
 
-        from vllm import _custom_ops as ops
-
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            cos_sin_cache,
-            self.is_neox_style,
-        )
-        return query, key
+        return self.forward_native(positions, query, key)
 
     def forward_hip(
         self,
@@ -236,18 +222,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if self.use_aiter:
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            self.rocm_aiter_triton_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-            return query, key
-        return self.forward_cuda(positions, query, key)
+        return self.forward_native(positions, query, key)
 
     def forward_xpu(
         self,
@@ -255,24 +230,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        self._match_cos_sin_cache_dtype(query)
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        if key is None:
-            return self.forward_native(positions, query, key)
-        else:
-            from vllm import _custom_ops as ops
-
-            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            ops.rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                cos_sin_cache,
-                self.is_neox_style,
-            )
-        return query, key
+        return self.forward_native(positions, query, key)
 
     def forward_cpu(
         self,
@@ -280,21 +238,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from vllm import _custom_ops as ops
-
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-
-        # ops.rotary_embedding() is an in-place operation
-        # that updates the query and key tensors.
-        ops.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            cos_sin_cache,
-            self.is_neox_style,
-        )
-        return query, key
+        return self.forward_native(positions, query, key)
 
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"

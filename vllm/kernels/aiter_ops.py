@@ -7,6 +7,7 @@ from torch import Tensor
 from torch.library import Library
 
 from vllm import ir
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -33,6 +34,9 @@ direct_register_aiter_op = functools.partial(
 
 AITER_SUPPORTED = is_aiter_found()
 """Most kernels in this file are supported if AITER is installed."""
+
+AITER_TRITON_ROTARY_SUPPORTED = rocm_aiter_ops.is_triton_rotary_embed_enabled()
+"""AITER Triton rotary is only supported when the feature gate is enabled."""
 
 rms_no_var_16bit_only = (
     lambda x, weight, epsilon, variance_size=None: variance_size is None
@@ -144,3 +148,45 @@ direct_register_aiter_op(
     op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
     fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
 )
+
+
+def rotary_no_offsets_16bit_only(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+) -> bool:
+    return offsets is None and cos_sin_format == "standard"
+
+
+@ir.ops.rotary_embedding.register_impl(
+    "aiter",
+    supports_args=rotary_no_offsets_16bit_only,
+    supported=AITER_TRITON_ROTARY_SUPPORTED,
+    inplace=True,
+)
+def rotary_embedding(
+    positions: Tensor,
+    query: Tensor,
+    key: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+) -> tuple[Tensor, Tensor]:
+    torch.ops.vllm.rocm_aiter_triton_rotary_embedding(
+        positions,
+        query,
+        key,
+        head_size,
+        cos_sin_cache,
+        is_neox_style,
+    )
+    return query, key
