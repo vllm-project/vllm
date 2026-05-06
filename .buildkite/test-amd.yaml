@@ -230,7 +230,6 @@ steps:
   - tests/entrypoints/llm/test_collective_rpc.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
@@ -272,7 +271,6 @@ steps:
   - tests/v1/worker/test_worker_memory_snapshot.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
@@ -590,7 +588,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pip freeze | grep -E 'torch'
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
@@ -865,7 +862,6 @@ steps:
   - tests/entrypoints/openai/test_multi_api_servers.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
@@ -1175,7 +1171,6 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s tests/distributed/test_context_parallel.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=allgather_reducescatter --disable-nccl-for-dp-synchronization
 
@@ -1189,7 +1184,6 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
@@ -1209,7 +1203,6 @@ steps:
   - tests/examples/features/data_parallel/data_parallel_offline.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - PP_SIZE=2 torchrun --nproc-per-node=4 distributed/test_torchrun_example.py
   - TP_SIZE=4 torchrun --nproc-per-node=4 distributed/test_torchrun_example_moe.py
@@ -1255,7 +1248,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s distributed/test_ray_v2_executor.py
   - pytest -v -s distributed/test_ray_v2_executor_e2e.py
   - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
@@ -1277,7 +1269,6 @@ steps:
   - vllm/v1/worker/gpu_worker.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 #--------------------------------------------------------  mi300 · entrypoints  --------------------------------------------------------#
@@ -2284,7 +2275,6 @@ steps:
   - tests/entrypoints/openai/test_multi_api_servers.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
@@ -2304,7 +2294,6 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -2367,7 +2356,6 @@ steps:
   - tests/distributed/test_utils
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
@@ -2497,7 +2485,6 @@ steps:
   - tests/entrypoints/llm/test_collective_rpc.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
   - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
@@ -2522,7 +2509,6 @@ steps:
   - tests/v1/worker/test_worker_memory_snapshot.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
@@ -2543,7 +2529,6 @@ steps:
   - tests/distributed/test_multiproc_executor.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
@@ -2723,7 +2708,6 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
