@@ -145,10 +145,19 @@ class OpenAIServingCompletion(OpenAIServing):
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         for i, engine_input in enumerate(engine_inputs):
+            input_length = self._extract_prompt_len(engine_input)
+            if request.truncate_prompt_tokens is not None:
+                truncated_length = (
+                    max_model_len
+                    if request.truncate_prompt_tokens == -1
+                    else request.truncate_prompt_tokens
+                )
+                input_length = min(input_length, truncated_length)
+
             max_tokens = get_max_tokens(
                 max_model_len,
                 request.max_tokens,
-                self._extract_prompt_len(engine_input),
+                input_length,
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
