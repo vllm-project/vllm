@@ -102,6 +102,77 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
     assert tokens["video"] == 32 * (70 + 2 + 6)
 
 
+@pytest.mark.parametrize(
+    ("media_io_kwargs", "expected_video_tokens"),
+    [
+        ({}, 32 * (70 + 2 + 6)),
+        ({"video": {"num_frames": 8}}, 8 * (70 + 2 + 6)),
+        ({"video": {"num_frames": 40}}, 40 * (70 + 2 + 6)),
+        ({"video": {"num_frames": 0}}, 32 * (70 + 2 + 6)),
+        ({"video": {"num_frames": -1}}, 32 * (70 + 2 + 6)),
+        ({"video": {"num_frames": "32"}}, 32 * (70 + 2 + 6)),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
+    model_id: str,
+    media_io_kwargs: dict[str, object],
+    expected_video_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"media_io_kwargs": media_io_kwargs},
+        limit_mm_per_prompt={"video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["image"] == 280
+    assert tokens["video"] == expected_video_tokens
+
+
+@pytest.mark.parametrize(
+    ("media_io_kwargs", "expected_num_frames"),
+    [
+        ({}, 32),
+        ({"video": {"num_frames": 8}}, 8),
+        ({"video": {"num_frames": 40}}, 40),
+        ({"video": {"num_frames": 0}}, 32),
+        ({"video": {"num_frames": -1}}, 32),
+        ({"video": {"num_frames": "32"}}, 32),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_dummy_video_respects_configured_video_num_frames(
+    model_id: str,
+    media_io_kwargs: dict[str, object],
+    expected_num_frames: int,
+):
+    ctx = build_model_context(
+        model_id,
+        model_config_kwargs={"media_io_kwargs": media_io_kwargs},
+        limit_mm_per_prompt={"video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    dummy_data = processor.dummy_inputs.get_dummy_mm_data(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+        mm_options={},
+    )
+
+    assert "video" in dummy_data
+    assert len(dummy_data["video"]) == 1
+    video, metadata = dummy_data["video"][0]
+    assert video.shape[0] == expected_num_frames
+    assert metadata["total_num_frames"] == expected_num_frames
+
+
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
     ctx = build_model_context(
