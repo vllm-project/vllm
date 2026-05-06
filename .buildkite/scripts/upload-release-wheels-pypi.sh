@@ -39,10 +39,11 @@ fi
 
 set -x # avoid printing secrets above
 
-# install twine from pypi
+# install twine and sdist build prerequisites from pypi
 python3 -m venv /tmp/vllm-release-env
 source /tmp/vllm-release-env/bin/activate
 pip install twine
+pip install -r requirements/build/cuda.txt
 python3 -m twine --version
 
 # copy release wheels to local directory
