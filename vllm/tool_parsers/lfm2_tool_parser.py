@@ -106,7 +106,9 @@ class Lfm2ToolParser(ToolParser):
         return raw_after
 
     @classmethod
-    def _extract_tool_call_text(cls, model_output: str) -> tuple[str | None, str | None]:
+    def _extract_tool_call_text(
+        cls, model_output: str
+    ) -> tuple[str | None, str | None]:
         """Extract the pythonic call text and surrounding content.
 
         Returns (tool_text, content) where tool_text is the text between

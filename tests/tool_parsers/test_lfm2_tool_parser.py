@@ -280,9 +280,7 @@ def test_streaming_full_block_and_trailing_in_single_delta(
     trailing assistant text arrive in one delta. Trailing content must
     still be emitted — not silently dropped."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
-    full_text = (
-        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}\nDone."
-    )
+    full_text = f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}\nDone."
 
     reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
 
@@ -298,8 +296,7 @@ def test_streaming_leading_content_and_full_block_in_single_delta(
     delta. Leading content must be emitted — not silently dropped."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
     full_text = (
-        "Let me check. "
-        f"{TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
+        f"Let me check. {TOOL_CALL_START}[{SIMPLE_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
     )
 
     reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
@@ -341,9 +338,7 @@ def test_echoed_tool_call_body_not_leaked_to_content(
         "ingredientList=[{'name': 'apple', 'quantity': '2'}], "
         "deliveryAddress='123 Main St')]"
     )
-    model_output = (
-        f"{TOOL_CALL_START}{body}{TOOL_CALL_END}{body}{TOOL_CALL_END}"
-    )
+    model_output = f"{TOOL_CALL_START}{body}{TOOL_CALL_END}{body}{TOOL_CALL_END}"
 
     # Non-streaming
     content_ns, tool_calls_ns = run_tool_extraction(
@@ -354,9 +349,7 @@ def test_echoed_tool_call_body_not_leaked_to_content(
     assert content_ns in (None, "")
 
     # Streaming: re-fetch a fresh parser since state was mutated above.
-    tool_parser2: ToolParser = ToolParserManager.get_tool_parser("lfm2")(
-        lfm2_tokenizer
-    )
+    tool_parser2: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
     content_s, tool_calls_s = run_tool_extraction(
         tool_parser2, model_output, streaming=True
     )
@@ -378,8 +371,8 @@ def test_streaming_char_by_char_multi_dict_list(lfm2_tokenizer: TokenizerLike):
     full_text = (
         f"{TOOL_CALL_START}[grocery.orderIngredients("
         "ingredientList=["
-        "{\"name\": \"apple\", \"quantity\": \"2\"}, "
-        "{\"name\": \"bread\", \"quantity\": \"1\"}"
+        '{"name": "apple", "quantity": "2"}, '
+        '{"name": "bread", "quantity": "1"}'
         f"])]{TOOL_CALL_END}"
     )
     deltas = [c for c in full_text]
@@ -391,6 +384,7 @@ def test_streaming_char_by_char_multi_dict_list(lfm2_tokenizer: TokenizerLike):
     assert len(reconstructor.tool_calls) == 1
     assert reconstructor.tool_calls[0].function.name == "grocery.orderIngredients"
     import json
+
     args = json.loads(reconstructor.tool_calls[0].function.arguments)
     assert args == {
         "ingredientList": [
@@ -405,9 +399,7 @@ def test_streaming_dotted_name_in_single_delta(lfm2_tokenizer: TokenizerLike):
     ``domain.method(arg=...)``) must be parsed correctly in streaming mode
     just as in non-streaming mode."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
-    full_text = (
-        f"{TOOL_CALL_START}[{DOTTED_NAME_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
-    )
+    full_text = f"{TOOL_CALL_START}[{DOTTED_NAME_FUNCTION_OUTPUT}]{TOOL_CALL_END}"
 
     reconstructor = run_tool_extraction_streaming(tool_parser, [full_text])
 
