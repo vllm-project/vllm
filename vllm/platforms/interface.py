@@ -242,7 +242,12 @@ class Platform:
         ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+            try:
+                return int(physical_device_id)
+            except ValueError:
+                # MIG device UUID (e.g. "MIG-<uuid>") — CUDA already remaps
+                # it to logical device 0, so device_id is the correct index.
+                return device_id
         else:
             return device_id
 
