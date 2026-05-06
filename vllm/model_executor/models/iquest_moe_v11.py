@@ -530,6 +530,35 @@ class IquestMoeModel(nn.Module):
                         logger.warning_once("sink attention feature is disabled")
                         continue
 
+                    if "experts.fc_scale_inv" in name:
+                        # Block-quantization scales for packed w13 weights.
+                        # loaded_weight: [E, 2*ceil(I/128), ceil(H/128)]
+                        name = name.replace(
+                            "experts.fc_scale_inv", "experts.w13_weight_scale_inv"
+                        )
+                        if name not in params_dict:
+                            continue
+                        param = params_dict[name]
+                        weight_loader = param.weight_loader
+                        half = loaded_weight.shape[1] // 2
+                        for expert_id in range(self.config.num_experts):
+                            weight_loader(
+                                param,
+                                loaded_weight[expert_id, :half],
+                                name,
+                                shard_id="w1",
+                                expert_id=expert_id,
+                            )
+                            weight_loader(
+                                param,
+                                loaded_weight[expert_id, half:],
+                                name,
+                                shard_id="w3",
+                                expert_id=expert_id,
+                            )
+                        loaded_params.add(name)
+                        continue
+
                     if "experts.fc" in name:
                         # NOTE(yxing): for sonic moe model
                         # experts.fc -> experts.w13_.
@@ -578,6 +607,27 @@ class IquestMoeModel(nn.Module):
                         oe_heads_counter += 1
                         if oe_heads_counter == total_oe_heads:
                             loaded_params.add(name)
+                        continue
+
+                    if "experts.proj_scale_inv" in name:
+                        # Block-quantization scales for packed w2 weights.
+                        # loaded_weight: [E, ceil(H/128), ceil(I/128)]
+                        name = name.replace(
+                            "experts.proj_scale_inv", "experts.w2_weight_scale_inv"
+                        )
+                        if name not in params_dict:
+                            continue
+                        param = params_dict[name]
+                        weight_loader = param.weight_loader
+                        for expert_id in range(self.config.num_experts):
+                            weight_loader(
+                                param,
+                                loaded_weight[expert_id],
+                                name,
+                                shard_id="w2",
+                                expert_id=expert_id,
+                            )
+                        loaded_params.add(name)
                         continue
 
                     if "experts.proj" in name:
