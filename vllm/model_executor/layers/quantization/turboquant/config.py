@@ -282,7 +282,7 @@ class TurboQuantConfig:
         return result
 
     @staticmethod
-    def from_cache_dtype(cache_dtype: str, head_dim: int) -> "TurboQuantConfig":
+    def from_cache_dtype(cache_dtype: str, head_dim: int) -> TurboQuantConfig:
         """Create config from a named preset.
 
         Valid presets: turboquant_k8v4, turboquant_4bit_nc, etc.
