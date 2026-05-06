@@ -142,7 +142,9 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             topk_group=topk_group,
             num_expert_group=num_expert_group,
             scoring_func="softmax",
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=(
+                routed_scaling_factor if routed_scaling_factor is not None else 1.0
+            ),
             e_score_correction_bias=e_score_correction_bias,
         )
 
