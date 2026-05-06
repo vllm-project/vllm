@@ -426,7 +426,7 @@ def mhc_fused_tilelang(
     residual_out,
     hc: int,
     hidden: int,
-    n_out: int,  # static; equals hc_mult * (2 + hc_mult) for mhc
+    n_out: int,
     n_thr: int = 256,
     h_blk: int = 256,
     tile_n: int = 1,
@@ -449,88 +449,66 @@ def mhc_fused_tilelang(
     rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type]
     residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
 
-    # Strided h loop: each thread owns indices {h_split_start + tid, +n_thr, ...}
-    # within its k-split. Per-thread acc[tile_n] and sqr accumulate across all
-    # iterations; one final warp_reduce_sum + smem cross-warp reduce mirrors the
-    # CUDA __shfl_xor_sync butterfly + s_warp staging.
     h_iters = h_per_split // n_thr
     num_warps = n_thr // 32
-    _ = h_blk  # vestigial; per-thread strided loop replaces the h-block tiling.
 
     with T.Kernel(m, n_tiles, split_k, threads=n_thr) as (i_n, i_nt, i_ks):
         tid = T.get_thread_binding()
-        warp_id = tid // 32
-        lane = tid % 32
+        warp_id = T.get_warp_idx()
+        lane = T.get_lane_idx()
 
-        # Shared mem: cross-warp staging (analog of CUDA `s_warp`).
-        # Layout: [num_warps][tile_n cols + 1 sqr slot].
         s_warp = T.alloc_shared((num_warps, tile_n + 1), T.float32)
-        # Shared mem: post_mix and comb_mix loaded once per CTA (analog of
-        # CUDA s_post / s_comb).
         s_post = T.alloc_shared((hc,), T.float32)
         s_comb = T.alloc_shared((hc, hc), T.float32)
 
-        # Per-thread registers (analogs of CUDA's `pm[]`, `cm[][]`, `acc[]`,
-        # `sqr`, `new_r[][]`, `rf_k[]`).
         pm = T.alloc_local((hc,), T.float32)
         cm = T.alloc_local((hc, hc), T.float32)
         acc = T.alloc_local((tile_n,), T.float32)
         sqr = T.alloc_local((1,), T.float32)
         new_r = T.alloc_local((hc,), T.float32)
-        r_vals = T.alloc_local((hc,), T.float32)
+
+        T.clear(acc)
+        T.clear(sqr)
+        h_split_start = i_ks * h_per_split
 
         T.pdl_sync()
 
-        # Load post_mix and comb_mix into shared via a coalesced copy, then
-        # broadcast into per-thread registers.
         T.copy(post_mix[i_n, 0], s_post)
         T.copy(comb_mix[i_n, 0, 0], s_comb)
-        T.sync_threads()
+
         for j in T.unroll(hc):
             pm[j] = s_post[j]
         for j in T.unroll(hc):
             for k in T.unroll(hc):
                 cm[k, j] = s_comb[k, j]
 
-        for n in T.unroll(tile_n):
-            acc[n] = T.float32(0.0)
-        sqr[0] = T.float32(0.0)
-
-        h_split_start = i_ks * h_per_split
-
         # Each thread owns h_iters elements of the k-split's h slice.
         for it in T.serial(h_iters):
             h_idx = h_split_start + it * n_thr + tid
 
-            # ---- Load this thread's slice of x and residual ----
-            xv = x_in[i_n, h_idx]
-            for k in T.unroll(hc):
-                r_vals[k] = residual_in[i_n, k, h_idx]
-
-            # ---- Compute new_r[j] = pm[j] * x + sum_k cm[k, j] * r[k] ----
+            # Compute new residual from layer output and past residual
             for j in T.unroll(hc):
-                new_r[j] = pm[j] * xv
+                new_r[j] = pm[j] * x_in[i_n, h_idx]
                 for k in T.unroll(hc):
-                    new_r[j] += cm[k, j] * r_vals[k]
+                    new_r[j] += cm[k, j] * residual_in[i_n, k, h_idx]
 
-            # ---- residual_out + sqr (only n-tile 0; per-thread, no race) ----
+            # populate residual_out and compute sqr sum
             if i_nt == 0:
                 for j in T.unroll(hc):
-                    residual_out[i_n, j, h_idx] = new_r[j]  # fp32 -> bf16
+                    residual_out[i_n, j, h_idx] = new_r[j]
                     sqr[0] += new_r[j] * new_r[j]
 
-            # ---- Per-thread FMA into acc[n] (no smem — pure register) ----
+            # Per-thread FMA into acc[n]
             for n in T.unroll(tile_n):
                 for j in T.unroll(hc):
                     acc[n] += weight_t[i_nt * tile_n + n, j, h_idx] * new_r[j]
 
-        # ---- Butterfly warp reduce (analog of __shfl_xor_sync loop) ----
         for n in T.unroll(tile_n):
             acc[n] = T.warp_reduce_sum(acc[n])
         if i_nt == 0:
             sqr[0] = T.warp_reduce_sum(sqr[0])
 
-        # ---- Cross-warp reduce via shared mem (analog of CUDA s_warp) ----
+        # Cross-warp reduce via shared mem
         if lane == 0:
             for n in T.unroll(tile_n):
                 s_warp[warp_id, n] = acc[n]
@@ -538,22 +516,19 @@ def mhc_fused_tilelang(
                 s_warp[warp_id, tile_n] = sqr[0]
         T.sync_threads()
 
-        # Warp 0 does the final cross-warp sum and writes outputs. Lane n
-        # writes column n (mirrors CUDA "if lane == 0 && warp_id < n_cols").
+        # Warp 0 does the final cross-warp sum and writes outputs
         if warp_id == 0:
             if lane < tile_n:
-                v = T.alloc_local((1,), T.float32)
-                v[0] = T.float32(0.0)
+                v = T.alloc_var(T.float32, init=0.0)
                 for w in T.unroll(num_warps):
-                    v[0] += s_warp[w, lane]
-                yp_out[i_ks, i_n, i_nt * tile_n + lane] = v[0]
+                    v += s_warp[w, lane]
+                yp_out[i_ks, i_n, i_nt * tile_n + lane] = v
 
             if i_nt == 0 and lane == 0:
-                v2 = T.alloc_local((1,), T.float32)
-                v2[0] = T.float32(0.0)
+                v2 = T.alloc_var(T.float32, init=0.0)
                 for w in T.unroll(num_warps):
-                    v2[0] += s_warp[w, tile_n]
-                rp_out[i_ks, i_n] = v2[0]
+                    v2 += s_warp[w, tile_n]
+                rp_out[i_ks, i_n] = v2
 
         T.pdl_trigger()
 
