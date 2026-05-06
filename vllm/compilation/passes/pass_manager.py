@@ -18,9 +18,6 @@ from .ir.clone_elimination import UnsafeCloneEliminationPass
 from .ir.lowering_pass import VllmIRLoweringPass
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
-if rocm_aiter_ops.is_enabled() or current_platform.is_cuda():
-    from .fusion.allreduce_rms_fusion import AllReduceFusionPass
-
 if rocm_aiter_ops.is_enabled():
     from .fusion.allreduce_rms_fusion import (
         RocmAiterAllReduceFusionPass,
@@ -44,6 +41,7 @@ if current_platform.is_cuda_alike():
     from .utility.split_coalescing import SplitCoalescingPass
 
 if current_platform.is_cuda():
+    from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
     from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
@@ -144,7 +142,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
-            if self.pass_config.fuse_allreduce_rms:
+            if self.pass_config.fuse_allreduce_rms and current_platform.is_cuda():
                 self.passes += [AllReduceFusionPass(config)]
 
             if self.pass_config.fuse_minimax_qk_norm:
