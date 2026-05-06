@@ -157,7 +157,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
-    VLLM_MXFP4_USE_CUTLASS_MXFP4: bool | None = None
+    VLLM_USE_CUTLASS_MXFP4_MXFP4: bool | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -1214,8 +1214,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
     ),
     # Whether to use cutlass kernel in mxfp4 quantization method
-    "VLLM_MXFP4_USE_CUTLASS_MXFP4": lambda: maybe_convert_bool(
-        os.environ.get("VLLM_MXFP4_USE_CUTLASS_MXFP4", None)
+    "VLLM_USE_CUTLASS_MXFP4_MXFP4": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_USE_CUTLASS_MXFP4_MXFP4", None)
     ),
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(

@@ -24,8 +24,8 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    prepare_moe_fp4_layer_for_marlin,
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
@@ -41,8 +41,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         self.group_size = 32
 
         # Select mxfp4 MoE backend
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
-        self.use_marlin = self.mxfp4_backend == Mxfp4MoeBackend.MARLIN
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+            moe,
+            activation_key=kMxfp4Dynamic,
+        )
         self.use_cutlass_mxfp4 = self.mxfp4_backend == Mxfp4MoeBackend.CUTLASS_MXFP4
 
     def create_weights(
@@ -164,54 +166,45 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_scale = torch.nn.Parameter(
                 torch.stack(swizzled_w2), requires_grad=False
             )
-
-        if self.use_marlin:
-            logger.warning_once(
-                "Your GPU does not have native support for FP4 computation "
-                "but FP4 quantization is being used. Weight-only FP4 "
-                "compression will be used leveraging the Marlin kernel. "
-                "This may degrade performance for compute-heavy workloads."
-            )
-            prepare_moe_fp4_layer_for_marlin(layer)
-
-        # Allow for accessing weights and scales in standard way.
-        w13 = layer.w13_weight
-        w2 = layer.w2_weight
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
-        w13_bias = getattr(layer, "w13_bias", None)
-        w2_bias = getattr(layer, "w2_bias", None)
-
-        # Convert weights to kernel format
-        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
-                mxfp4_backend=self.mxfp4_backend,
-                layer=layer,
-                w13_weight=w13,
-                w2_weight=w2,
-                w13_weight_scale=w13_scale,
-                w2_weight_scale=w2_scale,
-                w13_bias=w13_bias,
-                w2_bias=w2_bias,
-            )
-        )
-
-        # For TRITON backends, weights are wrapped tensors from triton_kernels
-        # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
-            replace_parameter(layer, "w13_weight", w13)
-            replace_parameter(layer, "w2_weight", w2)
-            replace_parameter(layer, "w13_weight_scale", w13_scale)
-            replace_parameter(layer, "w2_weight_scale", w2_scale)
         else:
-            layer.w13_weight = w13
-            layer.w2_weight = w2
-            self.w13_precision_config = w13_scale
-            self.w2_precision_config = w2_scale
+            # Allow for accessing weights and scales in standard way.
+            w13 = layer.w13_weight
+            w2 = layer.w2_weight
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
 
-        if w13_bias is not None and w2_bias is not None:
-            replace_parameter(layer, "w13_bias", w13_bias)
-            replace_parameter(layer, "w2_bias", w2_bias)
+            # Convert weights to kernel format
+            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+                convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
+                    mxfp4_backend=self.mxfp4_backend,
+                    layer=layer,
+                    w13_weight=w13,
+                    w2_weight=w2,
+                    w13_weight_scale=w13_scale,
+                    w2_weight_scale=w2_scale,
+                    w13_bias=w13_bias,
+                    w2_bias=w2_bias,
+                )
+            )
+
+            # For TRITON backends, weights are wrapped tensors from triton_kernels
+            # that don't support .detach(). Manually assign parameters.
+            if self.mxfp4_backend not in TRITON_BACKENDS:
+                replace_parameter(layer, "w13_weight", w13)
+                replace_parameter(layer, "w2_weight", w2)
+                replace_parameter(layer, "w13_weight_scale", w13_scale)
+                replace_parameter(layer, "w2_weight_scale", w2_scale)
+            else:
+                layer.w13_weight = w13
+                layer.w2_weight = w2
+                self.w13_precision_config = w13_scale
+                self.w2_precision_config = w2_scale
+
+            if w13_bias is not None and w2_bias is not None:
+                replace_parameter(layer, "w13_bias", w13_bias)
+                replace_parameter(layer, "w2_bias", w2_bias)
 
         # Build quant config and kernel
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)

@@ -460,12 +460,15 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if envs.is_set("VLLM_MXFP4_USE_CUTLASS_MXFP4") and envs.VLLM_MXFP4_USE_CUTLASS_MXFP4:
+    if (
+        envs.is_set("VLLM_USE_CUTLASS_MXFP4_MXFP4")
+        and envs.VLLM_USE_CUTLASS_MXFP4_MXFP4
+    ):
         return _return_or_raise(
             Mxfp4MoeBackend.CUTLASS_MXFP4,
             config,
             kMxfp4Static,
-            None,
+            requested_activation_key,
             activation_format,
         )
 
