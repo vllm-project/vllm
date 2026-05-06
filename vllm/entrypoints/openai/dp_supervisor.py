@@ -206,6 +206,7 @@ def run_vllm_dp_server(
 
 
 class DPSupervisor:
+
     def __init__(self, args: argparse.Namespace):
         self.supervisor_port = args.data_parallel_supervisor_port
         self.vllm_ports = [
@@ -287,7 +288,7 @@ class DPSupervisor:
 
     async def monitor_vllm_servers(self) -> None:
         """
-        Main asyncio task that monitors the vLLM servers.
+        Main coroutine task that monitors the vLLM servers.
 
         It works by:
         - A) sleeping for HEALTHCHECK_INTERVAL_S or until shutdown event
@@ -359,7 +360,15 @@ class DPSupervisor:
 
     async def shutdown_vllm_servers(self) -> None:
         """
-        Shutdown the vLLM API server processes.
+        Shutdown the vLLM Server processes. It works by:
+        * first, sending a SIGTERM/SIGINT
+        * second, waiting for a grace period for shutdown
+        * third, killing the process tree of each vLLM Server.
+
+        Since the supervisor server is not handling data
+        plane request traffic from the users, it is key
+        to ensure we give the vLLM Server processes a grace
+        period to drain the existing running requests.
         """
         # 1. Send SIGTERM or SIGINT to all children
         for process in self.vllm_processes:
@@ -373,6 +382,7 @@ class DPSupervisor:
         # 2. Wait briefly for them to exit gracefully
         for process in self.vllm_processes:
             await asyncio.to_thread(
+                # TODO: we should use args.shutdown_timeout for this.
                 process.join(timeout=DEFAULT_CHILD_GRACEFUL_TERMINATION)
             )
         
@@ -387,18 +397,34 @@ class DPSupervisor:
 
 async def main(supervisor: DPSupervisor) -> None:
     """
-    This is the main coroutine running on pid 1 in K8s.
+    For DP/EP deployments, we want the Router (e.g. llm-d
+    Router) to target specific DP-ranks. However, collectives
+    like DeepEP require running within a single pod boundary,
+    so we want to launch N DP=1 vLLM deployments all running
+    on independent ports.
 
-    K8s pod termination lifecycle will send a SIGTERM to pid 1
-    during shutdown, with a terminationGracePeriodSeconds to
-    enable things like request draining. This eventloop is
-    responsible for handling this signal and coordinating
-    with the background workers.
+    However, in K8s, pod termination and readiness / health
+    probes expect a single endpoint and handling on pid 1:
+    - K8s sends SIGTERM to pid 1 during shutdown, with a 
+        terminationGracePeriodSeconds to enable cleanup like
+        request draining. The supervisor is responsible for
+        terminating the vLLM instances gracefully.
+    - K8s sends /health and /ready probes (configurable
+        by the deployment). The supervisor is responsible
+        for monitoring the vLLM instances and returning
+        the global readiness condition.
 
-    Additionally, the K8s API server will send health and
-    liveness probes to a single endpoint in the pod. This
-    coroutine is responsible for monitoring the background
-    vLLM servers and responding to those probes.
+    This function:
+    - Sets up signal handlers for SIGTERM from K8s
+    - Launches supervisor server for /health and /ready probes
+    - Launches N vLLM DP instances all running on different ports
+    - Monitors and shuts down vLLM DP instances as needed
+
+    > [!IMPORTANT]
+    > Routers like llm-d Router support multi-port request
+    > routing, enabling user data plane traffic to bypass
+    > the supervisor server. As a result, the supervisor
+    > server does not handle client traffic.
     """
 
     def _handle_signal(signum: int) -> None:
