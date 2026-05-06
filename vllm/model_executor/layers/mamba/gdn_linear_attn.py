@@ -1345,7 +1345,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[
+                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
                     : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
@@ -1365,7 +1365,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             head_v_dim=self.head_v_dim,
             initial_state=ssm_state,
             inplace_final_state=True,
-            cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+            cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],  # type: ignore[index]
             ssm_state_indices=non_spec_state_indices_tensor,
             use_qk_l2norm_in_kernel=True,
             core_attn_out=core_attn_out.reshape(-1),
