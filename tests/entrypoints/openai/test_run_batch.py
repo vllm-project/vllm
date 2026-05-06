@@ -13,7 +13,6 @@ from vllm.entrypoints.openai.run_batch import (
     BatchRequestOutput,
     download_bytes_from_url,
 )
-from vllm.platforms import current_platform
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
@@ -429,14 +428,6 @@ def test_completions():
             BatchRequestOutput.model_validate_json(line)
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason=(
-        "TODO(akaratza): re-enable after the ROCm base image includes "
-        "https://github.com/pytorch/pytorch/pull/179579, which removes "
-        "Kineto's ROCprofiler _exit(0) atexit hook."
-    ),
-)
 def test_completions_invalid_input():
     """
     Ensure that we fail when the input doesn't conform to the openai api.
