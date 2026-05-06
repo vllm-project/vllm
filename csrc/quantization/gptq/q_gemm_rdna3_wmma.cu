@@ -151,8 +151,10 @@ __forceinline__ __device__ bf16_t f32_to_bf16_no_canon(float f) {
 //   z_prep = -(128 + zero) * scale   (folded bias for FMA)
 //   y_prep = scale
 // Per-element FMA `q*y_prep + z_prep` then yields scale * (nibble - zero).
-__forceinline__ __device__ void dequant_4bit_8_bf16_to_bf16(
-    uint32_t qa, bf162_t (&dq)[4], float z_prep, float y_prep) {
+__forceinline__ __device__ void dequant_4bit_8_bf16_to_bf16(uint32_t qa,
+                                                            bf162_t (&dq)[4],
+                                                            float z_prep,
+                                                            float y_prep) {
   const uint32_t c0 = 0x43004300;
   const uint32_t q0 = ((qa >> 0) & 0x000F000F) | c0;
   const uint32_t q1 = ((qa >> 4) & 0x000F000F) | c0;
@@ -1582,7 +1584,8 @@ __global__ void gemm_q4_wmma_kernel_v7(
   __shared__ T b_lds[2][64][16];
 
   // Dequant with scale/zero caching: 1 global_load per iter (7/8 of the time).
-  const bool dq_ok = (wave_id < 4) && (n_tile + wave_id*16 + lane_lo < size_n);
+  const bool dq_ok =
+      (wave_id < 4) && (n_tile + wave_id * 16 + lane_lo < size_n);
   const int dq_n = wave_id * 16 + lane_lo;
   const int dq_an = n_tile + dq_n;
   const int dq_oct = lane_hi;
@@ -1599,8 +1602,8 @@ __global__ void gemm_q4_wmma_kernel_v7(
     if (g != cached_g) {
       cached_g = g;
       const int qz_idx = g * (size_n / 8) + dq_an / 8;
-      const uint32_t zero_v =
-          ((b_qzeros[qz_idx] >> ((dq_an & 7) * 4)) & 0xF) + (uint32_t)zero_offset;
+      const uint32_t zero_v = ((b_qzeros[qz_idx] >> ((dq_an & 7) * 4)) & 0xF) +
+                              (uint32_t)zero_offset;
       const T sc = b_scales[g * size_n + dq_an];
       if constexpr (std::is_same<T, half>::value)
         prep_zero_scale_fp16_precise(zero_v, sc, ch_z, ch_y);
@@ -1664,7 +1667,7 @@ __global__ void gemm_q4_wmma_kernel_v7(
 
     // Vectorized LDS reads: 32 bytes (16 bf16) per b_frag → ds_load_b128 × 2.
     static_assert(sizeof(V16) == 32, "V16 must be 32 bytes for memcpy");
-    __builtin_memcpy(&b_frag0, &b_lds[cur_buf][lane_lo +  0][0], 32);
+    __builtin_memcpy(&b_frag0, &b_lds[cur_buf][lane_lo + 0][0], 32);
     __builtin_memcpy(&b_frag1, &b_lds[cur_buf][lane_lo + 16][0], 32);
     __builtin_memcpy(&b_frag2, &b_lds[cur_buf][lane_lo + 32][0], 32);
     __builtin_memcpy(&b_frag3, &b_lds[cur_buf][lane_lo + 48][0], 32);
@@ -1744,7 +1747,8 @@ void launch_gemm_q4_wmma_v5(const T* a, const uint32_t* b_q_weight,
 
   // V7 (128M × 64N, 8 waves) for large M — doubles B-tile reuse.
   if (size_m >= 128) {
-    const int k_split = compute_wmma_k_split_mn(size_m, size_n, size_k, 128, 64);
+    const int k_split =
+        compute_wmma_k_split_mn(size_m, size_n, size_k, 128, 64);
     dim3 block(256);
     dim3 grid((size_n + 63) / 64, (size_m + 127) / 128, k_split);
     gemm_q4_wmma_kernel_v7<T><<<grid, block, 0, stream>>>(
