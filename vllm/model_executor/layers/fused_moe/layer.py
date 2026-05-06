@@ -238,12 +238,13 @@ class FusedMoE(PluggableLayer):
                     "Redundant experts are only supported with EPLB."
                 )
 
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
         # Create ExpertMapManager to handle expert mapping and placement
         self.expert_map_manager = ExpertMapManager(
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            max_num_batched_tokens=max_num_batched_tokens,
             top_k=top_k,
             global_num_experts=self.global_num_experts,
-            logical_num_experts=self.logical_num_experts,
             num_redundant_experts=num_redundant_experts,
             num_expert_group=num_expert_group,
             moe_parallel_config=self.moe_parallel_config,
@@ -323,7 +324,7 @@ class FusedMoE(PluggableLayer):
             in_dtype=moe_in_dtype,
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
-            max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            max_num_tokens=max_num_batched_tokens,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
@@ -541,21 +542,15 @@ class FusedMoE(PluggableLayer):
         return None
 
     def update_expert_map(self):
-        # ep_size and ep_rank should already be updated
         # Update ExpertMapManager with new EP configuration
+        # The moe_parallel_config (including ep_size and ep_rank)
+        # should already be updated.
         # Note: ExpertMapManager.update() recalculates expert maps and
         # reinitializes routing tables internally.
-        vllm_config = get_current_vllm_config()
         self.expert_map_manager.update(
-            new_ep_size=self.ep_size,
-            new_ep_rank=self.ep_rank,
-            dp_size=get_dp_group().world_size
-            if self.aiter_fmoe_shared_expert_enabled
-            else None,
-            top_k=self.top_k if self.aiter_fmoe_shared_expert_enabled else None,
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens
-            if self.aiter_fmoe_shared_expert_enabled
-            else None,
+            self.moe_parallel_config,
+            global_num_experts=self.global_num_experts,
+            num_fused_shared_experts=self.num_fused_shared_experts,
         )
 
         # Update local attributes from ExpertMapManager

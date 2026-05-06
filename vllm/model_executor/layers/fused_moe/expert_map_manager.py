@@ -166,7 +166,6 @@ class ExpertMapManager:
         max_num_batched_tokens: int,
         top_k: int,
         global_num_experts: int,
-        logical_num_experts: int,
         num_redundant_experts: int,
         num_expert_group: int | None,
         moe_parallel_config: FusedMoEParallelConfig,
@@ -180,7 +179,6 @@ class ExpertMapManager:
 
         Args:
             global_num_experts: Total number of experts across all ranks
-            logical_num_experts: Number of logical (non-redundant) experts
             moe_parallel_config: MoE parallel configuration (contains ep_size,
                                  ep_rank, backend flags)
             placement_strategy: Strategy for placing experts ('linear' or 'round_robin')
@@ -188,10 +186,11 @@ class ExpertMapManager:
             rocm_aiter_enabled: Whether ROCm AITER fusion is enabled
         """
         self.global_num_experts = global_num_experts
-        self.logical_num_experts = logical_num_experts
         self.moe_parallel_config = moe_parallel_config
         self.num_fused_shared_experts = num_fused_shared_experts
         self.rocm_aiter_enabled = rocm_aiter_enabled
+        self.top_k = top_k
+        self.max_num_batched_tokens = max_num_batched_tokens
 
         if moe_parallel_config.use_ep:
             # Determine expert placement strategy before creating manager
@@ -215,11 +214,7 @@ class ExpertMapManager:
         # Initialize routing tables if needed
         self._ensure_routing_tables_initialized()
 
-        self._init_aiter_shared_experts_topK_buffer(
-            dp_size=self.moe_parallel_config.dp_size,
-            top_k=top_k,
-            max_num_batched_tokens=max_num_batched_tokens,
-        )
+        self._init_aiter_shared_experts_topK_buffer()
 
         if self.use_ep and self.rocm_aiter_enabled:
             expert_mask = self.expert_mask
@@ -251,21 +246,17 @@ class ExpertMapManager:
         else:
             raise RuntimeError("no device available")
 
-    def _init_aiter_shared_experts_topK_buffer(
-        self,
-        dp_size: int,
-        top_k: int,
-        max_num_batched_tokens: int,
-    ):
+    def _init_aiter_shared_experts_topK_buffer(self):
         if self.num_fused_shared_experts > 0:
+            dp_size = self.moe_parallel_config.dp_size
             init_aiter_topK_meta_data(
                 n_routed_experts=self.global_num_experts,
                 n_shared_experts=self.num_fused_shared_experts,
-                top_k=top_k,
+                top_k=self.top_k,
                 tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
                 tp_size=self.ep_size if self.use_ep else self.tp_size,
                 shared_experts_score=1.0,
-                max_num_tokens=max_num_batched_tokens * dp_size,
+                max_num_tokens=self.max_num_batched_tokens * dp_size,
                 is_EP=self.use_ep,
             )
 
@@ -368,11 +359,9 @@ class ExpertMapManager:
 
     def update(
         self,
-        new_ep_size: int | None = None,
-        new_ep_rank: int | None = None,
-        dp_size: int | None = None,
-        top_k: int | None = None,
-        max_num_batched_tokens: int | None = None,
+        moe_parallel_config: FusedMoEParallelConfig,
+        global_num_experts: int,
+        num_fused_shared_experts: int,
     ) -> None:
         """
         Update expert mappings for new EP configuration.
@@ -380,36 +369,17 @@ class ExpertMapManager:
         Used during dynamic reconfiguration (e.g., elastic scaling).
 
         Args:
-            new_ep_size: New EP world size (if changed)
-            new_ep_rank: New EP rank (if changed)
-            dp_size: New DP size (if changed, for AITER buffer reinitialization)
-            top_k: New top_k (if changed, for AITER buffer reinitialization)
-            max_num_batched_tokens: New max batched tokens (if changed, for AITER
-                                    buffer reinitialization)
         """
+        self.moe_parallel_config = moe_parallel_config
+        self.global_num_experts = global_num_experts
+        self.num_fused_shared_experts = num_fused_shared_experts
+
         with self.device:
-            if new_ep_size is not None:
-                self.moe_parallel_config.ep_size = new_ep_size
-            if new_ep_rank is not None:
-                self.moe_parallel_config.ep_rank = new_ep_rank
-
-            # Recalculate everything
-            self._placement_strategy = self._determine_placement_strategy(
-                self._placement_strategy
-            )
-
             self._calculate_expert_maps()
             self._ensure_routing_tables_initialized()
 
             # Reinitialize AITER buffer if needed and parameters provided
-            if self.num_fused_shared_experts > 0 and all(
-                x is not None for x in [dp_size, top_k, max_num_batched_tokens]
-            ):
-                self._init_aiter_shared_experts_topK_buffer(
-                    dp_size=dp_size,  # type: ignore
-                    top_k=top_k,  # type: ignore
-                    max_num_batched_tokens=max_num_batched_tokens,  # type: ignore
-                )
+            self._init_aiter_shared_experts_topK_buffer()
 
     def get_compressed_map_string(self) -> str:
         """
