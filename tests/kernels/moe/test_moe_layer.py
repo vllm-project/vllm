@@ -1013,7 +1013,6 @@ def make_fake_moe_layer(
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
-    # enable_eplb: bool = False,
     use_ep: bool = False,
     tp_size: int = 1,
     dp_size: int = 1,
@@ -1021,10 +1020,6 @@ def make_fake_moe_layer(
 ) -> Callable:
     quant_dtype = None
     activation = MoEActivation.from_str(activation)
-
-    # eplb_manager: EplbManager | None = None
-    # if enable_eplb:
-    #    eplb_manager = EplbManager(num_redundant_experts=num_redundant_experts)
 
     router = create_fused_moe_router(
         top_k=top_k,
@@ -1038,7 +1033,6 @@ def make_fake_moe_layer(
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=0,  # TODO
-        # eplb_manager=eplb_manager,
     )
 
     if quant_dtype is not None:
@@ -1211,9 +1205,6 @@ def _test_body_eplb(
         routed_input_transform=routed_input_transform,
         routed_output_transform=routed_output_transform,
     )
-
-    # if eplb_moe_layer._expert_map is not None:
-    #    eplb_moe_layer._expert_map = eplb_moe_layer._expert_map.to(device)
 
     # All ranks must generate the same permutation
     initial_indices = torch.arange(num_experts, dtype=torch.long)
@@ -1403,9 +1394,6 @@ def _run_one_config(
                 routed_output_transform=routed_output_transform,
                 activation=activation,
             )
-
-            # if moe_layer._expert_map is not None:
-            #    moe_layer._expert_map = moe_layer._expert_map.to(device)
 
             num_tokens = m
             num_tokens_across_dp = torch.tensor(

@@ -173,7 +173,6 @@ class ExpertMapManager:
         enable_eplb: bool,
         num_fused_shared_experts: int = 0,
         rocm_aiter_enabled: bool = False,
-        device: torch.device | None = None,
     ):
         """
         Initialize expert map manager.
@@ -186,14 +185,12 @@ class ExpertMapManager:
             placement_strategy: Strategy for placing experts ('linear' or 'round_robin')
             num_fused_shared_experts: Number of fused shared experts (for AITER)
             rocm_aiter_enabled: Whether ROCm AITER fusion is enabled
-            device: Device for tensor allocations
         """
         self.global_num_experts = global_num_experts
         self.logical_num_experts = logical_num_experts
         self.moe_parallel_config = moe_parallel_config
         self.num_fused_shared_experts = num_fused_shared_experts
         self.rocm_aiter_enabled = rocm_aiter_enabled
-        self.device = device
 
         if moe_parallel_config.use_ep:
             # Determine expert placement strategy before creating manager
@@ -243,6 +240,15 @@ class ExpertMapManager:
                 self.global_num_experts,
                 self.get_compressed_map_string(),
             )
+
+    @property
+    def device(self) -> torch.device:
+        if self._expert_map is not None:
+            return self._expert_map.device
+        elif self._expert_mask is not None:
+            return self._expert_mask.device
+        else:
+            raise RuntimeError("no device found")
 
     def _init_aiter_shared_experts_topK_buffer(
         self,
@@ -380,28 +386,29 @@ class ExpertMapManager:
             max_num_batched_tokens: New max batched tokens (if changed, for AITER
             buffer reinitialization)
         """
-        if new_ep_size is not None:
-            self.moe_parallel_config.ep_size = new_ep_size
-        if new_ep_rank is not None:
-            self.moe_parallel_config.ep_rank = new_ep_rank
+        with self.device:
+            if new_ep_size is not None:
+                self.moe_parallel_config.ep_size = new_ep_size
+            if new_ep_rank is not None:
+                self.moe_parallel_config.ep_rank = new_ep_rank
 
-        # Recalculate everything
-        self._placement_strategy = self._determine_placement_strategy(
-            self._placement_strategy
-        )
-
-        self._calculate_expert_maps()
-        self._maybe_init_routing_tables()
-
-        # Reinitialize AITER buffer if needed and parameters provided
-        if self.num_fused_shared_experts > 0 and all(
-            x is not None for x in [dp_size, top_k, max_num_batched_tokens]
-        ):
-            self._init_aiter_shared_experts_topK_buffer(
-                dp_size=dp_size,  # type: ignore
-                top_k=top_k,  # type: ignore
-                max_num_batched_tokens=max_num_batched_tokens,  # type: ignore
+            # Recalculate everything
+            self._placement_strategy = self._determine_placement_strategy(
+                self._placement_strategy
             )
+
+            self._calculate_expert_maps()
+            self._maybe_init_routing_tables()
+
+            # Reinitialize AITER buffer if needed and parameters provided
+            if self.num_fused_shared_experts > 0 and all(
+                x is not None for x in [dp_size, top_k, max_num_batched_tokens]
+            ):
+                self._init_aiter_shared_experts_topK_buffer(
+                    dp_size=dp_size,  # type: ignore
+                    top_k=top_k,  # type: ignore
+                    max_num_batched_tokens=max_num_batched_tokens,  # type: ignore
+                )
 
     def get_compressed_map_string(self) -> str:
         """
@@ -469,13 +476,6 @@ class ExpertMapManager:
 
         self._local_num_experts += self.num_fused_shared_experts
 
-        # Move to device if specified
-        if self.device is not None:
-            if self._expert_map is not None:
-                self._expert_map = self._expert_map.to(self.device)
-            if self._expert_mask is not None:
-                self._expert_mask = self._expert_mask.to(self.device)
-
     def ensure_routing_tables_initialized(self) -> None:
         """
         Ensure routing tables are initialized if needed for round-robin.
@@ -509,10 +509,10 @@ class ExpertMapManager:
             "Round robin not supported for AITER."
         )
 
-        device_kwargs = {"device": self.device} if self.device is not None else {}
-
         global_indices = torch.arange(
-            self.global_num_experts, dtype=torch.long, **device_kwargs
+            self.global_num_experts,
+            dtype=torch.long,
+            device=self.device,
         )
         owner = torch.remainder(global_indices, self.ep_size)
         local_index = torch.div(global_indices, self.ep_size, rounding_mode="floor")
@@ -523,7 +523,9 @@ class ExpertMapManager:
 
         if remainder > 0:
             remainder_tensor = torch.tensor(
-                remainder, dtype=torch.long, **device_kwargs
+                remainder,
+                dtype=torch.long,
+                device=self.device,
             )
             physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
 
@@ -536,7 +538,7 @@ class ExpertMapManager:
             self.global_num_experts,
             self.ep_size,
             dtype=torch.long,
-            **device_kwargs,
+            device=self.device,
         )
         if local_global.numel() != self._local_num_experts:
             local_global = local_global[: self._local_num_experts]
