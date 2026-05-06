@@ -29,6 +29,11 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         return device_capability.major == 10
 
+    _INSTALL_HINT = (
+        "tokenspeed_mla package is not installed. "
+        "Install it with: `uv pip install tokenspeed-mla`"
+    )
+
     @classmethod
     def is_available(cls) -> bool:
         try:
@@ -39,6 +44,22 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             return True
         except ImportError:
             return False
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        device_capability,
+        selector_config,
+    ) -> list[str]:
+        # Replace the generic "required dependencies not available" message
+        # from the base class with a specific install hint so users know
+        # exactly which package to install when they explicitly select this
+        # backend without having tokenspeed_mla installed.
+        reasons = super().validate_configuration(device_capability, selector_config)
+        return [
+            cls._INSTALL_HINT if r == "required dependencies not available" else r
+            for r in reasons
+        ]
 
     def __init__(
         self,

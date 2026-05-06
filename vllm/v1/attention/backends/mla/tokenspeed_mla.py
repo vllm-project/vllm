@@ -95,6 +95,16 @@ class TokenspeedMLABackend(MLACommonBackend):
         use_sparse: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
+        # Surface a clear install hint up front rather than letting a raw
+        # ModuleNotFoundError fire deep inside `forward_mqa` at first request.
+        try:
+            import tokenspeed_mla  # noqa: F401
+        except ImportError:
+            return (
+                "tokenspeed_mla package is not installed. "
+                "Install it with: `uv pip install tokenspeed-mla`"
+            )
+
         # tokenspeed_mla CuTe DSL kernel is shape-specialized for DeepSeek R1
         # MLA dimensions (qk_nope=128, qk_rope=64, v=128). Reject anything else.
         from vllm.config import get_current_vllm_config
