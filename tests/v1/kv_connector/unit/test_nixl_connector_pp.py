@@ -448,6 +448,7 @@ class TestNixlConnectorPPWiring:
         mock_request.request_id = "req-1"
         mock_request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         mock_request.kv_transfer_params = {"do_remote_decode": True}
+        mock_request.num_cached_tokens = 0
 
         with patch.object(sched, "get_sw_clipped_blocks", return_value=[[0, 1, 2]]):
             _, kv_params = sched.request_finished(mock_request, [[0, 1, 2]])
