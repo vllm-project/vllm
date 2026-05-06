@@ -183,7 +183,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
 
-#ifndef USE_ROCM
   // Horizontally-fused DeepseekV4-MLA: per-head RMSNorm + GPT-J RoPE for Q, and
   // GPT-J RoPE + UE8M0 FP8 quant + paged cache insert for KV, all in one
   // kernel launch.
@@ -194,7 +193,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float eps, int cache_block_size) -> ()");
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert", torch::kCUDA,
            &fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert);
-#endif
 
   // Apply repetition penalties to logits in-place
   ops.def(

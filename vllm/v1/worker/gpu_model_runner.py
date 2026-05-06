@@ -4182,7 +4182,7 @@ class GPUModelRunner(
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
@@ -5094,7 +5094,6 @@ class GPUModelRunner(
         if not num_prompt_logprobs_dict:
             return {}
 
-        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
@@ -5118,14 +5117,14 @@ class GPUModelRunner(
             )
 
             # Set up target LogprobsTensors object.
-            logprobs_tensors = in_progress_dict.get(req_id)
-            if not logprobs_tensors:
+            logprobs_tensors = request.in_progress_prompt_logprobs_cpu
+            if logprobs_tensors is None:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
                 logprobs_tensors = LogprobsTensors.empty_cpu(
                     num_prompt_tokens - 1, num_prompt_logprobs + 1
                 )
-                in_progress_dict[req_id] = logprobs_tensors
+                request.in_progress_prompt_logprobs_cpu = logprobs_tensors
 
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
@@ -5182,7 +5181,7 @@ class GPUModelRunner(
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
-            del in_progress_dict[req_id]
+            self.requests[req_id].in_progress_prompt_logprobs_cpu = None
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
