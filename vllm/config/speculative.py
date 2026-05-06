@@ -626,6 +626,7 @@ class SpeculativeConfig:
                     revision=self.revision,
                     code_revision=self.code_revision,
                     tokenizer_revision=self.target_model_config.tokenizer_revision,
+                    max_model_len=self.max_model_len,  # type: ignore[arg-type]
                     spec_target_max_model_len=self.target_model_config.max_model_len,
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
@@ -837,10 +838,17 @@ class SpeculativeConfig:
 
             return speculative_max_model_len
 
-        return min(
+        result = min(
             draft_max_model_len,
             target_max_model_len,
         )
+        if result != draft_max_model_len:
+            logger.info(
+                "Overriding draft model max model len from %d to %d",
+                draft_max_model_len,
+                result,
+            )
+        return result
 
     @staticmethod
     def _verify_and_get_draft_tp(

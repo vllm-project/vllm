@@ -188,6 +188,30 @@ class TestExtractToolCalls:
             "location": "NYC"
         }
 
+    def test_type_conversion_in_non_streaming(self):
+        """Non-streaming extraction must convert params using the tool schema."""
+        tool = ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="toggle",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "enabled": {"type": "boolean"},
+                        "count": {"type": "integer"},
+                    },
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        model_output = build_tool_call("toggle", {"enabled": "true", "count": "42"})
+        result = parser.extract_tool_calls(model_output, None)
+        assert result.tools_called
+        assert len(result.tool_calls) == 1
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"enabled": True, "count": 42}
+        assert isinstance(args["enabled"], bool)
+        assert isinstance(args["count"], int)
+
 
 # ---------------------------------------------------------------------------
 # Tests: extract_tool_calls_streaming

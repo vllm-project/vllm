@@ -12,6 +12,60 @@ from ...utils import build_model_context
 GEMMA4_MODEL_ID = "google/gemma-4-E2B-it"
 
 
+@pytest.mark.parametrize(
+    "image_width,image_height,max_soft_tokens",
+    [
+        # Production repro: a 3x900 image (extreme aspect ratio) made the
+        # prompt-side estimator return 289 while the HF Gemma 4 image
+        # processor's vision tower output capped at 280, producing the
+        # "Attempted to assign 280 multimodal tokens to 289 placeholders"
+        # mismatch that crashed EngineCore.
+        (900, 3, 280),
+        (3, 900, 280),
+        # Same pathology should hold for the video-frame budget (70 tokens).
+        (900, 3, 70),
+        # And for any other supported budget.
+        (4000, 2, 1120),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
+    model_id: str,
+    image_width: int,
+    image_height: int,
+    max_soft_tokens: int,
+):
+    """Regression for the Gemma 3/4 multimodal crash.
+
+    `_compute_num_soft_tokens` must never return a value larger than
+    `max_soft_tokens`. The HF Gemma 4 image processor clamps its vision
+    tower output to that value; if the prompt-side estimator returns more,
+    the prompt has more `image` placeholder tokens than the encoder will
+    fill, and `_merge_multimodal_embeddings` raises `ValueError` deep in
+    the model forward.
+    """
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs={"do_pan_and_scan": True},
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    num_soft_tokens = processor.info._compute_num_soft_tokens(
+        image_width=image_width,
+        image_height=image_height,
+        max_soft_tokens=max_soft_tokens,
+    )
+
+    assert num_soft_tokens <= max_soft_tokens, (
+        f"_compute_num_soft_tokens returned {num_soft_tokens} for "
+        f"image_width={image_width}, image_height={image_height}, "
+        f"max_soft_tokens={max_soft_tokens} — exceeds the cap that the HF "
+        f"image processor enforces on its vision tower output. This is "
+        f"the placeholder/encoder count mismatch that crashes EngineCore."
+    )
+
+
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_limit_mm_per_prompt(
     image_assets: ImageTestAssets,
