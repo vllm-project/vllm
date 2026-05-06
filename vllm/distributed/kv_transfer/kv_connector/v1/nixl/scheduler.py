@@ -160,9 +160,8 @@ class NixlConnectorScheduler:
         if self.is_bidirectional_kv_xfer_enabled and self.kv_recompute_threshold > 0:
             logger.info(
                 "Bidirectional KV transfer is enabled and the kv "
-                "recompute threshold is set to %d tokens. Note that KV blocks lease "
-                "renewal is not supported to extend TTL of blocks on D. Using a "
-                "default TTL of %d seconds for decoder KV blocks.",
+                "recompute threshold is set to %d tokens."
+                "KV blocks on D are released after a TTL of %d seconds.",
                 self.kv_recompute_threshold,
                 self.decoder_kv_blocks_ttl,
             )
@@ -644,7 +643,7 @@ class NixlConnectorScheduler:
                 request_kv_blocks_ttl = self.decoder_kv_blocks_ttl
             logger.debug(
                 "NIXLConnector request_finished(%s) waiting for %d seconds "
-                "for remote decode to fetch blocks or extend the lease",
+                "before releasing blocks",
                 request.request_id,
                 request_kv_blocks_ttl,
             )

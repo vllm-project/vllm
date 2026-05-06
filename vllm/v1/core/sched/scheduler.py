@@ -164,9 +164,9 @@ class Scheduler(SchedulerInterface):
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
             ) from e
         # Priority queues for requests.
-        self.waiting: RequestQueue = create_request_queue(self.policy)
+        self.waiting = create_request_queue(self.policy)
         # requests skipped in waiting flow due async deps or constraints.
-        self.skipped_waiting: RequestQueue = create_request_queue(self.policy)
+        self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the

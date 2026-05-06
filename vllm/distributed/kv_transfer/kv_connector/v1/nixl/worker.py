@@ -1739,7 +1739,7 @@ class NixlConnectorWorker:
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
                 "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d decode worker(s) before lease expired.",
+                "retrieved by %d remote worker(s) before lease expired.",
                 req_id,
                 count,
             )
