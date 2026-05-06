@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Benchmarks CLI Test
+  key: benchmarks-cli-test
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
@@ -12,7 +13,8 @@ steps:
   - pytest -v -s benchmarks/
 
 - label: Attention Benchmarks Smoke Test (B200)
-  device: b200
+  key: attention-benchmarks-smoke-test-b200
+  device: b200-k8s
   num_gpus: 2
   optional: true
   working_dir: "/vllm-workspace/"
