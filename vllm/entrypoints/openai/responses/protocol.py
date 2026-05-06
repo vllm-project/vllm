@@ -118,6 +118,29 @@ def serialize_messages(msgs):
     return [serialize_message(msg) for msg in msgs] if msgs else None
 
 
+def _text_chunks_from_responses_message_content(content: Any) -> list[str]:
+    """Extract plain-text segments from Responses API message content.
+
+    Used when folding ``role=developer`` messages into ``instructions`` so
+    chat-template backends never see an unsupported ``developer`` role.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [content] if content else []
+    if not isinstance(content, list):
+        return []
+    chunks: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") in ("input_text", "output_text"):
+            text = part.get("text")
+            if isinstance(text, str) and text:
+                chunks.append(text)
+    return chunks
+
+
 class ResponseRawMessageAndToken(OpenAIBaseModel):
     """Class to show the raw message.
     If message / tokens diverge, tokens is the source of truth"""
@@ -458,6 +481,9 @@ class ResponsesRequest(OpenAIBaseModel):
         cannot disambiguate in a Union of TypedDict / BaseModel types.
 
         Specifically handles:
+        - message(role=developer) -> merged into top-level ``instructions`` and
+          removed from ``input`` (OpenAI-compatible agents such as Codex send
+          developer messages; chat templates only accept system/user/assistant).
         - function_call -> ResponseFunctionToolCall
         - reasoning     -> ResponseReasoningItem (auto-generates id)
         - message(role=assistant) -> ResponseOutputMessage (auto-generates
@@ -479,13 +505,21 @@ class ResponsesRequest(OpenAIBaseModel):
                 # Not iterable, leave as-is for Pydantic to handle
                 return data
 
-        processed_input = []
+        processed_input: list[Any] = []
+        developer_chunks: list[str] = []
         for item in input_data:
             if not isinstance(item, dict):
                 processed_input.append(item)
                 continue
 
             item_type = item.get("type")
+            if item.get("role") == "developer" and (
+                item_type is None or item_type == "message"
+            ):
+                developer_chunks.extend(
+                    _text_chunks_from_responses_message_content(item.get("content"))
+                )
+                continue
 
             if item_type == "function_call":
                 try:
@@ -538,6 +572,14 @@ class ResponsesRequest(OpenAIBaseModel):
 
             else:
                 processed_input.append(item)
+
+        if developer_chunks:
+            merged = "\n\n".join(developer_chunks)
+            existing = data.get("instructions")
+            if isinstance(existing, str) and existing.strip():
+                data["instructions"] = f"{existing}\n\n{merged}"
+            else:
+                data["instructions"] = merged
 
         data["input"] = processed_input
         return data
