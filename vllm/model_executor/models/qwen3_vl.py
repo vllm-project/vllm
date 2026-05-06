@@ -1778,16 +1778,7 @@ class Qwen3VLForConditionalGeneration(
             modalities.append("video")
 
         # Compute max_frames_per_video for budget sizing.
-        max_frames = 1
-        if "video" in modalities:
-            mm_registry = MULTIMODAL_REGISTRY
-            info = mm_registry.get_processing_info(self.model_config)
-            max_frames = info.get_num_frames_with_most_features(
-                seq_len=self.model_config.max_model_len,
-                mm_counts={
-                    "video": self.multimodal_config.get_limit_per_prompt("video")
-                },
-            )
+        max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -1816,6 +1807,15 @@ class Qwen3VLForConditionalGeneration(
         elif "video_grid_thw" in mm_kwargs:
             return "video"
         raise AssertionError("This line should be unreachable.")
+
+    def get_max_frames_per_video(self) -> int:
+        mm_registry = MULTIMODAL_REGISTRY
+        info = mm_registry.get_processing_info(self.model_config)
+        max_frames_per_video = info.get_num_frames_with_most_features(
+            seq_len=self.model_config.max_model_len,
+            mm_counts={"video": self.multimodal_config.get_limit_per_prompt("video")},
+        )
+        return max_frames_per_video
 
     def get_encoder_cudagraph_budget_range(
         self,

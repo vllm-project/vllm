@@ -1531,6 +1531,12 @@ class SupportsEncoderCudaGraph(Protocol):
         """Return the modality of the inputs."""
         ...
 
+    def get_max_frames_per_video(
+        self,
+    ) -> int:
+        """Return model-specific max frames per video."""
+        ...
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
