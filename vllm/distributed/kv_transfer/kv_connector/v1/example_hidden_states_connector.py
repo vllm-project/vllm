@@ -4,6 +4,7 @@ import fcntl
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -203,8 +204,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self._pending_copies: list[
             tuple[dict[str, torch.Tensor], torch.cuda.Event, str, str]
         ] = []
-        # req_id → most recent in-flight Future for that req_id.
+        # req_id → in-flight disk-write Future for that req_id.
         self._req_futures: dict[str, Future] = {}
+        # req_id → CUDA event marking completion of the DtoH copy. Once
+        # this event is complete the request is considered "done sending"
+        # by get_finished; clients block on the per-file flock to wait for
+        # the disk write itself.
+        self._req_copy_events: dict[str, torch.cuda.Event] = {}
         # req_ids reported as finished-generating by the scheduler,
         # accumulated across get_finished calls.
         self._accumulated_finished_req_ids: set[str] = set()
@@ -256,8 +262,18 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             future = self._executor.submit(
                 self._write_tensors, tensors, event, filename, lock_fd
             )
+            self._req_copy_events[req_id] = event
             self._req_futures[req_id] = future
+            future.add_done_callback(partial(self._on_write_done, req_id))
         self._pending_copies.clear()
+
+    def _on_write_done(self, req_id: str, future: Future) -> None:
+        """Surface any exception from the disk-write thread and drop the
+        completed future from the in-flight tracking dict."""
+        self._req_futures.pop(req_id, None)
+        exc = future.exception()
+        if exc is not None:
+            logger.error("Hidden-states write failed for req_id=%s: %r", req_id, exc)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         from vllm.model_executor.models.extract_hidden_states import (
@@ -461,22 +477,22 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Poll async write completion for requests that finished generating.
+        """Poll DtoH-copy completion for requests that finished generating.
 
         The scheduler passes finished_req_ids to tell the worker which
         requests are done generating.  We accumulate these across calls
-        and return a request as "finished sending" once its disk write
-        Future is complete (or if it never had a pending write).
+        and return a request as "finished sending" once its DtoH copy
+        event is complete (or if it never had a pending copy).  The
+        subsequent disk write may still be in flight; clients block on
+        the per-file flock to wait for it.
         """
         self._accumulated_finished_req_ids.update(finished_req_ids)
 
         done_sending: set[str] = set()
         for req_id in list(self._accumulated_finished_req_ids):
-            future = self._req_futures.get(req_id)
-            if future is None or future.done():
-                if future is not None:
-                    future.result()  # propagate write exceptions
-                    del self._req_futures[req_id]
+            event = self._req_copy_events.get(req_id)
+            if event is None or event.query():
+                self._req_copy_events.pop(req_id, None)
                 done_sending.add(req_id)
                 self._accumulated_finished_req_ids.discard(req_id)
 
