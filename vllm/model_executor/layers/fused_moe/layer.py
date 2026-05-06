@@ -550,7 +550,6 @@ class FusedMoE(PluggableLayer):
         self.expert_map_manager.update(
             self.moe_parallel_config,
             global_num_experts=self.global_num_experts,
-            num_fused_shared_experts=self.num_fused_shared_experts,
         )
 
         # Update local attributes from ExpertMapManager

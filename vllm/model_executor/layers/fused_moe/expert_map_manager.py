@@ -361,7 +361,6 @@ class ExpertMapManager:
         self,
         moe_parallel_config: FusedMoEParallelConfig,
         global_num_experts: int,
-        num_fused_shared_experts: int,
     ) -> None:
         """
         Update expert mappings for new EP configuration.
@@ -372,7 +371,6 @@ class ExpertMapManager:
         """
         self.moe_parallel_config = moe_parallel_config
         self.global_num_experts = global_num_experts
-        self.num_fused_shared_experts = num_fused_shared_experts
 
         with self.device:
             self._calculate_expert_maps()
