@@ -243,8 +243,18 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def can_implement(
         cls, config: FP8ScaledMMLinearLayerConfig
     ) -> tuple[bool, str | None]:
-        if not config.activation_quant_key.scale.group_shape.is_per_group():
-            return False, "Only block-quantized (per-group) weights supported."
+        # Validate weight block shape
+        weight_gs = config.weight_quant_key.scale.group_shape
+        if weight_gs.col <= 0 or weight_gs.col != 128:
+            return False, (
+                "CPU FP8 kernel requires K-dimension block size of 128, "
+                f"got {weight_gs.col}."
+            )
+        if weight_gs.row <= 0 or weight_gs.row % 32 != 0:
+            return False, (
+                "CPU FP8 kernel requires N-dimension block size to be "
+                f"a positive multiple of 32, got {weight_gs.row}."
+            )
         if config.out_dtype not in (torch.bfloat16, torch.float32):
             return False, "Only bfloat16/float32 output dtype supported."
         return True, None

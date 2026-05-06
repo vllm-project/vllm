@@ -8,15 +8,13 @@ Run `pytest tests/kernels/quantization/test_cpu_fp8_scaled_mm.py -v`.
 import pytest
 import torch
 
-from vllm._custom_ops import _supports_cpu_fp8_w8a16
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._C  # noqa: E402, F401  # load custom ops
-
-if not _supports_cpu_fp8_w8a16:
+if not ops._supports_cpu_fp8_w8a16:
     pytest.skip("fp8_scaled_mm_cpu op not available", allow_module_level=True)
 
 BLOCK_SIZE = [128, 128]
@@ -150,7 +148,7 @@ def test_cpu_fp8_scaled_mm(M: int, N: int, K: int, use_bias: bool):
     )
 
     packed_weight = torch.ops._C.convert_weight_packed(fp8_weight)
-    kernel_out = torch.ops._C.fp8_scaled_mm_cpu(
+    kernel_out = ops.fp8_scaled_mm_cpu(
         x,
         packed_weight,
         scales,
@@ -161,10 +159,4 @@ def test_cpu_fp8_scaled_mm(M: int, N: int, K: int, use_bias: bool):
     )
 
     assert kernel_out.dtype == out_dtype
-    rel_diff = torch.mean(torch.abs(kernel_out.float() - ref_out.float())) / torch.mean(
-        torch.abs(ref_out.float())
-    ).clamp(min=1e-6)
-    assert rel_diff < 0.02, (
-        f"Relative diff {rel_diff:.4f} exceeds threshold 0.02 "
-        f"(M={M}, N={N}, K={K}, bias={use_bias})"
-    )
+    torch.testing.assert_close(kernel_out, ref_out, rtol=0.02, atol=0.01)
