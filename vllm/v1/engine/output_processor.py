@@ -395,6 +395,9 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
+        if delta and routed_experts is not None and len(token_ids) > 0:
+            routed_experts = routed_experts[-len(token_ids) :]
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
