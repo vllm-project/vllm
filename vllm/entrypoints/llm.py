@@ -926,7 +926,10 @@ class LLM:
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
                     tools=tools,
-                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                    tokenize=(
+                        is_mistral_tokenizer(renderer.tokenizer)
+                        or self.model_config.enable_prompt_embeds
+                    ),
                 ),
             ),
             mm_processor_kwargs=mm_processor_kwargs,
