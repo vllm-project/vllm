@@ -93,75 +93,82 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "has_mamba,swa_enabled,mamba_enabled,remote_ratio,"
-    "remote_block_ids,expected_remote_block_ids",
+    "group_spec_types,expansion_stride,remote_block_ids,expected_remote_block_ids",
     [
-        # Non-mamba (FA+SWA): both groups expanded via _logical_to_kernel_block_ids.
-        # Regression for https://github.com/vllm-project/vllm/pull/39724
-        (
-            False,
-            True,
-            False,
-            1,
+        pytest.param(
+            ("FullAttentionSpec", "SlidingWindowSpec"),
+            2,
             ([0, 1, 2], [3, 4]),
             [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
+            id="dense_fa_swa",
         ),
-        # Mamba (FA+Mamba): FA expanded via _logical_to_remote_kernel_block_ids,
-        # Mamba passed through unchanged.
-        # remote_ratio=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
-        # the wrong conversion method produces different FA results.
-        (
-            True,
-            False,
-            True,
+        pytest.param(
+            ("FullAttentionSpec", "MambaSpec"),
             261,
             ([0, 1, 2], [10, 11]),
             [[0, 1, 261, 262, 522, 523], [10, 11]],
+            id="mamba_fa_ssm",
         ),
     ],
-    ids=["non_mamba_fa_swa", "mamba_fa_ssm"],
 )
 def test_read_blocks_for_req_expands_remote_ids(
-    has_mamba,
-    swa_enabled,
-    mamba_enabled,
-    remote_ratio,
+    group_spec_types,
+    expansion_stride,
     remote_block_ids,
     expected_remote_block_ids,
 ):
     """_read_blocks_for_req must expand remote logical block IDs to kernel
     block IDs when kernel block size != logical block size.
 
-    Non-mamba path uses _logical_to_kernel_block_ids (all groups expanded).
-    Mamba path uses _logical_to_remote_kernel_block_ids (FA expanded, Mamba
-    passed through).
+    The hot path always calls _logical_to_remote_kernel_block_ids with
+    remote_info.remote_physical_blocks_per_logical (model-agnostic).
     """
     from unittest.mock import MagicMock
 
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+        TPMapping,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        MambaSpec,
+        SlidingWindowSpec,
+    )
+
+    spec_name_to_type = {
+        "FullAttentionSpec": FullAttentionSpec,
+        "SlidingWindowSpec": SlidingWindowSpec,
+        "MambaSpec": MambaSpec,
+    }
+    resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
-    worker._has_mamba = has_mamba
     worker._physical_blocks_per_logical_kv_block = 2
+
+    has_mamba = any(t is MambaSpec for t in resolved_types)
+    has_swa = any(t is SlidingWindowSpec for t in resolved_types)
     worker.kv_cache_config = make_kv_cache_config(
-        block_size=16, swa_enabled=swa_enabled, mamba_enabled=mamba_enabled
+        block_size=16, swa_enabled=has_swa, mamba_enabled=has_mamba
     )
 
     remote_engine_id = "remote-engine"
-    if has_mamba:
-        worker._physical_blocks_per_logical = {remote_engine_id: remote_ratio}
 
-    # Mock transfer_topo: empty remote ranks skips the transfer machinery
-    # entirely, isolating the block-ID expansion logic.
     worker.transfer_topo = MagicMock()
-    worker.transfer_topo.target_remote_ranks.return_value = []
-    worker.transfer_topo.get_engine_info.return_value = MagicMock(remote_tp_size=1)
     worker.transfer_topo.tp_ratio.return_value = 1
+    remote_info = MagicMock()
+    remote_info.remote_physical_blocks_per_logical = expansion_stride
+    worker.transfer_topo.get_engine_info.return_value = remote_info
+    worker.use_mla = False
+
+    mock_plan = MagicMock(spec=TPMapping)
+    mock_plan.all_source_ranks = ()
+    mock_plan.source_ranks_per_group = ()
+    worker.tp_mappings = {remote_engine_id: mock_plan}
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -306,75 +313,82 @@ def test_nixl_metadata_hma_block_ids_structure():
     assert list(req_meta.remote.block_ids[1]) == [18, 19, 20, 21]
 
 
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_hybrid_ssm():
-    """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
-    when ratio=1 (no kernel block size mismatch)."""
+def _make_mock_worker_for_desc_ids(
+    num_regions: int,
+    has_mamba: bool,
+    group_spec_types: tuple,
+    block_len_per_layer: list[int] | None = None,
+):
+    """Build a mock NixlConnectorWorker with attrs needed by _compute_desc_ids."""
+    from unittest.mock import MagicMock
+
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
 
-    worker = object.__new__(NixlConnectorWorker)
+    worker = MagicMock(spec=NixlConnectorWorker)
+    worker.num_regions = num_regions
+    worker._has_mamba = has_mamba
+    worker._group_spec_types = group_spec_types
+    worker.block_len_per_layer = block_len_per_layer or [100]
+    worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
+        worker, NixlConnectorWorker
+    )
+    return worker
 
-    num_blocks = 100
-    engine_id = "test-engine"
-    worker.num_regions = 2
-    worker.dst_num_blocks = {engine_id: num_blocks}
-    worker._has_mamba = True
-    worker._is_mamba_group = [False, True]
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker._physical_blocks_per_logical = {engine_id: 1}
-    worker.block_len_per_layer = [100]
-    # num_descs = num_regions * num_blocks (no blocks_first doubling)
-    worker.num_descs = 2 * num_blocks
+
+@pytest.mark.cpu_test
+def test_get_block_descs_ids_hybrid_ssm():
+    """Test _compute_desc_ids uses per-group strides for hybrid
+    FA+SSM when ratio=1 (no kernel block size mismatch)."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=True,
+        group_spec_types=(FullAttentionSpec, MambaSpec),
+        block_len_per_layer=[100],
+    )
 
     fa_blocks = [3, 5]
     ssm_blocks = [1, 2]
-    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+    result = worker._compute_desc_ids(
+        block_ids=(fa_blocks, ssm_blocks),
+        dst_num_blocks=100,
+        block_size_ratio=None,
+        physical_blocks_per_logical=1,
+    )
 
-    # FA group: stride=num_blocks=100, offset=0
-    #   region0: [3, 5],  region1: [103, 105]
-    # SSM group: stride=logical_blocks=100 (=num_blocks/ratio=100/1),
-    #   offset=num_fa_descs=200, 4 regions per Mamba layer (x, B, C, ssm)
-    #   region0: [201, 202], region1: [301, 302],
-    #   region2: [401, 402], region3: [501, 502]
     expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
-    """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
-    vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    worker = object.__new__(NixlConnectorWorker)
+    """Test _compute_desc_ids uses different strides for FA
+    (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
     ratio = 4
     logical_blocks = 100
     num_blocks = logical_blocks * ratio  # 400 kernel blocks
-    engine_id = "test-engine"
-    worker.num_regions = 2
-    worker.dst_num_blocks = {engine_id: num_blocks}
-    worker._has_mamba = True
-    worker._is_mamba_group = [False, True]
-    worker._physical_blocks_per_logical_kv_block = ratio
-    worker._physical_blocks_per_logical = {engine_id: ratio}
-    worker.block_len_per_layer = [100]
-    worker.num_descs = 2 * num_blocks  # 800
 
-    fa_blocks = [3, 7]  # kernel-level block IDs
-    ssm_blocks = [1, 2]  # logical block IDs
-    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+    worker = _make_mock_worker_for_desc_ids(
+        num_regions=2,
+        has_mamba=True,
+        group_spec_types=(FullAttentionSpec, MambaSpec),
+        block_len_per_layer=[100],
+    )
 
-    # FA group: stride=num_blocks=400, offset=0
-    #   region0: [3, 7],  region1: [403, 407]
-    # SSM group: stride=logical_blocks=400//4=100, offset=num_fa_descs=800,
-    #   4 regions per Mamba layer (x, B, C, ssm)
-    #   region0: [801, 802], region1: [901, 902],
-    #   region2: [1001, 1002], region3: [1101, 1102]
+    fa_blocks = [3, 7]
+    ssm_blocks = [1, 2]
+    result = worker._compute_desc_ids(
+        block_ids=(fa_blocks, ssm_blocks),
+        dst_num_blocks=num_blocks,
+        block_size_ratio=None,
+        physical_blocks_per_logical=ratio,
+    )
+
     expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 

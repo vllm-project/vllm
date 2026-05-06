@@ -154,32 +154,52 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w2: torch.Tensor,
     ) -> None:
         # Shuffle weights to runtime format.
-        w13, w2 = convert_to_unquantized_kernel_format(
+        w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
             layer=layer,
             w13_weight=w13,
             w2_weight=w2,
         )
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
+        # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
+        # On the first call we replace the parameter normally. On subsequent
+        # calls (e.g. RL weight updates that re-trigger
+        # process_weights_after_loading) the moe kernel has already been set
+        # up and CUDA graphs may have captured the parameter addresses, so
+        # we copy the shuffled data into the existing storage instead of
+        # re-registering a new Parameter.
+        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
+        replace_parameter(layer, "w13_weight", w13_new, prefer_copy=is_weight_update)
+        replace_parameter(layer, "w2_weight", w2_new, prefer_copy=is_weight_update)
 
-        # Setup moe kernel.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        self.moe_kernel = make_unquantized_moe_kernel(
-            quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-            backend=self.unquantized_backend,
-            experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
-        )
+        if not is_weight_update:
+            # Setup moe kernel only on the first call. For the unquantized
+            # method, moe_quant_config is either the constant
+            # FUSED_MOE_UNQUANTIZED_CONFIG or biased_moe_quant_config(...)
+            # which references layer.w{13,2}_bias; since weight updates
+            # mutate those bias tensors in place, the kernel does not need
+            # to be re-built.
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            assert self.experts_cls is not None
+            self.moe_kernel = make_unquantized_moe_kernel(
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                backend=self.unquantized_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        # Padding the weight for better performance on ROCm
+        # Padding the weight for better performance on ROCm.
+        # _maybe_pad_weight is idempotent: on the first call it allocates a
+        # padded storage and returns a strided view; on subsequent calls
+        # (weight updates) the stride condition no longer matches so it
+        # returns the input unchanged. The reassignment to .data is therefore
+        # a no-op on updates and preserves the storage address (data_ptr)
+        # used by captured CUDA graphs.
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
