@@ -180,8 +180,7 @@ def determine_expert_placement_strategy(
             return "linear"
         if (
             moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.use_deepep_ll_kernels
-            and not moe_parallel_config.use_nixl_ep_kernels
+            and not moe_parallel_config.needs_round_robin_routing_tables
         ):
             logger.warning(
                 "Round-robin expert placement currently only supports "
@@ -269,6 +268,7 @@ class FusedMoE(PluggableLayer):
         custom_routing_function: Callable | None = None,
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
+        swiglu_limit: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -286,6 +286,7 @@ class FusedMoE(PluggableLayer):
         routed_output_transform: torch.nn.Module | None = None,
         apply_routed_scale_to_output: bool = False,
         zero_expert_type: str | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
 
@@ -295,6 +296,7 @@ class FusedMoE(PluggableLayer):
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
+        self.swiglu_limit = swiglu_limit
 
         # FIXME (varun): We should have a better way of inferring the activation
         # datatype. This works for now as the tensor datatype entering the MoE
@@ -456,6 +458,7 @@ class FusedMoE(PluggableLayer):
         self.e_score_correction_bias = e_score_correction_bias
         # TODO(bnell): end attributes
 
+        self.hash_indices_table = hash_indices_table
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
@@ -480,6 +483,7 @@ class FusedMoE(PluggableLayer):
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
             zero_expert_type=zero_expert_type,
             num_logical_experts=self.logical_num_experts,
+            hash_indices_table=self.hash_indices_table,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
@@ -534,9 +538,11 @@ class FusedMoE(PluggableLayer):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
+        if not self.moe_config.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
@@ -687,8 +693,7 @@ class FusedMoE(PluggableLayer):
         # Currently routing_tables only needed for round-robin expert placement
         # with DeepEP-ll or NIXL EP all2all backends.
         if self.expert_placement_strategy != "round_robin" or (
-            not self.moe_parallel_config.use_deepep_ll_kernels
-            and not self.moe_parallel_config.use_nixl_ep_kernels
+            not self.moe_parallel_config.needs_round_robin_routing_tables
         ):
             return None
 
@@ -1099,7 +1104,8 @@ class FusedMoE(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "gpt_oss_mxfp4":
+        quant_config_name = self.quant_config and self.quant_config.get_name()
+        if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
@@ -1493,15 +1499,19 @@ class FusedMoE(PluggableLayer):
             "w2_input_scale",
         }
 
+        # Parameters of non-expert submodules that live inside runner (MoERunner).
+        # These must be excluded from EPLB weight rearrangement.
+        NON_EXPERT_PREFIXES = (
+            "runner._shared_experts.",
+            "runner.gate.",
+            "runner.routed_input_transform.",
+            "runner.routed_output_transform.",
+        )
+
         assert all(
             weight.is_contiguous()
             for name, weight in weights
-            if not (
-                name.startswith("_shared_experts.")
-                or name.startswith("_gate.")
-                or name.startswith("_routed_input_transform.")
-                or name.startswith("_routed_output_transform.")
-            )
+            if not name.startswith(NON_EXPERT_PREFIXES)
             and name not in NON_EXPERT_WEIGHTS
         )
 
@@ -1510,12 +1520,7 @@ class FusedMoE(PluggableLayer):
             for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
-            and not name.startswith("_shared_experts.")
-            # exclude parameters from non-expert submodules,
-            # e.g. gate/shared/transforms.
-            and not name.startswith("_gate.")
-            and not name.startswith("_routed_input_transform.")
-            and not name.startswith("_routed_output_transform.")
+            and not name.startswith(NON_EXPERT_PREFIXES)
         ]
 
     def set_eplb_state(
@@ -1552,10 +1557,12 @@ class FusedMoE(PluggableLayer):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.runner.forward(
             hidden_states,
             router_logits,
+            input_ids,
         )
 
     @property
