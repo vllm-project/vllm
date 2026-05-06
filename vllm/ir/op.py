@@ -4,8 +4,7 @@ import contextlib
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar, Literal, overload
-from typing import Any, ClassVar, Protocol, overload
+from typing import Any, ClassVar, Literal, Protocol, overload
 
 import torch
 from torch.library import Library, infer_schema
@@ -187,7 +186,6 @@ class IrOp:
         self._schema_str = infer_schema(native_impl, mutates_args=[])
         self._input_generator: InputGenerator | None = None
         self._tolerance_overrides: ToleranceSpec = {}
-        self.allow_inplace = allow_inplace
 
         # native implementation
         self.impls["native"] = IrOpImpl(
@@ -215,11 +213,6 @@ class IrOp:
         vllm_ir_lib._register_fake(self.name, self._fake_call)
         assert hasattr(torch.ops.vllm_ir, name)
         self.torch_op: torch._ops.OpOverload = getattr(torch.ops.vllm_ir, name).default
-
-        if self.allow_inplace:
-            self.maybe_inplace = IrOpInplaceOverload(self)
-        else:
-            self.maybe_inplace = None
 
     def register_fake(self, fn: Callable) -> Callable:
         """
@@ -282,7 +275,9 @@ class IrOp:
         )
 
         def _register_impl(f: Callable):
-            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace, compiled)
+            impl = IrOpImpl(
+                self, provider, f, supported, supports_args, inplace, compiled
+            )
             self.impls[provider] = impl
 
             if self.get_priority():

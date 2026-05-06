@@ -364,6 +364,10 @@ def op_name(...):
 
 **Parameters:**
 
+- `activations`: List of parameter names considered "activations" (typically consumed by `maybe_inplace`). Defaults to parameters starting with `x`.
+- `allow_inplace`: Creates a `maybe_inplace` overload for memory-efficient execution (see below).
+
+### The `maybe_inplace` Overload
 
 The `maybe_inplace` overload is a critical feature for memory efficiency in LLM inference.
 It signals that the caller doesn't need to preserve the activation inputs after the operation,
