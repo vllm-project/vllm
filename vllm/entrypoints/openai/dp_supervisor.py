@@ -171,7 +171,7 @@ async def _probe_endpoint(
         return False, str(exc)
 
 
-def _build_supervisor_app() -> FastAPI:
+def build_supervisor_app() -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.state.is_vllm_ready = False
 
@@ -198,8 +198,7 @@ def run_vllm_dp_server(
     from vllm.entrypoints.openai.api_server import run_server
 
     rank = child_args.data_parallel_rank
-    # what does this do?
-    os.setpgrp()
+    os.setpgrp() # what does this do?
     update_environment_variables(env_updates)
     set_process_title("ExternalLBRank", str(rank))
     decorate_logs(f"ExternalLBRank{rank}")
@@ -215,7 +214,7 @@ class DPSupervisor:
         ]
 
         # Supervisor server uvicorn application.
-        self.app = _build_supervisor_app()
+        self.app = build_supervisor_app()
 
         # Background vLLM process.
         self.vllm_processes: list[BaseProcess] = []
@@ -412,7 +411,6 @@ async def main(supervisor: DPSupervisor) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _handle_signal, sig)
     
-    # Launch supervisor server
     server, server_task = await supervisor.start_supervisor()
 
     try:
@@ -421,7 +419,6 @@ async def main(supervisor: DPSupervisor) -> None:
     finally:
         await supervisor.shutdown_vllm_servers()
 
-        # Shutdown the supervisor server.
         server.should_exit = True
         await server_task
 
