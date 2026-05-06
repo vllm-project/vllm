@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import replace
 from typing import Any
 
 import torch
@@ -25,7 +24,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -72,7 +71,6 @@ class LoopCoderAttention(nn.Module):
         layer_idx: int = 0,
     ) -> None:
         super().__init__()
-        cache_config = vllm_config.cache_config if vllm_config is not None else None
         quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
         self.hidden_size = hidden_size
@@ -129,8 +127,6 @@ class LoopCoderAttention(nn.Module):
         )
         self.attn = nn.ModuleList()
 
-        base_cache_config = cache_config
-
         for loop_idx in range(self.loop_num):
             base_layer_idx = extract_layer_index(prefix)
             unique_layer_idx = loop_idx * total_layers + base_layer_idx
@@ -139,19 +135,7 @@ class LoopCoderAttention(nn.Module):
                 f"layers.{base_layer_idx}", f"layers.{unique_layer_idx}"
             )
 
-            if loop_idx == 0:
-                loop_cache_config = cache_config
-            else:
-                if base_cache_config is not None:
-                    loop_cache_config = replace(
-                        base_cache_config,
-                        sliding_window=self.loop_window_size,
-                    )
-                else:
-                    loop_cache_config = CacheConfig(
-                        sliding_window=self.loop_window_size,
-                        cache_dtype="auto",
-                    )
+            per_layer_sliding_window = None if loop_idx == 0 else self.loop_window_size
 
             self.attn.append(
                 Attention(
@@ -159,8 +143,8 @@ class LoopCoderAttention(nn.Module):
                     self.head_dim,
                     self.scaling,
                     num_kv_heads=self.num_kv_heads,
-                    cache_config=loop_cache_config,
                     vllm_config=vllm_config,
+                    per_layer_sliding_window=per_layer_sliding_window,
                     attn_type=attn_type,
                     prefix=f"{unique_prefix}.attn",
                     **{

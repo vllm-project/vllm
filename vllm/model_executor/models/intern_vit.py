@@ -365,7 +365,6 @@ class InternVisionEncoder(nn.Module):
         layer_cls: type[InternVisionEncoderLayer] = InternVisionEncoderLayer,
     ):
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.config = config
         self.layer_cls = layer_cls
@@ -379,7 +378,7 @@ class InternVisionEncoder(nn.Module):
             [
                 self.layer_cls(
                     config=config,
-                    quant_config=quant_config,
+                    vllm_config=vllm_config,
                     num_dummy_heads=num_dummy_heads,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )

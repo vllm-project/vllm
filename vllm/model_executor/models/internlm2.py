@@ -256,7 +256,6 @@ class InternLM2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
 
         self.config = config
         self.vocab_size = config.vocab_size
@@ -269,7 +268,6 @@ class InternLM2Model(nn.Module):
             lambda prefix: layer_type(
                 config,
                 vllm_config=vllm_config,
-                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",

@@ -72,8 +72,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
             head_size=self.head_size,
             scale=1.0 / (self.head_size**0.5),
             num_kv_heads=self.num_kv_heads,
-            cache_config=vllm_config.cache_config,
-            model_config=vllm_config.model_config,
+            vllm_config=vllm_config,
             prefix="model.layers.0.self_attn.attn",
         )
         self.attn._k_scale = self.attn._k_scale.to(device)

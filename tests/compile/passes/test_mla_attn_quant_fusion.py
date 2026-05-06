@@ -105,8 +105,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
             q_lora_rank=None,
             kv_lora_rank=kv_lora_rank,
             kv_b_proj=kv_b_proj,
-            cache_config=vllm_config.cache_config,
-            quant_config=self.quant_config,
+            vllm_config=vllm_config,
             prefix="model.layers.0.self_attn.attn",
         )
         self.mla_attn._k_scale = self.mla_attn._k_scale.to(device)

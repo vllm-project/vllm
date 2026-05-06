@@ -65,8 +65,7 @@ class QKNormRoPETestModel(torch.nn.Module):
             head_size=self.head_dim,
             scale=1.0 / self.head_dim**0.5,
             num_kv_heads=self.num_kv_heads,
-            cache_config=vllm_config.cache_config,
-            model_config=vllm_config.model_config,
+            vllm_config=vllm_config,
             prefix=prefix,
             attn_type=AttentionType.DECODER,
         )

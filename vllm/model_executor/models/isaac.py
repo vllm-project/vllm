@@ -24,7 +24,6 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
 )
@@ -755,13 +754,14 @@ class IsaacVisionEmbedding(nn.Module):
         vision_cfg: PixelShuffleSiglip2VisionConfig,
         hidden_dim: int,
         output_dim: int,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.transformer = Siglip2VisionTransformer(
             vision_cfg,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "0"),
         )
         self.linear_fc1 = ColumnParallelLinear(
@@ -840,7 +840,6 @@ class IsaacForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
         config: IsaacConfig = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         self.config = config
 
         head_dim = config.head_dim
@@ -904,7 +903,7 @@ class IsaacForConditionalGeneration(
                 vision_cfg=vision_cfg,
                 hidden_dim=hidden_dim,
                 output_dim=config.hidden_size,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "vision_embedding"),
             )
 

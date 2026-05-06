@@ -588,7 +588,6 @@ class CheersForConditionalGeneration(
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         if type(config).__name__ not in ("CheersConfig", "UMMConfig"):
@@ -651,7 +650,7 @@ class CheersForConditionalGeneration(
                 image_embed_dim=vit_hidden_size,
                 text_embed_dim=llm_hidden_size,
                 compression_factor=(2, 2),
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "und_projector"),
             )
 
