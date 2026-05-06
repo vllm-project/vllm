@@ -270,29 +270,31 @@ Known supported models (with corresponding benchmarks):
 
 ## Input Processing
 
-### Tokenizer Backend
+### fastokens Tokenizer Mode
 
 By default vLLM uses the standard Hugging Face `tokenizers` library to power
-the fast tokenizer. For BPE tokenizers (Qwen, Llama, DeepSeek, GPT-OSS, etc.)
-you can switch to the [fastokens](https://github.com/crusoecloud/fastokens) Rust backend, which
-is a drop-in replacement that's substantially faster on encode/decode and on
-streaming detokenization:
+the fast tokenizer (`--tokenizer-mode hf`). For BPE tokenizers (Qwen, Llama,
+DeepSeek, GPT-OSS, etc.) you can switch to the
+[fastokens](https://github.com/crusoecloud/fastokens) Rust backend, a drop-in
+replacement that's substantially faster on encode/decode and on streaming
+detokenization:
 
 ```console
-vllm serve Qwen/Qwen3-8B --tokenizer-backend fastokens
+vllm serve Qwen/Qwen3-8B --tokenizer-mode fastokens
 ```
 
 Equivalent in the offline API:
 
 ```python
 from vllm import LLM
-llm = LLM(model="Qwen/Qwen3-8B", tokenizer_backend="fastokens")
+llm = LLM(model="Qwen/Qwen3-8B", tokenizer_mode="fastokens")
 ```
 
 The `fastokens` Python package must be installed; if it isn't, vLLM raises
-a clear `ImportError` at tokenizer load. The flag only affects the HF tokenizer
-path — it has no effect when `--tokenizer-mode` selects a non-HF tokenizer
-(e.g. `mistral`, `deepseek_v32`).
+a clear `ImportError` at tokenizer load. `fastokens` loads a Hugging Face
+fast tokenizer with its inner Rust tokenizer replaced by the fastokens shim,
+so it is mutually exclusive with non-HF modes such as `mistral` or
+`deepseek_v32`.
 
 Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
 batch detokenization — see the largest wins. If your bottleneck is GPU

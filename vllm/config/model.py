@@ -83,8 +83,9 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
-TokenizerBackend = Literal["huggingface", "fastokens"]
+TokenizerMode = Literal[
+    "auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4", "fastokens"
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -137,17 +138,10 @@ class ModelConfig:
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
     - "qwen_vl" will always use the tokenizer from `qwen_vl`.
-    - Other custom values can be supported via plugins."""
-    tokenizer_backend: TokenizerBackend | str = "huggingface"
-    """Backend used to power the Hugging Face tokenizer when
-    `tokenizer_mode` resolves to "hf":
-
-    - "huggingface" (default) uses the standard `tokenizers` library.
-    - "fastokens" uses the fastokens backend
+    - "fastokens" loads a Hugging Face fast tokenizer powered by the
+      [fastokens](https://github.com/crusoecloud/fastokens) Rust BPE backend
       (requires the `fastokens` package to be installed).
-
-    Has no effect when `tokenizer_mode` is set to a non-HF mode such as
-    "mistral" or "deepseek_v32"."""
+    - Other custom values can be supported via plugins."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
