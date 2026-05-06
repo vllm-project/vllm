@@ -1866,10 +1866,7 @@ def test_nixl_side_channel_host_uses_ray_actor_ip(monkeypatch):
     monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
     monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.12")
 
-    assert (
-        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
-        == "10.0.0.12"
-    )
+    assert NixlConnectorScheduler._resolve_side_channel_host(vllm_config) == "10.0.0.12"
 
 
 def test_nixl_side_channel_host_uses_ray_actor_ip_after_dp_reset(monkeypatch):
@@ -1883,10 +1880,7 @@ def test_nixl_side_channel_host_uses_ray_actor_ip_after_dp_reset(monkeypatch):
     monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
     monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.13")
 
-    assert (
-        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
-        == "10.0.0.13"
-    )
+    assert NixlConnectorScheduler._resolve_side_channel_host(vllm_config) == "10.0.0.13"
 
 
 def test_nixl_side_channel_host_keeps_env_for_non_ray_dp(monkeypatch):
@@ -1916,10 +1910,7 @@ def test_nixl_side_channel_host_falls_back_when_ray_lookup_fails(monkeypatch):
         lambda: "10.0.0.14",
     )
 
-    assert (
-        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
-        == "10.0.0.14"
-    )
+    assert NixlConnectorScheduler._resolve_side_channel_host(vllm_config) == "10.0.0.14"
 
 
 def test_nixl_scheduler_uses_resolved_side_channel_host(monkeypatch):
