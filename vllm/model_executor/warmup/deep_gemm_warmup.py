@@ -160,7 +160,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
 
 
 def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
-    if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
+    if not (is_deep_gemm_supported() and envs.VLLM_MOE_USE_DEEP_GEMM):
         return False
 
     if not isinstance(module, MoERunner):
