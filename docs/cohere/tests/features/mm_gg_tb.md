@@ -40,23 +40,23 @@ reporting branch.
 ### Compatibility
 
 | Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | | | | | | T.3.1.1 | |
 
 | Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | | T.3.1.1 | T.3.1.1 | T.3.1.1 | |
 
 | Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | | | T.3.1.1 | | |
 
 | Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | | | T.3.1.1 | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | | | T.3.1.1 | T.3.1.1 | T.3.1.1 | |
 
 ## Implementation

@@ -252,7 +252,7 @@ Metric upload path:
 Current upload triggers in `test-pipeline.yaml`:
 
 | `test_group` | Artifact | Upload path on target branch |
-|---|---|---|
+| --- | --- | --- |
 | `performance` | `benchmark_results_summary.json` | `data/summary` |
 | `bee_eval` | `eval_results_summary.json` | `eval_data/summary` |
 | `quantization_32bit_logits` | `unit_results_summary.json` | `unit_data/summary` |

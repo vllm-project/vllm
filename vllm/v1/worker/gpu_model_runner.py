@@ -3075,7 +3075,7 @@ class GPUModelRunner(
         if "score" in supported_tasks:
             num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
             if num_labels != 1:
-                supported_tasks.remove("score")
+                supported_tasks.remove("score")  # type: ignore[arg-type]
                 logger.debug_once("Score API is only enabled for num_labels == 1.")
 
         return supported_tasks

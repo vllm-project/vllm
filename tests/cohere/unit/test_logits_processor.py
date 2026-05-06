@@ -46,7 +46,7 @@ def _require_cuda() -> torch.device:
 
 def _synchronize(device: torch.device) -> None:
     if device.type == "cuda":
-        torch.cuda.synchronize(device)
+        torch.accelerator.synchronize(device)
 
 
 def _make_fixture(

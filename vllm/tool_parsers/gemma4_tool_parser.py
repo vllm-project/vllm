@@ -356,10 +356,10 @@ class Gemma4ToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
 
-    def adjust_request(
+    def adjust_request(  # type: ignore[override]
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
-        request = super().adjust_request(request)
+        request = super().adjust_request(request)  # type: ignore[arg-type]
         if (
             isinstance(request, ChatCompletionRequest)
             and request.tools

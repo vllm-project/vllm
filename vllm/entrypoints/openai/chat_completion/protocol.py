@@ -180,7 +180,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | None
     ) = "none"
     reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
-    thinking_token_budget: int | None = None
+    # cohere: thinking_token_budget moved to cohere section below
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 

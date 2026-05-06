@@ -567,6 +567,64 @@ tests, use `TP_SIZE=0` once.
 In iterative Docker mode, run Step 3 multiple times with different `-e TP_SIZE=` values.
 In current-env mode, re-export `TP_SIZE` and re-run `bash ./cohere/scripts/run_tests.sh` for each value.
 
+## Monitoring Long-Running Commands
+
+Many CI steps (model downloads, Docker setup, test runs) take minutes or tens of
+minutes. The agent's Shell tool will background commands that exceed the
+`block_until_ms` timeout, streaming output to a terminal file. **Do not assume a
+backgrounded command has finished or hung just because the tool returned.**
+
+Follow this protocol for any long-running step:
+
+1. **Set `block_until_ms: 0`** for commands expected to run longer than 30 s
+   (downloads, docker run, test execution). This immediately backgrounds the
+   command and returns a terminal file path.
+2. **Poll the terminal file periodically.** Read the last ~50 lines to check
+   progress. Use exponential backoff: start at ~10 s, then 20 s, 40 s, up to
+   ~120 s between checks.
+3. **Look for concrete progress signals:**
+   - Downloads: new shard files appearing, `gsutil` progress lines, percentage
+     indicators.
+   - Docker setup: `pip install` output, `setup_tests.sh` completion message.
+   - Tests: pytest collection lines, `PASSED`/`FAILED` markers, test count
+     progress (e.g. `[3/12]`).
+4. **Detect hangs:** If two consecutive polls (with ≥60 s gap) show identical
+   output and `running_for_ms` keeps increasing, the command is likely hung.
+   Report this to the user and suggest killing the process (using the PID from
+   the terminal file header) and retrying.
+5. **Never leave a backgrounded command unmonitored.** Always poll until you see
+   either an `exit_code` footer (command finished) or a steady-state signal
+   (server ready, etc.).
+
+## Verifying Model Downloads
+
+Model shard downloads via `gsutil` can silently fail (network hiccups, partial
+transfers, quota issues) without a non-zero exit code. A missing or corrupt
+shard causes the model to load garbage weights, producing nonsensical generation
+output that looks like a test logic bug but is actually a data integrity problem.
+
+After `download_checkpoints.sh` completes:
+
+1. **Check the exit code.** A non-zero exit means an obvious failure; re-run.
+2. **Verify shard count.** List the downloaded model directory and compare the
+   number of `.safetensors` / `.bin` shard files against what the model expects.
+   For example, if `config.json` or the GCS listing shows 8 shards, confirm 8
+   files are present locally.
+3. **Spot-check file sizes.** Shard files for the same model should be roughly
+   the same size (within ~10%). A shard that is orders of magnitude smaller than
+   its siblings was likely truncated.
+4. **Re-download on mismatch.** If any shards are missing or suspiciously small,
+   re-run the download for that model. `gsutil cp` with `-n` (no-clobber) skips
+   files that already exist and match; remove the bad file first, then re-run.
+
+Signs of a bad download surfacing later:
+- Model output is random tokens, repeated garbage, or all-same-token sequences.
+- Eval scores drop dramatically vs. known baselines.
+- JSON/structured output is malformed when it normally passes.
+
+When you see these symptoms, **check model shard integrity before debugging test
+code.**
+
 ## Notes
 - Feature tests ignore models/TP size; eval/perf tests require model support for the GPU/TP.
 - GitHub `build-and-bench` supports public HF repo IDs only when dispatched with an explicit shared `:tpN` suffix, but local runs should omit the suffix and set `TP_SIZE` directly.

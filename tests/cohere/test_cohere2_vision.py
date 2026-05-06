@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
 import logging
 import os
 from io import BytesIO
 
+import pybase64 as base64
 from datatools.tokenizer.bpe import TemplatedBPTokenizer
 from PIL import Image
 from vllm.cohere.multimodal_tokeniser.continuous import (
