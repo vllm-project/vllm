@@ -8,6 +8,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -53,6 +54,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import (
@@ -402,6 +404,8 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         shared_experts: torch.nn.Module | None = None,
+        overlap_stream: torch.cuda.Stream | None = None,
+        overlap_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -414,7 +418,12 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
         self.shared_experts = shared_experts
+        self._overlap_stream = overlap_stream
+        self._overlap_events = overlap_events
+        self._sm_count = current_platform.num_compute_units()
+
         weight_attrs = {"weight_loader": self.weight_loader}
         self.w13_weight = nn.Parameter(
             torch.zeros(
@@ -674,18 +683,62 @@ def _deepseek_v4_mega_moe_experts_op(
     activation_clamp: float | None,
     fast_math: bool,
 ) -> None:
+    from vllm.third_party.deep_gemm import get_num_sms, set_num_sms
+
     self = get_forward_context().no_compile_layers[layer_name]
-    self._run_mega_moe(
-        hidden_states,
-        topk_weights,
-        topk_ids,
-        out,
-        activation_clamp,
-        fast_math,
+
+    # Sequential path: no shared_experts, no aux stream, or overlap disabled
+    # at runtime. mega_moe writes ``out`` directly; shared_experts (if any)
+    # is added in-place after.
+    # NOTE Currently, we reuse the  overlap logic of FusedMoE
+    overlap_enabled = (
+        self.shared_experts is not None
+        and self._overlap_stream is not None
+        and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+        and hidden_states.shape[0] <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
     )
-    if self.shared_experts is not None:
-        shared_output = self.shared_experts(hidden_states)
-        out += shared_output
+    if not overlap_enabled:
+        self._run_mega_moe(
+            hidden_states, topk_weights, topk_ids, out, activation_clamp, fast_math
+        )
+        if self.shared_experts is not None:
+            out.add_(self.shared_experts(hidden_states))
+        return
+
+    # Overlap path: cap deep_gemm at half SM so mega_moe doesn't saturate
+    # the device and starve the shared_experts FP8 GEMMs on the aux stream.
+    # Both fn0 and fn1 use deep_gemm and read this global; restoring after
+    # ensures other DG kernels (next layer's pre-MoE GEMMs, big-batch
+    # fallbacks) keep running with the full SM count.
+    original_sms = get_num_sms()
+
+    event0, event1 = self._overlap_events
+
+    set_num_sms(max(1, self._sm_count // 2))
+
+    def _experts_fn() -> None:
+        self._run_mega_moe(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            out,
+            activation_clamp,
+            fast_math,
+        )
+
+    def _shared_fn() -> torch.Tensor:
+        return self.shared_experts(hidden_states)
+
+    _, shared_output = maybe_execute_in_parallel(
+        _experts_fn,
+        _shared_fn,
+        event0,
+        event1,
+        self._overlap_stream,
+    )
+    out.add_(shared_output)
+    # recover original SMs
+    set_num_sms(original_sms)
 
 
 def _deepseek_v4_mega_moe_experts_op_fake(
@@ -713,8 +766,10 @@ class DeepseekV4MoE(nn.Module):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ):
         super().__init__()
+        self.aux_stream_list = aux_stream_list
 
         self.tp_size = get_tensor_model_parallel_world_size()
         config = vllm_config.model_config.hf_config
@@ -796,6 +851,19 @@ class DeepseekV4MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self._overlap_stream: torch.cuda.Stream | None = (
+            self.aux_stream_list[0]
+            if self.aux_stream_list
+            and self.use_mega_moe
+            and self.shared_experts is not None
+            else None
+        )
+        self._overlap_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = (
+            (torch.cuda.Event(), torch.cuda.Event())
+            if self._overlap_stream is not None
+            else None
+        )
+
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
@@ -825,6 +893,8 @@ class DeepseekV4MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             shared_experts=self.shared_experts,
+            overlap_stream=self._overlap_stream,
+            overlap_events=self._overlap_events,
             prefix=f"{prefix}.experts",
         )
 
@@ -867,34 +937,8 @@ class DeepseekV4MoE(nn.Module):
 
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
-
-        org_shape = hidden_states.shape
-        router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias.data
-            if self.gate.e_score_correction_bias is not None
-            else None,
-            topk=self.n_activated_experts,
-            renormalize=self.renormalize,
-            indices_type=self.hash_indices_dtype,
-            input_tokens=input_ids,
-            hash_indices_table=self.gate.tid2eid,
-            routed_scaling_factor=self.routed_scaling_factor,
-        )
-        activation_clamp = (
-            float(self.swiglu_limit) if self.swiglu_limit is not None else None
-        )
-        final_hidden_states = self.experts(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            activation_clamp=activation_clamp,
-        )
-
-        return final_hidden_states.view(org_shape)
+        else:
+            return self._forward_mega_moe(hidden_states, input_ids)
 
     def _forward_fused_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -915,6 +959,40 @@ class DeepseekV4MoE(nn.Module):
                 input_ids=input_ids,
             )
 
+        return final_hidden_states.view(org_shape)
+
+    def _forward_mega_moe(
+        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        org_shape = hidden_states.shape
+        router_logits, _ = self.gate(hidden_states)
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias.data
+            if self.gate.e_score_correction_bias is not None
+            else None,
+            topk=self.n_activated_experts,
+            renormalize=self.renormalize,
+            indices_type=self.hash_indices_dtype,
+            input_tokens=input_ids,
+            hash_indices_table=self.gate.tid2eid,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
+        activation_clamp = (
+            float(self.swiglu_limit) if self.swiglu_limit is not None else None
+        )
+        # Both the shared_experts merge and the mega_moe + shared_experts
+        # multi-stream overlap (with the deep_gemm SM cap) are handled
+        # inside the deepseek_v4_mega_moe_experts custom op, which is the
+        # only dynamo-opaque region in this path.
+        final_hidden_states = self.experts(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation_clamp=activation_clamp,
+        )
         return final_hidden_states.view(org_shape)
 
     def finalize_mega_moe_weights(self) -> None:
@@ -1114,7 +1192,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
-        self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
+        self.ffn = DeepseekV4MoE(
+            vllm_config,
+            prefix=f"{prefix}.ffn",
+            aux_stream_list=aux_stream_list,
+        )
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
         self.ffn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
