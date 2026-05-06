@@ -460,6 +460,23 @@ def _strip_mimo_v2_attention_chunk_size(
             delattr(cfg, "attention_chunk_size")
 
 
+class Qwen3ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """
+    For Voyage embedding models that reuse the Qwen3 architecture name
+    (e.g. ``voyageai/voyage-4-nano``) but ship a custom
+    ``modeling_qwen3_bidirectional`` module via ``auto_map``.  When we detect
+    that module we switch the reported architectures so the vLLM registry
+    routes the model to :class:`VoyageQwen3BidirectionalEmbedModel`
+    instead of the generic text-generation Qwen3 class.
+    """
+
+    def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        auto_map = getattr(hf_config, "auto_map", None) or {}
+        if any("modeling_qwen3_bidirectional" in v for v in auto_map.values()):
+            hf_config.architectures = ["VoyageQwen3BidirectionalEmbedModel"]
+        super().__init__(hf_config, hf_text_config)
+
+
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
         if getattr(hf_config, "vision_config", None):
@@ -570,4 +587,5 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "longcat_flash_mtp": LongCatFlashMTPModelArchConfigConvertor,
+    "qwen3": Qwen3ModelArchConfigConvertor,
 }
