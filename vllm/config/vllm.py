@@ -1394,7 +1394,7 @@ class VllmConfig:
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
-        # - No preference: auto-disable for unsupported features (e.g. kv connector)
+        # - No preference: auto-disable for unsupported features or connector configs
         # - Explicit disable (--disable-kv-cache-manager): always respect it
         need_disable_hybrid_kv_cache_manager = False
         # logger should only print warning message for hybrid models. As we
@@ -1426,43 +1426,25 @@ class VllmConfig:
                 need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to disable HMA, but only if the user didn't express a preference.
+            # Auto-disable HMA only when the connector config does not support it.
             if self.kv_transfer_config is not None:
-                from vllm.config.kv_transfer import KVTransferConfig
                 from vllm.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
-                from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-                    supports_hma,
-                )
 
-                connector_cls = KVConnectorFactory.get_connector_class(
-                    self.kv_transfer_config
-                )
-                all_support_hma = supports_hma(connector_cls)
-                # MultiConnector subclasses SupportsHMA; only effectively
-                # supports HMA when every sub-connector does.
-                if all_support_hma and connector_cls.__name__ == "MultiConnector":
-                    sub_ktcs = self.kv_transfer_config.kv_connector_extra_config.get(
-                        "connectors", []
-                    )
-                    all_support_hma = all(
-                        supports_hma(
-                            KVConnectorFactory.get_connector_class(
-                                KVTransferConfig(**sub)
-                            )
-                        )
-                        for sub in sub_ktcs
-                    )
-                if not all_support_hma:
+                if not KVConnectorFactory.supports_hma_config(self.kv_transfer_config):
                     need_disable_hybrid_kv_cache_manager = True
                     logger.warning(
                         "Turning off hybrid kv cache manager because "
-                        "connector %s does not subclass `SupportsHMA`. "
-                        "This will reduce performance on models with "
-                        "sliding window or Mamba attention. See "
-                        "kv_connector/v1/base.py for details.",
-                        connector_cls.__name__,
+                        "`--kv-transfer-config` selects a KV connector that "
+                        "does not support it. Impact: hybrid SSM models "
+                        "(e.g. Jamba, Bamba) require HMA and will fail at "
+                        "startup without it; models with sliding window "
+                        "attention will run with reduced performance. "
+                        "To add HMA support to a KV connector, subclass "
+                        "`SupportsHMA` defined in kv_connector/v1/base.py "
+                        "(for MultiConnector, all child connectors must "
+                        "support HMA)."
                     )
             self.scheduler_config.disable_hybrid_kv_cache_manager = (
                 need_disable_hybrid_kv_cache_manager

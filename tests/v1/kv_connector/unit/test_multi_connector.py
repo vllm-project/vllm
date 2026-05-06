@@ -990,11 +990,8 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
     )
 
 
-def test_multi_connector_hma_opt_in():
+def test_multi_connector_hma_support_detection():
     """
-    MultiConnector currently assumes HMA is opt-in: it needs
-    --no-disable-hybrid-kv-cache-manager to be enabled.
-
     At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.

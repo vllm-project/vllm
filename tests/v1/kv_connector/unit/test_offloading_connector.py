@@ -274,7 +274,7 @@ def test_cpu_offloading(
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
         **({"attention_config": {"backend": attn_backend}} if attn_backend else {}),
-        # HMA models need explicit opt-in when kv_transfer_config is set
+        # Keep HMA explicitly enabled for HMA model coverage.
         **({"disable_hybrid_kv_cache_manager": False} if uses_hma else {}),
         **({"enable_prefix_caching": True} if force_prefix_caching else {}),
         # ROCm: batch size 1 to reduce variability
