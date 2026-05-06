@@ -151,6 +151,14 @@ class SimpleCPUOffloadScheduler:
         self._load_event_counter: int = 0
         self._store_event_counter: int = 0
 
+        # Flush-on-finish (eager mode only): blocks queued by request_finished
+        # that were confirmed this step (after _update_after_schedule) but
+        # missed by build_connector_meta (which ran before _update_after_schedule).
+        # Consumed and merged into the next build_connector_meta store event.
+        self._pending_flush_gpu_blocks: list[int] = []
+        self._pending_flush_cpu_blocks: list[int] = []
+        self._pending_flush_req_ids: list[str] = []
+
         # For TP/PP: track partial store completions across steps.
         # Events must be reported by all world_size workers before considered complete.
         self._expected_worker_count = vllm_config.parallel_config.world_size
@@ -322,6 +330,19 @@ class SimpleCPUOffloadScheduler:
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self.prepare_store_specs(scheduler_output)
+
+        # Merge any blocks queued by _flush_final_blocks_on_finish (eager mode).
+        # These are blocks whose KV data was confirmed after build_connector_meta
+        # ran in the previous step (because _update_after_schedule fires after
+        # build_connector_meta), so they couldn't be included then.
+        if not self._lazy_mode and self._pending_flush_gpu_blocks:
+            store_gpu = store_gpu + self._pending_flush_gpu_blocks
+            store_cpu = store_cpu + self._pending_flush_cpu_blocks
+            store_req_ids = store_req_ids + self._pending_flush_req_ids
+            self._pending_flush_gpu_blocks = []
+            self._pending_flush_cpu_blocks = []
+            self._pending_flush_req_ids = []
+
         if store_gpu:
             store_event = self._store_event_counter
             self._store_event_counter += 1
@@ -654,6 +675,94 @@ class SimpleCPUOffloadScheduler:
         """Return True if there are in-flight store transfers."""
         return bool(self._store_event_to_blocks)
 
+    def _flush_final_blocks_on_finish(self, request: "Request") -> bool:
+        """Queue any final confirmed blocks for the next store event.
+
+        Called from request_finished() before the cleanup check. At that
+        point _update_after_schedule() has already advanced
+        request.num_computed_tokens, so the last full block computed during
+        this step is now confirmed and eligible for offload — but it was
+        invisible to build_connector_meta(), which ran before
+        _update_after_schedule().
+
+        Returns True if any blocks were queued, False otherwise.
+        """
+        req_id = request.request_id
+        state = self._reqs_to_store.get(req_id)
+        if state is None or state.finished:
+            return False
+
+        gpu_block_pool = self._gpu_block_pool
+        if gpu_block_pool is None:
+            return False
+
+        cpu_block_pool = self.cpu_block_pool
+        kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
+        num_groups = len(kv_cache_groups)
+        num_free = cpu_block_pool.get_num_free_blocks()
+
+        confirmed_tokens = request.num_computed_tokens - request.num_output_placeholders
+
+        gpu_block_ids: list[int] = []
+        block_hashes_to_store: list[bytes] = []
+        out_of_space = False
+
+        for g in range(num_groups):
+            if out_of_space:
+                break
+            already_stored_g = state.num_stored_blocks[g]
+            group_gpu_ids = state.block_ids[g]
+            g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+            ready_blocks_g = confirmed_tokens // g_block_size
+            scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
+
+            advanced = 0
+            for gpu_block_id in scannable:
+                gpu_block = gpu_block_pool.blocks[gpu_block_id]
+                if gpu_block.is_null:
+                    advanced += 1
+                    continue
+                bhash_with_group = gpu_block.block_hash
+                if bhash_with_group is None:
+                    break
+                if (
+                    cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                        bhash_with_group
+                    )
+                    is not None
+                ):
+                    advanced += 1
+                    continue
+                if num_free <= 0:
+                    out_of_space = True
+                    break
+                num_free -= 1
+                gpu_block_ids.append(gpu_block_id)
+                block_hashes_to_store.append(bhash_with_group)
+                advanced += 1
+            state.num_stored_blocks[g] += advanced
+
+        if not gpu_block_ids:
+            return False
+
+        cpu_blocks_alloc = cpu_block_pool.get_new_blocks(len(gpu_block_ids))
+        cpu_block_ids = [blk.block_id for blk in cpu_blocks_alloc]
+        for cpu_blk, bhash in zip(cpu_blocks_alloc, block_hashes_to_store):
+            cpu_blk._block_hash = bhash  # type: ignore[assignment]
+
+        gpu_block_pool.touch([gpu_block_pool.blocks[bid] for bid in gpu_block_ids])
+
+        self._pending_flush_gpu_blocks.extend(gpu_block_ids)
+        self._pending_flush_cpu_blocks.extend(cpu_block_ids)
+        self._pending_flush_req_ids.append(req_id)
+
+        logger.debug(
+            "Flush on finish: Request %s queued %d final block(s) for CPU offload",
+            req_id,
+            len(cpu_block_ids),
+        )
+        return True
+
     def request_finished(
         self,
         request: "Request",
@@ -671,12 +780,13 @@ class SimpleCPUOffloadScheduler:
             else:
                 self._cleanup_load_request(req_id)
 
-        # Handle store (eager mode only): defer cleanup if stores in-flight
+        # Handle store (eager mode only): flush final block then defer or cleanup
         if not self._lazy_mode:
+            has_pending_flush = self._flush_final_blocks_on_finish(request)
             store_state = self._reqs_to_store.get(req_id)
             if store_state is not None:
-                if store_state.store_events:
-                    store_state.finished = True  # Defer: stores in-flight
+                if store_state.store_events or has_pending_flush:
+                    store_state.finished = True
                 else:
                     self._cleanup_store_request(req_id)
 

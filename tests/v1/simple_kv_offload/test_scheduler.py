@@ -1135,3 +1135,79 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
         assert bid in ext_block_ids, (
             f"Load GPU block {bid} should be an ext_comp block, not a comp or new block"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Flush final block on finish (eager mode)
+# ---------------------------------------------------------------------------
+def test_eager_flush_final_block_on_finish() -> None:
+    """Eager mode: the last full block computed in the same step a request
+    finishes must still be offloaded to CPU (flush-on-finish).
+
+    Root cause: build_connector_meta runs BEFORE _update_after_schedule, so
+    the current step's newly confirmed block is invisible to
+    _prepare_eager_store_specs.  When the request then finishes in that same
+    step, request_finished must flush it rather than silently drop it.
+
+    Sequence simulated:
+    1. Allocate 2 GPU blocks; confirm only block 0 before the first
+       build_connector_meta call — matching the real scheduler ordering.
+    2. build_connector_meta stores block 0.
+    3. _update_after_schedule advances num_computed_tokens to cover block 1.
+    4. request_finished is called — flush-on-finish queues block 1.
+    5. Next build_connector_meta merges the pending flush into a store event.
+    6. After store completes, block 1's hash is in the CPU cache.
+    """
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    req = make_request(num_blocks=2)
+
+    # Allocate both GPU blocks but only confirm block 0 initially.
+    kv_blocks = _alloc_and_register(fix, req, 2, confirmed=False)
+    req.num_computed_tokens = BLOCK_SIZE  # block 0 confirmed
+    block_ids = kv_blocks.get_block_ids()
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+
+    # Step 1: build_connector_meta sees only block 0 confirmed → stores block 0.
+    sched_out1 = make_scheduler_output(
+        {req.request_id: BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+    meta1 = sched.build_connector_meta(sched_out1)
+    assert meta1.store_event >= 0, "Block 0 should be scheduled for store"
+    assert len(meta1.store_gpu_blocks) == 1, "Only block 0 should be stored"
+    simulate_store_completion(sched, meta1.store_event)
+
+    # Step 2: simulate _update_after_schedule advancing num_computed_tokens.
+    req.num_computed_tokens = 2 * BLOCK_SIZE  # block 1 now confirmed
+
+    # Step 3: request finishes — flush-on-finish should queue block 1.
+    sched.request_finished(req, block_ids=[])
+    assert len(sched._pending_flush_gpu_blocks) == 1, (
+        "Block 1 should be queued in _pending_flush_gpu_blocks after request_finished"
+    )
+    # State must be kept alive (finished=True, not yet cleaned up).
+    assert req.request_id in sched._reqs_to_store
+    assert sched._reqs_to_store[req.request_id].finished is True
+
+    # Step 4: next build_connector_meta consumes the pending flush.
+    sched_out2 = make_scheduler_output({})
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.store_event >= 0, "Flush should produce a store event"
+    assert len(meta2.store_gpu_blocks) == 1, "Exactly block 1 should be flushed"
+    assert len(sched._pending_flush_gpu_blocks) == 0, "Pending flush must be cleared"
+
+    simulate_store_completion(sched, meta2.store_event)
+
+    # State cleaned up after the flush store event completes.
+    assert req.request_id not in sched._reqs_to_store
+
+    # Block 1's hash must now be discoverable in the CPU cache.
+    bhash1_with_group = make_block_hash_with_group_id(req.block_hashes[1], 0)
+    cached = sched.cpu_block_pool.cached_block_hash_to_block.get_one_block(
+        bhash1_with_group
+    )
+    assert cached is not None, (
+        "Block 1 should be in CPU cache after flush-on-finish store completes"
+    )
