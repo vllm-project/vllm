@@ -220,10 +220,18 @@ class Scheduler(SchedulerInterface):
         self._unieai_dsc_spec_enabled = True
         self._unieai_dsc_disable_decode_tokens = 0
         self._unieai_dsc_enable_decode_tokens = 0
+        self._unieai_dsc_disable_waiting_reqs = 0
+        self._unieai_dsc_enable_waiting_reqs = 0
         self._unieai_dsc_switch_cooldown_sec = 0.0
         self._unieai_dsc_last_switch_time = 0.0
+        self._unieai_dsc_disable_condition_streak = 0
+        self._unieai_dsc_enable_condition_streak = 0
+        self._unieai_dsc_disable_required_samples = 0
+        self._unieai_dsc_enable_required_samples = 0
         self._unieai_dsc_last_status_log_time = 0.0
         self._unieai_dsc_status_log_interval_sec = 5.0
+        self._unieai_dsc_last_eval_time = 0.0
+        self._unieai_dsc_eval_interval_sec = 5.0
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
@@ -232,7 +240,8 @@ class Scheduler(SchedulerInterface):
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
             if (
-                speculative_config.method in ("ngram", "ngram_gpu", "dflash")
+                speculative_config.method
+                in ("ngram", "ngram_gpu", "mtp", "dflash")
                 and speculative_config.unieai_dsc
             ):
                 self._unieai_dsc_enabled = True
@@ -254,20 +263,36 @@ class Scheduler(SchedulerInterface):
                 )
                 if enable_decode_tokens is None:
                     enable_decode_tokens = max(1, int(disable_decode_tokens * 0.8))
+                disable_waiting_reqs = max(
+                    32, min(128, self.max_num_running_reqs // 8)
+                )
+                enable_waiting_reqs = max(16, int(disable_waiting_reqs * 0.625))
                 self._unieai_dsc_disable_decode_tokens = disable_decode_tokens
                 self._unieai_dsc_enable_decode_tokens = min(
                     enable_decode_tokens, disable_decode_tokens
                 )
+                self._unieai_dsc_disable_waiting_reqs = disable_waiting_reqs
+                self._unieai_dsc_enable_waiting_reqs = min(
+                    enable_waiting_reqs, disable_waiting_reqs
+                )
                 self._unieai_dsc_switch_cooldown_sec = (
                     speculative_config.unieai_dsc_switch_cooldown_sec
                 )
+                self._unieai_dsc_disable_required_samples = 2
+                self._unieai_dsc_enable_required_samples = 3
                 logger.info(
                     "UNIEAI_DSC_INIT disable_decode_tokens=%d "
-                    "enable_decode_tokens=%d switch_cooldown_sec=%.2f "
+                    "enable_decode_tokens=%d disable_waiting_reqs=%d "
+                    "enable_waiting_reqs=%d disable_required_samples=%d "
+                    "enable_required_samples=%d switch_cooldown_sec=%.2f "
                     "method=%s max_num_seqs=%d max_num_scheduled_tokens=%d "
                     "max_num_batched_tokens=%d",
                     self._unieai_dsc_disable_decode_tokens,
                     self._unieai_dsc_enable_decode_tokens,
+                    self._unieai_dsc_disable_waiting_reqs,
+                    self._unieai_dsc_enable_waiting_reqs,
+                    self._unieai_dsc_disable_required_samples,
+                    self._unieai_dsc_enable_required_samples,
                     self._unieai_dsc_switch_cooldown_sec,
                     speculative_config.method,
                     self.max_num_running_reqs,
@@ -1800,6 +1825,9 @@ class Scheduler(SchedulerInterface):
             if request.num_computed_tokens >= request.num_prompt_tokens
         )
 
+    def _get_waiting_request_load(self) -> int:
+        return len(self.waiting)
+
     def _get_step_max_num_scheduled_tokens(self, use_spec_decode: bool) -> int:
         if use_spec_decode or self._has_pending_spec_decode_tokens():
             return self.max_num_scheduled_tokens
@@ -1824,51 +1852,94 @@ class Scheduler(SchedulerInterface):
             return True
 
         decode_token_load = self._get_running_decode_token_load()
+        waiting_request_load = self._get_waiting_request_load()
         now = time.monotonic()
 
-        if self._unieai_dsc_spec_enabled:
-            if decode_token_load >= self._unieai_dsc_disable_decode_tokens:
-                self._unieai_dsc_spec_enabled = False
-                self._unieai_dsc_last_switch_time = now
-                logger.info(
-                    "UNIEAI_DSC_SWITCH to=normal_decode "
-                    "decode_token_load=%d disable_threshold=%d "
-                    "enable_threshold=%d cooldown_sec=%.2f",
-                    decode_token_load,
-                    self._unieai_dsc_disable_decode_tokens,
-                    self._unieai_dsc_enable_decode_tokens,
-                    self._unieai_dsc_switch_cooldown_sec,
+        if now - self._unieai_dsc_last_eval_time >= self._unieai_dsc_eval_interval_sec:
+            self._unieai_dsc_last_eval_time = now
+
+            if self._unieai_dsc_spec_enabled:
+                disable_condition = (
+                    decode_token_load >= self._unieai_dsc_disable_decode_tokens
+                    and waiting_request_load >= self._unieai_dsc_disable_waiting_reqs
                 )
-            decision = self._unieai_dsc_spec_enabled
-            self._log_unieai_dsc_state(now, decode_token_load, decision)
-            return decision
+                if disable_condition:
+                    self._unieai_dsc_disable_condition_streak += 1
+                else:
+                    self._unieai_dsc_disable_condition_streak = 0
+                self._unieai_dsc_enable_condition_streak = 0
 
-        if (
-            now - self._unieai_dsc_last_switch_time
-            < self._unieai_dsc_switch_cooldown_sec
-        ):
-            decision = False
-            self._log_unieai_dsc_state(now, decode_token_load, decision)
-            return decision
+                if (
+                    self._unieai_dsc_disable_condition_streak
+                    >= self._unieai_dsc_disable_required_samples
+                ):
+                    self._unieai_dsc_spec_enabled = False
+                    self._unieai_dsc_last_switch_time = now
+                    self._unieai_dsc_disable_condition_streak = 0
+                    logger.info(
+                        "UNIEAI_DSC_SWITCH to=normal_decode "
+                        "decode_token_load=%d waiting_request_load=%d "
+                        "disable_decode_threshold=%d enable_decode_threshold=%d "
+                        "disable_waiting_threshold=%d enable_waiting_threshold=%d "
+                        "cooldown_sec=%.2f",
+                        decode_token_load,
+                        waiting_request_load,
+                        self._unieai_dsc_disable_decode_tokens,
+                        self._unieai_dsc_enable_decode_tokens,
+                        self._unieai_dsc_disable_waiting_reqs,
+                        self._unieai_dsc_enable_waiting_reqs,
+                        self._unieai_dsc_switch_cooldown_sec,
+                    )
+            else:
+                if (
+                    now - self._unieai_dsc_last_switch_time
+                    >= self._unieai_dsc_switch_cooldown_sec
+                ):
+                    enable_condition = (
+                        decode_token_load <= self._unieai_dsc_enable_decode_tokens
+                        and waiting_request_load <= self._unieai_dsc_enable_waiting_reqs
+                    )
+                    if enable_condition:
+                        self._unieai_dsc_enable_condition_streak += 1
+                    else:
+                        self._unieai_dsc_enable_condition_streak = 0
+                    self._unieai_dsc_disable_condition_streak = 0
 
-        if decode_token_load <= self._unieai_dsc_enable_decode_tokens:
-            self._unieai_dsc_spec_enabled = True
-            self._unieai_dsc_last_switch_time = now
-            logger.info(
-                "UNIEAI_DSC_SWITCH to=spec_decode "
-                "decode_token_load=%d disable_threshold=%d "
-                "enable_threshold=%d cooldown_sec=%.2f",
-                decode_token_load,
-                self._unieai_dsc_disable_decode_tokens,
-                self._unieai_dsc_enable_decode_tokens,
-                self._unieai_dsc_switch_cooldown_sec,
-            )
+                    if (
+                        self._unieai_dsc_enable_condition_streak
+                        >= self._unieai_dsc_enable_required_samples
+                    ):
+                        self._unieai_dsc_spec_enabled = True
+                        self._unieai_dsc_last_switch_time = now
+                        self._unieai_dsc_enable_condition_streak = 0
+                        logger.info(
+                            "UNIEAI_DSC_SWITCH to=spec_decode "
+                            "decode_token_load=%d waiting_request_load=%d "
+                            "disable_decode_threshold=%d enable_decode_threshold=%d "
+                            "disable_waiting_threshold=%d enable_waiting_threshold=%d "
+                            "cooldown_sec=%.2f",
+                            decode_token_load,
+                            waiting_request_load,
+                            self._unieai_dsc_disable_decode_tokens,
+                            self._unieai_dsc_enable_decode_tokens,
+                            self._unieai_dsc_disable_waiting_reqs,
+                            self._unieai_dsc_enable_waiting_reqs,
+                            self._unieai_dsc_switch_cooldown_sec,
+                        )
+                else:
+                    self._unieai_dsc_enable_condition_streak = 0
         decision = self._unieai_dsc_spec_enabled
-        self._log_unieai_dsc_state(now, decode_token_load, decision)
+        self._log_unieai_dsc_state(
+            now, decode_token_load, waiting_request_load, decision
+        )
         return decision
 
     def _log_unieai_dsc_state(
-        self, now: float, decode_token_load: int, decision_use_spec_decode: bool
+        self,
+        now: float,
+        decode_token_load: int,
+        waiting_request_load: int,
+        decision_use_spec_decode: bool,
     ) -> None:
         if (
             now - self._unieai_dsc_last_status_log_time
@@ -1882,12 +1953,20 @@ class Scheduler(SchedulerInterface):
         )
         logger.info(
             "UNIEAI_DSC_STATE use_spec_decode=%s decode_token_load=%d "
-            "disable_threshold=%d enable_threshold=%d "
+            "waiting_request_load=%d disable_decode_threshold=%d "
+            "enable_decode_threshold=%d disable_waiting_threshold=%d "
+            "enable_waiting_threshold=%d disable_streak=%d "
+            "enable_streak=%d "
             "cooldown_remaining_sec=%.2f",
             decision_use_spec_decode,
             decode_token_load,
+            waiting_request_load,
             self._unieai_dsc_disable_decode_tokens,
             self._unieai_dsc_enable_decode_tokens,
+            self._unieai_dsc_disable_waiting_reqs,
+            self._unieai_dsc_enable_waiting_reqs,
+            self._unieai_dsc_disable_condition_streak,
+            self._unieai_dsc_enable_condition_streak,
             cooldown_remaining_sec,
         )
         self._unieai_dsc_last_status_log_time = now
