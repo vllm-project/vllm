@@ -32,18 +32,23 @@ else()
         "-DVLLM_CPU_EXTENSION")
 
     # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-    # and create a local shim dir with it
+    # and create a local shim dir with it. When PyTorch is built from source or packaged
+    # by a distro (common on RISC-V, s390x, Fedora/RHEL aarch64), no vendored libgomp
+    # exists and the shim dir is empty; fall back to the system libgomp in that case.
     vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
 
-    find_library(OPEN_MP
-        NAMES gomp
-        PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
-        NO_DEFAULT_PATH
-        REQUIRED
-    )
-    # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
-    if (OPEN_MP)
+    if(VLLM_TORCH_GOMP_SHIM_DIR)
+        find_library(OPEN_MP
+            NAMES gomp
+            PATHS "${VLLM_TORCH_GOMP_SHIM_DIR}"
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        # Use the same libgomp as PyTorch at runtime
         set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+    else()
+        # Fall back to system / toolchain libgomp
+        find_library(OPEN_MP NAMES gomp REQUIRED)
     endif()
 endif()
 
