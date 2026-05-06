@@ -122,7 +122,10 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, 64] if current_platform.is_rocm() else [64]
+        # Must not advertise 1 on ROCm: select_common_block_size picks
+        # min([1, 64]) = 1, which keeps block_size=1 and leaves the gluon
+        # preshuffle path (added in #41217) permanently disabled.
+        return [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
