@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.common import get_cp_collective_scratch_tensors
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -107,21 +107,6 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
     if bits == 32:
         return 1
     raise ValueError(f"Cannot pack fp32 LSE into output dtype {output_dtype}.")
-
-
-def _dcp_a2a_send_recv_buffers(
-    shape: tuple[int, ...],
-    device: torch.device,
-    dtype: torch.dtype,
-    scratch_workspace: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    send_buffer, recv_buffer = get_cp_collective_scratch_tensors(
-        device,
-        (shape, dtype),
-        (shape, dtype),
-        scratch_workspace=scratch_workspace,
-    )
-    return send_buffer, recv_buffer
 
 
 @triton.jit
@@ -384,6 +369,23 @@ def _dcp_a2a_unpack_combine(
     return out
 
 
+def dcp_a2a_lse_reduce_workspace_shapes(
+    num_tokens: int,
+    total_heads: int,
+    head_dim: int,
+    cp_world_size: int,
+    dtype: torch.dtype,
+    lse_dtype: torch.dtype = torch.float32,
+) -> list[tuple[tuple[int, ...], torch.dtype]]:
+    local_heads = total_heads // cp_world_size
+    lse_pack_dim = _dcp_a2a_lse_pack_dim(dtype)
+    buf_shape = (cp_world_size, num_tokens, local_heads, head_dim + lse_pack_dim)
+    return [
+        (buf_shape, dtype),
+        (buf_shape, dtype),
+    ]
+
+
 def dcp_a2a_lse_reduce(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
@@ -391,7 +393,7 @@ def dcp_a2a_lse_reduce(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
-    scratch_workspace: torch.Tensor | None = None,
+    workspaces: list[torch.Tensor] | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
@@ -406,6 +408,8 @@ def dcp_a2a_lse_reduce(
         ctx: CPTritonContext (unused, for signature compatibility)
         return_lse: If True, also return the combined global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        workspaces: Pre-allocated [send_buffer, recv_buffer] from
+            dcp_a2a_lse_reduce_workspace_shapes.
 
     Returns:
         Combined output [B, H/N, D] (head-scattered)
@@ -424,12 +428,17 @@ def dcp_a2a_lse_reduce(
     H_per_rank = H // world_size
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
-    send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
-        (world_size, B, H_per_rank, D + lse_pack_dim),
-        device=cp_attn_out.device,
-        dtype=cp_attn_out.dtype,
-        scratch_workspace=scratch_workspace,
-    )
+    if workspaces is None:
+        workspaces = current_workspace_manager().get_simultaneous(
+            *dcp_a2a_lse_reduce_workspace_shapes(
+                num_tokens=B,
+                total_heads=H,
+                head_dim=D,
+                cp_world_size=world_size,
+                dtype=cp_attn_out.dtype,
+            )
+        )
+    send_buffer, recv_buffer = workspaces
 
     _dcp_a2a_pack_send(
         cp_attn_out,

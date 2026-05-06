@@ -28,11 +28,14 @@ from vllm.v1.attention.backends.fa_utils import (
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import (
     cp_all_gather_heads,
-    cp_collective_scratch_bytes,
     cp_lse_ag_out_rs,
+    cp_lse_ag_out_rs_workspace_shapes,
     reserve_cp_collective_workspace,
 )
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    dcp_a2a_lse_reduce_workspace_shapes,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -678,7 +681,12 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+        if dcp_a2a:
+            self.dcp_combine = dcp_a2a_lse_reduce
+            self.dcp_combine_workspace_shapes = dcp_a2a_lse_reduce_workspace_shapes
+        else:
+            self.dcp_combine = cp_lse_ag_out_rs
+            self.dcp_combine_workspace_shapes = cp_lse_ag_out_rs_workspace_shapes
 
         self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
@@ -692,36 +700,6 @@ class FlashAttentionImpl(AttentionImpl):
                 dtype=self._dcp_dtype,
                 reserve_a2a=dcp_a2a,
             )
-
-    def _get_dcp_combine_workspace_bytes(self, num_tokens: int) -> int:
-        assert self._dcp_dtype is not None
-        ws, n, h, hd, d = (
-            self.dcp_world_size,
-            num_tokens,
-            self.num_heads,
-            self.head_size,
-            self._dcp_dtype,
-        )
-        if self.dcp_combine is dcp_a2a_lse_reduce:
-            t = (ws, n, h, hd)
-            return cp_collective_scratch_bytes(
-                (t, d),  # send_output
-                (t, d),  # recv_output
-                ((ws, n, h), torch.float32),  # send_lse
-                ((ws, n, h), torch.float32),  # recv_lse
-            )
-        return max(
-            # buffer for all_gather_into_tensor
-            # [ws * n, total_heads]
-            cp_collective_scratch_bytes(
-                ((ws * n, h * ws), torch.float32),
-            ),
-            # output buffer for reduce scatter
-            cp_collective_scratch_bytes(
-                (((h * ws), n, hd), d),
-                ((h, n, hd), d),
-            ),
-        )
 
     def forward(
         self,
@@ -952,15 +930,25 @@ class FlashAttentionImpl(AttentionImpl):
             list(self.sliding_window) if self.sliding_window is not None else None
         )
         n = query_across_dcp.shape[0]
-        dcp_context_out, dcp_combine_workspace = (
+        total_heads = self.num_heads * self.dcp_world_size
+
+        dcp_context_out, dcp_query_out, *combine_workspaces = (
             current_workspace_manager().get_simultaneous(
+                ((n, total_heads, self.head_size), self._dcp_dtype),
                 (
-                    (n, self.num_heads * self.dcp_world_size, self.head_size),
+                    (query.shape[0], self.num_heads, self.head_size),
                     self._dcp_dtype,
                 ),
-                ((self._get_dcp_combine_workspace_bytes(n),), torch.uint8),
+                *self.dcp_combine_workspace_shapes(
+                    num_tokens=n,
+                    total_heads=total_heads,
+                    head_dim=self.head_size,
+                    cp_world_size=self.dcp_world_size,
+                    dtype=self._dcp_dtype,
+                ),
             )
         )
+
         context_attn_out, context_lse = flash_attn_varlen_func(
             q=query_across_dcp,
             k=key_cache,
@@ -990,13 +978,9 @@ class FlashAttentionImpl(AttentionImpl):
             context_lse.transpose(0, 1),
             get_dcp_group(),
             return_lse=True,
-            scratch_workspace=dcp_combine_workspace,
+            workspaces=combine_workspaces,
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
-
-        (dcp_query_out,) = current_workspace_manager().get_simultaneous(
-            ((query.shape[0], self.num_heads, self.head_size), self._dcp_dtype),
-        )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
