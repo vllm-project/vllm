@@ -582,7 +582,7 @@ class OlmoHybridGatedDeltaNet(nn.Module, MambaBase):
                 )
             )
         else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
+            core_attn_out_non_spec, _last_recurrent_state = None, None
 
         if spec_sequence_masks is not None and core_attn_out_non_spec is not None:
             merged_out = torch.empty(

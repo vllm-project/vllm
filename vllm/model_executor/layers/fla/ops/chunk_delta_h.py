@@ -114,13 +114,11 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     if USE_INITIAL_STATE:
         should_load = True
         if IS_CONTINUOUS_BATCHING:
-            state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq
-            ).to(tl.int64)
+            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(
+                tl.int64
+            )
             if HAS_INITIAL_STATE_MASK:
-                has_init = tl.load(
-                    has_initial_state + i_n * stride_has_initial_state
-                )
+                has_init = tl.load(has_initial_state + i_n * stride_has_initial_state)
                 if has_init:
                     h0 = h0 + state_idx * stride_init_state_token + i_h * V * K
                 else:
@@ -130,7 +128,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         else:
             h0 = h0 + i_nh * V * K
         if should_load:
-            p_h0_1 = tl.make_block_ptr(h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
+            p_h0_1 = tl.make_block_ptr(
+                h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0)
+            )
             b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
             if K > 64:
                 p_h0_2 = tl.make_block_ptr(
@@ -302,9 +302,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # epilogue
     if STORE_FINAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq
-            ).to(tl.int64)
+            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(
+                tl.int64
+            )
             ht = ht + state_idx * stride_final_state_token + i_h * V * K
         else:
             ht = ht + i_nh * V * K

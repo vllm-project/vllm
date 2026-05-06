@@ -119,10 +119,18 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         g = g.contiguous()
         beta = beta.contiguous()
         cu_seqlens = cu_seqlens.contiguous() if cu_seqlens is not None else None
-        chunk_indices = chunk_indices.contiguous() if chunk_indices is not None else None
-        chunk_offsets = chunk_offsets.contiguous() if chunk_offsets is not None else None
-        ssm_state_indices = ssm_state_indices.contiguous() if ssm_state_indices is not None else None
-        has_initial_state = has_initial_state.contiguous() if has_initial_state is not None else None
+        chunk_indices = (
+            chunk_indices.contiguous() if chunk_indices is not None else None
+        )
+        chunk_offsets = (
+            chunk_offsets.contiguous() if chunk_offsets is not None else None
+        )
+        ssm_state_indices = (
+            ssm_state_indices.contiguous() if ssm_state_indices is not None else None
+        )
+        has_initial_state = (
+            has_initial_state.contiguous() if has_initial_state is not None else None
+        )
         if ssm_state_indices is None and initial_state is not None:
             initial_state = initial_state.contiguous()
 
