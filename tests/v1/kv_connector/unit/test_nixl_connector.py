@@ -321,8 +321,8 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
-def test_pre_admission_aborted_remote_prefill_enqueues_empty_recv():
-    """A remote-prefill request added with pre_admission_aborted=True should
+def test_abort_immediately_remote_prefill_enqueues_empty_recv():
+    """A remote-prefill request added with abort_immediately=True should
     be added to the scheduler's waiting queue then immediately aborted, so the
     NIXL connector's request_finished hook enqueues an empty recv to notify
     the prefill instance to free its blocks."""
@@ -334,7 +334,7 @@ def test_pre_admission_aborted_remote_prefill_enqueues_empty_recv():
     assert request.kv_transfer_params is not None
     assert request.kv_transfer_params["do_remote_prefill"] is True
 
-    # Mimic the EngineCore.add_request path for a pre-admission-aborted req.
+    # Mimic the EngineCore.add_request path for an abort-immediately req.
     scheduler.add_request(request)
     scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
 

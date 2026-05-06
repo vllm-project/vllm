@@ -126,7 +126,7 @@ class EngineCoreRequest(
     # and immediately aborted, so connector-side cleanup runs via the standard
     # request_finished hook. Used to free P-side prefill blocks when a
     # KV-transfer request is rejected on the D node before engine admission.
-    pre_admission_aborted: bool = False
+    abort_immediately: bool = False
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

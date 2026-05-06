@@ -76,7 +76,7 @@ class Request:
         resumable: bool = False,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
-        pre_admission_aborted: bool = False,
+        abort_immediately: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -185,7 +185,7 @@ class Request:
 
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
-        self.pre_admission_aborted = pre_admission_aborted
+        self.abort_immediately = abort_immediately
 
     @classmethod
     def from_engine_core_request(
@@ -211,7 +211,7 @@ class Request:
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
-            pre_admission_aborted=request.pre_admission_aborted,
+            abort_immediately=request.abort_immediately,
         )
 
     def append_output_token_ids(

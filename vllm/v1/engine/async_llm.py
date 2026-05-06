@@ -743,7 +743,7 @@ class AsyncLLM(EngineClient):
             lora_request=None,
             cache_salt=None,
             data_parallel_rank=data_parallel_rank,
-            pre_admission_aborted=True,
+            abort_immediately=True,
         )
         await self.engine_core.add_request_async(request)
 

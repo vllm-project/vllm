@@ -344,7 +344,7 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
-        if request.pre_admission_aborted:
+        if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
