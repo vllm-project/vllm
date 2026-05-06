@@ -11,14 +11,6 @@ is the same packed layout used by ``FlashAttentionDiffKVBackend``:
 We slice ``key_cache = kv_cache[..., :head_size_qk]`` and
 ``value_cache = kv_cache[..., head_size_qk:]`` on the host, so the kernel
 takes two cache pointers but with two distinct head sizes.
-
-Compared to the standard kernel this version drops:
-  - 3D (per-segment) softmax decode path; only the 2D path is supported
-  - FP8 / int8 quantized KV cache (per-tensor and per-token-head)
-  - mm_prefix / qq_bias / chunked attention / encoder mode
-
-Kept: causal, sinks, sliding window, alibi (with optional sqrt), softcap,
-fp16/bf16/fp32 KV cache.
 """
 
 from vllm.logger import init_logger
