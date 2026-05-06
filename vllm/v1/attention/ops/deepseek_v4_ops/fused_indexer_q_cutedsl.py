@@ -335,13 +335,9 @@ class IndexerQMxFp4Kernel:
         if in_bounds:
             for i in cutlass.range_constexpr(self.tile_head):
                 # q layout: [num_tokens, num_heads, head_dim]
-                _q_bf16x2 = _ldg_vec(
-                    q,
-                    (token_id, head_start + i, elem_base),
-                    8,
-                    ".relaxed.cta.L1::no_allocate",
-                    ld_type=Uint32,
-                )
+                coord = (token_id, head_start + i, elem_base)
+                cache_mod = ".relaxed.cta.L1::no_allocate"
+                _q_bf16x2 = _ldg_vec(q, coord, 8, cache_mod, ld_type=Uint32)
                 q_bf16x2[i, None].store(_q_bf16x2)  # copy to make it mutable
 
         # RoPE applies only to the trailing rope_dim values. We keep the rounded
@@ -435,13 +431,8 @@ class IndexerQMxFp4Kernel:
                 packed = cute.make_rmem_tensor(2, Uint32)
                 packed[0] = _fp32x8_to_fp4x8(vals, 0)
                 packed[1] = _fp32x8_to_fp4x8(vals, 8)
-                _stg_vec(
-                    q_fp4,
-                    (token_id, head_start + i, elem_base // 2),
-                    packed,
-                    2,
-                    modifier=".cs",
-                )
+                coord = (token_id, head_start + i, elem_base // 2)
+                _stg_vec(q_fp4, coord, packed, 2, modifier=".cs")
 
         # Weight scaling is independent of the Q subwarp work. The first
         # num_tokens * num_heads logical threads cover one weight each.
