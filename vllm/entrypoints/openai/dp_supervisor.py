@@ -180,6 +180,7 @@ def _build_dp_supervisor_app(
     supervisor: DPSupervisor,
 ) -> FastAPI:
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
+    app.state.supervisor = supervisor
 
     def _status_response(ok: bool) -> Response:
         return Response(
@@ -188,13 +189,13 @@ def _build_dp_supervisor_app(
 
     @app.get("/health", include_in_schema=False)
     async def health() -> Response:
-        return _status_response(supervisor.is_healthy())
+        return _status_response(app.state.supervisor.is_healthy())
 
     @app.get("/ready", include_in_schema=False)
     @app.get("/readyz", include_in_schema=False)
     async def ready() -> Response:
         # when child servers is healthy, it is ready already
-        return _status_response(supervisor.is_healthy())
+        return _status_response(app.state.supervisor.is_healthy())
 
     return app
 
