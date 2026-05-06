@@ -61,3 +61,21 @@ def fused_add_rms_norm(
     assert variance_size is None
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
+
+
+@ir.ops.fatrelu_and_mul.register_impl("vllm_c", supported=CUDA_ALIKE)
+def fatrelu_and_mul(x: Tensor, threshold: float = 0.0) -> Tensor:
+    d = x.shape[-1] // 2
+    output_shape = x.shape[:-1] + (d,)
+    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    torch.ops._C.fatrelu_and_mul(out, x, threshold)
+    return out
+
+
+@ir.ops.swigluoai_and_mul.register_impl("vllm_c", supported=CUDA_ALIKE)
+def swigluoai_and_mul(x: Tensor, alpha: float = 1.702, limit: float = 7.0) -> Tensor:
+    d = x.shape[-1] // 2
+    output_shape = x.shape[:-1] + (d,)
+    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    torch.ops._C.swigluoai_and_mul(out, x, alpha, limit)
+    return out
