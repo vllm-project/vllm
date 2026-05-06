@@ -15,6 +15,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    OffloadPromMetrics,
+)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -40,6 +50,122 @@ logger = init_logger(__name__)
 
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
+
+
+class SimpleCPUOffloadConnectorStats(OffloadingConnectorStats):
+    """Transfer and CPU-pool stats for SimpleCPUOffloadConnector."""
+
+    CPU_POOL_KEYS = {
+        "cpu_pool_total_blocks",
+        "cpu_pool_free_blocks",
+        "cpu_pool_used_blocks",
+        "cpu_pool_usage_perc",
+        "pending_loads",
+        "pending_stores",
+    }
+
+    def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+        if other.is_empty():
+            return self
+        for key, value in other.data.items():
+            if key in self.CPU_POOL_KEYS:
+                self.data[key] = value
+                continue
+            if key not in self.data:
+                self.data[key] = value
+            else:
+                accumulator = self.data[key]
+                assert isinstance(accumulator, list)
+                assert isinstance(value, list)
+                accumulator.extend(value)
+        return self
+
+    def reduce(self) -> dict[str, int | float]:
+        transfer_data = {
+            key: value
+            for key, value in self.data.items()
+            if key not in self.CPU_POOL_KEYS
+        }
+        reduced = OffloadingConnectorStats(data=transfer_data).reduce()
+        reduced.update(
+            {
+                key: value
+                for key, value in self.data.items()
+                if key in self.CPU_POOL_KEYS
+            }
+        )
+        return reduced
+
+
+class SimpleCPUOffloadPromMetrics(OffloadPromMetrics):
+    """Prometheus metrics for SimpleCPUOffloadConnector."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+        self.gauges: dict[str, dict[int, PromMetricT]] = {}
+        for name, documentation in {
+            "vllm:simple_cpu_offload_total_blocks": (
+                "Total usable CPU KV cache blocks managed by "
+                "SimpleCPUOffloadConnector."
+            ),
+            "vllm:simple_cpu_offload_free_blocks": (
+                "Free usable CPU KV cache blocks managed by "
+                "SimpleCPUOffloadConnector."
+            ),
+            "vllm:simple_cpu_offload_used_blocks": (
+                "Used usable CPU KV cache blocks managed by "
+                "SimpleCPUOffloadConnector."
+            ),
+            "vllm:simple_cpu_offload_usage_perc": (
+                "CPU KV cache usage for SimpleCPUOffloadConnector. "
+                "1 means 100 percent usage."
+            ),
+            "vllm:simple_cpu_offload_pending_loads": (
+                "Requests with pending CPU-to-GPU loads in "
+                "SimpleCPUOffloadConnector."
+            ),
+            "vllm:simple_cpu_offload_pending_stores": (
+                "Store events pending worker completion in "
+                "SimpleCPUOffloadConnector."
+            ),
+        }.items():
+            gauge = self._gauge_cls(
+                name=name,
+                documentation=documentation,
+                multiprocess_mode="mostrecent",
+                labelnames=labelnames,
+            )
+            self.gauges[name] = {
+                idx: gauge.labels(*per_engine_labelvalues[idx])
+                for idx in per_engine_labelvalues
+            }
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        mapping = {
+            "cpu_pool_total_blocks": "vllm:simple_cpu_offload_total_blocks",
+            "cpu_pool_free_blocks": "vllm:simple_cpu_offload_free_blocks",
+            "cpu_pool_used_blocks": "vllm:simple_cpu_offload_used_blocks",
+            "cpu_pool_usage_perc": "vllm:simple_cpu_offload_usage_perc",
+            "pending_loads": "vllm:simple_cpu_offload_pending_loads",
+            "pending_stores": "vllm:simple_cpu_offload_pending_stores",
+        }
+        transfer_data = {
+            key: value
+            for key, value in transfer_stats_data.items()
+            if key not in mapping
+        }
+        if transfer_data:
+            super().observe(transfer_data, engine_idx)
+        for data_key, metric_name in mapping.items():
+            if data_key in transfer_stats_data:
+                self.gauges[metric_name][engine_idx].set(transfer_stats_data[data_key])
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -237,6 +363,31 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler_manager is not None:
             return self.scheduler_manager.take_events()
         return []
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.worker_handler is not None:
+            return self.worker_handler.get_kv_connector_stats()
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_kv_connector_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return SimpleCPUOffloadConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return SimpleCPUOffloadPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
 
     def reset_cache(self) -> bool | None:
         raise NotImplementedError(

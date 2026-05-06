@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -740,3 +741,23 @@ class SimpleCPUOffloadScheduler:
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         return self.cpu_block_pool.take_events()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            SimpleCPUOffloadConnectorStats,
+        )
+
+        total_blocks = max(0, self.cpu_block_pool.num_gpu_blocks - 1)
+        free_blocks = self.cpu_block_pool.get_num_free_blocks()
+        used_blocks = max(0, total_blocks - free_blocks)
+        usage = used_blocks / total_blocks if total_blocks else 0.0
+        return SimpleCPUOffloadConnectorStats(
+            data={
+                "cpu_pool_total_blocks": total_blocks,
+                "cpu_pool_free_blocks": free_blocks,
+                "cpu_pool_used_blocks": used_blocks,
+                "cpu_pool_usage_perc": usage,
+                "pending_loads": len(self._reqs_to_load),
+                "pending_stores": len(self._store_event_to_blocks),
+            }
+        )

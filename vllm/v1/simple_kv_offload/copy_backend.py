@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from dataclasses import dataclass
 
 import torch
 
@@ -18,6 +19,15 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class DmaCopyEvent:
+    event_idx: int
+    start_event: torch.Event
+    end_event: torch.Event
+    num_bytes: int
+    is_store: bool
 
 
 class DmaCopyBackend:
@@ -60,12 +70,21 @@ class DmaCopyBackend:
         dst_blocks: list[int],
         is_store: bool,
         event_idx: int,
-        events_list: list[tuple[int, torch.Event]],
+        events_list: list[DmaCopyEvent],
     ) -> None:
         params = self._store_params if is_store else self._load_params
         assert params is not None and self._queue is not None
+        num_bytes = int(len(src_blocks) * sum(params.bpb))
         self._queue.put(
-            (src_blocks, dst_blocks, params, is_store, event_idx, events_list)
+            (
+                src_blocks,
+                dst_blocks,
+                params,
+                is_store,
+                event_idx,
+                events_list,
+                num_bytes,
+            )
         )
 
     def shutdown(self) -> None:
@@ -89,9 +108,27 @@ class DmaCopyBackend:
             item = q.get()
             if item is None:
                 return
-            src_blocks, dst_blocks, params, is_store, event_idx, events_list = item
-            copy_blocks(src_blocks, dst_blocks, params)
+            (
+                src_blocks,
+                dst_blocks,
+                params,
+                is_store,
+                event_idx,
+                events_list,
+                num_bytes,
+            ) = item
             stream = store_stream if is_store else load_stream
-            event = torch.Event()
-            event.record(stream)
-            events_list.append((event_idx, event))
+            start_event = torch.Event(enable_timing=True)
+            end_event = torch.Event(enable_timing=True)
+            start_event.record(stream)
+            copy_blocks(src_blocks, dst_blocks, params)
+            end_event.record(stream)
+            events_list.append(
+                DmaCopyEvent(
+                    event_idx=event_idx,
+                    start_event=start_event,
+                    end_event=end_event,
+                    num_bytes=num_bytes,
+                    is_store=is_store,
+                )
+            )
