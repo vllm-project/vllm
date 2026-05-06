@@ -70,6 +70,7 @@ def determine_expert_map(
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
+
     # Create an expert map for the local experts
     if expert_placement_strategy == "linear":
         start_idx = ep_rank * base_experts + min(ep_rank, remainder)
@@ -507,13 +508,10 @@ class ExpertMapManager:
             "Round robin not supported for AITER."
         )
 
-        assert self._expert_map is not None
-        device = self._expert_map.device
-
         global_indices = torch.arange(
             self.global_num_experts,
             dtype=torch.long,
-            device=device,
+            device=self.device,
         )
         owner = torch.remainder(global_indices, self.ep_size)
         local_index = torch.div(global_indices, self.ep_size, rounding_mode="floor")
@@ -526,7 +524,7 @@ class ExpertMapManager:
             remainder_tensor = torch.tensor(
                 remainder,
                 dtype=torch.long,
-                device=device,
+                device=self.device,
             )
             physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
 
@@ -539,7 +537,7 @@ class ExpertMapManager:
             self.global_num_experts,
             self.ep_size,
             dtype=torch.long,
-            device=device,
+            device=self.device,
         )
         if local_global.numel() != self._local_num_experts:
             local_global = local_global[: self._local_num_experts]
