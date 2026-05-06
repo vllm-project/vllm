@@ -54,14 +54,18 @@ jobs:
         run: |
           # 1) Install torch from the nightly ROCm index *only* (no
           #    PyPI fallback) so we always get the ROCm wheel.
-          #    Use --upgrade-package to avoid upgrading heavy transitive
-          #    deps like rocm-sdk-libraries that exhaust disk space.
           uv pip install --system \
+            --upgrade-package "rocm[devel,libraries]" \
             --upgrade-package torch \
-            --upgrade-package torchvision \
             --upgrade-package torchaudio \
-            torch torchvision torchaudio \
+            --upgrade-package torchvision \
+            "rocm[devel,libraries]" \
+            torch \
+            torchaudio \
+            torchvision \
             --index-url ${{ env.PYTORCH_INDEX_URL }}
+          # rocm-sdk-devel ships a tarball that must be unpacked after every upgrade
+          rocm-sdk init
           # 2) Install the remaining build deps from the requirements
           #    file with torch/torchvision/torchaudio lines and the
           #    stable ROCm index stripped out.
