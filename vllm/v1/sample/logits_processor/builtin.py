@@ -267,12 +267,13 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         all_toks: list[np.ndarray] = []  # stop-token ids at those rows
 
         for req_idx, min_tok, current_len, stop_toks in entries:
-            # Row j (0-based) is the logits row for the (j+1)-th token of this
-            # speculative step; after accepting it, output length would be
-            # ``current_len + j + 1``. Mask EOS while that length is still
-            # strictly below ``min_tok`` → ``j < min_tok - current_len - 1``.
+            # Row j predicts the (j+1)-th token of this step. Align with
+            # ``apply()`` / ``update_state``: mask stop logits while the
+            # output length *before* that token would still be below
+            # ``min_tok``, i.e. ``current_len + j < min_tok`` →
+            # ``j < min_tok - current_len``.
             n_mask = int(
-                min(max(min_tok - current_len - 1, 0), num_draft_arr[req_idx])
+                min(max(min_tok - current_len, 0), num_draft_arr[req_idx])
             )
 
             if n_mask > 0:

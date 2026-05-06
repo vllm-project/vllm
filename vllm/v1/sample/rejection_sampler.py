@@ -342,10 +342,19 @@ class RejectionSampler(nn.Module):
             # ``bonus_token_forced``. Without a fresh ``update_state`` here, target
             # draft rows would reuse stale forcing state and greedy argmax can diverge
             # from plain (non-spec) decode.
-            holder.update_state(
-                output_token_ids,
+            # ``update_state`` strips ``len(spec)`` tokens from each row. The
+            # expanded ``output_token_ids`` above uses cumulative draft prefixes
+            # (last row has only K-1 drafts for K proposals), so passing it with
+            # ``repeat_indices`` would strip an accepted token. Use the same
+            # per-request layout as ``Sampler`` (accepted + full draft list).
+            thinking_rows = Sampler._combine_outputs_with_spec_tokens(
+                sampling_metadata.output_token_ids,
                 sampling_metadata.spec_token_ids,
-                repeat_indices,
+            )
+            holder.update_state(
+                thinking_rows,
+                sampling_metadata.spec_token_ids,
+                None,
             )
             logits = holder.apply_to_logits(
                 logits,
@@ -392,8 +401,10 @@ class RejectionSampler(nn.Module):
 
         result = []
         for out, spec in zip(output_token_ids, spec_token_ids):
+            # Requests with no draft tokens have no rows in ``target_logits`` (see
+            # ``repeat_indices`` in ``apply_logits_processors``). Do not emit a
+            # combined row here or penalties / bad words / thinking masks misalign.
             if len(spec) == 0:
-                result.append(out)
                 continue
             result.append(out)
             for i in range(len(spec) - 1):
