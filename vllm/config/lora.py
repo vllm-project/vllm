@@ -71,6 +71,9 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
+    enable_lora_overlap_loading: bool = False
+    """Run LoRA H2D weight copies on a side CUDA stream to overlap with
+    compute. Synchronises via a CUDA event before the next forward pass."""
 
     def compute_hash(self) -> str:
         """
