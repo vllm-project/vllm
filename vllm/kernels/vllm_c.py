@@ -10,10 +10,10 @@ current_platform.import_kernels()
 
 CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
+ROCM = current_platform.is_rocm()
 
-rms_no_var_size = (
-    lambda x, weight, epsilon, variance_size=None: variance_size is None
-    and (weight is None or weight.dtype == x.dtype)
+rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
+    variance_size is None and (weight is None or weight.dtype == x.dtype)
 )
 """vLLM kernel requires no variance_size override and matching input/weight dtype."""
 
@@ -28,16 +28,20 @@ def rms_norm(
         # Kernel requires weight tensor, pass ones
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
-    original_shape = x.shape
-    x = x.reshape(-1, original_shape[-1])
-    output = torch.empty_like(x)
+    if ROCM and x.dim() > 2:
+        original_shape = x.shape
+        x = x.view(-1, original_shape[-1])
+        output = torch.empty_like(x)
+        torch.ops._C.rms_norm(output, x, weight, epsilon)
+        return output.view(original_shape)
+
+    output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
-    return output.reshape(original_shape)
+    return output
 
 
-rms_add_no_var_size = (
-    lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
-    and (weight is None or weight.dtype == x.dtype)
+rms_add_no_var_size = lambda x, x_residual, weight, epsilon, variance_size=None: (
+    variance_size is None and (weight is None or weight.dtype == x.dtype)
 )
 """vLLM Kernel does not support variance_size parameter and requires
 matching input/weight dtype."""
@@ -61,9 +65,12 @@ def fused_add_rms_norm(
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
 
     assert variance_size is None
-    original_shape = x.shape
-    if x.dim() > 2:
-        x = x.reshape(-1, original_shape[-1])
-        x_residual = x_residual.reshape(-1, original_shape[-1])
+    if ROCM and x.dim() > 2:
+        original_shape = x.shape
+        x = x.view(-1, original_shape[-1])
+        x_residual = x_residual.view(-1, original_shape[-1])
+        torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
+        return x.view(original_shape), x_residual.view(original_shape)
+
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
-    return x.reshape(original_shape), x_residual.reshape(original_shape)
+    return x, x_residual
