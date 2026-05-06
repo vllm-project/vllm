@@ -228,11 +228,15 @@ class RoutedExperts(PluggableLayer):
         return None
 
     def update_expert_map(self):
-        # ep_size and ep_rank should already be updated
         # Update ExpertMapManager with new EP configuration
+        # The moe_parallel_config (including ep_size and ep_rank)
+        # should already be updated.
         # Note: ExpertMapManager.update() recalculates expert maps and
         # reinitializes routing tables internally.
-        self.expert_map_manager.update()
+        self.expert_map_manager.update(
+            self.moe_parallel_config,
+            global_num_experts=self.global_num_experts,
+        )
 
         # Update local attributes from ExpertMapManager
         self.update_expert_map_info()

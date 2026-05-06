@@ -223,12 +223,13 @@ def FusedMoE(
             "Redundant experts are only supported with EPLB."
         )
 
+    max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
     # Create expert map manager
     expert_map_manager = ExpertMapManager(
-        max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        max_num_batched_tokens=max_num_batched_tokens,
         top_k=top_k,
         global_num_experts=global_num_experts,
-        logical_num_experts=logical_num_experts,
         num_redundant_experts=num_redundant_experts,
         num_expert_group=num_expert_group,
         moe_parallel_config=moe_parallel_config,
@@ -295,7 +296,7 @@ def FusedMoE(
         in_dtype=moe_in_dtype,
         moe_backend=vllm_config.kernel_config.moe_backend,
         router_logits_dtype=router_logits_dtype,
-        max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+        max_num_tokens=max_num_batched_tokens,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
         activation=moe_activation,
