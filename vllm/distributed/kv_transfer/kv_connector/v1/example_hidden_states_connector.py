@@ -5,9 +5,12 @@ import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import partial
+from importlib.metadata import version
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
+from packaging.version import Version
+from safetensors.torch import load_file, save_file
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -57,7 +60,7 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
     lock_path = path + ".lock"
     with open(lock_path) as lf:
         fcntl.flock(lf, fcntl.LOCK_SH)  # sleeps until writer releases LOCK_EX
-        data = torch.load(path, map_location="cpu")
+        data = load_file(path, device="cpu")
     return data
 
 
@@ -169,6 +172,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self.cache_layers: list[str] = []  # set by self.register_kv_caches
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
+
+        if Version(version("safetensors")) < Version("0.8.0"):
+            logger.warning(
+                "safetensors < 0.8.0 holds the GIL during save_file, which "
+                "serializes the writer thread pool and hurts throughput. "
+                "Upgrade to safetensors >= 0.8.0 for better performance."
+            )
 
         assert self._vllm_config.speculative_config is not None, (
             "ExampleHiddenStatesConnector only works when using "
@@ -304,7 +314,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         """
         try:
             event.synchronize()
-            torch.save(tensors, filename)
+            save_file(tensors, filename)
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)  # releases LOCK_EX
@@ -434,7 +444,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         meta = ExampleHiddenStatesConnectorMetadata()
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
-            filename = os.path.join(self._storage_path, f"{new_req.req_id}.pt")
+            filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
             meta.add_request(
                 new_req.req_id,
                 filename=filename,

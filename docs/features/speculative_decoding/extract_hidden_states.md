@@ -75,7 +75,7 @@ The `kv_connector_extra_config` dict accepts these options:
 
 ## Output Format
 
-Each request produces a `.pt` file containing a dict with:
+Each request produces a `.safetensors` file containing:
 
 - **`hidden_states`** — shape `[num_tokens, num_extracted_layers, hidden_size]`
 - **`token_ids`** — shape `[num_tokens]`
