@@ -131,6 +131,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
         else:
             return [
@@ -138,6 +139,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
 
 
@@ -187,6 +189,10 @@ class CudaPlatformBase(Platform):
         # see https://github.com/pytorch/pytorch/issues/155668
         # for why and when it is needed
         _ = torch.zeros(1, device=device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
@@ -363,7 +369,6 @@ class CudaPlatformBase(Platform):
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
             "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
         )
 
         return selected_backend.get_path()
@@ -417,7 +422,6 @@ class CudaPlatformBase(Platform):
                 if is_backend_supported:
                     logger.info_once(
                         f"Using backend {vit_attn_backend} for vit attention",
-                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
@@ -545,6 +549,10 @@ class CudaPlatformBase(Platform):
         return cls.is_device_capability(90) or cls.is_device_capability_family(100)
 
     @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
@@ -570,7 +578,9 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+        )
 
 
 # NVML utils

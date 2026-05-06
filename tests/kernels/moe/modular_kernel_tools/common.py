@@ -46,6 +46,7 @@ from vllm.utils.import_utils import (
     has_deep_gemm,
     has_mori,
 )
+from vllm.utils.math_utils import next_power_of_2
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -604,13 +605,6 @@ def make_modular_kernel(
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
 ) -> mk.FusedMoEKernel:
-    def next_power_of_2(x):
-        import math
-
-        if x == 0:
-            return 1
-        return 2 ** math.ceil(math.log2(x))
-
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
         tp_size_=get_tensor_model_parallel_world_size(),

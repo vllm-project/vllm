@@ -37,6 +37,7 @@ from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
 from vllm.model_executor.models.parakeet import ParakeetExtractor, ProjectedParakeet
 from vllm.model_executor.models.radio import RadioModel, calc_seq_lens
 from vllm.model_executor.models.utils import (
+    WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -903,6 +904,12 @@ class NemotronH_Nano_VL_V2(
     requires_sequential_video_encoding = True
     """Temporarily needed for dynamic res video w/ conv3d, doesn't support bs>1 yet"""
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "language_model.backbone": "language_model.model",
+        },
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
@@ -1005,38 +1012,27 @@ class NemotronH_Nano_VL_V2(
             )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
-        n, w, h, c = x.size()
-        # N, W, H, C --> N, W, H * scale, C // scale
-        x = x.view(
-            n,
-            w,
-            int(h * scale_factor),
-            int(c / scale_factor),
-        )
-        # N, W, H * scale, C // scale --> N, H * scale, W, C // scale
-        x = x.permute(0, 2, 1, 3).contiguous()
-        # N, H * scale, W, C // scale -->
-        # N, H * scale, W * scale, C // (scale ** 2)
-        x = x.view(
-            n,
-            int(h * scale_factor),
-            int(w * scale_factor),
-            int(c / (scale_factor * scale_factor)),
-        )
+        n, h, w, c = x.size()
+        r = int(1 / scale_factor)
+        new_h = h // r
+        new_w = w // r
+        new_c = c * r * r
+
+        x = x.view(n, new_h, r, new_w, r, c)
         if self.ps_version == "v1":
             warnings.warn(
                 "In ps_version 'v1', the height and width have not "
                 "been swapped back, which results in a transposed image.",
                 stacklevel=2,
             )
+            x = x.permute(0, 3, 1, 2, 4, 5).reshape(n, new_w, new_h, new_c)
         else:
-            x = x.permute(0, 2, 1, 3).contiguous()
+            x = x.permute(0, 1, 3, 2, 4, 5).reshape(n, new_h, new_w, new_c)
         return x
 
     def pixel_shuffle_dynamic_res(
         self, x: torch.Tensor, *, imgs_sizes: list[tuple[int, int]]
     ) -> torch.Tensor:
-        scale_factor = self.downsample_ratio
         patch_dim = self.patch_size
         seq_lens = calc_seq_lens(imgs_sizes, patch_dim)
         splits = torch.split(x, seq_lens, dim=-2)
@@ -1045,22 +1041,8 @@ class NemotronH_Nano_VL_V2(
             h = imgs_sizes[i][0] // patch_dim
             w = imgs_sizes[i][1] // patch_dim
             sv = sv.reshape(sv.shape[0], h, w, -1)
-
-            n, h, w, c = sv.size()
-
-            sv = sv.view(n, h, int(w * scale_factor), int(c / scale_factor))
-            sv = sv.permute(0, 2, 1, 3).contiguous()
-            sv = sv.view(
-                n,
-                int(w * scale_factor),
-                int(h * scale_factor),
-                int(c / (scale_factor * scale_factor)),
-            )
-
-            if self.ps_version == "v2":
-                sv = sv.permute(0, 2, 1, 3).contiguous()
-
-            sv = sv.reshape(sv.shape[0], -1, sv.shape[-1])
+            sv = self.pixel_shuffle(sv, scale_factor=self.downsample_ratio)
+            sv = sv.flatten(1, 2)
             out.append(sv)
 
         x = torch.cat(out, dim=-2)
@@ -1142,7 +1124,9 @@ class NemotronH_Nano_VL_V2(
             )
         else:
             return NanoNemotronVLImagePixelInputs(
-                num_patches=kwargs.pop("image_num_patches"), **kwargs
+                pixel_values_flat=pixel_values_flat,
+                num_patches=kwargs.pop("image_num_patches"),
+                **kwargs,
             )
 
     def _process_image_input_dynamic(
@@ -1515,6 +1499,11 @@ class NemotronH_Nano_VL_V2(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        mm_config = self.model_config.multimodal_config
+        load_multimodal_weights = not all(
+            mm_config.get_limit_per_prompt(modality) == 0
+            for modality in ("image", "video", "audio")
+        )
         adapter_dict = dict(self.mlp1.named_parameters())
 
         def is_llm(name: str) -> bool:
@@ -1539,23 +1528,30 @@ class NemotronH_Nano_VL_V2(
                 # Strip 'language_model.' prefix for LLM weights
                 llm_weights.append((".".join(name.split(".")[1:]), w))
             elif is_adapter_weights((name, w)):
+                if not load_multimodal_weights:
+                    continue
                 # Load vision-language adapter weights directly
                 trimmed_name = ".".join(name.split(".")[1:])
                 param = adapter_dict[trimmed_name]
                 with torch.no_grad():
                     default_weight_loader(param, w)
             elif is_vision_weights(name):
+                if not load_multimodal_weights:
+                    continue
                 # Convert: vision_model.radio_model.* → radio_model.*
                 hf_key = name[len("vision_model.") :]  # Remove "vision_model." prefix
                 vision_weights.append((hf_key, w))
             elif is_sound_weights(name):
+                if not load_multimodal_weights:
+                    continue
                 assert self.sound_encoder is not None
                 sound_weights.append((name, w))
 
         self.language_model.load_weights(llm_weights)
-        self.vision_model.load_weights(vision_weights)
-        if self.sound_encoder is not None and len(sound_weights) > 0:
-            self.sound_encoder.load_weights(sound_weights)
+        if load_multimodal_weights:
+            self.vision_model.load_weights(vision_weights)
+            if self.sound_encoder is not None and len(sound_weights) > 0:
+                self.sound_encoder.load_weights(sound_weights)
 
     def get_vit_model_from_radio_config(self, hf_config):
         hf_config_vision = hf_config.vision_config

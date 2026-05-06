@@ -9,14 +9,14 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
 
 # --8<-- [start:logits_processor]
-@CustomOp.register("logits_processor")
-class LogitsProcessor(CustomOp):
+@PluggableLayer.register("logits_processor")
+class LogitsProcessor(PluggableLayer):
     """Process logits and apply logits processors from sampling metadata.
 
     This layer does the following:

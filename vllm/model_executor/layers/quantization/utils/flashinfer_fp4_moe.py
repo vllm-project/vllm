@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
+    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
@@ -341,6 +342,13 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        w13, w13_scale, w2, w2_scale, padded_hidden = (
+            align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        )
+        if layer.moe_config.hidden_dim_unpadded is None:
+            layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
+        layer.moe_config.hidden_dim = padded_hidden
+
         # Align weights for FI NVFP4 MoE kernels.
         min_alignment = 16 if is_gated else 128
         w13, w13_scale, w2, w2_scale, padded_intermediate = (

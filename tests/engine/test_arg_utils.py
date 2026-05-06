@@ -12,6 +12,7 @@ from pydantic import Field
 from vllm.config import AttentionConfig, CompilationConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
+    _expand_json_human_readable_numbers,
     contains_type,
     get_kwargs,
     get_type,
@@ -332,8 +333,6 @@ def test_attention_config():
             "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
-            "--attention-config.use_cudnn_prefill",
-            "true",
             "--attention-config.use_trtllm_ragged_deepseek_prefill",
             "true",
             "--attention-config.use_trtllm_attention",
@@ -351,7 +350,6 @@ def test_attention_config():
     assert engine_args.attention_config.flash_attn_version == 3
     assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
-    assert engine_args.attention_config.use_cudnn_prefill is True
     assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
     assert engine_args.attention_config.use_trtllm_attention is True
     assert engine_args.attention_config.disable_flashinfer_prefill is True
@@ -563,3 +561,32 @@ def test_ir_op_priority():
             ir_op_priority=ir_op_priority,
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
+
+
+@pytest.mark.parametrize(
+    ("input_json", "expected_json"),
+    [
+        # Decimal suffixes (lowercase)
+        ('{"x": 80g}', '{"x": 80000000000}'),
+        ('{"x": 1k}', '{"x": 1000}'),
+        ('{"x": 5m}', '{"x": 5000000}'),
+        ('{"x": 2t}', '{"x": 2000000000000}'),
+        # Binary suffixes (uppercase)
+        ('{"x": 1K}', f'{{"x": {2**10}}}'),
+        ('{"x": 1G}', f'{{"x": {2**30}}}'),
+        # Decimal values
+        ('{"x": 1.5g}', '{"x": 1500000000}'),
+        # Quoted strings must NOT be modified
+        ('{"my_key": 80g}', '{"my_key": 80000000000}'),
+        ('{"name": "80g"}', '{"name": "80g"}'),
+        ('{"model_name": "foo_bar"}', '{"model_name": "foo_bar"}'),
+        # Multiple values
+        ('{"a": 1k, "b": 2m}', '{"a": 1000, "b": 2000000}'),
+        # Plain numbers are untouched
+        ('{"x": 42}', '{"x": 42}'),
+        # Nested JSON
+        ('{"outer": {"inner": 10g}}', '{"outer": {"inner": 10000000000}}'),
+    ],
+)
+def test_expand_json_human_readable_numbers(input_json, expected_json):
+    assert _expand_json_human_readable_numbers(input_json) == expected_json

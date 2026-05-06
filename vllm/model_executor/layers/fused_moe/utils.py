@@ -4,6 +4,7 @@ import functools
 from math import prod
 
 import torch
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -21,6 +22,9 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    ref_nvfp4_quant_dequant,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
@@ -204,11 +208,12 @@ def _mxfp8_e4m3_quantize(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_sf_swizzled_layout: bool = False,
+    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None or block_shape == [1, 32]
-    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
+    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout, mx_alignment)
 
 
 def _mxfp6_e3m2_quantize(
@@ -253,6 +258,8 @@ def moe_kernel_quantize_input(
     block_shape: list[int] | None = None,
     is_fp4_scale_swizzled: bool = True,
     ocp_mx_scheme: str | None = None,
+    quantization_emulation: bool = False,
+    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
     if ocp_mx_scheme is not None:
@@ -274,26 +281,65 @@ def moe_kernel_quantize_input(
         # activation quantization below.
 
     if quant_dtype == current_platform.fp8_dtype():
+        if quantization_emulation:
+            raise NotImplementedError(
+                f"moe_kernel_quantize_input does not support quant_dtype={quant_dtype}"
+                " MOE quantization emulation. Please open an issue."
+            )
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
+        if quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input does not support quant_dtype=torch.int8"
+                " MOE quantization emulation. Please open an issue."
+            )
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "nvfp4":
-        return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
+        if not quantization_emulation:
+            return _nvfp4_quantize(
+                A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled
+            )
+        else:
+            A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
+            return A, None
     elif quant_dtype == "mxfp4":
+        if not quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input should not be used for native"
+                " quant_dtype='mxfp4' MOE. Please open an issue."
+            )
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
+        if quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
+                "quantization emulation. Please open an issue."
+            )
         return _mxfp8_e4m3_quantize(
             A,
             A_scale,
             per_act_token_quant,
             block_shape,
-            is_sf_swizzled_layout=is_fp4_scale_swizzled,
+            is_sf_swizzled_layout=False,
+            mx_alignment=mx_alignment,
         )
     elif quant_dtype == "mxfp6_e3m2":
+        if not quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input should not be used for native "
+                " quant_dtype='mxfp6_e3m2'MOE. Please open an issue."
+            )
+
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
+        if not quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input should not be used for native"
+                " quant_dtype='mxfp6_e2m3' MOE. Please open an issue."
+            )
+
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
@@ -343,3 +389,20 @@ def trtllm_moe_pack_topk_ids_weights(
     return (topk_ids.to(torch.int32) << 16) | topk_weights.to(torch.bfloat16).view(
         torch.int16
     )
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def swiglu_limit_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    swiglu_limit: float = 0.0,
+) -> None:
+    d = input.shape[1] // 2
+    gate = input[:, :d]
+    up = input[:, d:]
+
+    if swiglu_limit > 0:
+        gate = torch.clamp(gate, max=swiglu_limit)
+        up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
+
+    output.copy_(F.silu(gate) * up)

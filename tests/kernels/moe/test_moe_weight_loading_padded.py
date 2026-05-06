@@ -257,6 +257,41 @@ class TestWeightLoadingWithPaddedHiddenSize:
 
         assert torch.equal(expert_data_full, loaded_weight)
 
+    def test_narrow_shard_dim(self):
+        """Simulate loading w2 when both hidden_size and intermediate_size
+        are padded.
+        """
+        padded_hidden = 3072
+        original_hidden = 2688
+        padded_intermediate = 1024
+        original_intermediate = 896
+
+        expert_data_full = torch.zeros(padded_hidden, padded_intermediate)
+        loaded_weight = torch.randn(original_hidden, original_intermediate)
+
+        shard_dim = 1
+        hidden_dim = FusedMoE._get_hidden_dim(shard_dim=shard_dim, ndim=2)
+        expert_data = FusedMoE._narrow_expert_data_for_padding(
+            expert_data_full,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            shard_dim=shard_dim,
+        )
+        expert_data.copy_(loaded_weight)
+
+        assert torch.equal(
+            expert_data_full[:original_hidden, :original_intermediate],
+            loaded_weight,
+        )
+        assert torch.equal(
+            expert_data_full[original_hidden:, :],
+            torch.zeros(padded_hidden - original_hidden, padded_intermediate),
+        )
+        assert torch.equal(
+            expert_data_full[:original_hidden, original_intermediate:],
+            torch.zeros(original_hidden, padded_intermediate - original_intermediate),
+        )
+
     def test_bnb_shape_mismatch_raises(self):
         """BnB + padded hidden_size should raise via weight_loader."""
         from unittest.mock import MagicMock
