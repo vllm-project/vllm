@@ -7,6 +7,8 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from vllm.entrypoints.codec_compression import wrap_streaming_response
+from vllm.entrypoints.codec_frame import CONTENT_TYPE
 from vllm.entrypoints.openai.chat_completion.batch_serving import OpenAIServingChatBatch
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
@@ -69,6 +71,16 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         return JSONResponse(
             content=generator.model_dump(),
             headers=metrics_header(metrics_header_format),
+        )
+
+    if request.stream_format != "json":
+        media_type = CONTENT_TYPE.get(
+            request.stream_format, "application/x-msgpack"
+        )
+        return wrap_streaming_response(
+            raw_request.headers.get("accept-encoding", ""),
+            generator,
+            media_type=media_type,
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

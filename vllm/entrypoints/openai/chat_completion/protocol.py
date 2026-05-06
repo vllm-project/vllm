@@ -186,6 +186,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    stream_format: Literal["json", "msgpack", "protobuf"] = Field(
+        default="json",
+        description=(
+            "Binary wire format for streaming token output (Codec protocol). "
+            "'json' (default) uses the standard SSE/JSON path with full chat "
+            "structure (assistant role, tool calls, finish_reason). "
+            "'msgpack' / 'protobuf' stream raw token IDs as Codec frames — "
+            "no role headers, no tool-call parsing, no detokenization. "
+            "Setting a binary format implies stream=True and rejects n > 1. "
+            "The client is responsible for any chat-protocol decoding it needs "
+            "(e.g. running its own tool-call parser over the decoded text). "
+            "See GET /codec/schema for the protobuf schema."
+        ),
+    )
     temperature: float | None = None
     top_p: float | None = None
     tools: list[ChatCompletionToolsParam] | None = None
@@ -407,6 +421,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
             tool_calls = msg.get("tool_calls")
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_stream_format(cls, data):
+        # Mirror CompletionRequest.validate_stream_format. See completion/protocol.py.
+        if not isinstance(data, dict):
+            return data
+        fmt = data.get("stream_format", "json")
+        if fmt != "json":
+            data["stream"] = True
+            n = data.get("n", 1)
+            if isinstance(n, int) and n > 1:
+                raise VLLMValidationError(
+                    f"stream_format='{fmt}' does not support n > 1. "
+                    "Binary CodecFrame has no choice index field; multiple "
+                    "completion sequences cannot be demultiplexed by the client. "
+                    "Use n=1 or stream_format='json'."
+                )
         return data
 
     @model_validator(mode="after")

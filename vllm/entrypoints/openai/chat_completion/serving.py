@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Final
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.codec_frame import encode_frame
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -360,6 +361,14 @@ class OpenAIServingChat(OpenAIServing):
         (result_generator,) = generators
 
         if request.stream:
+            if request.stream_format != "json":
+                # Binary Codec path: emit raw token IDs only. No role headers,
+                # no tool-call parsing, no reasoning-content split. The client
+                # owns any chat-protocol decoding it wants to do over the
+                # decoded text.
+                return self.chat_completion_binary_stream_generator(
+                    request, result_generator
+                )
             return self.chat_completion_stream_generator(
                 request,
                 result_generator,
@@ -1144,6 +1153,49 @@ class OpenAIServingChat(OpenAIServing):
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
+
+    async def chat_completion_binary_stream_generator(
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+    ) -> AsyncIterator[bytes]:
+        """Stream raw token IDs as Codec binary frames for chat completions.
+
+        Symmetric with the completion endpoint's binary path: drop role
+        headers, finish_reason structures, tool-call parsing, and reasoning
+        splits — emit only `CodecFrame { ids, done, finish_reason? }` per
+        chunk. The client (e.g. @codecai/web) decodes the IDs and runs any
+        chat-protocol parsing it wants over the decoded text.
+
+        Validation in `ChatCompletionRequest.validate_stream_format` already
+        forced `stream=True` and rejected `n > 1`, so we expect exactly one
+        choice per chunk.
+        """
+        try:
+            async for res in result_generator:
+                if not res.outputs:
+                    continue
+                output = res.outputs[0]
+                ids = list(output.token_ids) if output.token_ids else []
+                finish_reason = output.finish_reason
+                done = finish_reason is not None
+                yield encode_frame(
+                    request.stream_format,
+                    ids,
+                    done=done,
+                    finish_reason=finish_reason,
+                )
+                if done:
+                    return
+        except GenerationError:
+            yield encode_frame(
+                request.stream_format, [], done=True, finish_reason="error"
+            )
+        except Exception:
+            logger.exception("Error in chat completion binary stream generator.")
+            yield encode_frame(
+                request.stream_format, [], done=True, finish_reason="error"
+            )
 
     async def chat_completion_full_generator(
         self,
