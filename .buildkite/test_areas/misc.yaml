@@ -224,7 +224,7 @@ steps:
 - label: Batch Invariance (B200)
   key: batch-invariance-b200
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers
