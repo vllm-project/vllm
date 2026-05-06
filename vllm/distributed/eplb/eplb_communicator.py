@@ -223,10 +223,12 @@ def create_eplb_communicator(
             try:
                 from nccl.core.interop.torch import _to_nccl_dtype
                 from nccl.core.typing import NcclInvalid
-
+            except ImportError:
+                return False
+            try:
                 _to_nccl_dtype(dtype)
                 return True
-            except (ImportError, NcclInvalid):
+            except NcclInvalid:
                 return False
 
         unsupported_dtypes = sorted(
