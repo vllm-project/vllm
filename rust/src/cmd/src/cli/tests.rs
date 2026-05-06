@@ -49,6 +49,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         disable_log_stats: false,
+                        served_model_name: [],
                     },
                     python_args: [
                         "--dtype",
@@ -210,6 +211,7 @@ fn frontend_args_accept_json() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         disable_log_stats: false,
+                        served_model_name: [],
                     },
                 },
             ),
@@ -596,6 +598,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         disable_log_stats: false,
+                        served_model_name: [],
                     },
                     python_args: [],
                 },
@@ -690,6 +693,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
                 port: 8000,
@@ -751,6 +755,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
+            served_model_name: [],
             listener_mode: BindTcp {
                 host: "127.0.0.1",
                 port: 8000,
@@ -828,6 +833,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 address: "tcp://127.0.0.1:7000",
             },
             model: "Qwen/Qwen3-0.6B",
+            served_model_name: [],
             listener_mode: InheritedFd {
                 fd: 3,
             },

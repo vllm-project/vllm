@@ -263,7 +263,7 @@ async fn http_test_server(
         test_llm(client),
         Arc::new(FakeChatBackend) as Arc<dyn ChatTextBackend>,
     );
-    let state = Arc::new(AppState::new("test-model", chat));
+    let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     let app = build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind http listener");

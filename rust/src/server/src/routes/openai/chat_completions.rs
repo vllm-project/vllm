@@ -50,7 +50,7 @@ pub async fn chat_completions(
     let stream = body.stream;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
 
-    let prepared = match prepare_chat_request(body, &state.model_id, request_context) {
+    let prepared = match prepare_chat_request(body, state.served_model_names(), request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };

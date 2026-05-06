@@ -29,12 +29,15 @@ pub struct PreparedRequest {
 
 /// Validate and lower one OpenAI completions request into the internal
 /// text-generation format.
+///
+/// `served_model_names` must be non-empty; the first entry is used as the
+/// `model` field in responses.
 pub(crate) fn prepare_completion_request(
     request: CompletionRequest,
-    configured_model: &str,
+    served_model_names: &[String],
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, configured_model)?;
+    validate::validate_request_compat(&request, served_model_names)?;
 
     let request_id = format!("cmpl-{}", ctx.request_id);
 
@@ -104,7 +107,7 @@ pub(crate) fn prepare_completion_request(
 
     Ok(PreparedRequest {
         request_id,
-        response_model: configured_model.to_string(),
+        response_model: served_model_names.first().cloned().unwrap_or_default(),
         include_usage,
         text_request,
         echo,
@@ -125,6 +128,10 @@ mod tests {
 
     fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
         resolve_request_context(headers, request_id)
+    }
+
+    fn served(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
     }
 
     fn base_request_json() -> serde_json::Value {
@@ -182,7 +189,7 @@ mod tests {
 
         let prepared = prepare_completion_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
@@ -226,7 +233,7 @@ mod tests {
 
         let prepared = prepare_completion_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
@@ -248,7 +255,7 @@ mod tests {
 
         let prepared = prepare_completion_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
@@ -273,7 +280,7 @@ mod tests {
         assert!(
             prepare_completion_request(
                 request,
-                "Qwen/Qwen1.5-0.5B-Chat",
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
             )
             .is_err()
@@ -293,7 +300,7 @@ mod tests {
 
         let prepared = prepare_completion_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
@@ -317,7 +324,7 @@ mod tests {
         headers.insert("X-data-parallel-rank", "3".parse().unwrap());
         let prepared = prepare_completion_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
         )
         .expect("prepare");
@@ -335,7 +342,7 @@ mod tests {
 
         let prepared = prepare_completion_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("prepare");

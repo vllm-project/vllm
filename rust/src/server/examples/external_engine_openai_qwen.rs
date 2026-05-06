@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         },
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
+        served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {
             host: "127.0.0.1".to_string(),
             port,

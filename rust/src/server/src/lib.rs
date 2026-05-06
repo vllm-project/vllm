@@ -76,8 +76,16 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone());
 
+    // If no served names are specified, fall back to the backend model path so
+    // that the API always has at least one valid model ID.
+    let served_model_names = if config.served_model_name.is_empty() {
+        vec![config.model.clone()]
+    } else {
+        config.served_model_name.clone()
+    };
+
     Ok(Arc::new(
-        AppState::new(config.model.clone(), chat).with_log_requests(config.enable_log_requests),
+        AppState::new(served_model_names, chat).with_log_requests(config.enable_log_requests),
     ))
 }
 
@@ -98,7 +106,7 @@ pub async fn serve(config: Config, shutdown: CancellationToken) -> Result<()> {
         .await
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr()?;
-    let model = state.model_id.clone();
+    let model = state.primary_model_name().to_owned();
     let app = build_router(state.clone());
 
     // Optionally bind the gRPC Generate server on a separate port. Bind

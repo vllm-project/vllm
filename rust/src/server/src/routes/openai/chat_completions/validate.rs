@@ -5,9 +5,9 @@ use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolCho
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &ChatCompletionRequest,
-    configured_model: &str,
+    served_model_names: &[String],
 ) -> Result<(), ApiError> {
-    if request.model != configured_model {
+    if !served_model_names.iter().any(|n| n == &request.model) {
         return Err(ApiError::model_not_found(request.model.clone()));
     }
 
@@ -190,6 +190,10 @@ mod tests {
         ToolChoiceValue, ToolReference,
     };
 
+    fn served(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
             model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
@@ -209,7 +213,7 @@ mod tests {
             ..base_request()
         };
 
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("stop strings should be accepted");
     }
 
@@ -223,7 +227,7 @@ mod tests {
             seed: Some(7),
             ..base_request()
         };
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("sampling fields should be accepted");
 
         let request = ChatCompletionRequest {
@@ -238,7 +242,7 @@ mod tests {
             }]),
             ..base_request()
         };
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("function tools should be accepted");
 
         let request = ChatCompletionRequest {
@@ -257,7 +261,7 @@ mod tests {
             }],
             ..base_request()
         };
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("developer function tools should be accepted");
     }
 
@@ -280,7 +284,7 @@ mod tests {
             ..base_request()
         };
 
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
@@ -289,7 +293,7 @@ mod tests {
             logprobs: true,
             ..base_request()
         };
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("logprobs should be accepted");
     }
 
@@ -304,7 +308,7 @@ mod tests {
             ..base_request()
         };
 
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("reasoning_effort should be accepted");
     }
 
@@ -314,7 +318,7 @@ mod tests {
             top_logprobs: Some(0),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
@@ -323,13 +327,13 @@ mod tests {
             prompt_logprobs: Some(1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
 
         let request = ChatCompletionRequest {
             prompt_logprobs: Some(-1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
@@ -339,7 +343,7 @@ mod tests {
             prompt_logprobs: Some(-2),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
@@ -348,14 +352,14 @@ mod tests {
             response_format: Some(ResponseFormat::Text),
             ..base_request()
         };
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("response_format=text should be accepted");
 
         let request = ChatCompletionRequest {
             response_format: Some(ResponseFormat::JsonObject),
             ..base_request()
         };
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("response_format=json_object should be accepted");
     }
 
@@ -366,7 +370,7 @@ mod tests {
             ..base_request()
         };
 
-        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("tool_choice=none is ok");
     }
 
@@ -376,7 +380,7 @@ mod tests {
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
             ..base_request()
         };
-        assert!(validate_request_compat(&required, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&required, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
 
         let named = ChatCompletionRequest {
             tool_choice: Some(ToolChoice::Function {
@@ -387,7 +391,7 @@ mod tests {
             }),
             ..base_request()
         };
-        assert!(validate_request_compat(&named, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&named, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
 
         let allowed_tools = ChatCompletionRequest {
             tool_choice: Some(ToolChoice::AllowedTools {
@@ -399,6 +403,8 @@ mod tests {
             }),
             ..base_request()
         };
-        assert!(validate_request_compat(&allowed_tools, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(
+            validate_request_compat(&allowed_tools, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
     }
 }

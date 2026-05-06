@@ -6,12 +6,12 @@ use crate::error::{ApiError, bail_invalid_request};
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
     request: &CompletionRequest,
-    configured_model: &str,
+    served_model_names: &[String],
 ) -> Result<(), ApiError> {
     // This path is intentionally scoped to the minimum surface needed by
     // `vllm-bench` random workload compatibility, so unsupported legacy
     // completions features fail early here.
-    if request.model != configured_model {
+    if !served_model_names.iter().any(|n| n == &request.model) {
         return Err(ApiError::model_not_found(request.model.clone()));
     }
 
@@ -120,13 +120,37 @@ mod tests {
         .expect("parse request")
     }
 
+    fn served_names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn validate_request_compat_accepts_logprobs() {
         let request = CompletionRequest {
             logprobs: Some(1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_ok());
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_any_served_name() {
+        let request = base_request();
+        assert!(
+            validate_request_compat(
+                &request,
+                &served_names(&["other-alias", "Qwen/Qwen1.5-0.5B-Chat"])
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_unknown_model() {
+        let request = base_request();
+        assert!(validate_request_compat(&request, &served_names(&["other-model"])).is_err());
     }
 
     #[test]
@@ -135,7 +159,9 @@ mod tests {
             prompt_logprobs: Some(1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
     }
 
     #[test]
@@ -145,6 +171,8 @@ mod tests {
             prompt_logprobs: Some(-1),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_ok());
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_ok()
+        );
     }
 }

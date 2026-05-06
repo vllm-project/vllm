@@ -18,10 +18,10 @@ pub struct PreparedRequest {
 /// text-generation format.
 pub fn prepare_generate_request(
     request: GenerateRequest,
-    configured_model: &str,
+    served_model_names: &[String],
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, configured_model)?;
+    validate::validate_request_compat(&request, served_model_names)?;
 
     let include_logprobs = request.sampling_params.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
@@ -81,7 +81,7 @@ mod tests {
 
         let prepared = prepare_generate_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             ResolvedRequestContext::default(),
         )
         .expect("prepare");

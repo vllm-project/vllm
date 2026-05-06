@@ -5,10 +5,10 @@ use crate::error::{ApiError, bail_invalid_request};
 /// route.
 pub(super) fn validate_request_compat(
     request: &GenerateRequest,
-    configured_model: &str,
+    served_model_names: &[String],
 ) -> Result<(), ApiError> {
     if let Some(model) = request.model.as_ref()
-        && model != configured_model
+        && !served_model_names.iter().any(|n| n == model)
     {
         return Err(ApiError::model_not_found(model.clone()));
     }
@@ -60,13 +60,17 @@ mod tests {
         .expect("parse request")
     }
 
+    fn served(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn validate_request_compat_rejects_streaming() {
         let request = GenerateRequest {
             stream: true,
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
@@ -75,6 +79,6 @@ mod tests {
             token_ids: Vec::new(),
             ..base_request()
         };
-        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 }

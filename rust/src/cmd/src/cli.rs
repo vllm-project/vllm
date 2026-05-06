@@ -168,6 +168,17 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub disable_log_stats: bool,
 
+    /// The model name(s) used in the API. If multiple names are provided, the
+    /// server will respond to any of the provided names. The model name in the
+    /// model field of a response will be the first name in this list. If not
+    /// specified, the model name will be the same as the `--model` argument.
+    /// Noted that this name(s) will also be used in `model_name` tag
+    /// content of prometheus metrics, if multiple names provided, metrics
+    /// tag will take the first one.
+    #[arg(long, num_args = 0..)]
+    #[serde(default)]
+    pub served_model_name: Vec<String>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -215,6 +226,7 @@ impl SharedRuntimeArgs {
                 None => CoordinatorMode::None,
             },
             model: self.model,
+            served_model_name: self.served_model_name,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
@@ -254,6 +266,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
+            served_model_name: self.served_model_name,
             listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,

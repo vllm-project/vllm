@@ -246,7 +246,7 @@ async fn grpc_test_server(
         test_llm(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let state = Arc::new(AppState::new("test-model", chat));
+    let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     let svc = GenerateServer::new(GenerateServiceImpl::new(state));
 
     // Bind to an OS-assigned port.

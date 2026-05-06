@@ -40,12 +40,15 @@ pub struct PreparedRequest {
 
 /// Validate and lower one OpenAI chat completion request into the internal chat
 /// format.
+///
+/// `served_model_names` must be non-empty; the first entry is used as the
+/// `model` field in responses.
 pub(crate) fn prepare_chat_request(
     request: ChatCompletionRequest,
-    configured_model: &str,
+    served_model_names: &[String],
     ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
-    validate::validate_request_compat(&request, configured_model)?;
+    validate::validate_request_compat(&request, served_model_names)?;
 
     let request_id = format!("chatcmpl-{}", ctx.request_id);
     let echo = request
@@ -132,7 +135,7 @@ pub(crate) fn prepare_chat_request(
 
     Ok(PreparedRequest {
         request_id,
-        response_model: configured_model.to_string(),
+        response_model: served_model_names.first().cloned().unwrap_or_default(),
         include_usage,
         requested_logprobs,
         include_prompt_logprobs,
@@ -354,6 +357,10 @@ mod tests {
         resolve_request_context(headers, request_id)
     }
 
+    fn served(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
     fn base_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
             model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
@@ -384,7 +391,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -423,7 +430,7 @@ mod tests {
     fn prepare_chat_request_keeps_optional_sampling_fields_unset() {
         let prepared = prepare_chat_request(
             base_request(),
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -467,7 +474,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -506,7 +513,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -546,7 +553,7 @@ mod tests {
         assert!(
             prepare_chat_request(
                 request,
-                "Qwen/Qwen1.5-0.5B-Chat",
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
             )
             .is_err()
@@ -572,7 +579,7 @@ mod tests {
         assert!(
             prepare_chat_request(
                 request,
-                "Qwen/Qwen1.5-0.5B-Chat",
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
             )
             .is_err()
@@ -599,7 +606,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -635,7 +642,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -692,7 +699,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -735,7 +742,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -760,7 +767,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -776,7 +783,7 @@ mod tests {
         headers.insert("X-data-parallel-rank", "7".parse().unwrap());
         let prepared = prepare_chat_request(
             base_request(),
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
         )
         .expect("request is valid");
@@ -787,7 +794,7 @@ mod tests {
     fn prepare_chat_request_leaves_data_parallel_rank_none_when_absent() {
         let prepared = prepare_chat_request(
             base_request(),
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -801,7 +808,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -820,7 +827,7 @@ mod tests {
 
         let error = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .unwrap_err();
@@ -842,7 +849,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");
@@ -860,7 +867,7 @@ mod tests {
 
         let error = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .unwrap_err();
@@ -883,7 +890,7 @@ mod tests {
 
         let prepared = prepare_chat_request(
             request,
-            "Qwen/Qwen1.5-0.5B-Chat",
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
         )
         .expect("request is valid");

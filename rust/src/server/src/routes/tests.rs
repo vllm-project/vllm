@@ -614,7 +614,10 @@ async fn test_app() -> axum::Router {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)))
+    build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )))
 }
 
 async fn test_health_app_with_engine_script<F>(
@@ -642,7 +645,10 @@ where
     .expect("connect client");
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let state = Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat));
+    let state = Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    ));
     (build_router(state.clone()), state, engine_task)
 }
 
@@ -671,7 +677,10 @@ where
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
         build_router_with_dev_mode(
-            Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)),
+            Arc::new(AppState::new(
+                vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+                chat,
+            )),
             true,
         ),
         engine_task,
@@ -692,7 +701,10 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat))),
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
         engine_task,
     )
 }
@@ -704,7 +716,10 @@ async fn test_app_with_backend_and_stream_output_specs(
     let (chat, engine_task) =
         test_models_with_engine_outputs_and_backend(b"engine-openai", output_specs, backend).await;
     (
-        build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat))),
+        build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        ))),
         engine_task,
     )
 }
@@ -998,7 +1013,10 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -1648,7 +1666,10 @@ async fn non_stream_completions_include_logprobs() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -1747,7 +1768,10 @@ async fn non_stream_completions_include_prompt_logprobs() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -1830,7 +1854,10 @@ async fn non_stream_chat_completions_still_succeed() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -1887,7 +1914,10 @@ async fn non_stream_completions_still_succeed() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -1951,7 +1981,10 @@ async fn chat_completions_header_request_id_takes_precedence() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -2045,7 +2078,10 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .call(
@@ -2353,7 +2389,7 @@ async fn prepared_openai_request_streams_text_events() {
             "messages": [{"role": "user", "content": "hello"}]
         }))
         .expect("decode request"),
-        "Qwen/Qwen1.5-0.5B-Chat",
+        &["Qwen/Qwen1.5-0.5B-Chat".to_string()],
         crate::utils::ResolvedRequestContext::default(),
     )
     .expect("prepare request");
@@ -2597,7 +2633,10 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
         test_llm(client),
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
     );
-    let app = build_router(Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)));
+    let app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
 
     let response = app
         .clone()
@@ -3002,7 +3041,10 @@ async fn is_sleeping_route_returns_json_payload() {
 async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
     let app = build_router_with_dev_mode(
-        Arc::new(AppState::new("Qwen/Qwen1.5-0.5B-Chat", chat)),
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
         false,
     );
 

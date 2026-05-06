@@ -10,8 +10,9 @@ const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Shared router state for the minimal single-model OpenAI server.
 pub struct AppState {
-    /// Public model ID returned by `/v1/models` and validated on chat requests.
-    pub model_id: String,
+    /// All public model IDs served by this frontend. The first entry is the
+    /// primary ID used in responses; all entries are valid in requests.
+    served_model_names: Vec<String>,
     /// Shared chat facade used by all requests.
     pub chat: ChatLlm,
     /// Whether to log a summary line for each completed request.
@@ -22,9 +23,20 @@ pub struct AppState {
 
 impl AppState {
     /// Construct one application state instance.
-    pub fn new(model_id: impl Into<String>, chat: ChatLlm) -> Self {
+    ///
+    /// `served_model_names` must be non-empty; the first entry is the primary
+    /// model ID returned in API responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `served_model_names` is empty.
+    pub fn new(served_model_names: Vec<String>, chat: ChatLlm) -> Self {
+        assert!(
+            !served_model_names.is_empty(),
+            "served_model_names must not be empty"
+        );
         Self {
-            model_id: model_id.into(),
+            served_model_names,
             chat,
             enable_log_requests: false,
             server_load: AtomicU64::new(0),
@@ -35,6 +47,17 @@ impl AppState {
     pub fn with_log_requests(mut self, enabled: bool) -> Self {
         self.enable_log_requests = enabled;
         self
+    }
+
+    /// The primary model name echoed back in API responses (the first served
+    /// name).
+    pub fn primary_model_name(&self) -> &str {
+        self.served_model_names.first().map(String::as_str).unwrap_or_default()
+    }
+
+    /// All model names served by this frontend.
+    pub fn served_model_names(&self) -> &[String] {
+        &self.served_model_names
     }
 
     /// Return a reference to the underlying engine core client for utility

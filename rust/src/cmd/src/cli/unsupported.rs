@@ -234,16 +234,6 @@ pub struct EngineUnsupportedArgs {
     )]
     pub enable_prompt_embeds: Option<Unsupported>,
 
-    /// The model name(s) used in the API. If multiple names are provided, the
-    /// server will respond to any of the provided names. The model name in the
-    /// model field of a response will be the first name in this list. If not
-    /// specified, the model name will be the same as the `--model` argument.
-    /// Noted that this name(s) will also be used in `model_name` tag
-    /// content of prometheus metrics, if multiple names provided, metrics
-    /// tag will take the first one.
-    #[arg(long)]
-    pub served_model_name: Option<Unsupported>,
-
     /// The token to use as HTTP bearer authorization for remote files. If
     /// `True`, will use the token generated when running `hf auth login`
     /// (stored in `~/.cache/huggingface/token`).
