@@ -587,17 +587,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def update_packed_mapping(self, enable_lora: bool):
-        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
-        if enable_lora:
-            base = getattr(
-                Qwen3_5ForConditionalGeneration, "packed_modules_mapping", {}
-            )
-            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
-            self.packed_modules_mapping.pop("in_proj_qkvz", None)
-            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
-            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
-
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
