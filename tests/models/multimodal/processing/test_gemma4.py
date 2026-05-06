@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from PIL import Image as PILImage
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -64,6 +65,65 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
         f"image processor enforces on its vision tower output. This is "
         f"the placeholder/encoder count mismatch that crashes EngineCore."
     )
+
+
+@pytest.mark.parametrize(
+    ("mm_processor_kwargs", "expected_image_tokens"),
+    [
+        ({}, 280),
+        ({"max_soft_tokens": 70}, 70),
+        ({"max_soft_tokens": 280}, 280),
+        ({"max_soft_tokens": 1120}, 1120),
+        ({"images_kwargs": {"max_soft_tokens": 560}}, 560),
+        ({"images_kwargs": None}, 280),
+        ({"images_kwargs": "not-a-dict"}, 280),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
+    expected_image_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs=mm_processor_kwargs,
+        limit_mm_per_prompt={"image": 1, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"image": 1, "video": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["image"] == expected_image_tokens
+    assert tokens["video"] == 32 * (70 + 2 + 6)
+
+
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
+    ctx = build_model_context(
+        model_id,
+        mm_processor_kwargs={"images_kwargs": {"max_soft_tokens": 560}},
+        limit_mm_per_prompt={"image": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    image = PILImage.new("RGB", (1000, 1000), color="white")
+    image_size = image.size
+    mm_items = processor.info.parse_mm_data({"image": image})
+
+    prompt_update = processor._get_prompt_updates(mm_items, {}, {})[0]
+    replacement = prompt_update.resolve(0).content.full
+    expected = processor.info.get_image_repl(
+        image_width=image_size[0],
+        image_height=image_size[1],
+        processor=processor.info.get_hf_processor(),
+        max_soft_tokens=560,
+    ).full
+
+    assert replacement == expected
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
