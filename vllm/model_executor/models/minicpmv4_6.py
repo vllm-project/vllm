@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import MiniCPMV4_6Config
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -22,7 +23,6 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.minicpmv4_6 import MiniCPMV4_6Config
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (
