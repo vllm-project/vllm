@@ -498,10 +498,24 @@ def set_global_experts_capturer(capturer: RoutedExpertsCapturer):
 
 def extract_routed_experts_for_current_batch(
     req_ids: list[str],
+    requests: dict,
+    req_id_to_index: dict[str, int],
+    num_tokens_no_spec: np.ndarray,
+    max_model_len: int,
 ) -> dict[str, tuple] | None:
-    """Package routed-experts data for every active request with a
-    non-empty host-cache buffer this step. Finish detection is the
-    scheduler's responsibility."""
+    """Extract routed experts for requests predicted to finish this step.
+
+    Checks all stop conditions the scheduler will check (max_tokens,
+    EOS token, stop tokens, max_model_len) so that every finished
+    request gets its routing data attached to the ModelRunnerOutput.
+
+    Args:
+        req_ids: Ordered request IDs for the current batch.
+        requests: Map of req_id to CachedRequestState (read-only).
+        req_id_to_index: Map of req_id to input batch index.
+        num_tokens_no_spec: Array of total token counts per request index.
+        max_model_len: Maximum model sequence length.
+    """
     capturer = get_global_experts_capturer()
     if capturer is None:
         return None
@@ -509,18 +523,55 @@ def extract_routed_experts_for_current_batch(
     if host_cache is None:
         return None
 
-    candidate_req_ids = [
-        req_id for req_id in req_ids if host_cache.get_filled_len(req_id) > 0
-    ]
-    if not candidate_req_ids:
+    finishing_req_ids: list[str] = []
+    for req_id in req_ids:
+        req_state = requests.get(req_id)
+        if req_state is None:
+            continue
+        sp = req_state.sampling_params
+        if sp is None:
+            continue
+        output_ids = req_state.output_token_ids
+        if not output_ids:
+            continue
+        if len(output_ids) < sp.min_tokens:
+            continue
+
+        finishing = False
+        last_token = output_ids[-1]
+
+        # EOS token (mirrors check_stop: eos_token_id is None
+        # when ignore_eos=True, so this naturally respects that)
+        if last_token == sp.eos_token_id:
+            finishing = True
+
+        # Explicit stop token IDs
+        if not finishing and sp.stop_token_ids and last_token in sp.stop_token_ids:
+            finishing = True
+
+        # max_tokens / max_model_len length cap
+        if not finishing:
+            if sp.max_tokens is not None and len(output_ids) >= sp.max_tokens:
+                finishing = True
+            else:
+                req_idx = req_id_to_index.get(req_id)
+                if req_idx is not None:
+                    total = num_tokens_no_spec[req_idx]
+                    if total >= max_model_len:
+                        finishing = True
+
+        if finishing:
+            finishing_req_ids.append(req_id)
+
+    if not finishing_req_ids:
         return None
 
-    # Ensure the latest async D2H copy has been scattered into the host
-    # cache before reading.
+    # At least one request is finishing: ensure the latest async D2H
+    # copy has been scattered into the host cache.
     capturer.finalize_pending_copy()
 
     result: dict[str, tuple] = {}
-    for req_id in candidate_req_ids:
+    for req_id in finishing_req_ids:
         seqlen = host_cache.get_filled_len(req_id)
         if seqlen <= 0:
             continue
