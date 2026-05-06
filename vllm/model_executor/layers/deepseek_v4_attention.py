@@ -29,8 +29,8 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     fused_q_kv_rmsnorm,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    rocm_forward_decode_fallback,
     rocm_inv_rope_einsum,
+    rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
 )
 
@@ -840,7 +840,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_lens = swa_metadata.decode_swa_lens
 
         if current_platform.is_rocm():
-            rocm_forward_decode_fallback(
+            rocm_sparse_attn_decode(
                 q=q,
                 kv_cache=kv_cache,
                 swa_k_cache=self.swa_cache_layer.kv_cache,
@@ -1030,6 +1030,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     topk_length=combined_lens,
                     scale=self.scale,
                     head_dim=self.head_dim,
+                    nope_head_dim=self.nope_head_dim,
+                    rope_head_dim=self.rope_head_dim,
                     attn_sink=self.attn_sink,
                     output=output[query_start:query_end],
                 )
@@ -1043,7 +1045,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     topk_length=combined_lens,
                     out=output[query_start:query_end],
                 )
-
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def __init__(
