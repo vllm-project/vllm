@@ -7,7 +7,6 @@ from itertools import islice
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -716,12 +715,15 @@ class DeepseekV4MoE(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.prefix = prefix
-        if vllm_config.parallel_config.enable_expert_parallel:
-            self.use_mega_moe = (
-                vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        )
+        if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "DeepSeek V4 MegaMoE currently requires expert parallel. "
+                "Enable it with --enable-expert-parallel, or pick a different "
+                "moe backend."
             )
-        else:
-            self.use_mega_moe = False
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hidden_size = config.hidden_size
@@ -854,10 +856,9 @@ class DeepseekV4MoE(nn.Module):
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
-        if self.gate.tid2eid is not None:
-            if input_ids is None:
-                raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
-            input_ids = input_ids.to(dtype=self.hash_indices_dtype)
+        if self.gate.tid2eid is not None and input_ids is None:
+            raise ValueError("DeepSeek V4 hash MoE routing requires input_ids.")
+
         if not self.use_mega_moe:
             return self._forward_fused_moe(hidden_states, input_ids)
 
@@ -1225,7 +1226,15 @@ class DeepseekV4Model(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
+        )
+        if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
+            raise NotImplementedError(
+                "DeepSeek V4 MegaMoE currently requires expert parallel. "
+                "Enable it with --enable-expert-parallel, or pick a different "
+                "moe backend."
+            )
         self.vocab_size = config.vocab_size
         self.hc_eps = config.hc_eps
         self.hc_mult = config.hc_mult
@@ -1236,7 +1245,12 @@ class DeepseekV4Model(nn.Module):
         # DeepseekV4MultiHeadLatentAttentionWrapper.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
-        aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        # Disable them on ROCm because of hang issues.
+        aux_stream_list = (
+            None
+            if current_platform.is_rocm()
+            else [torch.cuda.Stream() for _ in range(3)]
+        )
 
         self.device = current_platform.device_type
         # Reserved topk indices buffer for all Indexer layers to reuse.
@@ -1309,7 +1323,8 @@ class DeepseekV4Model(nn.Module):
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.embed_input_ids(input_ids)
         hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
-
+        if self.use_mega_moe:
+            input_ids = input_ids.to(torch.int64)
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(
                 hidden_states,
@@ -1451,14 +1466,25 @@ def hc_head(
     rms_norm_eps: float,
     hc_eps: float,
 ) -> torch.Tensor:
-    x = hidden_states
-    shape, dtype = x.size(), x.dtype
-    x = x.flatten(1).float()
-    rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + rms_norm_eps)
-    mixes = F.linear(x, hc_fn) * rsqrt
-    pre = torch.sigmoid(mixes * hc_scale + hc_base) + hc_eps
-    y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
-    return y.to(dtype)
+    hc_mult, hidden_size = hidden_states.shape[-2:]
+    outer_shape = hidden_states.shape[:-2]
+    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+    num_tokens = hs_flat.shape[0]
+    out = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+    )
+    torch.ops.vllm.hc_head_fused_kernel(
+        hs_flat,
+        hc_fn,
+        hc_scale,
+        hc_base,
+        out,
+        hidden_size,
+        rms_norm_eps,
+        hc_eps,
+        hc_mult,
+    )
+    return out.view(*outer_shape, hidden_size)
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
