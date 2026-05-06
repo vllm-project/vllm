@@ -72,7 +72,74 @@ else()
 endif()
 
 #
-# Update cmake's `CMAKE_PREFIX_PATH` with torch location.
+# POWER8/ppc64le CPU-only build path: Skip CUDA/GPU entirely
+# For CPU builds, we get torch paths without importing torch (avoids NumPy ABI issues)
+#
+if (VLLM_TARGET_DEVICE STREQUAL "cpu")
+    message(STATUS "CPU-only build requested, skipping GPU configuration")
+
+    # Get torch site-packages path without importing torch (avoids NumPy ABI issues)
+    execute_process(
+        COMMAND ${VLLM_PYTHON_EXECUTABLE} -c "import site; import os; sp = [p for p in site.getsitepackages() if 'site-packages' in p]; print(os.path.join(sp[0], 'torch') if sp else '')"
+        OUTPUT_VARIABLE TORCH_ROOT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE TORCH_PATH_RESULT)
+
+    if(NOT TORCH_PATH_RESULT EQUAL 0 OR NOT EXISTS "${TORCH_ROOT}")
+        message(FATAL_ERROR "Failed to find torch installation. TORCH_ROOT=${TORCH_ROOT}")
+    endif()
+
+    message(STATUS "Found torch at: ${TORCH_ROOT}")
+
+    # Set Torch_DIR for find_package
+    set(Torch_DIR "${TORCH_ROOT}/share/cmake/Torch")
+    message(STATUS "Using Torch cmake dir: ${Torch_DIR}")
+
+    # Programmatically disable CUDA in Caffe2Config.cmake for CPU-only builds.
+    # PyTorch's Caffe2Config.cmake has a hardcoded "if(ON)" block that includes
+    # public/cuda.cmake and fatal-errors if CUDA is not found. On non-CUDA
+    # platforms (e.g. ppc64le), this block must be skipped entirely.
+    # We patch it at configure time so users don't need to edit PyTorch files.
+    set(_caffe2_config "${TORCH_ROOT}/share/cmake/Caffe2/Caffe2Config.cmake")
+    if(EXISTS "${_caffe2_config}")
+        file(READ "${_caffe2_config}" _caffe2_content)
+        string(FIND "${_caffe2_content}" "set(CAFFE2_USE_CUDA ON)" _cuda_on_pos)
+        if(NOT _cuda_on_pos EQUAL -1)
+            # Disable the CUDA block: replace "set(CAFFE2_USE_CUDA ON)" so the
+            # entire if(ON) block becomes harmless (cuda.cmake sees USE_CUDA=OFF
+            # and the fatal-error guard "if(ON AND NOT CAFFE2_USE_CUDA)" is
+            # neutralized by pre-setting the variable before the block).
+            string(REPLACE
+                "set(CAFFE2_USE_CUDA ON)"
+                "set(CAFFE2_USE_CUDA OFF) # patched by vllm CPU-only build"
+                _caffe2_content "${_caffe2_content}")
+            # Also neutralize the fatal-error guard that checks "if(ON AND NOT CAFFE2_USE_CUDA)"
+            string(REPLACE
+                "if(ON AND NOT CAFFE2_USE_CUDA)"
+                "if(OFF AND NOT CAFFE2_USE_CUDA) # patched by vllm CPU-only build"
+                _caffe2_content "${_caffe2_content}")
+            file(WRITE "${_caffe2_config}" "${_caffe2_content}")
+            message(STATUS "Patched Caffe2Config.cmake: disabled CUDA block for CPU-only build")
+        else()
+            message(STATUS "Caffe2Config.cmake: CUDA already disabled or not present, no patch needed")
+        endif()
+    endif()
+
+    # Belt-and-suspenders: prevent CMake from finding CUDA packages even if
+    # cuda.cmake is still included (e.g. different Caffe2Config layout).
+    set(CMAKE_DISABLE_FIND_PACKAGE_CUDA ON)
+    set(CMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit ON)
+    set(CAFFE2_USE_CUDA OFF)
+
+    find_package(Torch REQUIRED)
+    message(STATUS "Torch version: ${Torch_VERSION}")
+
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/cpu_extension.cmake)
+    return()
+endif()
+
+#
+# Update cmake's `CMAKE_PREFIX_PATH` with torch location (GPU builds only)
 #
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
 
