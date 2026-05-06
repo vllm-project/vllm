@@ -251,7 +251,6 @@ class FusedMoE(PluggableLayer):
             enable_eplb=self.enable_eplb,
             num_fused_shared_experts=self.num_fused_shared_experts,
             rocm_aiter_enabled=self.rocm_aiter_fmoe_enabled,
-            device=None,
         )
 
         # Extract properties from ExpertMapManager
