@@ -25,7 +25,7 @@ steps:
 - label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
   key: qwen3-30b-a3b-fp8-block-accuracy-b200
   timeout_in_minutes: 60
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   working_dir: "/vllm-workspace"
