@@ -120,6 +120,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.input_global_scale * layer.weight_global_scale, requires_grad=False
         )
 
+        # Convert layer to NVFP4 linear kernel format
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
