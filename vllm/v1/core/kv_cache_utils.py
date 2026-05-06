@@ -890,23 +890,41 @@ def get_max_concurrency_for_kv_cache_config(
     return max_concurrency
 
 
-def may_override_num_blocks(
-    vllm_config: VllmConfig, num_blocks: int, suppress_log: bool = False
-) -> int:
+def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     """
     Override the number of kv cache blocks if `num_gpu_blocks_override` is set.
+    The override is logged once, at the call site in `get_kv_cache_configs`.
     """
     if vllm_config.cache_config.num_gpu_blocks_override is not None:
-        num_gpu_blocks_override = vllm_config.cache_config.num_gpu_blocks_override
-        if not suppress_log:
-            logger.info(
-                "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-                num_blocks,
-                num_gpu_blocks_override,
-            )
-        num_blocks = num_gpu_blocks_override
-
+        num_blocks = vllm_config.cache_config.num_gpu_blocks_override
     return num_blocks
+
+
+def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+    """
+    Bytes consumed by one block in the worker's shared KV cache pool, mirroring
+    the divisor used by `get_kv_cache_config_from_groups` to convert
+    `available_memory` into `num_blocks`. Used to compute the effective KV cache
+    capacity once `num_gpu_blocks_override` is applied.
+    """
+    if len(kv_cache_groups) == 1 and isinstance(
+        kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
+    ):
+        return kv_cache_groups[0].kv_cache_spec.page_size_bytes
+    if all(
+        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
+    ):
+        # DeepseekV4: shared layout sized by the largest per-page-size bucket.
+        full_mla_spec = cast(UniformTypeKVCacheSpecs, kv_cache_groups[0].kv_cache_spec)
+        layer_tuple_page_bytes = sum(full_mla_spec.get_page_sizes())
+        num_layer_tuples = max(
+            cast(UniformTypeKVCacheSpecs, g.kv_cache_spec).get_num_layer_tuples()
+            for g in kv_cache_groups
+        )
+        return layer_tuple_page_bytes * num_layer_tuples
+    group_size = max(len(g.layer_names) for g in kv_cache_groups)
+    page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
+    return page_size * group_size
 
 
 def get_num_blocks(
@@ -914,7 +932,6 @@ def get_num_blocks(
     num_layers: int,
     available_memory: int,
     page_size: int,
-    suppress_log: bool = False,
 ) -> int:
     """
     Get the number of kv cache blocks.
@@ -924,15 +941,10 @@ def get_num_blocks(
         num_layers: The number of layers
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
-        suppress_log: Whether to suppress override log messages. Used when creating a
-            temporary/dummy KV cache config, e.g. during CG memory profiling
     """
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
-    num_blocks = may_override_num_blocks(
-        vllm_config, num_blocks, suppress_log=suppress_log
-    )
-    return num_blocks
+    return may_override_num_blocks(vllm_config, num_blocks)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1220,7 +1232,6 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
-    suppress_log: bool = False,
 ) -> KVCacheConfig:
     """
     Generate the KV cache configuration from the KV cache groups and spec
@@ -1252,9 +1263,7 @@ def get_kv_cache_config_from_groups(
         num_blocks = (
             available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
         )
-        num_blocks = may_override_num_blocks(
-            vllm_config, num_blocks, suppress_log=suppress_log
-        )
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(
@@ -1288,11 +1297,7 @@ def get_kv_cache_config_from_groups(
         )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
-            vllm_config,
-            group_size,
-            available_memory,
-            page_size,
-            suppress_log=suppress_log,
+            vllm_config, group_size, available_memory, page_size
         )
         kv_cache_tensors = []
         for i in range(group_size):
@@ -1688,36 +1693,24 @@ def _report_kv_cache_config(
         vllm_config: The global VllmConfig
         kv_cache_config: The resolved KV cache configuration
     """
-    min_block_size = min(
-        [group.kv_cache_spec.block_size for group in kv_cache_config.kv_cache_groups]
-    )
-
-    # Log the KV cache size and maximum concurrency.
-    num_tokens = (
-        kv_cache_config.num_blocks
-        // len(kv_cache_config.kv_cache_groups)
-        * min_block_size
-    )
-    dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-    pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-    if pcp_size * dcp_size > 1:
-        num_tokens *= pcp_size * dcp_size
-        logger.info(
-            "Multiplying the GPU KV cache size by the cp_world_size %d "
-            "(pcp_world_size %d * dcp_world_size %d).",
-            pcp_size * dcp_size,
-            pcp_size,
-            dcp_size,
-        )
-    num_tokens_str = f"{num_tokens:,}"
-    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str)
-    max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
+    max_model_len = vllm_config.model_config.max_model_len
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
     )
+
+    # GPU KV cache size in tokens = max_concurrency * max_model_len: the total
+    # tokens of context the pool can hold at peak utilization. Sourcing this
+    # from the concurrency calculation handles hybrid layouts correctly: SWA /
+    # chunked-local groups have a per-request block count that's capped by
+    # their window, so a naive `num_blocks // num_groups * block_size` formula
+    # underestimates capacity for these models. DCP/PCP sharding is already
+    # accounted for in each spec's `max_memory_usage_bytes`.
+    num_tokens = int(max_concurrency * max_model_len)
+
+    logger.info_once("GPU KV cache size: %s tokens", f"{num_tokens:,}")
     logger.info_once(
         "Maximum concurrency for %s tokens per request: %.2fx",
-        max_model_len_str,
+        f"{max_model_len:,}",
         max_concurrency,
     )
 
@@ -1987,6 +1980,28 @@ def get_kv_cache_configs(
         _project_kv_cache_groups_to_worker(global_kv_cache_groups, worker_spec)
         for worker_spec in kv_cache_specs
     ]
+
+    # If `num_gpu_blocks_override` is set, the cache size that will actually
+    # be allocated is decoupled from the profiled `available_memory`:
+    # `may_override_num_blocks` in `get_kv_cache_config_from_groups` clamps
+    # `num_blocks` to the override. Reflect that in `available_memory` here so
+    # auto-fit, the admission check, and the per-worker config builder all
+    # plan against the same effective capacity.
+    override = vllm_config.cache_config.num_gpu_blocks_override
+    if override is not None:
+        adjusted_memory: list[int] = []
+        for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+            if not groups:
+                adjusted_memory.append(avail_mem)
+                continue
+            bytes_per_block = _pool_bytes_per_block(groups)
+            logger.info(
+                "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
+                avail_mem // bytes_per_block,
+                override,
+            )
+            adjusted_memory.append(override * bytes_per_block)
+        available_memory = adjusted_memory
 
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
