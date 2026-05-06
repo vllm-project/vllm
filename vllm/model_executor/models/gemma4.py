@@ -520,28 +520,26 @@ class Gemma4Attention(nn.Module):
         q = self.q_norm(q)
         q = q.flatten(-2, -1)
 
-        if self.use_k_eq_v:
-            # qkv_proj has v_head_size=0: output is [Q, K] only.
-            # Derive V from the same pre-norm K tensor via v_norm (no
-            # learnable scale), which is mathematically identical to the
-            # old approach of loading K weights into the V slot.
-            k = qkv[..., self.q_size :]
-            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            k_normed = self.k_norm(k)
-            v = self.v_norm(k).flatten(-2, -1)
-            k = k_normed.flatten(-2, -1)
-            q, k = self.rotary_emb(positions, q, k)
-        elif not self.is_kv_shared_layer:
-            # Non-shared standard layers: apply K norm + RoPE, V norm
-            k = qkv[..., self.q_size : self.q_size + self.kv_size]
-            v = qkv[..., self.q_size + self.kv_size :]
-            k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            k = self.k_norm(k)
-            k = k.flatten(-2, -1)
-            q, k = self.rotary_emb(positions, q, k)
-            v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
-            v = self.v_norm(v)
-            v = v.flatten(-2, -1)
+        if not self.is_kv_shared_layer:
+            if self.use_k_eq_v:
+                # qkv_proj has v_head_size=0: output is [Q, K] only.
+                # Derive V from the pre-norm K tensor via v_norm (no
+                # learnable scale), which is mathematically identical to
+                # the old approach of loading K weights into the V slot.
+                k = qkv[..., self.q_size :]
+                k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+                v = self.v_norm(k).flatten(-2, -1)
+                k = self.k_norm(k).flatten(-2, -1)
+                q, k = self.rotary_emb(positions, q, k)
+            else:
+                # Standard path: apply K norm + RoPE, V norm
+                k = qkv[..., self.q_size : self.q_size + self.kv_size]
+                v = qkv[..., self.q_size + self.kv_size :]
+                k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+                k = self.k_norm(k).flatten(-2, -1)
+                q, k = self.rotary_emb(positions, q, k)
+                v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+                v = self.v_norm(v).flatten(-2, -1)
         else:
             # KV-shared layers: only apply RoPE to Q; K/V come from cache
             k = qkv[..., self.q_size : self.q_size + self.kv_size]
