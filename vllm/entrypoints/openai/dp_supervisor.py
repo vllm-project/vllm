@@ -409,14 +409,8 @@ class DPSupervisor:
             self._supervisor_server_task is not None
             and not self._supervisor_server_task.done()
         ):
-            try:
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._supervisor_server_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                self._supervisor_server_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._supervisor_server_task
-        self._supervisor_server = None
-        self._supervisor_server_task = None
 
 
 def run_dp_supervisor(args: argparse.Namespace) -> None:
