@@ -22,7 +22,6 @@ Usage:
 
 import argparse
 import asyncio
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -59,14 +58,6 @@ def make_random_prompts(
     ]
 
 
-def cleanup_hidden_states(path: str) -> None:
-    lock_path = path + ".lock"
-    if os.path.exists(lock_path):
-        os.remove(lock_path)
-    if os.path.exists(path):
-        os.remove(path)
-
-
 def consume_hidden_states(path: str) -> float:
     """Load hidden states from disk and compute per-position mean.
 
@@ -81,7 +72,7 @@ def consume_hidden_states(path: str) -> float:
     hs = obj["hidden_states"]
     total = hs.mean().item()
 
-    cleanup_hidden_states(path)
+    example_hidden_states_connector.cleanup_hidden_states(path)
 
     return total
 
@@ -241,7 +232,7 @@ async def _run_extraction_async(
             if final_output and final_output.kv_transfer_params:
                 path = final_output.kv_transfer_params.get("hidden_states_path")
                 if path:
-                    cleanup_hidden_states(path)
+                    example_hidden_states_connector.cleanup_hidden_states(path)
 
         if profile_dir:
             await engine.start_profile()

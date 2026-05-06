@@ -60,6 +60,19 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
     return data
 
 
+def cleanup_hidden_states(path: str, keep_hidden_states: bool = False) -> None:
+    """Clean up hidden states file and lock file after loading.
+
+    If keep_hidden_states is True, only removes the lock file
+    and keeps the hidden states file.
+    """
+    lock_path = path + ".lock"
+    if os.path.exists(lock_path):
+        os.remove(lock_path)
+    if not keep_hidden_states and os.path.exists(path):
+        os.remove(path)
+
+
 @dataclass
 class ReqMeta:
     # Request ID

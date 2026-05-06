@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import tempfile
 
 from vllm import LLM, SamplingParams
@@ -65,9 +64,4 @@ with tempfile.TemporaryDirectory() as tmpdirname:
         )  # [prompt_len, num_extracted_layers, hidden_size]
         print("Extracted hidden states:", hidden_states)
 
-        # Clean up hidden state files
-        lock_path = hidden_states_path + ".lock"
-        if os.path.exists(lock_path):
-            os.remove(lock_path)
-        if os.path.exists(hidden_states_path):
-            os.remove(hidden_states_path)
+        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
