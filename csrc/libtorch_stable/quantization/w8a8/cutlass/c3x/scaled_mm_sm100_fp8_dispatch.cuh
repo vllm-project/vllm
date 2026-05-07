@@ -312,7 +312,7 @@ inline void cutlass_gemm_sm100_fp8_batch_invariant_dispatch(
   using Cutlass3xGemmM64 =
       typename sm100_fp8_config_M64<InType, OutType, EnableBias>::Cutlass3xGemm;
 
-  // keep the CUTLASS config independent of M
+  // keep the CUTLASS config independent of M for batch invariance
   uint32_t const k = a.size(1);
   if (k < 4096) {
     return cutlass_gemm_caller_sm100_fp8<Cutlass3xGemmM64>(

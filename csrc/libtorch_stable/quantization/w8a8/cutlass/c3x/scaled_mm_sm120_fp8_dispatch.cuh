@@ -194,7 +194,7 @@ inline void cutlass_gemm_sm120_fp8_batch_invariant_dispatch(
   using Cutlass3xGemmM64 =
       typename sm120_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
 
-  // keep the CUTLASS config independent of M
+  // keep the CUTLASS config independent of M for batch invariance
   return cutlass_gemm_caller<Cutlass3xGemmM64>(
       out, a, b, std::forward<EpilogueArgs>(args)...);
 }

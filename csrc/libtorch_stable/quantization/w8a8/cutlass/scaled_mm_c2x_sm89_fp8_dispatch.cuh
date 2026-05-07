@@ -393,7 +393,7 @@ inline void cutlass_gemm_sm89_fp8_batch_invariant_dispatch(
   STD_TORCH_CHECK(b.scalar_type() ==
                   torch::headeronly::ScalarType::Float8_e4m3fn);
 
-  // keep the CUTLASS config independent of M
+  // keep the CUTLASS config independent of M for batch invariance
   return sm89_fp8_config_M64::dispatch<InType, OutType, Epilogue>(
       out, a, b, std::forward<EpilogueArgs>(args)...);
 }
