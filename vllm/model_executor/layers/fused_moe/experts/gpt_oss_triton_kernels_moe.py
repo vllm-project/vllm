@@ -34,6 +34,30 @@ from ..utils import swiglu_limit_func
 logger = init_logger(__name__)
 
 
+def _triton_kernel_moe_supports_current_device() -> bool:
+    # Shared device gate for the OAI Triton MoE expert classes.
+    # Platform-aware to avoid ROCm capability aliasing — cap (9, 0)
+    # matches both gfx90a (verified) and gfx906 (unverified), so we
+    # dispatch on gfx-string helpers instead of the cap tuple on ROCm.
+    p = current_platform
+    if p.is_cuda():
+        cap = p.get_device_capability()
+        # Keep the original `(9, 0) <= cap < (11, 0)` window on
+        # CUDA (covers Hopper SM90 and Blackwell SM100, excludes
+        # SM120) — this PR is ROCm-scoped and the broader CUDA
+        # range was not validated.
+        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
+    if p.is_rocm():
+        from vllm.platforms.rocm import on_gfx1x, on_gfx9
+
+        # gfx9 family: gfx90a (MI200), gfx942/gfx950 (MI3xx);
+        # on_gfx9() already excludes gfx906/gfx908.
+        # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
+        # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
+        return on_gfx9() or on_gfx1x()
+    return False
+
+
 def _patch_make_bitmatrix_metadata() -> None:
     """Monkey-patch make_bitmatrix_metadata to support non-power-of-2 top_k.
 
@@ -524,17 +548,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        if not p.is_cuda_alike():
-            return False
-        cap = p.get_device_capability()
-        if cap is None:
-            return False
-        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
-        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
-        if not has_triton_kernels():
-            return False
-        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -938,17 +952,7 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        p = current_platform
-        if not p.is_cuda_alike():
-            return False
-        cap = p.get_device_capability()
-        if cap is None:
-            return False
-        # (9,0) <= cap < (11,0) covers CUDA SM90 (Hopper), SM100+ (Blackwell)
-        # and ROCm gfx942/gfx950 (which map to 9.4/9.5).
-        if not has_triton_kernels():
-            return False
-        return (9, 0) <= (cap.major, cap.minor) < (11, 0)
+        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
