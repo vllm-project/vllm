@@ -124,9 +124,9 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # RIXL/UCX build stages
 FROM base AS build_rixl
-ARG RIXL_BRANCH="bf4a7214"
+ARG RIXL_BRANCH="39be1de8"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG UCX_BRANCH="7009d7a1"
+ARG UCX_BRANCH="bfb51733"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
@@ -192,6 +192,7 @@ RUN cd /opt/rixl && \
     sed -i "s/--exclude 'libamdhip64\*'/--exclude 'libamdhip64*' --exclude 'libcore*' --exclude 'libpull*'/" \
         contrib/build-wheel.sh && \
     mkdir -p /app/install && \
+    _ucx_install_dir=${UCX_HOME} \
     ./contrib/build-wheel.sh \
         --output-dir /app/install \
         --rocm-dir ${ROCM_PATH} \
