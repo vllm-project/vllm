@@ -23,13 +23,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
     ):
         super().__init__(cpu_group, device, device_group, unique_name)
         if self.use_all2all:
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
-
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
-
-            elif self.all2all_backend == "allgather_reducescatter":
+            if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)

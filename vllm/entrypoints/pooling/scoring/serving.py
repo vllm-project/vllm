@@ -8,6 +8,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
+from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
@@ -38,10 +39,15 @@ class ServingScores(PoolingServing):
         self,
         engine_client: EngineClient,
         *args,
+        supported_tasks: tuple[SupportedTask, ...],
         enable_flash_late_interaction: bool = True,
         **kwargs,
     ):
-        self.io_processor_name: str = engine_client.model_config.score_type
+        pooling_task = engine_client.model_config.get_pooling_task(supported_tasks)
+        score_type = SCORE_TYPE_MAP.get(pooling_task, None)  # type: ignore[arg-type]
+        assert score_type is not None
+
+        self.io_processor_name: str = score_type
         self.enable_flash_late_interaction = (
             self.io_processor_name == "late-interaction"
             and enable_flash_late_interaction

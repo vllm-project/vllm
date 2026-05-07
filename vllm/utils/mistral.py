@@ -12,8 +12,10 @@ from vllm.utils.import_utils import LazyLoader
 if TYPE_CHECKING:
     # if type checking, eagerly import the module
     import vllm.tokenizers.mistral as mt
+    import vllm.tool_parsers.mistral_tool_parser as mtp
 else:
     mt = LazyLoader("mt", globals(), "vllm.tokenizers.mistral")
+    mtp = LazyLoader("mtp", globals(), "vllm.tool_parsers.mistral_tool_parser")
 
 
 def is_mistral_tokenizer(obj: TokenizerLike | None) -> TypeGuard[mt.MistralTokenizer]:
@@ -25,4 +27,17 @@ def is_mistral_tokenizer(obj: TokenizerLike | None) -> TypeGuard[mt.MistralToken
     return bool(
         getattr(cls, "IS_MISTRAL_TOKENIZER", False)
         and isinstance(obj, mt.MistralTokenizer)
+    )
+
+
+def is_mistral_tool_parser(cls: type | None) -> bool:
+    """Return true if *cls* is (a subclass of) MistralToolParser.
+
+    Uses a class attribute check so that importing
+    ``vllm.tool_parsers.mistral_tool_parser`` — and transitively
+    ``mistral_common`` — is not required.
+    """
+    return bool(
+        getattr(cls, "IS_MISTRAL_TOOL_PARSER", False)
+        and issubclass(cls, mtp.MistralToolParser)  # type: ignore[arg-type]
     )
