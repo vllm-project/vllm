@@ -3,6 +3,7 @@
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:2
+#SBATCH --ntasks-per-node=1
 #SBATCH --mem=512G
 #SBATCH --time=01:00:00
 #SBATCH --output=results/%x-%j.out
@@ -10,7 +11,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-ipv4-direct-driver-2026-05-07"
+SCRIPT_VERSION="arc-ray-ipv4-direct-driver-2026-05-07-v3"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
@@ -75,6 +76,8 @@ if [ -z "${HEAD_NODE_IP}" ]; then
   exit 1
 fi
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
+export VLLM_HOST_IP="${HEAD_NODE_IP}"
+echo "VLLM_HOST_IP=${VLLM_HOST_IP}"
 
 export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
@@ -219,7 +222,20 @@ fi
 
 echo "=== ray status ==="
 echo "Checking cluster status..."
-"${RAY_BIN}" status
+"${RAY_BIN}" status || echo "Warning: ray status failed; continuing with Python Ray node check."
+python - <<'PY'
+import ray
+
+ray.init(address="auto")
+nodes = ray.nodes()
+print("Ray nodes:")
+for node in nodes:
+    print(
+        f"  {node.get('NodeManagerAddress')} "
+        f"alive={node.get('Alive')} "
+        f"resources={node.get('Resources')}"
+    )
+PY
 
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
