@@ -254,23 +254,22 @@ class DPSupervisor:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
+        while (
+            not supervisor_server.started
+            and not supervisor_server_task.done()
+            and not self._shutdown_event.is_set()
+        ):
+            await asyncio.sleep(0)
+        if supervisor_server_task.done() or self._shutdown_event.is_set():
+            supervisor_server.should_exit = True
+            await supervisor_server_task
+            return
+        logger.info(
+            "Started multi-port external LB supervisor on %s:%d",
+            host,
+            self.supervisor_port,
+        )
         try:
-            while (
-                not supervisor_server.started
-                and not supervisor_server_task.done()
-                and not self._shutdown_event.is_set()
-            ):
-                await asyncio.sleep(0)
-            if supervisor_server_task.done():
-                await supervisor_server_task
-                return
-            if self._shutdown_event.is_set():
-                return
-            logger.info(
-                "Started multi-port external LB supervisor on %s:%d",
-                host,
-                self.supervisor_port,
-            )
             self._start_children()
             await self._monitor_children()
         finally:
