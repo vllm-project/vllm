@@ -356,7 +356,7 @@ class MoRIIOWriter:
             )
             # mark request as done, then we can free the blocks
             with self.worker.moriio_wrapper.lock:
-                self.worker.moriio_wrapper.done_req_ids.append(task.request_id)
+                self.worker.moriio_wrapper.done_req_ids.append(task.transfer_id)
             del self.worker.moriio_wrapper.done_remote_allocate_req_dict[
                 task.transfer_id
             ]
