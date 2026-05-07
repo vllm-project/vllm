@@ -43,7 +43,7 @@ from vllm.logger import init_logger
 from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer, adapt_inplace_to_mistral_tool
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
@@ -241,12 +241,7 @@ class MistralToolParser(ToolParser):
         )
 
         mistral_tools = (
-            [
-                MistralTool.model_validate(
-                    adapt_inplace_to_mistral_tool(tool.model_dump())
-                )
-                for tool in request.tools
-            ]
+            [MistralTool.from_openai(tool.model_dump()) for tool in request.tools]
             if request.tools is not None
             else None
         )
