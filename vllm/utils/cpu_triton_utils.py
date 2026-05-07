@@ -213,6 +213,7 @@ def _rejection_greedy_sample_kernel_impl(
     # passed by the rejection sampler for synthetic mode support, but are not
     # yet implemented in the C++ CPU kernel. We accept them here to maintain
     # compatibility with the kernel calling convention.
+    assert not SYNTHETIC_MODE, "Synthetic acceptance not supported with CPU sampling"
     orig_dtype = output_token_ids.dtype
     output_token_ids_i64 = _ensure_int64(output_token_ids)
     torch.ops._C.rejection_greedy_sample_kernel_impl(
