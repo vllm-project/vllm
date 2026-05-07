@@ -274,7 +274,7 @@ class DPSupervisor:
             self._start_children()
             await self._monitor_children()
         finally:
-            self._shutdown_event.set()
+            self.children_healthy = False
             await self._shutdown_children()
             supervisor_server.should_exit = True
             await supervisor_server_task
@@ -304,7 +304,19 @@ class DPSupervisor:
             self.processes.append(process)
 
     async def _monitor_children(self) -> None:
+        """
+        Main coroutine task that monitors the children vLLM servers.
+
+        Before the vLLM servers are /ready:
+        - if the pid is dead, we will shut down
+        - if the probe fails, we try again after data_parallel_probe_interval_s
+
+        After the vLLM servers are /ready:
+        - if the pid is dead, we will shut down
+        - if the probe fails, we will shut down
+        """
         timeout = aiohttp.ClientTimeout(total=self.args.data_parallel_probe_timeout_s)
+        ready_once = False
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while not self._shutdown_event.is_set():
                 child_health = await asyncio.gather(
@@ -313,7 +325,8 @@ class DPSupervisor:
                         for port in self.child_ports
                     )
                 )
-                self.children_healthy = all(child_health)
+                all_healthy = all(child_health)
+                self.children_healthy = all_healthy
                 failed_process = next(
                     (
                         process
@@ -327,6 +340,12 @@ class DPSupervisor:
                         f"Multi-port external LB child exited unexpectedly: "
                         f"{failed_process.name} "
                         f"exit code {failed_process.exitcode}"
+                    )
+                if all_healthy:
+                    ready_once = True
+                elif ready_once:
+                    raise RuntimeError(
+                        "Multi-port external LB child became unhealthy after startup"
                     )
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(

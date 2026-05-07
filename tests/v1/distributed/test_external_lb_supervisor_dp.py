@@ -105,6 +105,28 @@ async def test_dp_supervisor_monitor_children_raises_when_child_exits(
 
 
 @pytest.mark.asyncio
+async def test_dp_supervisor_monitor_children_raises_when_child_unhealthy_after_startup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    supervisor = DPSupervisor(_make_args(data_parallel_probe_interval_s=0.0))
+    supervisor.child_ports = [8000]
+    probe_results = iter([True, False])
+
+    async def fake_probe(*_args, **_kwargs) -> bool:
+        return next(probe_results)
+
+    monkeypatch.setattr(dp_supervisor, "_probe_endpoint", fake_probe)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Multi-port external LB child became unhealthy after startup",
+    ):
+        await supervisor._monitor_children()
+
+    assert supervisor.children_healthy is False
+
+
+@pytest.mark.asyncio
 async def test_dp_supervisor_run_propagates_supervisor_server_error_before_startup(
     monkeypatch: pytest.MonkeyPatch,
 ):
