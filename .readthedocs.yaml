@@ -9,14 +9,13 @@ build:
     python: "3.12"
   jobs:
     post_checkout:
-      # - bash docs/maybe_skip_pr_build.sh
       - git fetch origin main --unshallow --no-tags --filter=blob:none || true
-    pre_create_environment:
-      - pip install uv
-    create_environment:
-      - uv venv $READTHEDOCS_VIRTUALENV_PATH
-    install:
-      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r requirements/docs.txt 
+
+python:
+  install:
+    - method: uv
+      command: pip
+      requirements: requirements/docs.txt
 
 mkdocs:
   configuration: mkdocs.yaml
