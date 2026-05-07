@@ -233,10 +233,7 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
         if kv_cache_scheme is not None:
             scheme_type = kv_cache_scheme.get("type", "float")
-            if scheme_type == "int":
-                kv_cache_dtype = "int8_per_tensor"
-            else:
-                kv_cache_dtype = "fp8"
+            kv_cache_dtype = "int8_per_tensor" if scheme_type == "int" else "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
                 cache_config.cache_dtype = kv_cache_dtype
