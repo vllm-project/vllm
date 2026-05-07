@@ -241,7 +241,9 @@ def _log_gdn_backend_decision(
 def _resolve_gdn_decode_backend(ssm_state_dtype: torch.dtype) -> str:
     """Resolve the GDN decode backend. Returns ``"flashinfer"``
     or ``"triton"``.
-    FlashInfer requires SM90+ and ``state.dtype in (bfloat16, float32)``.
+
+    FlashInfer requires SM90+, a PyTorch build with CUDA 13+,
+    and ``state.dtype in (bfloat16, float32)``.
     Respect ``--gdn-decode-backend`` engine arg.
     """
     additional_config = get_current_vllm_config().additional_config
@@ -249,19 +251,35 @@ def _resolve_gdn_decode_backend(ssm_state_dtype: torch.dtype) -> str:
     backend_cfg = additional_config.get("gdn_decode_backend", "auto")
     backend = str(backend_cfg).strip().lower()
 
-    supports_flashinfer = (
+    cuda_version = torch.version.cuda
+    cuda_major = int(cuda_version.split(".")[0]) if cuda_version else 0
+    # FlashInfer GDN decode kernel has known issues on CUDA 12.x;
+    # only enable on CUDA 13+.
+    cuda_supports_fi_gdn = cuda_major >= 13
+
+    platform_supports_fi_gdn = (
         current_platform.is_cuda() and current_platform.has_device_capability(90)
     )
+    supports_fi_gdn = platform_supports_fi_gdn and cuda_supports_fi_gdn
     state_dtype_ok = ssm_state_dtype in (torch.bfloat16, torch.float32)
 
     if backend == "triton":
         use_flashinfer = False
     elif backend == "flashinfer":
-        if not supports_flashinfer:
+        if not platform_supports_fi_gdn:
             logger.warning_once(
                 "GDN decode backend 'flashinfer' is selected but cannot be "
                 "used on the current platform (requires CUDA SM90+). "
                 "Falling back to Triton/FLA."
+            )
+            use_flashinfer = False
+        elif not cuda_supports_fi_gdn:
+            logger.warning_once(
+                "GDN decode backend 'flashinfer' is selected but the "
+                "PyTorch build is using CUDA %s; the FlashInfer GDN "
+                "decode kernel has known issues on CUDA 12.x and is only "
+                "enabled on CUDA 13+. Falling back to Triton/FLA.",
+                cuda_version,
             )
             use_flashinfer = False
         elif not state_dtype_ok:
@@ -277,8 +295,8 @@ def _resolve_gdn_decode_backend(ssm_state_dtype: torch.dtype) -> str:
             use_flashinfer = True
     else:
         # Default / unset: implicit auto -- use FlashInfer when the
-        # platform and SSM-state dtype support it.
-        use_flashinfer = supports_flashinfer and state_dtype_ok
+        # platform, CUDA toolkit version, and SSM-state dtype support it.
+        use_flashinfer = supports_fi_gdn and state_dtype_ok
 
     if not use_flashinfer:
         logger.info_once("Using Triton/FLA GDN decode kernel")
