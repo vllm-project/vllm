@@ -1557,13 +1557,11 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             )
 
             if result.returncode != 0:
-                # Read traceback written by child, fall back to stderr
-                tb = ""
+                # Read traceback written by child; stderr is shown separately
+                tb = "(no traceback file written)"
                 if os.path.exists(tb_file) and os.path.getsize(tb_file) > 0:
                     with open(tb_file) as fp:
                         tb = fp.read()
-                else:
-                    tb = result.stderr.decode(errors="replace")
                 stdout = result.stdout.decode(errors="replace")
                 stderr = result.stderr.decode(errors="replace")
                 raise RuntimeError(
