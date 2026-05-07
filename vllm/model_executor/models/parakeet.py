@@ -99,6 +99,8 @@ class ProjectedParakeet(nn.Module):
             if target is None:
                 target = buffers_dict.get(target_name)
             if target is None:
+                if self._can_skip_missing_named_param(target_name):
+                    continue
                 raise ValueError(f"Unknown weight: {name}")
             weight_loader = getattr(target, "weight_loader", default_weight_loader)
             with torch.no_grad():
@@ -106,6 +108,27 @@ class ProjectedParakeet(nn.Module):
             loaded_params.add(target_name)
 
         return loaded_params
+
+    def _can_skip_missing_named_param(self, target_name: str) -> bool:
+        if self.config.convolution_bias:
+            return False
+
+        # In transformers v5 (not v4), `convolution_bias=False` is
+        # propagated from parakeet config. If `False`, torch.conv1d will
+        # *skip registering the param*, thus it will be missing in the
+        # module's named params. *If* you happen to also have the bias
+        # tensors in the weights, it will cause a mismatch between the
+        # weights and the params.
+        # This allows us to have `convolution_bias=False` in the sound config,
+        # but still allow for the weights to exist.
+
+        return target_name.endswith(
+            (
+                ".conv.pointwise_conv1.bias",
+                ".conv.depthwise_conv.bias",
+                ".conv.pointwise_conv2.bias",
+            )
+        )
 
 
 EPSILON = 1e-5
