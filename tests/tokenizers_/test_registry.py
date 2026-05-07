@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import ByteLevel
 
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import registry
 from vllm.tokenizers.registry import (
     TokenizerRegistry,
     get_tokenizer,
@@ -75,3 +82,52 @@ def test_customized_tokenizer():
     assert tokenizer.bos_token_id == 0
     assert tokenizer.eos_token_id == 1
     assert tokenizer.pad_token_id == 2
+
+
+def test_deepseek_v3_overrides_incorrect_hub_tokenizer_class(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    vocab = {
+        "MLA": 0,
+        "Ġattention": 1,
+        ",": 2,
+        "Ġor": 3,
+        "Ġmore": 4,
+        "Ġspecifically": 5,
+        ".ĊĊ": 6,
+        "<｜begin▁of▁sentence｜>": 7,
+        "<｜end▁of▁sentence｜>": 8,
+    }
+    tokenizer = Tokenizer(BPE(vocab=vocab, merges=[], unk_token=None))
+    tokenizer.pre_tokenizer = ByteLevel(add_prefix_space=False)
+    tokenizer.decoder = ByteLevelDecoder()
+    tokenizer.save(str(tmp_path / "tokenizer.json"))
+
+    (tmp_path / "tokenizer_config.json").write_text(
+        json.dumps(
+            {
+                "tokenizer_class": "LlamaTokenizerFast",
+                "legacy": True,
+                "clean_up_tokenization_spaces": False,
+                "bos_token": "<｜begin▁of▁sentence｜>",
+                "eos_token": "<｜end▁of▁sentence｜>",
+                "pad_token": "<｜end▁of▁sentence｜>",
+                "unk_token": None,
+            }
+        )
+    )
+
+    monkeypatch.setattr(
+        registry,
+        "get_config",
+        lambda *args, **kwargs: SimpleNamespace(model_type="deepseek_v3"),
+    )
+    registry.cached_get_tokenizer.cache_clear()
+    registry.cached_resolve_tokenizer_args.cache_clear()
+
+    tokenizer = get_tokenizer(str(tmp_path), trust_remote_code=True)
+
+    assert tokenizer.decode([0, 1, 2, 3, 4, 5, 6]) == (
+        "MLA attention, or more specifically.\n\n"
+    )
