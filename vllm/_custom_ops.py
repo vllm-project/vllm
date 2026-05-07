@@ -2449,23 +2449,6 @@ def moe_wna16_gemm(
     )
 
 
-def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
-    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
-
-
-if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
-
-    @register_fake("_moe_C::router_gemm_bf16_fp32")
-    def router_gemm_bf16_fp32_fake(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.empty(
-            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
-        )
-
-
 def dsv3_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -3189,6 +3172,40 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         return torch.empty_like(hidden_states)
 
 
+def fused_experts_cpu(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool,
+    use_int8_w8a8: bool,
+    use_fp8_w8a16: bool,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    block_size: list[int] | None,
+    a1_scale: torch.Tensor | None,
+    a2_scale: torch.Tensor | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fused_experts_cpu(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace,
+        use_int8_w8a8,
+        use_fp8_w8a16,
+        w1_scale,
+        w2_scale,
+        block_size,
+        a1_scale,
+        a2_scale,
+        is_vnni,
+    )
+
+
 if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
 
     @register_fake("_C::int8_scaled_mm_with_quant")
@@ -3235,6 +3252,39 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
 
 
 _supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_cpu"):
+
+    @register_fake("_C::fp8_scaled_mm_cpu")
+    def fp8_scaled_mm_cpu_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        block_size: list[int],
+        bias: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype, device=mat1.device)
+
+
+_supports_cpu_fp8_w8a16 = bool(hasattr(torch.ops._C, "fp8_scaled_mm_cpu"))
+
+
+def fp8_scaled_mm_cpu(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scales2: torch.Tensor,
+    block_size: list[int],
+    bias: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
 
 
 class CPUDNNLGEMMHandler:

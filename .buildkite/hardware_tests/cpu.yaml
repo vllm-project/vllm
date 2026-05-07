@@ -12,15 +12,19 @@ steps:
   - vllm/_custom_ops.py
   - tests/kernels/attention/test_cpu_attn.py
   - tests/kernels/moe/test_cpu_fused_moe.py
+  - tests/kernels/moe/test_cpu_fp8_fused_moe.py
   - tests/kernels/test_onednn.py
   - tests/kernels/test_awq_int4_to_int8.py
+  - tests/kernels/quantization/test_cpu_fp8_scaled_mm.py
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 20m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
       pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
       pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
+      pytest -x -v -s tests/kernels/moe/test_cpu_fp8_fused_moe.py
       pytest -x -v -s tests/kernels/test_onednn.py
-      pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py"
+      pytest -x -v -s tests/kernels/test_awq_int4_to_int8.py
+      pytest -x -v -s tests/kernels/quantization/test_cpu_fp8_scaled_mm.py"
 
 - label: CPU-Compatibility Tests
   depends_on: []
