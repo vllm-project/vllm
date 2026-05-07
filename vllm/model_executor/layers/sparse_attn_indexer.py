@@ -32,13 +32,6 @@ if current_platform.is_cuda_alike():
 elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops
 
-# Registers `vllm::rocm_sparse_attn_indexer_no_insert` (the V4 layout where the
-# compressor pre-inserts K and the indexer is called with k=None).
-# Keep this import at module scope so the op is visible at compile time, not
-# just on the first forward.
-if current_platform.is_rocm():
-    import vllm.v1.attention.ops.rocm_sparse_attn_indexer  # noqa: F401
-
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
@@ -510,20 +503,17 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
+        if self.skip_k_cache_insert or not rocm_aiter_ops.is_enabled():
+            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_aiter_sparse_attn_indexer_native,
+            )
 
-        if self.skip_k_cache_insert:
-            # DeepSeek-V4 layout: the compressor has already inserted the
-            # compressed K into the indexer's KV cache and passes k=None.
-            # The AITER op below always issues its own
-            # ``ops.indexer_k_quant_and_cache(k, ...)`` and dereferences ``k``,
-            # so it can't be reused here. Use the dedicated no-insert ROCm
-            # path that uses only ROCm-available helpers (and a Triton MQA
-            # kernel under the hood).
-            return torch.ops.vllm.rocm_sparse_attn_indexer_no_insert(
+            return rocm_aiter_sparse_attn_indexer_native(
                 hidden_states,
                 _encode_layer_name(self.k_cache.prefix),
                 self.k_cache.kv_cache,
                 q_quant,
+                k,
                 weights,
                 self.quant_block_size,
                 self.scale_fmt,
@@ -532,8 +522,8 @@ class SparseAttnIndexer(CustomOp):
                 self.max_model_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
+                skip_k_cache_insert=self.skip_k_cache_insert,
             )
-
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
@@ -550,9 +540,4 @@ class SparseAttnIndexer(CustomOp):
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
             )
-        else:
-            raise RuntimeError(
-                "Sparse attention indexer ROCm custom op requires ROCm "
-                "Aiter ops to be enabled (or skip_k_cache_insert=True for "
-                "the V4 layout)."
-            )
+        raise RuntimeError("Sparse attention indexer ROCm path could not be selected.")
