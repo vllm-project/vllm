@@ -186,7 +186,13 @@ def make_request(
     if request_id is None:
         request_id = f"req-{_req_counter}"
 
-    num_tokens = num_blocks * BLOCK_SIZE
+    # Add one extra token beyond the last full block so that
+    # ``max_cache_hit_length = num_tokens - 1`` (see
+    # KVCacheManager.get_computed_blocks) does not truncate the final
+    # full block: ``find_longest_cache_hit`` uses
+    # ``max_length // block_size`` and would otherwise drop one block
+    # when the prompt is an exact multiple of block_size.
+    num_tokens = num_blocks * BLOCK_SIZE + 1
     start = _req_counter * 10000
     prompt_token_ids = list(range(start, start + num_tokens))
     sampling_params = SamplingParams(max_tokens=1)
