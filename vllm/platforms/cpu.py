@@ -24,9 +24,11 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
+    IrOpPriorityConfig = None
 
 
 def get_max_threads(pid=0):
@@ -455,3 +457,12 @@ class CpuPlatform(Platform):
             slot_mapping,
             isa,
         )
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # CPU only supports native implementation
+        return IrOpPriorityConfig.with_default(["native"])

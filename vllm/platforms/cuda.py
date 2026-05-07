@@ -574,13 +574,13 @@ class CudaPlatformBase(Platform):
         # Use oink if enabled for rms_norm
         # TODO(Laurawly/luka): remove this env var,
         #  users can just use IR op priority directly
-        rms_norm = default
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
+            return IrOpPriorityConfig.with_default(
+                default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+            )
 
-        return IrOpPriorityConfig.with_default(
-            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
-        )
+        return IrOpPriorityConfig.with_default(default)
 
 
 # NVML utils
