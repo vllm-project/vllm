@@ -587,9 +587,15 @@ class DelegatingParser(Parser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
-        if request.tool_choice and isinstance(
-            request.tool_choice,
-            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        assert self._tool_parser is not None
+        supports_required_and_named = self._tool_parser.supports_required_and_named
+        if (
+            supports_required_and_named
+            and request.tool_choice
+            and isinstance(
+                request.tool_choice,
+                (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+            )
         ):
             delta_message, function_name_returned = extract_named_tool_call_streaming(
                 delta_text=delta_text,
@@ -601,7 +607,7 @@ class DelegatingParser(Parser):
             )
             return delta_message, function_name_returned
 
-        if request.tool_choice == "required":
+        if supports_required_and_named and request.tool_choice == "required":
             delta_message, function_name_returned = (
                 extract_required_tool_call_streaming(
                     previous_text=previous_text,
@@ -706,6 +712,12 @@ class DelegatingParser(Parser):
                     function_name_returned=state.function_name_returned,
                 )
             )
+            if (
+                delta_message
+                and delta_message.tool_calls
+                and delta_message.tool_calls[0].id is not None
+            ):
+                state.history_tool_call_cnt += 1
 
         # No phase active: pass through as content
         if (
