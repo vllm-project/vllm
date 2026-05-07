@@ -5,7 +5,12 @@ Tests for the UvicornAccessLogFilter class.
 """
 
 import logging
+from argparse import Namespace
 
+from vllm.entrypoints.openai.server_utils import (
+    _get_excluded_paths,
+    get_uvicorn_log_config,
+)
 from vllm.logging_utils.access_log_filter import (
     UvicornAccessLogFilter,
     create_uvicorn_log_config,
@@ -369,3 +374,92 @@ class TestIntegration:
 
         # Should allow because args is None
         assert filter.filter(record) is True
+
+
+class TestGetExcludedPaths:
+    """Test cases for the _get_excluded_paths helper."""
+
+    def test_no_flags_set(self):
+        """Returns empty list when neither flag is set."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints=None,
+        )
+        assert _get_excluded_paths(args) == []
+
+    def test_metrics_flag_only(self):
+        """Returns /health and /metrics when shorthand flag is set."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints=None,
+        )
+        assert _get_excluded_paths(args) == ["/health", "/metrics"]
+
+    def test_endpoints_flag_only(self):
+        """Returns parsed paths when only endpoints flag is set."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints="/ping,/ready",
+        )
+        assert _get_excluded_paths(args) == ["/ping", "/ready"]
+
+    def test_both_flags_merged_no_duplicates(self):
+        """Merges both flags and removes duplicate paths."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints="/metrics,/ping",
+        )
+        paths = _get_excluded_paths(args)
+        # /health and /metrics from shorthand, /ping from endpoints,
+        # /metrics should not be duplicated
+        assert paths == ["/health", "/metrics", "/ping"]
+
+    def test_endpoints_flag_with_whitespace(self):
+        """Handles whitespace around comma-separated paths."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints=" /health , /ping , ",
+        )
+        assert _get_excluded_paths(args) == ["/health", "/ping"]
+
+
+class TestGetUvicornLogConfigWithMetricsFlag:
+    """Test get_uvicorn_log_config with --disable-uvicorn-metrics-access-log."""
+
+    def test_returns_none_when_no_flags(self):
+        """Returns None when no filtering or log config is requested."""
+        args = Namespace(
+            log_config_file=None,
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints=None,
+            uvicorn_log_level="info",
+        )
+        assert get_uvicorn_log_config(args) is None
+
+    def test_returns_config_with_metrics_flag(self):
+        """Returns a log config filtering /health and /metrics."""
+        args = Namespace(
+            log_config_file=None,
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints=None,
+            uvicorn_log_level="info",
+        )
+        config = get_uvicorn_log_config(args)
+        assert config is not None
+        assert "filters" in config
+        filter_cfg = config["filters"]["access_log_filter"]
+        assert "/health" in filter_cfg["excluded_paths"]
+        assert "/metrics" in filter_cfg["excluded_paths"]
+
+    def test_metrics_flag_combined_with_endpoints(self):
+        """Merges metrics shorthand with explicit endpoint list."""
+        args = Namespace(
+            log_config_file=None,
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints="/ping",
+            uvicorn_log_level="info",
+        )
+        config = get_uvicorn_log_config(args)
+        assert config is not None
+        excluded = config["filters"]["access_log_filter"]["excluded_paths"]
+        assert excluded == ["/health", "/metrics", "/ping"]
