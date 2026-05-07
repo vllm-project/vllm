@@ -153,6 +153,7 @@ class BaseRouter(FusedMoERouter):
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        num_fused_shared_experts: int = 0,
     ):
         """
         Note: the indices dtype might not be available at router construction
@@ -166,6 +167,7 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
+        self.num_fused_shared_experts = num_fused_shared_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
@@ -230,7 +232,6 @@ class BaseRouter(FusedMoERouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the actual routing logic.
@@ -242,8 +243,6 @@ class BaseRouter(FusedMoERouter):
             hidden_states: Input hidden states
             router_logits: Router logits for expert selection
             indices_type: Desired dtype for expert indices (may be None)
-            num_fused_shared_experts: Number of shared experts whose
-                activation is fused into the routing kernel (0 = disabled)
 
         Returns:
             tuple of (topk_weights, topk_ids)
@@ -256,7 +255,6 @@ class BaseRouter(FusedMoERouter):
         router_logits: torch.Tensor,
         *,
         input_ids: torch.Tensor | None = None,
-        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -290,7 +288,6 @@ class BaseRouter(FusedMoERouter):
             router_logits,
             indices_type,
             input_ids=input_ids,
-            num_fused_shared_experts=num_fused_shared_experts,
         )
 
         # Capture logical ids before EPLB mapping.

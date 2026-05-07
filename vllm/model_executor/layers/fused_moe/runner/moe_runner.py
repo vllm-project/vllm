@@ -496,9 +496,6 @@ class MoERunner(MoERunnerInterface):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
-                num_fused_shared_experts=(
-                    self.num_fused_shared_experts if self._fse_fuse_gate else 0
-                ),
             )
 
             # Write routing data for non-monolithic path (Triton, etc.)

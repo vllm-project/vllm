@@ -52,7 +52,6 @@ class CustomRoutingRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using the custom routing function."""
         topk_weights, topk_ids = self.custom_routing_function(

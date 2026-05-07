@@ -189,6 +189,7 @@ class FusedTopKRouter(BaseRouter):
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        num_fused_shared_experts: int = 0,
     ):
         super().__init__(
             top_k=top_k,
@@ -196,6 +197,7 @@ class FusedTopKRouter(BaseRouter):
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            num_fused_shared_experts=num_fused_shared_experts,
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
@@ -217,7 +219,6 @@ class FusedTopKRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using standard fused top-k."""
         topk_weights, topk_ids, token_expert_indices = fused_topk(
@@ -227,7 +228,7 @@ class FusedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             indices_type=indices_type,
             scoring_func=self.scoring_func,
-            num_fused_shared_experts=num_fused_shared_experts,
+            num_fused_shared_experts=self.num_fused_shared_experts,
         )
 
         return topk_weights, topk_ids

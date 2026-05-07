@@ -268,6 +268,7 @@ class GroupedTopKRouter(BaseRouter):
             eplb_state=eplb_state,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
+            num_fused_shared_experts=num_fused_shared_experts,
         )
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
@@ -275,7 +276,6 @@ class GroupedTopKRouter(BaseRouter):
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
-        self.num_fused_shared_experts = num_fused_shared_experts
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -294,7 +294,6 @@ class GroupedTopKRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using grouped top-k."""
 

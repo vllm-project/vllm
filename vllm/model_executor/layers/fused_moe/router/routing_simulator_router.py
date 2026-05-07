@@ -336,7 +336,6 @@ class RoutingSimulatorRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-        num_fused_shared_experts: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Use routing simulator to compute routing."""
         routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY

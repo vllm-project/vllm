@@ -463,6 +463,16 @@ class FusedMoE(PluggableLayer):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = MoEActivation.from_str(activation)
 
+        # Gate fusion is active when both routing and shared-expert gates
+        # are present and FSE is enabled.  The router must know the effective
+        # value so it can handle the extra shared-expert columns in
+        # gating_output without needing it passed per-call.
+        fse_fuse_gate = (
+            gate is not None
+            and shared_expert_gate is not None
+            and self.num_fused_shared_experts > 0
+        )
+
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.
         self.router = create_fused_moe_router(
@@ -477,7 +487,9 @@ class FusedMoE(PluggableLayer):
             scoring_func=scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=self.num_fused_shared_experts,
+            num_fused_shared_experts=(
+                self.num_fused_shared_experts if fse_fuse_gate else 0
+            ),
             enable_eplb=enable_eplb,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
