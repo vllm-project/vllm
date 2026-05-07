@@ -872,70 +872,6 @@ def cutlass_scaled_mm_supports_block_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_block_fp8(cuda_device_capability)
 
 
-def _pad_to_alignment(
-    x: torch.Tensor, dim: int, alignment: int, value: float = 0.0
-) -> torch.Tensor:
-    """Pad tensor ``x`` along ``dim`` to the next multiple of ``alignment``."""
-    remainder = x.shape[dim] % alignment
-    if remainder == 0:
-        return x
-    pad_size = alignment - remainder
-    pad_spec = [0] * (2 * x.dim())
-    # F.pad uses (last_dim_left, last_dim_right, ..., first_dim_left, ...)
-    pad_spec[-(2 * dim + 1)] = pad_size
-    return torch.nn.functional.pad(x, pad_spec, value=value)
-
-
-def _cutlass_scaled_mm_maybe_padded(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    scale_a: torch.Tensor,
-    scale_b: torch.Tensor,
-    out_dtype: torch.dtype,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    """Run CUTLASS scaled_mm, padding K and N dims to multiples of 16
-    when needed so that CUTLASS alignment requirements are satisfied.
-
-    CUTLASS requires b.stride(1) % 16 == 0 (i.e. K % 16 == 0 for
-    column-major b) and c.stride(0) % 16 == 0 (i.e. N % 16 == 0 for
-    row-major output).
-    """
-    K, N = b.shape
-    pad_k = (16 - K % 16) % 16
-    pad_n = (16 - N % 16) % 16
-
-    if pad_k > 0 or pad_n > 0:
-        # b is column-major [K, N] (stride (1, K)).  Transpose to
-        # row-major [N, K], pad both dims in one call, then transpose
-        # back so the result keeps column-major layout with stride
-        # (1, K_padded).
-        b = torch.nn.functional.pad(b.t().contiguous(), (0, pad_k, 0, pad_n)).t()
-
-        if pad_k > 0:
-            a = _pad_to_alignment(a, dim=1, alignment=16)
-        if pad_n > 0:
-            if bias is not None:
-                bias = _pad_to_alignment(bias, dim=0, alignment=16)
-            # scale_b is either per-tensor (numel==1) or per-channel
-            # (numel==N).  Block-wise 2D scales (e.g. DeepSeek V3) take
-            # a separate code path through CutlassFp8BlockScaledMMKernel
-            # and never reach this function.
-            if scale_b.numel() > 1:
-                scale_b = _pad_to_alignment(
-                    scale_b.view(-1), dim=0, alignment=16, value=1.0
-                )
-                if scale_b.dim() == 1 and b.shape[1] > 1:
-                    scale_b = scale_b.view(-1, 1)
-
-    out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
-
-    if pad_n > 0:
-        out = out[:, :N].contiguous()
-    return out
-
-
 def cutlass_scaled_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -973,14 +909,16 @@ def cutlass_scaled_mm(
     target_shape = (*a.shape[:-1], b.shape[1])
     a = a.view(-1, a.shape[-1])
 
-    if current_platform.is_rocm():
+    cutlass_compatible_b = b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0
+    if current_platform.is_rocm() or not cutlass_compatible_b:
         from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa
             triton_scaled_mm,
         )
 
         out = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     else:
-        out = _cutlass_scaled_mm_maybe_padded(a, b, scale_a, scale_b, out_dtype, bias)
+        out = torch.empty((a.shape[0], b.shape[1]), dtype=out_dtype, device=a.device)
+        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out.view(*target_shape)
 
