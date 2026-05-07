@@ -284,7 +284,12 @@ __global__ void gemm_q4_kernel_rdna3(
   // cheap as LDS reads. Measured: ~1% on 4B b=1, ~6% on 27B b=1 in=128.
   static_assert(BLOCK_KN_SIZE == THREADS_X,
                 "BLOCK_KN_SIZE must equal THREADS_X (1 K element per thread)");
-  constexpr bool USE_LDS_A = (M_COUNT > 1);
+  // The M=1 fast path (skip LDS) only has a global-read code path for bf16
+  // (the v_dot2_f32_bf16 branch).  The fp16 inner loop still indexes
+  // block_a[m][a_off] unconditionally, so for fp16 we MUST stage A through
+  // LDS even at M=1 to avoid reading uninitialized shared memory.
+  constexpr bool USE_LDS_A =
+      (M_COUNT > 1) || std::is_same<T, half>::value;
   if constexpr (USE_LDS_A) {
     if (offset_k + t < end_k) {
 #pragma unroll
