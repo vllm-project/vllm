@@ -1797,7 +1797,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   auto glbl = axl_glbl.data_ptr<float>();
   auto cntr = axl_cntr.data_ptr<int>();
 
-#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                     \
+#define WVSPLITKRC(_N, _GrpsShrB, _CHUNKK)                                     \
   {                                                                            \
     dim3 block(64, 4);                                                         \
     if (_DTRMNSTC)                                                             \
@@ -1824,19 +1824,20 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
     switch (N_p2) {
       case 16:
-        WVSPLITKrc(16, 1, 1) break;
+        WVSPLITKRC(16, 1, 1) break;
       case 32:
-        if (chunkk == 2) WVSPLITKrc(32, 2, 2) else WVSPLITKrc(32, 2, 1) break;
+        if (chunkk == 2) WVSPLITKRC(32, 2, 2) else WVSPLITKRC(32, 2, 1) break;
       case 64:
-        if (chunkk == 2) WVSPLITKrc(64, 4, 2) else WVSPLITKrc(64, 4, 1) break;
+        if (chunkk == 2) WVSPLITKRC(64, 4, 2) else WVSPLITKRC(64, 4, 1) break;
       case 128:
-        if (chunkk == 2) WVSPLITKrc(128, 4, 2) else WVSPLITKrc(128, 4, 1) break;
+        if (chunkk == 2) WVSPLITKRC(128, 4, 2) else WVSPLITKRC(128, 4, 1) break;
       default:
         throw std::runtime_error(
             "Unsupported N value: " + std::to_string(M_in) + "," +
             std::to_string(K_in) + "," + std::to_string(N_in));
     }
   });
+#undef WVSPLITKRC
   return out_c;
 }
 
