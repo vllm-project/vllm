@@ -1857,69 +1857,34 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
-def test_nixl_side_channel_host_uses_ray_actor_ip(monkeypatch):
-    vllm_config = create_vllm_config()
-    vllm_config.parallel_config.data_parallel_backend = "ray"
-    vllm_config.parallel_config.data_parallel_size = 8
-    vllm_config.parallel_config.data_parallel_size_local = 4
+def test_engine_core_actor_sets_nixl_side_channel_host(monkeypatch):
+    from vllm.v1.engine.core import EngineCoreActorMixin
 
-    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
-    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.12")
+    monkeypatch.delenv("VLLM_NIXL_SIDE_CHANNEL_HOST", raising=False)
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.15")
 
-    assert NixlConnectorScheduler._resolve_side_channel_host(vllm_config) == "10.0.0.12"
+    EngineCoreActorMixin._set_nixl_side_channel_host()
 
-
-def test_nixl_side_channel_host_uses_ray_actor_ip_after_dp_reset(monkeypatch):
-    vllm_config = create_vllm_config()
-    vllm_config.parallel_config.data_parallel_backend = "ray"
-    # Non-MoE Ray DP actors reset DP size before constructing the scheduler.
-    vllm_config.parallel_config.data_parallel_size = 1
-    vllm_config.parallel_config.data_parallel_size_local = 1
-    vllm_config.parallel_config.data_parallel_index = 3
-
-    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
-    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.13")
-
-    assert NixlConnectorScheduler._resolve_side_channel_host(vllm_config) == "10.0.0.13"
+    assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "10.0.0.15"
 
 
-def test_nixl_side_channel_host_keeps_env_for_non_ray_dp(monkeypatch):
-    vllm_config = create_vllm_config()
-    vllm_config.parallel_config.data_parallel_backend = "mp"
-    vllm_config.parallel_config.data_parallel_size = 8
-    vllm_config.parallel_config.data_parallel_size_local = 4
+def test_engine_core_actor_preserves_nixl_side_channel_host_override(monkeypatch):
+    from vllm.v1.engine.core import EngineCoreActorMixin
 
-    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "rank-local-node")
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "runtime-env-host")
+    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.15")
 
-    assert (
-        NixlConnectorScheduler._resolve_side_channel_host(vllm_config)
-        == "rank-local-node"
-    )
+    EngineCoreActorMixin._set_nixl_side_channel_host()
+
+    assert os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] == "runtime-env-host"
 
 
-def test_nixl_side_channel_host_falls_back_when_ray_lookup_fails(monkeypatch):
-    vllm_config = create_vllm_config()
-    vllm_config.parallel_config.data_parallel_backend = "ray"
-
-    def raise_ray_error():
-        raise RuntimeError("ray lookup failed")
-
-    monkeypatch.setattr(ray.util, "get_node_ip_address", raise_ray_error)
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.get_ip",
-        lambda: "10.0.0.14",
-    )
-
-    assert NixlConnectorScheduler._resolve_side_channel_host(vllm_config) == "10.0.0.14"
-
-
-def test_nixl_scheduler_uses_resolved_side_channel_host(monkeypatch):
+def test_nixl_scheduler_uses_actor_side_channel_host(monkeypatch):
     vllm_config = create_vllm_config()
     vllm_config.parallel_config.data_parallel_backend = "ray"
     vllm_config.parallel_config.data_parallel_index = 2
 
-    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "driver-node")
-    monkeypatch.setattr(ray.util, "get_node_ip_address", lambda: "10.0.0.15")
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "10.0.0.15")
 
     scheduler = NixlConnectorScheduler(
         vllm_config,
