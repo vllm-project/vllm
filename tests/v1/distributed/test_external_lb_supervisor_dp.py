@@ -80,7 +80,7 @@ def test_dp_supervisor_is_unhealthy_after_shutdown_requested():
 
 
 @pytest.mark.asyncio
-async def test_dp_supervisor_monitor_children_returns_failed_process(
+async def test_dp_supervisor_monitor_children_raises_when_child_exits(
     monkeypatch: pytest.MonkeyPatch,
 ):
     supervisor = DPSupervisor(_make_args())
@@ -95,7 +95,13 @@ async def test_dp_supervisor_monitor_children_returns_failed_process(
 
     monkeypatch.setattr(dp_supervisor, "_probe_endpoint", fake_probe)
 
-    assert await supervisor._monitor_children() is failed_process
+    with pytest.raises(
+        RuntimeError, match="Multi-port external LB child exited unexpectedly"
+    ) as exc_info:
+        await supervisor._monitor_children()
+
+    assert "ExternalLBRank_5" in str(exc_info.value)
+    assert "exit code 17" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

@@ -231,7 +231,6 @@ class DPSupervisor:
         return not self._shutdown_event.is_set() and self.children_healthy
 
     async def run(self) -> None:
-        failed_process: BaseProcess | None = None
         supervisor_server_exited = False
         supervisor_server_failure: BaseException | None = None
         loop = asyncio.get_running_loop()
@@ -280,7 +279,7 @@ class DPSupervisor:
                 self.supervisor_port,
             )
             self._start_children()
-            failed_process = await self._monitor_children()
+            await self._monitor_children()
         finally:
             self._shutdown_event.set()
             await self._shutdown_children()
@@ -291,12 +290,6 @@ class DPSupervisor:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.remove_signal_handler(sig)
 
-        if failed_process is not None:
-            raise RuntimeError(
-                f"Multi-port external LB child exited unexpectedly: "
-                f"{failed_process.name} "
-                f"exit code {failed_process.exitcode}"
-            )
         if supervisor_server_exited:
             raise RuntimeError(
                 "Multi-port external LB supervisor exited unexpectedly"
@@ -326,7 +319,7 @@ class DPSupervisor:
             process.start()
             self.processes.append(process)
 
-    async def _monitor_children(self) -> BaseProcess | None:
+    async def _monitor_children(self) -> None:
         timeout = aiohttp.ClientTimeout(total=self.args.data_parallel_probe_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             while not self._shutdown_event.is_set():
@@ -346,13 +339,16 @@ class DPSupervisor:
                     None,
                 )
                 if failed_process is not None:
-                    return failed_process
+                    raise RuntimeError(
+                        f"Multi-port external LB child exited unexpectedly: "
+                        f"{failed_process.name} "
+                        f"exit code {failed_process.exitcode}"
+                    )
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
                         timeout=self.args.data_parallel_probe_interval_s,
                     )
-        return None
 
     async def _shutdown_children(self) -> None:
         if self.processes:
