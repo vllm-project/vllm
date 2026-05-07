@@ -76,7 +76,7 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``.
+      - Blackwell (SM10.x) with ``head_k_dim == 128`` and ``cuda_runtime >= 13``.
     """
     if backend not in ["flashinfer", "auto"]:
         return False
@@ -86,7 +86,9 @@ def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> 
         return True  # Hopper — no further constraints.
     if not current_platform.is_device_capability_family(100):
         return False  # Neither Hopper nor Blackwell.
-    return head_k_dim == 128
+    if head_k_dim != 128:
+        return False
+    return current_platform.get_cuda_runtime_major() >= 13
 
 
 def _log_gdn_backend_decision(
