@@ -60,6 +60,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
+        self._pending_removal: set[OffloadKey] = set()
 
     # --- block pool ---
 
@@ -135,6 +136,10 @@ class CPUOffloadingManager(OffloadingManager):
             assert block is not None, f"Block {key!r} not found"
             assert block.ref_cnt > 0, f"Block {key!r} ref_cnt is already 0"
             block.ref_cnt -= 1
+            if block.ref_cnt == 0 and key in self._pending_removal:
+                self._pending_removal.discard(key)
+                self._policy.remove(key)
+                self._free_block(block)
 
     def prepare_store(
         self,
@@ -205,12 +210,20 @@ class CPUOffloadingManager(OffloadingManager):
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
-                    block.ref_cnt = 0
-                    stored_keys.append(key)
+                    if key in self._pending_removal:
+                        # Store completed for a block that was reset mid-flight.
+                        # Free it without emitting a "stored" event.
+                        self._pending_removal.discard(key)
+                        self._policy.remove(key)
+                        self._free_block(block)
+                    else:
+                        block.ref_cnt = 0
+                        stored_keys.append(key)
         else:
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
+                    self._pending_removal.discard(key)
                     self._policy.remove(key)
                     self._free_block(block)
 
@@ -224,12 +237,33 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
     def reset_cache(self) -> None:
-        all_keys = self._policy.clear()
-        self._free_list.clear()
-        self._num_allocated_blocks = 0
-        if all_keys and self.events is not None:
+        # Evict only blocks with ref_cnt == 0.  Live blocks (ref_cnt > 0 for
+        # in-flight loads, ref_cnt == -1 for in-flight stores) stay in the
+        # policy and are freed lazily in complete_load / complete_store.
+        evicted = self._policy.clear()
+        for _, block in evicted:
+            self._free_block(block)
+
+        # Any key still present in the policy has an active reference.
+        # Mark it for removal so complete_load / complete_store clean it up.
+        self._pending_removal.update(key for key, _ in self._policy.all_items())
+
+        if not self._pending_removal:
+            # No live blocks: the ID watermark can be fully reset.
+            self._free_list.clear()
+            self._num_allocated_blocks = 0
+        # If live blocks exist, _free_list already holds the freed IDs added by
+        # _free_block() above, and _num_allocated_blocks stays at its current
+        # value.  This prevents _allocate_blocks from issuing fresh IDs that
+        # collide with the still-live block IDs.
+
+        if evicted and self.events is not None:
             self.events.append(
-                OffloadingEvent(keys=all_keys, medium=self.medium, removed=True)
+                OffloadingEvent(
+                    keys=[k for k, _ in evicted],
+                    medium=self.medium,
+                    removed=True,
+                )
             )
 
     def take_events(self) -> Iterable[OffloadingEvent]:
