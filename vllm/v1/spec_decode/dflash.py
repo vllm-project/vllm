@@ -80,9 +80,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         )
 
     @override
-    def _raise_if_multimodal(self):
+    def _warn_if_multimodal(self):
         # Override to allow multimodal inputs since DFlash supports Qwen3.5 models
-        # Support for multimodal inputs has not been tested.
         pass
 
     @override

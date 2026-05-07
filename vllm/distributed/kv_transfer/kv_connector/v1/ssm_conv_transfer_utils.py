@@ -31,6 +31,7 @@ class MambaConvSplitInfo:
     x_local: int  # intermediate_size / TP  (columns for x)
     b_local: int  # groups_ss / TP  (columns for B; C is same size)
     conv_dtype_size: int  # bytes per element (e.g. 2 for float16)
+    ssm_sizes: tuple[int, int]  # (conv_state_bytes, ssm_state_bytes)
 
     @property
     def conv_dim_local(self) -> int:
@@ -99,8 +100,8 @@ def derive_mamba_conv_split(
         local_tp: this engine's tensor-parallel size.
 
     Returns:
-        MambaConvSplitInfo with per-rank x_local, b_local, conv_rows, and
-        conv_dtype_size.
+        MambaConvSplitInfo with per-rank x_local, b_local, conv_rows,
+        conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
     """
     if mamba_spec.mamba_type != "mamba2":
         raise NotImplementedError(
@@ -142,12 +143,20 @@ def derive_mamba_conv_split(
         dtype=mamba_spec.dtypes[0],  # type: ignore[misc]
     ).element_size()
 
+    ssm_dtype_size = torch.tensor(
+        [],
+        dtype=mamba_spec.dtypes[1],  # type: ignore[misc]
+    ).element_size()
+    conv_state_bytes = torch.Size(mamba_spec.shapes[0]).numel() * conv_dtype_size
+    ssm_state_bytes = torch.Size(mamba_spec.shapes[1]).numel() * ssm_dtype_size
+
     # Divide by TP to get per-rank column counts.
     return MambaConvSplitInfo(
         conv_rows=conv_rows,
         x_local=intermediate_size // local_tp,
         b_local=groups_ss // local_tp,
         conv_dtype_size=conv_dtype_size,
+        ssm_sizes=(conv_state_bytes, ssm_state_bytes),
     )
 
 
