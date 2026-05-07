@@ -9,7 +9,7 @@
 
 set -euo pipefail
 export GLOO_SOCKET_IFNAME=eth0 # for InfiniBand communication
-SCRIPT_VERSION="arc-bench-ipv4-2026-05-07"
+SCRIPT_VERSION="arc-bench-ipv4-direct-2026-05-07"
 
 resolve_host_ipv4() {
   local nodename="$1"
@@ -125,24 +125,15 @@ fi
 
 cd "${REPO_ROOT}"
 
-srun \
-  --overlap \
-  --jobid="${RAY_JOBID}" \
-  --nodelist="${HEAD_NODE}" \
-  --nodes=1 \
-  --ntasks=1 \
-  --ntasks-per-node=1 \
-  --gpus-per-task="${GPUS_PER_NODE}" \
-  --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && \"${VLLM_BIN}\" bench serve \
+"${VLLM_BIN}" bench serve \
   --backend vllm \
-  --host \"${HOST:-${HEAD_NODE_IP}}\" \
-  --port \"${PORT}\" \
-  --endpoint \"${ENDPOINT}\" \
-  --model \"${MODEL_ID}\" \
+  --host "${HOST:-${HEAD_NODE_IP}}" \
+  --port "${PORT}" \
+  --endpoint "${ENDPOINT}" \
+  --model "${MODEL_ID}" \
   --dataset-name custom \
-  --dataset-path \"${DATASET_PATH}\" \
-  --num-prompts \"${NUM_PROMPTS}\" \
-  --request-rate \"${REQUEST_RATE}\" \
-  --burstiness \"${BURSTINESS}\" \
-  --seed \"${SEED}\""
+  --dataset-path "${DATASET_PATH}" \
+  --num-prompts "${NUM_PROMPTS}" \
+  --request-rate "${REQUEST_RATE}" \
+  --burstiness "${BURSTINESS}" \
+  --seed "${SEED}"

@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-ipv4-2026-05-07"
+SCRIPT_VERSION="arc-ray-ipv4-direct-driver-2026-05-07"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
@@ -219,38 +219,22 @@ fi
 
 echo "=== ray status ==="
 echo "Checking cluster status..."
-srun \
-  --overlap \
-  --nodelist "${HEAD_NODE}" \
-  --nodes=1 \
-  --ntasks=1 \
-  --ntasks-per-node=1 \
-  --gpus-per-task="${GPUS_PER_NODE}" \
-  --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && \"${RAY_BIN}\" status"
+"${RAY_BIN}" status
 
-echo "=== vLLM api_server (background srun) ==="
+echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
-srun \
-  --overlap \
-  --nodelist "${HEAD_NODE}" \
-  --nodes=1 \
-  --ntasks=1 \
-  --ntasks-per-node=1 \
-  --gpus-per-task="${GPUS_PER_NODE}" \
-  --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && python -m vllm.entrypoints.openai.api_server \
-  --model \"${MODEL_ID}\" \
-  --host \"${HOST}\" \
-  --port \"${PORT}\" \
+python -m vllm.entrypoints.openai.api_server \
+  --model "${MODEL_ID}" \
+  --host "${HOST}" \
+  --port "${PORT}" \
   --distributed-executor-backend ray \
-  --tensor-parallel-size \"${TP}\" \
+  --tensor-parallel-size "${TP}" \
   --enable-expert-parallel \
-  --additional-config '{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":${TP},\"expert_parallelism\":${EP}}}}' \
+  --additional-config "{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":${TP},\"expert_parallelism\":${EP}}}}" \
   --enforce-eager \
-  --disable-custom-all-reduce" &
+  --disable-custom-all-reduce &
 SERVER_STEP_PID=$!
-echo "Started vLLM server step (pid=${SERVER_STEP_PID}). Waiting for /health ..."
+echo "Started vLLM server process (pid=${SERVER_STEP_PID}). Waiting for /health ..."
 
 _health_wait_n=0
 until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
