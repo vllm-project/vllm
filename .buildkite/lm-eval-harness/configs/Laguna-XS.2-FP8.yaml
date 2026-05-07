@@ -4,9 +4,9 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.0  # TODO: replace with measured baseline before merge
+    value: 0.8779
   - name: "exact_match,flexible-extract"
-    value: 0.0  # TODO: replace with measured baseline before merge
+    value: 0.8688
 limit: 1319
 num_fewshot: 5
 max_model_len: 131072
