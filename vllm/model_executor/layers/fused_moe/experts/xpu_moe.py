@@ -17,6 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
     kMxfp4Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.platforms import current_platform
 
@@ -171,6 +173,19 @@ class XPUExpertsFp8(XPUExperts):
             self.is_mxfp8 = True
         else:
             self.is_fp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8StaticTensorSym, None),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kMxfp8Static, None),
+            (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
 
 class XPUExpertsMXFp4(XPUExperts):
