@@ -21,7 +21,6 @@ class ZayaConfig(PretrainedConfig):
         num_experts=16,
         num_attention_heads=8,
         head_dim=128,
-        kv_channels=128,
         activation_func="swiglu",
         max_position_embeddings=131072,
         norm_epsilon=1e-05,
@@ -70,10 +69,7 @@ class ZayaConfig(PretrainedConfig):
         self.num_experts = num_experts
         self.num_attention_heads = num_attention_heads
         self.head_dim = head_dim
-        self.kv_channels = kv_channels
         assert self.head_dim is not None
-        assert self.kv_channels is not None
-        assert self.kv_channels == self.head_dim
         assert self.num_query_groups == num_key_value_heads
         self.num_key_value_heads = num_key_value_heads
         self.activation_func = activation_func
