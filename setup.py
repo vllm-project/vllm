@@ -965,7 +965,10 @@ def get_requirements() -> list[str]:
         # cuda-pathfinder>=1.5.0 is pinned explicitly because Docker base images
         # may have an older pre-installed version satisfying ~=1.1 that lacks
         # cuda.pathfinder._optional_cuda_import required by cuda.core>=0.6.
-        requirements.append(f"nccl4py[cu{cuda_major}]")
+        # Pin to 0.1.1: nccl4py==0.2.0 has a broken dep spec (cuda-pathfinder~=1.3
+        # but cuda-core==0.7.0 requires cuda-pathfinder>=1.5.0 for
+        # cuda.pathfinder._optional_cuda_import).
+        requirements.append(f"nccl4py[cu{cuda_major}]==0.1.1")
         requirements.append("cuda-pathfinder>=1.5.0")
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
