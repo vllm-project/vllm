@@ -56,6 +56,8 @@ void shm_send_tensor_list(int64_t handle,
 
 std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src);
 
+// SGL CPU kernels
+
 at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
                                 const std::optional<at::Tensor>& bias,
                                 bool is_vnni);
@@ -65,12 +67,11 @@ at::Tensor convert_weight_packed(at::Tensor& weight);
 at::Tensor fused_experts_cpu(
     at::Tensor& hidden_states, at::Tensor& w1, at::Tensor& w2,
     at::Tensor& topk_weights, at::Tensor& topk_ids, bool inplace,
-    bool use_int8_w8a8, bool use_fp8_w8a16,
-    const std::optional<at::Tensor>& w1_scale,
+    int64_t moe_comp_method, const std::optional<at::Tensor>& w1_scale,
     const std::optional<at::Tensor>& w2_scale,
-    const std::optional<std::vector<int64_t>> block_size,
-    const std::optional<at::Tensor>& a1_scale,
-    const std::optional<at::Tensor>& a2_scale, bool is_vnni);
+    const std::optional<at::Tensor>& w1_zero,
+    const std::optional<at::Tensor>& w2_zero,
+    const std::optional<std::vector<int64_t>> block_size, bool is_vnni);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
@@ -86,7 +87,12 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
 
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
-    at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
+    at::Tensor qweight,  // awq: (*, K, N / 8)  ||  gptq: (*, K / 8, N) , int32
+    at::Tensor qzeros,   // awq: (*, K / group_size, N / 8) ||  gptq: (*, K /
+                         // group_size, N / 8) , int32
+    at::Tensor scales,   // awq: (*, K / group_size, N) ||  gptq: (*, K /
+                         // group_size, N) , bfloat16
+    int64_t quant_method_4bit);
 
 at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
                               at::Tensor& w_scales,
@@ -360,10 +366,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("convert_weight_packed(Tensor! weight) -> Tensor");
   ops.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);
   ops.def(
-      "fused_experts_cpu(Tensor! hidden_states, Tensor w1, Tensor w2, Tensor "
-      "topk_weights, Tensor topk_ids, bool inplace, bool use_int8_w8a8, bool "
-      "use_fp8_w8a16, Tensor? w1_scale, Tensor? w2_scale, SymInt[]? "
-      "block_size, Tensor? a1_scale, Tensor? a2_scale, bool is_vnni) -> "
+      "fused_experts_cpu(Tensor hidden_states, Tensor w1, Tensor w2, Tensor "
+      "topk_weights, Tensor topk_ids, bool "
+      "inplace, int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
+      "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, bool is_vnni) -> "
       "Tensor");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
@@ -374,8 +380,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Adapted from sglang: INT4 W4A8 kernels
   ops.def(
-      "convert_weight_packed_scale_zp(Tensor qweight, Tensor qzeros, "
-      "Tensor scales) -> (Tensor, Tensor, Tensor)");
+      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
+      "scales, int quant_method_4bit) -> (Tensor, "
+      "Tensor, Tensor)");
   ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
            &convert_weight_packed_scale_zp);
 
