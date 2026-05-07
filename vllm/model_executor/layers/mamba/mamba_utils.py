@@ -335,7 +335,10 @@ def get_temporal_copy_spec(
     num_accepted_tokens: int,
 ) -> MambaCopySpec:
     """Return a MambaCopySpec for copying a temporal state slice."""
-    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    target_block_idx = cur_block_idx + num_accepted_tokens - 1
+    # In align mode, lookahead tokens may not have backing blocks yet.
+    effective_block_idx = min(target_block_idx, len(block_ids) - 1)
+    src_block_id = block_ids[effective_block_idx]
     src_state = state[src_block_id]
     return MambaCopySpec(
         start_addr=src_state.data_ptr(), num_elements=src_state.numel()

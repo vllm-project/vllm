@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock, patch
 
+import torch
+
+from vllm.model_executor.layers.mamba.mamba_utils import get_temporal_copy_spec
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.worker.mamba_utils import preprocess_mamba
 
@@ -67,3 +70,18 @@ def test_resumed_req_ids_cleared_from_mamba_state_idx():
         )
 
     assert mamba_state_idx == {"keep": 99}
+
+
+def test_get_temporal_copy_spec_clamps_out_of_range_block_index():
+    state = torch.arange(12, dtype=torch.float32).view(3, 4)
+    block_ids = [0, 2]
+
+    copy_spec = get_temporal_copy_spec(
+        state,
+        block_ids,
+        cur_block_idx=1,
+        num_accepted_tokens=2,
+    )
+
+    assert copy_spec.start_addr == state[block_ids[-1]].data_ptr()
+    assert copy_spec.num_elements == state[block_ids[-1]].numel()
