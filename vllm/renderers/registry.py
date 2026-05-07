@@ -28,6 +28,7 @@ _VLLM_RENDERERS = {
     "mistral": ("mistral", "MistralRenderer"),
     "qwen_vl": ("hf", "HfRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
+    "fastokens": ("hf", "HfRenderer"),
 }
 
 
