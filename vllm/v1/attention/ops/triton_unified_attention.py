@@ -63,8 +63,13 @@ def select_2d_config(
                 # TILE_SIZE=256 requires 128KB, TILE_SIZE=128 fits.
                 TILE_SIZE = min(TILE_SIZE, 128)
 
+        waves_per_eu = 2
         if max_seqlen_q >= 256:
-            BLOCK_M = 128
+            if current_platform.is_gfx1151() and head_size >= 80:
+                BLOCK_M = 64
+                waves_per_eu = 4
+            else:
+                BLOCK_M = 128
             q_tile_bytes = BLOCK_M * head_size * element_size
             if current_platform.is_navi() and q_tile_bytes > 65536:
                 max_block_m = 65536 // (head_size * element_size)
@@ -80,7 +85,7 @@ def select_2d_config(
             "TILE_SIZE": TILE_SIZE,
             "num_warps": num_warps,
             "num_stages": num_stages_2d,
-            "waves_per_eu": 2,
+            "waves_per_eu": waves_per_eu,
         }
     else:
         TILE_SIZE = 32

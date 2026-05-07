@@ -1,0 +1,18 @@
+# Config for Qwen/Qwen3-8B-AWQ
+model:
+  num_layers: 36
+  num_q_heads: 32
+  num_kv_heads: 8
+  head_dim: 128
+  block_size: 16
+
+batch_specs:
+  - "q3968s4096"
+
+backends:
+  - TRITON_ATTN
+
+device: "cuda:0"
+repeats: 20
+warmup_iters: 10
+profile_memory: false
