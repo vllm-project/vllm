@@ -1286,10 +1286,12 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-// This version targets cases skinny where CUs are not filled
-// Wave-SplitK is used with reduction done via atomics.
-#if defined(__gfx950__)
-  #define WVSPLITKRC_1KPASS
+// Skinny GEMM for cases where the M dimension is too small to fill all CUs.
+// Uses a wave-level split-K strategy with atomic reduction across K chunks.
+#if defined(__HIP__GFX9__)
+  #if defined(__gfx950__)
+    #define WVSPLITKRC_1KPASS
+  #endif
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -1330,6 +1332,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
   __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
+  uint32_t numCuWithFullK =
+      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
+
   #ifndef WVSPLITKRC_1KPASS
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
@@ -1363,8 +1368,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
 
   bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
-  uint32_t numCuWithFullK =
-      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
   uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
 
   // given above k-split, find this wave's position
@@ -1728,7 +1731,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             int* cntr, scalar_t* C,
                             const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif  // defined(__gfx950__) TODO: extend to __HIP__GFX9__ and __HIP__GFX1X__
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -1767,13 +1770,13 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 
-  // With 64 Ms per CU (each of 4 SIMDs working on a 16x16 tile),
-  // and each working on a 512-shard of K, how many CUs would we need?
+  // Each CU has 4 SIMDs each working on a 16x16 tile = 64 output rows per CU.
+  // Each CU also covers a 512-element K shard. Round up to get CU demand.
   int rndup_cus = ((M_in + 64 - 1) / 64) * ((K_in + 512 - 1) / 512);
 
-  // How many of 4 waves in a group can work on same 16 Ms at same time? First
-  // try to maximize this. This reduces the Ms each group works on, i.e.
-  // increasing the number of CUs needed.
+  // How many of the 4 wavefronts per block can share the same 16 output rows
+  // simultaneously? Maximize this first — more sharing means fewer output rows
+  // per block, which increases the number of CUs needed.
   int GrpsShrB = min(N_p2 / 16, 4);
 
   // Given the above, how many CUs would we need?
