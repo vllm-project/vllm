@@ -570,6 +570,7 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             block_shape=block_shape,
             is_scale_swizzled=False,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # All other backends use normal config.
