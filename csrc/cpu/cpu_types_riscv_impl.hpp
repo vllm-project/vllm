@@ -640,6 +640,11 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const BF16Vec16& v) : reg(v.reg_fp32) {};
 #endif
 
+  // FP8 KV cache stub: never instantiated on RISC-V (CPU_ATTN_DISPATCH omits
+  // FP8 cases on __riscv); exists only so name lookup succeeds in templates
+  // referencing this signature (parallels ARM/VXE/VSX).
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
+
   FP32Vec16 operator+(const FP32Vec16& b) const {
     return FP32Vec16(
         RVVI(__riscv_vfadd_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
