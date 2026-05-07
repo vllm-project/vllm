@@ -136,9 +136,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        self.is_fse_enabled = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-
-        if self.is_fse_enabled or config.shared_expert_intermediate_size <= 0:
+        if (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            or config.shared_expert_intermediate_size <= 0
+        ):
             self.shared_expert = None
         else:
             self.shared_expert = Qwen3NextMLP(
@@ -165,8 +166,8 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=1 if self.is_fse_enabled else 0,
-            shared_expert_gate=self.shared_expert_gate if self.is_fse_enabled else None,
+            n_shared_experts=1,
+            shared_expert_gate=self.shared_expert_gate,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:

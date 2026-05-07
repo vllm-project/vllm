@@ -371,14 +371,6 @@ class FusedMoE(PluggableLayer):
             if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
             else 0
         )
-        if (
-            not self.aiter_fmoe_shared_expert_enabled
-            and self.num_fused_shared_experts != 0
-        ):
-            raise ValueError(
-                "n_shared_experts is only supported on ROCm aiter when "
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
-            )
         self.shared_expert_gate = shared_expert_gate
 
         # Determine expert maps
