@@ -1959,7 +1959,7 @@ class NixlConnectorWorker:
         if self.use_mla and tp_ratio < 0 and read_specs:
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
-            notif_id = f"{req_id}:{self.world_size}".encode()
+            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             read_ranks = {s.remote_rank for s in read_specs}
             for rank_to_notify, agent in remote_agents.items():
