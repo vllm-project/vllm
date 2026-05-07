@@ -478,13 +478,25 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             mm_kwargs = dict(
                 **mm_kwargs,
             )
-
-        hf_inputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
+        if "device" not in mm_kwargs and torch.cuda.is_available():
+            mm_kwargs["device"] = "cuda"
+            hf_inputs = (
+                super()
+                ._call_hf_processor(
+                    prompt=prompt,
+                    mm_data=mm_data,
+                    mm_kwargs=mm_kwargs,
+                    tok_kwargs=tok_kwargs,
+                )
+                .to("cpu")
+            )
+        else:
+            hf_inputs = super()._call_hf_processor(
+                prompt=prompt,
+                mm_data=mm_data,
+                mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
+            )
 
         input_features = hf_inputs.pop("input_features", None)
         feature_attention_mask = hf_inputs.get("feature_attention_mask", None)
@@ -952,8 +964,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_audio_input(
         self,
         audio_input: Qwen2_5OmniAudioFeatureInputs,
-        audio_hashes: list[str] | None = None,
-        cached_audio_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -990,8 +1000,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_video_input(
         self,
         video_input: Qwen2_5_VLVideoInputs,
-        video_hashes: list[str] = None,
-        cached_video_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"].type(self.visual.dtype)
