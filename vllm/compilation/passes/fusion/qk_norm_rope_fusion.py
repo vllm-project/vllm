@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from itertools import product
 
 import torch
@@ -20,8 +21,10 @@ logger = init_logger(__name__)
 
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
 
+_QKNormRopeOutputT = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
-class QkNormRopePattern(VllmPatternReplacement):
+
+class QkNormRopePattern(VllmPatternReplacement[..., _QKNormRopeOutputT]):
     """
     Match the unfused sequence in attention blocks and replace with the fused op.
 
@@ -83,14 +86,14 @@ class QkNormRopePattern(VllmPatternReplacement):
         return [qkv, positions, q_weight, k_weight, cos_sin_cache]
 
     @property
-    def pattern(self):
+    def pattern(self) -> Callable[..., _QKNormRopeOutputT]:
         def _pattern(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             q_weight: torch.Tensor,
             k_weight: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> _QKNormRopeOutputT:
             # split qkv -> q,k,v
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -115,14 +118,14 @@ class QkNormRopePattern(VllmPatternReplacement):
         return _pattern
 
     @property
-    def replacement(self):
+    def replacement(self) -> Callable[..., _QKNormRopeOutputT]:
         def _replacement(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             q_weight: torch.Tensor,
             k_weight: torch.Tensor,
             cos_sin_cache: torch.Tensor,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ) -> _QKNormRopeOutputT:
             # Run fused qk_norm_rope op
             result = auto_functionalized(
                 FUSED_QK_ROPE_OP,
