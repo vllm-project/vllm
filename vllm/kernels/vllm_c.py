@@ -10,7 +10,6 @@ current_platform.import_kernels()
 
 CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
-ROCM = current_platform.is_rocm()
 
 rms_no_var_size = lambda x, weight, epsilon, variance_size=None: (
     variance_size is None and (weight is None or weight.dtype == x.dtype)
@@ -28,7 +27,10 @@ def rms_norm(
         # Kernel requires weight tensor, pass ones
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
-    if ROCM and x.dim() > 2:
+    # NOTE: This check is necessary for ROCm. However, CUDA (A100) was also
+    # found to score better performance with this path, so we use it for all
+    # CUDA-alike platforms.
+    if CUDA_ALIKE and x.dim() > 2:
         original_shape = x.shape
         x = x.view(-1, original_shape[-1])
         output = torch.empty_like(x)
@@ -65,7 +67,10 @@ def fused_add_rms_norm(
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
 
     assert variance_size is None
-    if ROCM and x.dim() > 2:
+    # NOTE: This check is necessary for ROCm. However, CUDA (A100) was also
+    # found to score better performance with this path, so we use it for all
+    # CUDA-alike platforms.
+    if CUDA_ALIKE and x.dim() > 2:
         original_shape = x.shape
         x = x.view(-1, original_shape[-1])
         x_residual = x_residual.view(-1, original_shape[-1])
