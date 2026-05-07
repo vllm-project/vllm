@@ -158,7 +158,6 @@ def_external_tool_parser!(Qwen3XmlToolParser, QwenParser);
 // Custom envelopes with JSON arguments.
 def_external_tool_parser!(DeepSeekV31ToolParser, DeepSeek31Parser);
 def_external_tool_parser!(DeepSeekV3ToolParser, DeepSeekParser);
-def_external_tool_parser!(KimiK2ToolParser, KimiK2Parser);
 
 // Special-token or custom-syntax tool-call formats.
 def_external_tool_parser!(PythonicToolParser, PythonicParser);

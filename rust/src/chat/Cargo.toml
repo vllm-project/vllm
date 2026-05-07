@@ -66,5 +66,10 @@ name = "glm45_moe_tool_parser"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "kimi_k2_tool_parser"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true

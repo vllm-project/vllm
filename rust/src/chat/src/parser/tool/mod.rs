@@ -13,6 +13,7 @@ mod external;
 mod gemma4;
 mod glm45_moe;
 mod glm47_moe;
+mod kimi_k2;
 mod minimax_m2;
 mod parameters;
 mod qwen_coder;
@@ -39,6 +40,7 @@ pub use external::*;
 pub use gemma4::Gemma4ToolParser;
 pub use glm45_moe::Glm45MoeToolParser;
 pub use glm47_moe::Glm47MoeToolParser;
+pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
 
