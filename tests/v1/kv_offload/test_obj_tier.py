@@ -13,6 +13,7 @@ Required environment variables (tests are skipped if any are absent):
     VLLM_TEST_S3_ACCESS_KEY       — S3 access key
     VLLM_TEST_S3_SECRET_KEY       — S3 secret key
     VLLM_TEST_S3_SCHEME           — (optional) http or https, default http
+    VLLM_TEST_S3_CA_BUNDLE        — (optional) path to CA bundle for TLS verification
 """
 
 import os
@@ -36,6 +37,7 @@ _S3_ENDPOINT = os.environ.get("VLLM_TEST_S3_ENDPOINT", "")
 _S3_ACCESS_KEY = os.environ.get("VLLM_TEST_S3_ACCESS_KEY", "")
 _S3_SECRET_KEY = os.environ.get("VLLM_TEST_S3_SECRET_KEY", "")
 _S3_SCHEME = os.environ.get("VLLM_TEST_S3_SCHEME", "http")
+_S3_CA_BUNDLE = os.environ.get("VLLM_TEST_S3_CA_BUNDLE", "")
 
 if not all([_S3_BUCKET, _S3_ENDPOINT, _S3_ACCESS_KEY, _S3_SECRET_KEY]):
     pytest.skip(
@@ -52,6 +54,7 @@ try:
         access_key=_S3_ACCESS_KEY,
         secret_key=_S3_SECRET_KEY,
         scheme=_S3_SCHEME,
+        ca_bundle=_S3_CA_BUNDLE,
         model_name="_probe",
         gpu_block_size=16,
         tp_size=1,
@@ -106,6 +109,7 @@ def make_tier(
         access_key=_S3_ACCESS_KEY,
         secret_key=_S3_SECRET_KEY,
         scheme=_S3_SCHEME,
+        ca_bundle=_S3_CA_BUNDLE,
         model_name="test_model",
         gpu_block_size=16,
         tp_size=1,
