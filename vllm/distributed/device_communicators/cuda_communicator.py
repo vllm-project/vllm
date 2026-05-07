@@ -98,7 +98,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if (
             "tp" in unique_name
             and self.world_size > 1
-            and envs.VLLM_ALLREDUCE_QUANTIZATION is not None
+            and envs.VLLM_ALLREDUCE_QUANTIZATION.lower() in ("int8", "fp8")
         ):
             self.quant_comm = QuantizedAllReduceCommunicator(
                 group=self.cpu_group,

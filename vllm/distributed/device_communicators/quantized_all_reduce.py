@@ -75,10 +75,9 @@ class QuantizedAllReduceCommunicator:
             device = torch.device(device)
         self.device = device
 
-        mode_raw = envs.VLLM_ALLREDUCE_QUANTIZATION
-        if mode_raw is None:
+        mode = envs.VLLM_ALLREDUCE_QUANTIZATION.lower()
+        if mode == "none":
             return
-        mode = mode_raw.lower()
 
         try:
             from vllm.distributed.device_communicators.quantized_allreduce import (
