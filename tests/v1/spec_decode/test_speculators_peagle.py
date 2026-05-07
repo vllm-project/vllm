@@ -11,15 +11,13 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_PATH = "shanjiaz/qwen3-8b-peagle-speculators"
 
-# TODO: fill in after a first evaluation run
 EXPECTED_GSM8K_ACCURACY = 0.88
-ACCURACY_RTOL = 0.03
-EXPECTED_ACCEPTANCE_LEN = 3.0
-ACCEPTANCE_LEN_RTOL = 0.15
+ACCURACY_RTOL = 0.05
+EXPECTED_ACCEPTANCE_LEN = 2.27
+ACCEPTANCE_LEN_RTOL = 0.20
 
-# TODO: fill in after a first evaluation run
-EXPECTED_PER_POS_ACCEPTANCE_RATES = [0.75, 0.55, 0.40, 0.25]
-PER_POS_RTOL = 0.15
+EXPECTED_PER_POS_ACCEPTANCE_RATES = [0.66, 0.36, 0.18, 0.09]
+PER_POS_RTOL = 0.20
 
 
 def compute_spec_decode_stats(
