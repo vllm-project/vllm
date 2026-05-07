@@ -162,11 +162,6 @@ def test_commit_eplb_maps_for_layer():
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
 
 
-def test_eplb_config_disable_online_requires_initial_mapping():
-    with pytest.raises(ValueError, match="requires initial_mapping_path"):
-        EPLBConfig(disable_online_rebalancing=True)
-
-
 def _make_eplb_state_for_mapping(tmp_path: Path, record: dict) -> EplbState:
     mapping_path = tmp_path / "mapping.jsonl"
     mapping_path.write_text(json.dumps(record) + "\n")
@@ -242,7 +237,7 @@ def test_static_eplb_step_skips_runtime_rearrange(monkeypatch):
     state = object.__new__(EplbState)
     state.parallel_config = SimpleNamespace(
         eplb_config=SimpleNamespace(
-            disable_online_rebalancing=True,
+            enable_online=False,
             expert_load_stats_path=None,
             log_balancedness_interval=1,
         )

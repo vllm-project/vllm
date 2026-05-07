@@ -691,23 +691,20 @@ class EplbState:
         rearranged weights. Iteration order over `model_states` is the
         dict insertion order, identical across ranks, so collective entry
         is symmetric and cannot deadlock.
+
+        Uses a simple per-layer all_gather + index-copy pass, not
+        `rearrange_expert_weights_inplace`: at startup we only do this
+        once per server lifetime, so the simpler synchronous primitive
+        is preferable to the P2P-based path's stream-event coordination.
         """
+        ep_size = ep_group.size()
+        ep_rank = ep_group.rank()
         for state in self.model_states.values():
             if not state.pending_initial_mapping_rearrange:
                 continue
-            # Identity layout describes how weights actually sit in memory
-            # at load time: phys slot i = logical (i % num_routed), with
-            # the redundant copies appended after the routed experts.
-            identity_p2l_list = EplbState.build_initial_global_physical_to_logical_map(
-                state.model.num_routed_experts,
-                state.model.num_redundant_experts,
-            )
-            old_global_expert_indices = (
-                torch.tensor(identity_p2l_list, device=self.device)
-                .unsqueeze(0)
-                .expand(state.model.num_moe_layers, -1)
-                .contiguous()
-            )
+            num_physical = state.model.num_physical_experts
+            num_local = num_physical // ep_size
+            local_start = ep_rank * num_local
 
             logger.info(
                 "EPLB: applying initial_mapping_path rearrangement "
@@ -716,14 +713,20 @@ class EplbState:
                 state.model_name,
             )
 
-            rearrange_expert_weights_inplace(
-                old_global_expert_indices=old_global_expert_indices,
-                new_global_expert_indices=state.physical_to_logical_map,
-                expert_weights=state.model.expert_weights,
-                ep_group=ep_group,
-                communicator=state.communicator,
-                is_profile=False,
-            )
+            for layer_idx, layer_weights in enumerate(state.model.expert_weights):
+                # Target logical id for each of this rank's local slots.
+                # Equals the source phys slot in the identity layout.
+                src_indices = state.physical_to_logical_map[
+                    layer_idx, local_start : local_start + num_local
+                ].to(torch.long)
+
+                for weight in layer_weights:
+                    w_contig = weight.contiguous()
+                    gather_list = [torch.empty_like(w_contig) for _ in range(ep_size)]
+                    torch.distributed.all_gather(gather_list, w_contig, group=ep_group)
+                    gathered = torch.cat(gather_list, dim=0)
+                    weight.copy_(gathered[src_indices])
+                    del gather_list, gathered
 
             state.pending_initial_mapping_rearrange = False
 
@@ -950,7 +953,7 @@ class EplbState:
                     )
 
         online_rebalancing_enabled = (
-            not self.parallel_config.eplb_config.disable_online_rebalancing
+            self.parallel_config.eplb_config.enable_online
         )
         if (
             online_rebalancing_enabled
@@ -978,7 +981,7 @@ class EplbState:
         1) The next rearrangement step, so the sliding window is ready.
         2) The next balancedness logging step, when log_stats is enabled.
         """
-        if self.parallel_config.eplb_config.disable_online_rebalancing:
+        if not self.parallel_config.eplb_config.enable_online:
             return (
                 log_stats
                 or self.parallel_config.eplb_config.expert_load_stats_path is not None
