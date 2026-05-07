@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+
 import torch
 
 from vllm.distributed.parallel_state import GroupCoordinator
@@ -119,9 +121,10 @@ def reserve_cp_collective_workspace(
     cp_world_size: int,
     dtype: torch.dtype,
     lse_dtype: torch.dtype = torch.float32,
-    reserve_a2a: bool = False,
+    combine_workspace_shapes_fn: (
+        Callable[..., list[tuple[tuple[int, ...], torch.dtype]]] | None
+    ) = None,
 ) -> None:
-    # reserve workspace from workspace manager, call before allgather/reduce_scatter
     if (
         cp_world_size <= 1
         or max_num_tokens <= 0
@@ -132,29 +135,29 @@ def reserve_cp_collective_workspace(
     assert total_heads % cp_world_size == 0
     local_heads = total_heads // cp_world_size
     workspace_manager = current_workspace_manager()
+
+    # Reserve for cp_all_gather_heads (separate get_simultaneous call)
     workspace_manager.get_simultaneous(
         ((max_num_tokens * cp_world_size, local_heads, gather_head_dim), dtype),
     )
-    workspace_manager.get_simultaneous(
-        ((total_heads, max_num_tokens, reduce_scatter_head_dim), dtype),
-        ((local_heads, max_num_tokens, reduce_scatter_head_dim), dtype),
-    )
-    workspace_manager.get_simultaneous(
-        ((cp_world_size * max_num_tokens, total_heads), lse_dtype),
-    )
-    if reserve_a2a:
-        workspace_manager.get_simultaneous(
-            (
-                (cp_world_size, max_num_tokens, local_heads, reduce_scatter_head_dim),
-                dtype,
-            ),
-            (
-                (cp_world_size, max_num_tokens, local_heads, reduce_scatter_head_dim),
-                dtype,
-            ),
-            ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
-            ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
+
+    # Reserve for the single get_simultaneous in _forward_with_dcp:
+    # context FA output + query FA output + combine workspaces
+    combine_shapes: list[tuple[tuple[int, ...], torch.dtype]] = []
+    if combine_workspace_shapes_fn is not None:
+        combine_shapes = combine_workspace_shapes_fn(
+            num_tokens=max_num_tokens,
+            total_heads=total_heads,
+            head_dim=reduce_scatter_head_dim,
+            cp_world_size=cp_world_size,
+            dtype=dtype,
+            lse_dtype=lse_dtype,
         )
+    workspace_manager.get_simultaneous(
+        ((max_num_tokens, total_heads, gather_head_dim), dtype),
+        ((max_num_tokens, local_heads, reduce_scatter_head_dim), dtype),
+        *combine_shapes,
+    )
 
 
 def cp_all_gather_heads(

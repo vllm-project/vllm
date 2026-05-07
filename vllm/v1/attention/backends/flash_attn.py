@@ -698,7 +698,7 @@ class FlashAttentionImpl(AttentionImpl):
                 reduce_scatter_head_dim=self.head_size,
                 cp_world_size=self.dcp_world_size,
                 dtype=self._dcp_dtype,
-                reserve_a2a=dcp_a2a,
+                combine_workspace_shapes_fn=self.dcp_combine_workspace_shapes,
             )
 
     def forward(
@@ -935,10 +935,7 @@ class FlashAttentionImpl(AttentionImpl):
         dcp_context_out, dcp_query_out, *combine_workspaces = (
             current_workspace_manager().get_simultaneous(
                 ((n, total_heads, self.head_size), self._dcp_dtype),
-                (
-                    (query.shape[0], self.num_heads, self.head_size),
-                    self._dcp_dtype,
-                ),
+                ((n, self.num_heads, self.head_size), self._dcp_dtype),
                 *self.dcp_combine_workspace_shapes(
                     num_tokens=n,
                     total_heads=total_heads,
