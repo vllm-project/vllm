@@ -217,8 +217,8 @@ class InputPreprocessor:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
         if "prompt_token_ids" in prompt:
-            return self._process_tokens(  # type: ignore[arg-type]
-                prompt,
+            return self._process_tokens(
+                prompt,  # type: ignore[arg-type]
                 tokenization_kwargs=tokenization_kwargs,
             )
 
