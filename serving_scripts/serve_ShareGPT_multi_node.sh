@@ -10,6 +10,28 @@
 set -euo pipefail
 export GLOO_SOCKET_IFNAME=eth0 # for InfiniBand communication
 
+resolve_host_ipv4() {
+  local nodename="$1"
+  local ip=""
+
+  pick_ipv4() {
+    awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}'
+  }
+
+  ip=$(dig +short "${nodename}" 2>/dev/null | pick_ipv4 || true)
+  if [ -z "${ip}" ]; then
+    ip=$(getent hosts "${nodename}" 2>/dev/null | awk '{print $1}' | pick_ipv4 || true)
+  fi
+  if [ -z "${ip}" ]; then
+    ip=$(
+      srun --nodelist="${nodename}" --nodes=1 --ntasks=1 \
+        --cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" \
+        bash -c "hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}'" 2>/dev/null || true
+    )
+  fi
+  printf '%s' "${ip}"
+}
+
 module purge
 module load Anaconda3/2025.06-1
 module load CUDA/12.9.0
@@ -38,6 +60,11 @@ if [ "${PYTHON_PATH}" != "${EXPECTED_PYTHON}" ]; then
 fi
 
 python -m pip install -U pip
+VLLM_BIN="${VENV_DIR}/bin/vllm"
+if [ ! -x "${VLLM_BIN}" ]; then
+  echo "Error: vllm binary not found at ${VLLM_BIN}. Run the host setup/install first." >&2
+  exit 1
+fi
 
 DATASET_PATH="${DATASET_PATH:-${REPO_ROOT}/datasets/sharegpt_buckets/Qwen_Qwen3-30B-A3B-Instruct-2507/sharegpt_sp128.jsonl}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
@@ -65,9 +92,19 @@ if [ -z "${RAY_JOBID}" ] || [ -z "${HEAD_NODE}" ]; then
   echo "Or run inside an sbatch allocation with SLURM_JOB_ID/SLURM_NODELIST set." >&2
   exit 1
 fi
-HEAD_NODE_IP="$(dig +short "${HEAD_NODE}" | head -n1)"
+if [ -n "${HEAD_NODE_IP:-}" ]; then
+  case "${HEAD_NODE_IP}" in
+    *.*.*.*) ;;
+    *)
+      echo "Error: HEAD_NODE_IP must be IPv4, got ${HEAD_NODE_IP}." >&2
+      exit 1
+      ;;
+  esac
+else
+  HEAD_NODE_IP="$(resolve_host_ipv4 "${HEAD_NODE}")"
+fi
 if [ -z "${HEAD_NODE_IP}" ]; then
-  echo "Failed to resolve HEAD_NODE_IP for ${HEAD_NODE}" >&2
+  echo "Failed to resolve an IPv4 HEAD_NODE_IP for ${HEAD_NODE}" >&2
   exit 1
 fi
 RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
@@ -95,7 +132,7 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && vllm bench serve \
+  bash -lc "source \"${VENV_DIR}/bin/activate\" && \"${VLLM_BIN}\" bench serve \
   --backend vllm \
   --host \"${HOST:-${HEAD_NODE_IP}}\" \
   --port \"${PORT}\" \

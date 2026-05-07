@@ -33,44 +33,48 @@ echo "WORKER_NODES=${WORKER_NODES}"
 slurm_debug "SLURM_NTASKS=${SLURM_NTASKS:-} SLURM_JOB_NUM_NODES=${SLURM_JOB_NUM_NODES:-}"
 slurm_debug "Full nodelist: $(scontrol show hostnames "${SLURM_NODELIST}" 2>/dev/null | tr '\n' ' ')"
 
-# ARC/some clusters do not resolve Slurm hostnames via `dig`; fall back to libc / on-node IP.
+# ARC/some clusters return link-local IPv6 records for Slurm hostnames.
+# Ray/vLLM need a routable node address here, so resolve an IPv4 address.
 resolve_host_ip() {
   local nodename="$1"
   local ip=""
   local method=""
-  ip=$(dig +short "${nodename}" 2>/dev/null | head -n1)
+
+  pick_ipv4() {
+    awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}'
+  }
+
+  ip=$(dig +short "${nodename}" 2>/dev/null | pick_ipv4 || true)
   if [ -n "${ip}" ]; then
-    method="dig"
+    method="dig_ipv4"
   fi
   if [ -z "${ip}" ]; then
-    ip=$(getent hosts "${nodename}" 2>/dev/null | awk 'NR==1 {print $1}')
-    [ -n "${ip}" ] && method="getent"
-  fi
-  if [ -z "${ip}" ] && command -v python3 >/dev/null 2>&1; then
-    ip=$(python3 -c "import socket; print(socket.gethostbyname(\"${nodename}\"))" 2>/dev/null || true)
-    [ -n "${ip}" ] && method="python_socket"
+    ip=$(getent hosts "${nodename}" 2>/dev/null | awk '{print $1}' | pick_ipv4 || true)
+    [ -n "${ip}" ] && method="getent_ipv4"
   fi
   if [ -z "${ip}" ]; then
     ip=$(
       srun --nodelist="${nodename}" --nodes=1 --ntasks=1 \
         --cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" \
-        bash -c "hostname -I 2>/dev/null | awk '{print \$1}'" 2>/dev/null || true
+        bash -c "hostname -I 2>/dev/null | tr ' ' '\n' | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {print; exit}'" 2>/dev/null || true
     )
-    [ -n "${ip}" ] && method="srun_hostname_I"
+    [ -n "${ip}" ] && method="srun_hostname_I_ipv4"
   fi
+
   slurm_debug "resolve_host_ip(${nodename}) -> ${ip:-<empty>} [${method:-failed}]"
   printf '%s' "${ip}"
 }
 
 export HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
 if [ -z "${HEAD_NODE_IP}" ]; then
-  echo "Error: could not resolve IP for head node ${HEAD_NODE} (dig/getent/python/srun all failed)." >&2
+  echo "Error: could not resolve an IPv4 address for head node ${HEAD_NODE}." >&2
+  echo "Ray cannot use ARC's link-local fe80:: hostname result as the cluster address." >&2
   exit 1
 fi
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
 
-export RAY_PORT=6378
-export RAY_ADDRESS=$HEAD_NODE_IP:$RAY_PORT
+export RAY_PORT="${RAY_PORT:-6378}"
+export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 echo "RAY_PORT=${RAY_PORT} RAY_ADDRESS=${RAY_ADDRESS}"
 
 module purge
@@ -108,11 +112,22 @@ slurm_debug "pip install starting (cuda + build + editable vllm)..."
 python -m pip install -U pip
 python -m pip install -r "${REPO_ROOT}/requirements/cuda.txt"
 python -m pip install -r "${REPO_ROOT}/requirements/build/cuda.txt"
+RAY_REQUIREMENT="${RAY_REQUIREMENT:-ray[cgraph]>=2.48.0}"
+echo "Installing Ray requirement: ${RAY_REQUIREMENT}"
+python -m pip install "${RAY_REQUIREMENT}"
 (
   cd "${REPO_ROOT}" || exit 1
   export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED:-1}"
   python -m pip install -e . ${VLLM_PIP_INSTALL_EXTRA_ARGS:-}
 )
+
+RAY_BIN="${VENV_DIR}/bin/ray"
+if [ ! -x "${RAY_BIN}" ]; then
+  echo "Error: ray binary not found at ${RAY_BIN}. Install ray into this venv." >&2
+  echo "Hint: source \"${VENV_DIR}/bin/activate\" && python -m pip install ray" >&2
+  exit 1
+fi
+echo "Using RAY_BIN=${RAY_BIN}"
 
 export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
@@ -132,7 +147,11 @@ echo "=== runtime knobs ==="
 echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "SERVE_SCRIPT=${SERVE_SCRIPT}"
-echo "HF_TOKEN is ${HF_TOKEN:+set}${HF_TOKEN:-not set}"
+if [ -n "${HF_TOKEN:-}" ]; then
+  echo "HF_TOKEN is set"
+else
+  echo "HF_TOKEN is not set"
+fi
 slurm_debug "VLLM_TARGET_DEVICE=${VLLM_TARGET_DEVICE} VLLM_USE_DEEP_GEMM=${VLLM_USE_DEEP_GEMM}"
 
 SERVER_STEP_PID=""
@@ -166,7 +185,7 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && export VLLM_HOST_IP=${HEAD_NODE_IP} && ray start --block --head --node-ip-address=${HEAD_NODE_IP} --port=${RAY_PORT}" &
+  bash -lc "source \"${VENV_DIR}/bin/activate\" && export VLLM_HOST_IP=${HEAD_NODE_IP} && \"${RAY_BIN}\" start --block --head --node-ip-address=${HEAD_NODE_IP} --port=${RAY_PORT}" &
 HEAD_RAY_PID=$!
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
 sleep 20
@@ -188,7 +207,7 @@ if [ -n "${WORKER_NODES}" ]; then
       --ntasks-per-node=1 \
       --gpus-per-task="${GPUS_PER_NODE}" \
       --cpus-per-task="${CPUS_PER_TASK}" \
-      bash -lc "source \"${VENV_DIR}/bin/activate\" && export VLLM_HOST_IP=${WORKER_IP} && ray start --block --address=${HEAD_NODE_IP}:${RAY_PORT} --node-ip-address=${WORKER_IP}" &
+      bash -lc "source \"${VENV_DIR}/bin/activate\" && export VLLM_HOST_IP=${WORKER_IP} && \"${RAY_BIN}\" start --block --address=${HEAD_NODE_IP}:${RAY_PORT} --node-ip-address=${WORKER_IP}" &
     WORKER_RAY_PIDS="${WORKER_RAY_PIDS} $!"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
@@ -205,7 +224,7 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && ray status"
+  bash -lc "source \"${VENV_DIR}/bin/activate\" && \"${RAY_BIN}\" status"
 
 echo "=== vLLM api_server (background srun) ==="
 echo "Starting vLLM server on head node..."
@@ -248,5 +267,6 @@ unset _health_wait_n
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
 
 HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
+  HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
