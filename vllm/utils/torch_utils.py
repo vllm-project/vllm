@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+    from vllm.config.cache import CacheDType
     from vllm.sequence import IntermediateTensors
 else:
     ModelConfig = object
@@ -368,7 +369,9 @@ def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | No
     return None
 
 
-def get_kv_cache_scheme_dtype(scheme: dict[str, Any] | None) -> str | None:
+def get_kv_cache_scheme_dtype(
+    scheme: dict[str, Any] | None,
+) -> "CacheDType | None":
     """Map a ``kv_cache_scheme`` dict to a vLLM ``cache_dtype`` string."""
     if not isinstance(scheme, dict):
         return None
