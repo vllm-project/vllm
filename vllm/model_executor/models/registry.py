@@ -511,6 +511,10 @@ _MULTIMODAL_MODELS = {
     "Phi4ForCausalLMV": ("phi4siglip", "Phi4ForCausalLMV"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),
+    "QianfanOCRForConditionalGeneration": (
+        "qianfan_ocr",
+        "QianfanOCRForConditionalGeneration",
+    ),
     "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),
     "Qwen2_5_VLForConditionalGeneration": (
@@ -597,6 +601,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "DeepSeekV4MTPModel": ("deepseek_v4_mtp", "DeepSeekV4MTP"),
+    "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
     "Exaone4_5_MTP": ("exaone4_5_mtp", "Exaone4_5_MTP"),
