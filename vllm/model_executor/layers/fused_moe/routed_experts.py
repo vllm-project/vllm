@@ -922,7 +922,7 @@ class RoutedExperts(PluggableLayer):
                 f"experts.{routed_experts_prefix}{base_layer}w13_"
                 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
                 else f"experts.{routed_experts_prefix}{base_layer}w2_",
-                f"experts.{routed_experts_prefix}{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
                 expert_id,
                 shard_id,
             )

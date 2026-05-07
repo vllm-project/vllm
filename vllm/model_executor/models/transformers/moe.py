@@ -86,6 +86,7 @@ class TransformersFusedMoE(MoERunner):
         return self.routed_experts.load_weights(weights)
 
 
+# TODO(bnell): Is this still needed?  Probably broken if it is.
 def transformers_moe_forward(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
