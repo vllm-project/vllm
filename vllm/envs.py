@@ -126,6 +126,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_USE_V4_TRITON_FALLBACK: bool = True
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1076,6 +1077,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # Master switch for the pre-rebase ROCm-native code paths used by
+    # DeepSeek-V4 (DSv4-Flash-FP8). When True (default on ROCm) the model
+    # selects the validated pre-rebase implementations at four call sites:
+    #
+    #   1. SWA K-cache writer: torch reference
+    #      (``_deepseek_v4_qnorm_rope_kv_insert_reference``) instead of
+    #      upstream's HIPified ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``
+    #      C++ kernel, whose FP8 dtype is selected at compile time
+    #      (``HIP_FP8_TYPE_OCP``) and silently corrupts every K byte on
+    #      MI300X (FNUZ-only). This is the regression fix; the other three
+    #      below are kept for defense in depth and bisection.
+    #   2. MLA decode: ``flash_mla_with_kvcache_rocm`` Triton kernel
+    #      (95% GSM8K validated) instead of upstream's
+    #      ``rocm_forward_decode_fallback``.
+    #   3. MLA sparse prefill: ``flash_mla_sparse_fwd_rocm`` Triton kernel
+    #      instead of upstream's ``rocm_sparse_attn_prefill``.
+    #   4. Sparse indexer: recovered ``rocm_sparse_attn_indexer_no_insert``
+    #      orchestration instead of upstream's
+    #      ``rocm_aiter_sparse_attn_indexer_native``.
+    #
+    # Set to "0" to opt back into the upstream paths for bisection / perf
+    # comparison (note: requires the SWA writer fix below to also be in place
+    # — flipping this alone reproduces the deterministic-garbage regression).
+    "VLLM_ROCM_USE_V4_TRITON_FALLBACK": lambda: (
+        os.getenv("VLLM_ROCM_USE_V4_TRITON_FALLBACK", "True").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE

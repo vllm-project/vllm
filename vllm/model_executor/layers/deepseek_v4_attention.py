@@ -636,7 +636,21 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         block_sz = swa_metadata.block_size
         slot_map = swa_metadata.slot_mapping
 
-        if fused_op is not None:
+        # Commit 628c43630 wired the
+        # kernel into the ROCm build, but its FP8 dtype is selected at
+        # *compile time* via ``HIP_FP8_TYPE_OCP`` whereas MI300X (gfx942)
+        # is FNUZ-only at runtime — a mismatch silently corrupts every K
+        # byte written to the SWA cache. Force the Python reference on
+        # ROCm under ``VLLM_ROCM_USE_V4_TRITON_FALLBACK`` so we match the
+        # pre-rebase numerics; flip the env var to "0" to opt back into
+        # the upstream C++ kernel for bisection.
+        # TODO: fix in the next commit.
+        use_torch_ref = (
+            current_platform.is_rocm()
+            and envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+        )
+
+        if fused_op is not None and not use_torch_ref:
             fused_op(q, kv, swa_kv_cache_2d, slot_map, pos_i64, cos_sin, self.eps, block_sz)
         else:
             _deepseek_v4_qnorm_rope_kv_insert_reference(
@@ -1040,7 +1054,16 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
 
-        if current_platform.is_rocm():
+        # When VLLM_ROCM_USE_V4_TRITON_FALLBACK is enabled (default on ROCm),
+        # we deliberately skip the upstream `rocm_forward_decode_fallback` and
+        # let the standard `flash_mla_with_kvcache` call below run. That call
+        # is mapped by `vllm.v1.attention.ops.flashmla` to our pre-rebase
+        # `flash_mla_with_kvcache_rocm` Triton/online-softmax fallback, which
+        # is the path that produced 95% GSM8K accuracy. The upstream torch
+        # reference (`rocm_ref_sparse_attn_decode`) has its own bugs that
+        # collapse generation to the base-model prior, so we keep it gated as
+        # an opt-in fallback for bisection only.
+        if current_platform.is_rocm() and not envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK:
             rocm_forward_decode_fallback(
                 q=q,
                 kv_cache=kv_cache,
@@ -1088,12 +1111,19 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 f"Unsupported compress_ratio={self.compress_ratio}; "
                 "expected 1, 4, or 128."
             )
-        assert tile_metadata is not None, (
-            "swa_metadata missing tile_sched entry for "
-            f"compress_ratio={self.compress_ratio}; "
-            "DeepseekSparseSWAMetadataBuilder.build_tile_scheduler did not "
-            "allocate one for this layer type."
-        )
+        # FlashMLA's tile-scheduler metadata is an NVIDIA-only planner state
+        # consumed by the C++/CUDA kernel. Our ROCm fallback
+        # (`flash_mla_with_kvcache_rocm`) discards `tile_scheduler_metadata`
+        # entirely, and `DeepseekSparseSWAMetadataBuilder.build_tile_scheduler`
+        # (correctly) skips allocating it on ROCm — so a `None` here is
+        # expected on AMD and only an error on CUDA.
+        if not current_platform.is_rocm():
+            assert tile_metadata is not None, (
+                "swa_metadata missing tile_sched entry for "
+                f"compress_ratio={self.compress_ratio}; "
+                "DeepseekSparseSWAMetadataBuilder.build_tile_scheduler did "
+                "not allocate one for this layer type."
+            )
 
         out, _ = flash_mla_with_kvcache(
             q=q,
@@ -1223,7 +1253,17 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 N,
             )
 
-            if current_platform.is_rocm():
+            # See the matching comment in `_forward_decode`: by default
+            # (VLLM_ROCM_USE_V4_TRITON_FALLBACK=True) we send the prefill
+            # forward through `flash_mla_sparse_fwd`, which on ROCm is bound
+            # to our pre-rebase `flash_mla_sparse_fwd_rocm` chunked-online-
+            # softmax kernel via `vllm.v1.attention.ops.flashmla`. Set the env
+            # var to "0" to opt back into upstream's `rocm_sparse_attn_prefill`
+            # torch reference (kept for bisection / regression testing).
+            if (
+                current_platform.is_rocm()
+                and not envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+            ):
                 rocm_sparse_attn_prefill(
                     q=q[query_start:query_end],
                     kv=kv.view(-1, 1, q.shape[-1]),
