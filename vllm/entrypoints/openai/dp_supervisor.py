@@ -284,11 +284,6 @@ class DPSupervisor:
             self._shutdown_event.set()
             await self._shutdown_children()
             supervisor_server.should_exit = True
-            if not supervisor_server_task.done():
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(supervisor_server_task, timeout=5.0)
-            for sig in (signal.SIGTERM, signal.SIGINT):
-                loop.remove_signal_handler(sig)
 
         if supervisor_server_exited:
             raise RuntimeError(
