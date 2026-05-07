@@ -6,9 +6,9 @@ from typing import Annotated, TypeAlias
 
 from pydantic import BeforeValidator, Field
 
-from vllm import PoolingParams
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.logger import init_logger
+from vllm.pooling_params import PoolingParams
 from vllm.utils import random_uuid
 
 from ..base.protocol import (

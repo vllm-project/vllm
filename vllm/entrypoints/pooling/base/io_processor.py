@@ -5,16 +5,14 @@ from collections.abc import Sequence
 from concurrent.futures import Executor
 from typing import Any, Final, cast
 
-from vllm import (
-    PoolingParams,
-    PoolingRequestOutput,
-)
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatTemplateConfig,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.lora.request import LoRARequest
+from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.utils.async_utils import make_async

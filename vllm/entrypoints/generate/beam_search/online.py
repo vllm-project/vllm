@@ -7,10 +7,10 @@ from collections.abc import AsyncGenerator, Mapping
 
 import numpy as np
 
-from vllm import CompletionOutput, RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid

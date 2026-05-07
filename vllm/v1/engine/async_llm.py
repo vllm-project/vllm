@@ -12,7 +12,6 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
-from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -29,6 +28,7 @@ from vllm.exceptions import (
     VLLMValidationError,
 )
 from vllm.inputs import EngineInput, PromptType
+from vllm.inputs.llm import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
