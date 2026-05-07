@@ -3,11 +3,11 @@
 
 from fastapi.responses import JSONResponse, Response
 
-from vllm import PoolingParams
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,

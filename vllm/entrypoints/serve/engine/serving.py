@@ -4,7 +4,7 @@ from http import HTTPStatus
 
 from fastapi import Request
 
-from vllm import PromptType, SamplingParams, envs
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
@@ -16,13 +16,13 @@ from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
-from vllm.inputs import EngineInput
+from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
-from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 
 

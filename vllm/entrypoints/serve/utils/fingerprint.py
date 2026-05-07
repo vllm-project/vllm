@@ -55,7 +55,7 @@ def build_system_fingerprint(
     if mode == "custom":
         return custom_value
 
-    from vllm import __version__ as vllm_version
+    from vllm._version import __version__ as vllm_version
 
     try:
         hash8 = vllm_config.compute_hash()[:8]
