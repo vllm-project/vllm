@@ -151,7 +151,7 @@ def test_vllm_c_rms_norm_accepts_nd_input():
     if not impl.supported:
         pytest.skip("vllm_c impl not supported on this platform")
 
-    x = torch.randn(2, 8, 64, dtype=torch.float16)
+    x = torch.randn(1, 8, 64, dtype=torch.float16)
     weight = torch.randn(64, dtype=torch.float16)
     epsilon = 1e-5
 
@@ -198,8 +198,8 @@ def test_vllm_c_fused_add_rms_norm_accepts_nd_input():
     if not impl.supported:
         pytest.skip("vllm_c impl not supported on this platform")
 
-    x = torch.randn(2, 8, 64, dtype=torch.float16)
-    x_residual = torch.randn(2, 8, 64, dtype=torch.float16)
+    x = torch.randn(1, 8, 64, dtype=torch.float16)
+    x_residual = torch.randn(1, 8, 64, dtype=torch.float16)
     weight = torch.randn(64, dtype=torch.float16)
     epsilon = 1e-5
 

@@ -27,12 +27,13 @@ def rms_norm(
         # Kernel requires weight tensor, pass ones
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     assert variance_size is None
-    # NOTE: This check is necessary for ROCm. However, CUDA (A100) was also
-    # found to score better performance with this path, so we use it for all
-    # CUDA-alike platforms.
+    # NOTE: 3D inputs are only expected from the Transformers modeling backend,
+    # where the 0-th dimension is 1. This check is necessary for ROCm. However,
+    # CUDA (A100) was also found to score better performance with this path, so
+    # we use it for all CUDA-alike platforms.
     if CUDA_ALIKE and x.dim() > 2:
         original_shape = x.shape
-        x = x.view(-1, original_shape[-1])
+        x = x.view(*original_shape[-2:])
         output = torch.empty_like(x)
         torch.ops._C.rms_norm(output, x, weight, epsilon)
         return output.view(original_shape)
@@ -67,13 +68,14 @@ def fused_add_rms_norm(
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
 
     assert variance_size is None
-    # NOTE: This check is necessary for ROCm. However, CUDA (A100) was also
-    # found to score better performance with this path, so we use it for all
-    # CUDA-alike platforms.
+    # NOTE: 3D inputs are only expected from the Transformers modeling backend,
+    # where the 0-th dimension is 1. This check is necessary for ROCm. However,
+    # CUDA (A100) was also found to score better performance with this path, so
+    # we use it for all CUDA-alike platforms.
     if CUDA_ALIKE and x.dim() > 2:
         original_shape = x.shape
-        x = x.view(-1, original_shape[-1])
-        x_residual = x_residual.view(-1, original_shape[-1])
+        x = x.view(*original_shape[-2:])
+        x_residual = x_residual.view(*original_shape[-2:])
         torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
         return x.view(original_shape), x_residual.view(original_shape)
 
