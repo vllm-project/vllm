@@ -1370,7 +1370,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 if use_token_lb:
                     waiting_tokens = counts[2]
                     running_tokens = counts[3]
-                    score = waiting_tokens + running_tokens
+                    score = waiting_tokens * 4 + running_tokens
                 else:
                     score = waiting * 4 + running
                 if score < min_score:
