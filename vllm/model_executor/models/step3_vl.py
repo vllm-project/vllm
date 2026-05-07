@@ -739,12 +739,11 @@ class Step3VLForConditionalGeneration(
         """
         Step3-VL only supports "image"
         """
-        # Step3-VL only has image modality, no video
         return "image"
 
     def get_max_frames_per_video(self) -> int:
         """
-        Step3-VL does not yet support video; returns 0 as a placeholder.
+        Step3-VL does not support video; returns 0 as a placeholder.
         """
         return 0
 
@@ -910,30 +909,20 @@ class Step3VLForConditionalGeneration(
         self,
         token_budget: int,
         max_batch_size: int,
-    ) -> tuple[int, int, int]:
+    ) -> int:
         vision_config = self.config.vision_config
         num_patch_feature_size = getattr(vision_config, "num_patch_feature_size", 81)
         num_image_feature_size = getattr(vision_config, "num_image_feature_size", 169)
-
-        # Use the full token_budget as the per-item maximum — a single item
-        # in the batch may consume the entire budget. Dividing by max_batch_size
-        # would under-count patches when items have unequal patch counts
-        # (e.g. a 250-token 1-patch image at max_batch_size=2 would get 0
-        #  capture patch slots, causing out-of-bounds on replay).
-
-        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
-        max_num_patches_per_item = max(
+        total_image_tokens = max_batch_size * num_image_feature_size
+        patch_token_budget = max(0, token_budget - total_image_tokens)
+        max_total_patch_count = max(
             0,
             int(
-                math.ceil(
-                    (per_item_output - num_image_feature_size) / num_patch_feature_size
-                )
+                math.ceil(patch_token_budget / num_patch_feature_size)
             ),
         )
 
-        max_total_patch_count = max_num_patches_per_item * max_batch_size
-
-        return max_num_patches_per_item, max_num_patches_per_item, max_total_patch_count
+        return max_total_patch_count
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -945,7 +934,7 @@ class Step3VLForConditionalGeneration(
     ) -> "EncoderCudaGraphCaptureInputs":
         vision_config = self.config.vision_config
 
-        _, _, max_total_patch_count = self._get_capture_patch_config(
+        max_total_patch_count = self._get_capture_patch_config(
             token_budget, max_batch_size
         )
         dummy_pixel_values = torch.randn(
@@ -1058,7 +1047,7 @@ class Step3VLForConditionalGeneration(
         NPFS = getattr(vision_config, "num_patch_feature_size", 81)
         IMFS = getattr(vision_config, "num_image_feature_size", 169)
         H = self.config.hidden_size
-        _, max_np_per_item, max_total_patches = self._get_capture_patch_config(
+        max_total_patches = self._get_capture_patch_config(
             token_budget, max_batch_size
         )
         B = max_batch_size
