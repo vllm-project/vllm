@@ -34,6 +34,7 @@ def _apply_steering_kernel(
     hidden_ptr,
     table_ptr,
     index_ptr,
+    active_ptr,
     out_ptr,
     N,
     H,
@@ -45,16 +46,41 @@ def _apply_steering_kernel(
     o_stride_h,
     BLOCK_H: tl.constexpr,
 ):
-    """Compute ``out[i, j] = hidden[i, j] + cast(table[index[i], j])``."""
+    """Compute ``out[i, j] = hidden[i, j] + cast(table[index[i], j])``.
+
+    When the byte at ``active_ptr`` is zero, the kernel skips the gather
+    and emits ``out[i, j] = hidden[i, j]`` so the inactive-hook short
+    circuit keeps the same output-tensor contract as the active path.
+    The active-flag is a tensor (not a Python branch) so the compiled
+    graph topology stays stable across batches whose active-hook set
+    differs.
+    """
     pid_n = tl.program_id(axis=0)
     if pid_n >= N:
         return
 
-    row = tl.load(index_ptr + pid_n)
-
     hidden_row_ptr = hidden_ptr + pid_n * h_stride_n
-    table_row_ptr = table_ptr + row * t_stride_r
     out_row_ptr = out_ptr + pid_n * o_stride_n
+
+    active = tl.load(active_ptr)
+    if active == 0:
+        # Inactive: skip the table gather and the dtype cast entirely.
+        # We still must produce ``out == hidden_states`` so the gather-
+        # path callers see consistent value semantics; this branch
+        # eliminates the table memory traffic and the cast, which is
+        # the dominant cost when the table is bf16/fp16 and hidden_size
+        # is large.  Combine with the in-place sibling branch
+        # (``mutates_args=["hidden_states"]``) for a full skip with no
+        # memcpy.
+        for h_off in range(0, H, BLOCK_H):
+            h_idx = h_off + tl.arange(0, BLOCK_H)
+            mask = h_idx < H
+            h_vals = tl.load(hidden_row_ptr + h_idx * h_stride_h, mask=mask)
+            tl.store(out_row_ptr + h_idx * o_stride_h, h_vals, mask=mask)
+        return
+
+    row = tl.load(index_ptr + pid_n)
+    table_row_ptr = table_ptr + row * t_stride_r
 
     for h_off in range(0, H, BLOCK_H):
         h_idx = h_off + tl.arange(0, BLOCK_H)
@@ -90,12 +116,17 @@ def apply_steering_triton(
     hidden_states: torch.Tensor,
     steering_table: torch.Tensor,
     steering_index: torch.Tensor,
+    any_active: torch.Tensor,
 ) -> torch.Tensor:
     """Compute ``hidden_states + table[index[:N]].to(hidden_states.dtype)``.
 
     Returns a freshly allocated output tensor with the same shape and
     dtype as ``hidden_states``. Empty batches (``N == 0``) short-circuit
     without launching the kernel — Triton can fail on zero-sized grids.
+
+    ``any_active`` is a single-element bool tensor; when ``False`` the
+    kernel still launches but skips the table gather and emits
+    ``hidden_states`` into the freshly-allocated output.
     """
     out = torch.empty_like(hidden_states)
     N = hidden_states.shape[0]
@@ -109,6 +140,7 @@ def apply_steering_triton(
         hidden_states,
         steering_table,
         steering_index,
+        any_active,
         out,
         N,
         H,
@@ -145,4 +177,9 @@ def warmup_apply_steering_kernel(
         max(table_rows, 1), hidden_size, dtype=table_dtype, device=device
     )
     dummy_index = torch.zeros(1, dtype=torch.long, device=device)
-    apply_steering_triton(dummy_hidden, dummy_table, dummy_index)
+    # Warm both the active and inactive code paths so neither triggers a
+    # JIT compile during the first captured forward pass.
+    dummy_active = torch.zeros(1, dtype=torch.bool, device=device)
+    apply_steering_triton(dummy_hidden, dummy_table, dummy_index, dummy_active)
+    dummy_active.fill_(True)
+    apply_steering_triton(dummy_hidden, dummy_table, dummy_index, dummy_active)

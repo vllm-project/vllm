@@ -20,6 +20,7 @@ from vllm.config.steering_types import (
 from vllm.exceptions import SteeringVectorError
 from vllm.logger import init_logger
 from vllm.model_executor.layers.steering import (
+    HOOK_POINT_ANY_ACTIVE_ATTR,
     HOOK_POINT_TABLE_ATTR,
     SteeringHookPoint,
 )
@@ -756,6 +757,17 @@ class SteeringModelRunnerMixin:
                 any_layer = next(iter(self._steerable_layers_cache.values()))
                 steering_index = cast(torch.Tensor, any_layer.steering_index)
                 steering_index.zero_()
+                # Nothing-active transition: clear every per-layer
+                # ``_any_active`` flag so apply_steering short-circuits on
+                # this and subsequent steps.  Mirrors the index zero-out
+                # above — only paid on the active->inactive transition;
+                # steady-state inactive runs skip this branch entirely
+                # (``_steering_index_dirty`` stays False).
+                for mod in self._steerable_layers_cache.values():
+                    for hp in SteeringHookPoint:
+                        flag_buf = getattr(mod, HOOK_POINT_ANY_ACTIVE_ATTR[hp], None)
+                        if flag_buf is not None:
+                            flag_buf.zero_()
                 self._steering_index_dirty = False
             return
 
