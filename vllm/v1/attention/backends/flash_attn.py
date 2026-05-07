@@ -691,14 +691,27 @@ class FlashAttentionImpl(AttentionImpl):
         self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
             self._dcp_dtype = vllm_config.model_config.dtype
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            total_heads = self.num_heads * self.dcp_world_size
             reserve_cp_collective_workspace(
-                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-                total_heads=self.num_heads * self.dcp_world_size,
+                max_num_tokens=max_tokens,
+                total_heads=total_heads,
                 gather_head_dim=self.head_size,
                 reduce_scatter_head_dim=self.head_size,
                 cp_world_size=self.dcp_world_size,
                 dtype=self._dcp_dtype,
-                combine_workspace_shapes_fn=self.dcp_combine_workspace_shapes,
+                reserve_a2a=dcp_a2a,
+            )
+            current_workspace_manager().get_simultaneous(
+                ((max_tokens, total_heads, self.head_size), self._dcp_dtype),
+                ((max_tokens, self.num_heads, self.head_size), self._dcp_dtype),
+                *self.dcp_combine_workspace_shapes(
+                    num_tokens=max_tokens,
+                    total_heads=total_heads,
+                    head_dim=self.head_size,
+                    cp_world_size=self.dcp_world_size,
+                    dtype=self._dcp_dtype,
+                ),
             )
 
     def forward(
