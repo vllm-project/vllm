@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.scheduler import KV_LOAD_ERROR_STOP_REASON, Scheduler
 from vllm.v1.request import FinishReason, Request, RequestStatus
 
 from .utils import (
@@ -88,6 +88,7 @@ def test_error_propagation_sync_load(fail_scheduler: Scheduler):
     output = engine_outputs.outputs[0]
     assert output.request_id == request.request_id
     assert output.finish_reason == FinishReason.ERROR
+    assert output.stop_reason == KV_LOAD_ERROR_STOP_REASON
 
     assert len(fail_scheduler.running) == 0
 
@@ -143,6 +144,7 @@ def test_error_propagation_async_load(fail_scheduler: Scheduler):
     output = engine_outputs.outputs[0]
     assert output.request_id == request.request_id
     assert output.finish_reason == FinishReason.ERROR
+    assert output.stop_reason == KV_LOAD_ERROR_STOP_REASON
 
     assert len(fail_scheduler.waiting) == 0
     assert len(fail_scheduler.skipped_waiting) == 0
