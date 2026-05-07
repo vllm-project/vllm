@@ -342,6 +342,19 @@ def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | No
     return None
 
 
+def _get_kv_cache_scheme_dtype(quant_cfg: dict[str, Any]) -> str | None:
+    scheme = quant_cfg.get("kv_cache_scheme")
+    if not isinstance(scheme, dict):
+        return None
+    scheme_type = scheme.get("type", "float")
+    num_bits = scheme.get("num_bits")
+    if scheme_type == "int" and num_bits == 8:
+        return "int8_per_tensor"
+    if scheme_type == "float" and num_bits == 8:
+        return "fp8"
+    return None
+
+
 def resolve_kv_cache_dtype_string(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> str:
@@ -355,11 +368,13 @@ def resolve_kv_cache_dtype_string(
     if hf_cfg is not None:
         quant_cfg = getattr(hf_cfg, "quantization_config", None)
         if quant_cfg is not None:
-            kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None:
-                return kv_algo_str
+            modelopt_resolved = get_kv_cache_quant_algo_string(quant_cfg)
+            if modelopt_resolved is not None:
+                return modelopt_resolved
+            scheme_resolved = _get_kv_cache_scheme_dtype(quant_cfg)
+            if scheme_resolved is not None:
+                return scheme_resolved
 
-    # Default to auto (will be handled by downstream code)
     return "auto"
 
 
