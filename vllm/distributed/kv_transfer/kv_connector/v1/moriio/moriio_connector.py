@@ -110,6 +110,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
         self.mode = get_moriio_mode()
+        self._defer_timeout = envs.VLLM_MORIIO_DEFER_TIMEOUT
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MoRIIOConnectorScheduler | None = (
                 MoRIIOConnectorScheduler(vllm_config, self.engine_id)
@@ -176,7 +177,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         # ibv_post_send failures under high concurrency can silently drop the
         # finished_sending notification, leaving KV blocks permanently allocated
         # on the prefill side. The reaper frees them after this idle period.
-        return envs.VLLM_MORIIO_DEFER_TIMEOUT
+        return self._defer_timeout
 
     ############################################################
     # Worker Side Methods
@@ -665,6 +666,7 @@ class MoRIIOConnectorWorker:
         self.moriio_engine = None
         self._handle_request_thread = None
         self._ping_thread = None
+        self._transfer_timeout = envs.VLLM_MORIIO_TRANSFER_TIMEOUT
         self._writer = MoRIIOWriter(self)
         # Completions that arrived before transfer_id_to_request_id was populated.
         # Retried each step until the mapping is established.
@@ -1361,7 +1363,7 @@ class MoRIIOConnectorWorker:
 
         if remote_engine_id is None:
             return
-        _deadline = time.monotonic() + envs.VLLM_MORIIO_TRANSFER_TIMEOUT
+        _deadline = time.monotonic() + self._transfer_timeout
         while True:
             if (
                 self._ready_requests.empty()
@@ -1427,7 +1429,7 @@ class MoRIIOConnectorWorker:
 
         if remote_engine_id is None and not wait_handshake_readd_req:
             return
-        _deadline = time.monotonic() + envs.VLLM_MORIIO_TRANSFER_TIMEOUT
+        _deadline = time.monotonic() + self._transfer_timeout
         while True:
             if (
                 self._ready_requests.empty()

@@ -76,6 +76,7 @@ class MoRIIOWriter:
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
         self._deferred_tasks: list[WriteTask] = []
+        self._defer_timeout = envs.VLLM_MORIIO_DEFER_TIMEOUT
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -151,7 +152,7 @@ class MoRIIOWriter:
         if not self._deferred_tasks:
             return
 
-        defer_timeout = envs.VLLM_MORIIO_DEFER_TIMEOUT
+        defer_timeout = self._defer_timeout
         now = time.perf_counter()
         still_deferred: list[WriteTask] = []
 
@@ -397,6 +398,10 @@ class MoRIIOWrapper:
         self.done_req_ids: list[str] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
+        self._transfer_timeout = envs.VLLM_MORIIO_TRANSFER_TIMEOUT
+        self._qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
+        self._post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
+        self._num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
         self.paths: dict[str, zmq.Socket] = {}
@@ -409,9 +414,9 @@ class MoRIIOWrapper:
 
     def set_backend_type(self, backend_type):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
-        post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
-        num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
+        qp_per_transfer = self._qp_per_transfer
+        post_batch_size = self._post_batch_size
+        num_worker_threads = self._num_worker_threads
         poll_mode = PollCqMode.POLLING
         rdma_cfg = RdmaBackendConfig(
             qp_per_transfer,
@@ -514,7 +519,7 @@ class MoRIIOWrapper:
             transfers_to_wait = self.transfer_status[:]
             self.transfer_status.clear()
 
-        timeout = envs.VLLM_MORIIO_TRANSFER_TIMEOUT
+        timeout = self._transfer_timeout
         deadline = time.monotonic() + timeout
         remaining = list(transfers_to_wait)
         errors: list[str] = []
