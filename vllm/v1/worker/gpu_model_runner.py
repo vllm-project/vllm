@@ -169,6 +169,7 @@ from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
+from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
@@ -524,6 +525,7 @@ class GPUModelRunner(
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
+                | Gemma4Proposer
             )
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -552,6 +554,8 @@ class GPUModelRunner(
                 self._ngram_pinned_val_buf = torch.zeros(
                     self.max_num_reqs, dtype=torch.int32, pin_memory=True
                 )
+            elif self.speculative_config.use_gemma4_mtp():
+                self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
@@ -1343,13 +1347,27 @@ class GPUModelRunner(
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
-                # Add new_token_ids to token_ids_cpu.
-                start_token_index = num_computed_tokens
-                end_token_index = num_computed_tokens + len(new_token_ids)
-                self.input_batch.token_ids_cpu[
-                    req_index, start_token_index:end_token_index
-                ] = new_token_ids
-                self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+                start_token_index = self.input_batch.num_tokens_no_spec[req_index]
+                # For chunked prefill, num_computed_tokens may less
+                # than num_tokens_no_spec.
+                # Async scheduled PP: no new_token_ids, advance num_tokens_no_spec
+                # according to num_computed_tokens.
+                end_token_index = max(
+                    start_token_index,
+                    num_computed_tokens + len(new_token_ids),
+                )
+                if end_token_index > start_token_index:
+                    if new_token_ids:
+                        # Add new_token_ids to token_ids_cpu.
+                        num_new_tokens = end_token_index - start_token_index
+                        tokens_to_append = new_token_ids[-num_new_tokens:]
+                        self.input_batch.token_ids_cpu[
+                            req_index, start_token_index:end_token_index
+                        ] = tokens_to_append
+                    self.input_batch.is_token_ids[
+                        req_index, start_token_index:end_token_index
+                    ] = True
+                    self.input_batch.num_tokens_no_spec[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
@@ -2310,11 +2328,18 @@ class GPUModelRunner(
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, (EagleProposer, DFlashProposer)):
+                if isinstance(
+                    self.drafter, (EagleProposer, DFlashProposer, Gemma4Proposer)
+                ):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
+            # Capture per-group block tables for multi-group proposers.
+            if self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+                self.drafter.set_per_group_block_table(
+                    kv_cache_gid, cm.block_table_tensor
+                )
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
@@ -4182,7 +4207,7 @@ class GPUModelRunner(
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
@@ -4276,7 +4301,8 @@ class GPUModelRunner(
                     EagleProposer
                     | DFlashProposer
                     | DraftModelProposer
-                    | ExtractHiddenStatesProposer,
+                    | ExtractHiddenStatesProposer
+                    | Gemma4Proposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4672,7 +4698,8 @@ class GPUModelRunner(
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
-                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+                self.drafter,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -5594,7 +5621,8 @@ class GPUModelRunner(
                     EagleProposer
                     | DFlashProposer
                     | DraftModelProposer
-                    | ExtractHiddenStatesProposer,
+                    | ExtractHiddenStatesProposer
+                    | Gemma4Proposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -6395,7 +6423,8 @@ class GPUModelRunner(
             or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(
-                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+                self.drafter,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -6448,7 +6477,10 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | ExtractHiddenStatesProposer,
+                EagleProposer
+                | DFlashProposer
+                | ExtractHiddenStatesProposer
+                | Gemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
