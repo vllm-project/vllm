@@ -43,7 +43,7 @@ We currently support the following OpenAI APIs:
 
 ## Pooling models APIs
 
-For further details on Pooling Models, please refer to [this page](../../models/pooling_models/README.md).
+For further details on pooling models, please refer to [this page](../../models/pooling_models/README.md).
 
 - Classification Usages
     - [Classification API](../../models/pooling_models/classify.md#online-serving)(`/classify`)
@@ -73,7 +73,7 @@ For further details on Pooling Models, please refer to [this page](../../models/
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
-    - Render Chat Completions
+    - Render chat completions
 
 ## Custom APIs
 
