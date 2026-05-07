@@ -7,6 +7,7 @@ This module handles the extraction of DeltaMessage objects from
 harmony parser state during streaming chat completions.
 """
 
+from collections.abc import Iterable
 from typing import NamedTuple
 
 from openai_harmony import StreamableParser
@@ -21,12 +22,41 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
 )
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class TokenState(NamedTuple):
     channel: str | None
     recipient: str | None
     text: str
+
+
+def process_harmony_stream_tokens(
+    harmony_parser: StreamableParser, token_ids: Iterable[int]
+) -> tuple[list[TokenState], Exception | None]:
+    """Process streaming token IDs until Harmony parsing fails."""
+    token_states: list[TokenState] = []
+    for token_id in token_ids:
+        try:
+            harmony_parser.process(token_id)
+        except Exception as e:
+            logger.exception(
+                "Harmony parser stopped at token %d",
+                token_id,
+            )
+            return token_states, e
+
+        token_states.append(
+            TokenState(
+                harmony_parser.current_channel,
+                harmony_parser.current_recipient,
+                harmony_parser.last_content_delta or "",
+            )
+        )
+
+    return token_states, None
 
 
 def extract_harmony_streaming_delta(

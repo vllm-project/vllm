@@ -36,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     TokenState,
     extract_harmony_streaming_delta,
+    process_harmony_stream_tokens,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -420,6 +421,7 @@ class OpenAIServingChat(OpenAIServing):
             harmony_parsers = [
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
             ]
+            harmony_parser_failed = [False] * num_choices
             harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
@@ -586,15 +588,12 @@ class OpenAIServingChat(OpenAIServing):
 
                         # Track accumulated content per token with their state
                         token_states: list[TokenState] = []
-                        for token_id in output.token_ids:
-                            harmony_parser.process(token_id)
-                            token_delta = harmony_parser.last_content_delta or ""
-                            token_states.append(
-                                TokenState(
-                                    harmony_parser.current_channel,
-                                    harmony_parser.current_recipient,
-                                    token_delta,
-                                )
+                        if not harmony_parser_failed[i]:
+                            (
+                                token_states,
+                                harmony_parser_failed[i],
+                            ) = process_harmony_stream_tokens(
+                                harmony_parser, output.token_ids
                             )
                         delta_text = "".join(delta for _, _, delta in token_states)
                         cur_channel = harmony_parser.current_channel

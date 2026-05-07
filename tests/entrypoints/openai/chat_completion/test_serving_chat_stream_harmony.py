@@ -12,7 +12,10 @@ import pytest
 from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     TokenState,
     extract_harmony_streaming_delta,
+    process_harmony_stream_tokens,
 )
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @dataclass
@@ -28,6 +31,49 @@ class MockStreamableParser:
     """Mock StreamableParser for testing without openai_harmony dependency."""
 
     messages: list[MockMessage] = field(default_factory=list)
+
+
+@dataclass
+class ProcessableMockStreamableParser(MockStreamableParser):
+    """Mock parser that records processed token IDs."""
+
+    fail_on: int | None = None
+    current_channel: str | None = "final"
+    current_recipient: str | None = None
+    last_content_delta: str = ""
+    processed_tokens: list[int] = field(default_factory=list)
+
+    def process(self, token_id: int) -> None:
+        if token_id == self.fail_on:
+            raise RuntimeError("invalid harmony token")
+        self.processed_tokens.append(token_id)
+        self.last_content_delta = str(token_id)
+
+
+class TestProcessHarmonyStreamTokens:
+    """Tests for converting Harmony token IDs into token states."""
+
+    def test_processes_all_tokens(self):
+        parser = ProcessableMockStreamableParser()
+
+        token_states, failed = process_harmony_stream_tokens(parser, [1, 2, 3])
+
+        assert failed is False
+        assert parser.processed_tokens == [1, 2, 3]
+        assert token_states == [
+            TokenState("final", None, "1"),
+            TokenState("final", None, "2"),
+            TokenState("final", None, "3"),
+        ]
+
+    def test_stops_at_first_parser_error(self):
+        parser = ProcessableMockStreamableParser(fail_on=2)
+
+        token_states, failed = process_harmony_stream_tokens(parser, [1, 2, 3])
+
+        assert failed is True
+        assert parser.processed_tokens == [1]
+        assert token_states == [TokenState("final", None, "1")]
 
 
 class TestExtractHarmonyStreamingDelta:
