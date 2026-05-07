@@ -228,16 +228,6 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         limits["video"] = None
         return limits
 
-    def _get_configured_video_num_frames(self) -> int:
-        mm_config = self.ctx.model_config.get_multimodal_config()
-        video_kwargs = mm_config.media_io_kwargs.get("video", {})
-        if not isinstance(video_kwargs, Mapping):
-            video_kwargs = {}
-        num_frames = video_kwargs.get("num_frames", _VIDEO_MAX_FRAMES)
-        if type(num_frames) is not int or num_frames <= 0:
-            return _VIDEO_MAX_FRAMES
-        return num_frames
-
     def get_mm_max_tokens_per_item(
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
@@ -256,7 +246,14 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
         # Video: each frame ≤ 70 soft tokens + boi + eoi + ~6 ts tokens.
-        num_frames = self._get_configured_video_num_frames()
+        num_frames = _VIDEO_MAX_FRAMES
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        video_opts = mm_config.limit_per_prompt.get("video")
+        if (
+            isinstance(video_opts, VideoDummyOptions)
+            and video_opts.num_frames is not None
+        ):
+            num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
@@ -468,7 +465,7 @@ class Gemma4DummyInputsBuilder(BaseDummyInputsBuilder[Gemma4ProcessingInfo]):
             data["video"] = self._get_dummy_videos(
                 width=img_width,
                 height=img_height,
-                num_frames=self.info._get_configured_video_num_frames(),
+                num_frames=_VIDEO_MAX_FRAMES,
                 num_videos=num_videos,
                 overrides=video_overrides,
             )
