@@ -8,18 +8,16 @@ from pydantic import BaseModel, Field
 from vllm import PoolingParams
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.base.protocol import (
-    ClassifyRequestMixin,
-    PoolingBasicRequestMixin,
-)
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
+from ..base.protocol import ClassifyRequestMixin, PoolingBasicRequestMixin
 from .typing import ScoreContentPartParam, ScoreInput
 
 
-class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
+class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
+    # --8<-- [start:scoring-common-params]
     max_tokens_per_query: int = Field(
         default=0,
         description=(
@@ -37,6 +35,7 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             "applies to the combined query+document)."
         ),
     )
+    # --8<-- [end:scoring-common-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
@@ -57,14 +56,16 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
         )
 
 
-class ScoreDataRequest(ScoreRequestMixin):
+class ScoreDataRequest(ScoringRequestMixin):
     data_1: ScoreInput | list[ScoreInput]
     data_2: ScoreInput | list[ScoreInput]
 
 
-class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
+class ScoreQueriesDocumentsRequest(ScoringRequestMixin):
+    # --8<-- [start:score-request-params]
     queries: ScoreInput | list[ScoreInput]
     documents: ScoreInput | list[ScoreInput]
+    # --8<-- [end:score-request-params]
 
     @property
     def data_1(self):
@@ -75,7 +76,7 @@ class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
         return self.documents
 
 
-class ScoreQueriesItemsRequest(ScoreRequestMixin):
+class ScoreQueriesItemsRequest(ScoringRequestMixin):
     queries: ScoreInput | list[ScoreInput]
     items: ScoreInput | list[ScoreInput]
 
@@ -88,7 +89,7 @@ class ScoreQueriesItemsRequest(ScoreRequestMixin):
         return self.items
 
 
-class ScoreTextRequest(ScoreRequestMixin):
+class ScoreTextRequest(ScoringRequestMixin):
     text_1: ScoreInput | list[ScoreInput]
     text_2: ScoreInput | list[ScoreInput]
 
@@ -109,10 +110,12 @@ ScoreRequest: TypeAlias = (
 )
 
 
-class RerankRequest(ScoreRequestMixin):
+class RerankRequest(ScoringRequestMixin):
+    # --8<-- [start:rerank-request-params]
     query: ScoreInput
     documents: ScoreInput | list[ScoreInput]
     top_n: int = Field(default_factory=lambda: 0)
+    # --8<-- [end:rerank-request-params]
 
 
 ScoringRequest: TypeAlias = ScoreRequest | RerankRequest
