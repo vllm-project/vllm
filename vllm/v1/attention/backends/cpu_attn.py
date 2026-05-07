@@ -21,6 +21,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -49,6 +50,10 @@ class CPUAttentionBackend(AttentionBackend):
         "fp8_e4m3",
         "fp8_e5m2",
     ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
