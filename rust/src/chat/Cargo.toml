@@ -47,6 +47,16 @@ vllm-engine-core-client = { workspace = true, features = ["test-util"] }
 zeromq.workspace = true
 
 [[bench]]
+name = "deepseek_v3_tool_parser"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
+name = "deepseek_v31_tool_parser"
+harness = false
+required-features = ["test-util"]
+
+[[bench]]
 name = "deepseek_v32_tool_parser"
 harness = false
 required-features = ["test-util"]

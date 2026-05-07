@@ -7,6 +7,7 @@
 //! first, so later steps can attach adaptor-based implementations and then
 //! gradually replace them with native parsers as needed.
 
+mod deepseek_json;
 mod deepseek_v32;
 mod deepseek_v4;
 mod external;
@@ -34,6 +35,7 @@ use crate::request::{ChatRequest, ChatTool};
 /// Result alias for tool parser operations.
 pub type Result<T> = std::result::Result<T, ToolParserError>;
 
+pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use deepseek_v4::DeepSeekV4ToolParser;
 pub use deepseek_v32::DeepSeekV32ToolParser;
 pub use external::*;
