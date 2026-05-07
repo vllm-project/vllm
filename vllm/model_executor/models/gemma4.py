@@ -543,7 +543,7 @@ class Gemma4Attention(nn.Module):
         else:
             # KV-shared layers: only apply RoPE to Q; K/V come from cache
             k = qkv[..., self.q_size : self.q_size + self.kv_size]
-            v = qkv[..., self.q_size + self.kv_size :]
+            v = k if self.use_k_eq_v else qkv[..., self.q_size + self.kv_size :]
             q = self.rotary_emb(positions, q, k)[0]
 
         attn_output = self.attn(q, k, v)
