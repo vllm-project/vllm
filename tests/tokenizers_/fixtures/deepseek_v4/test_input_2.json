@@ -1,0 +1,24 @@
+[
+  {
+    "role": "system",
+    "content": "You are a helpful assistant."
+  },
+  {
+    "role": "user",
+    "content": "Hello"
+  },
+  {
+    "role": "assistant",
+    "reasoning": "The user said hello, I should greet back.",
+    "content": "Hi there! How can I help you?"
+  },
+  {
+    "role": "user",
+    "content": "What is the capital of France?"
+  },
+  {
+    "role": "assistant",
+    "reasoning": "The user asks about the capital of France. It is Paris.",
+    "content": "The capital of France is Paris."
+  }
+]

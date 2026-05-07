@@ -33,6 +33,36 @@ def rms_norm(
     return output
 
 
+rms_add_no_var_size = (
+    lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+    and (weight is None or weight.dtype == x.dtype)
+)
+"""vLLM Kernel does not support variance_size parameter and requires
+matching input/weight dtype."""
+
+
+@ir.ops.fused_add_rms_norm.register_impl(
+    "vllm_c",
+    supports_args=rms_add_no_var_size,
+    supported=CUDA_ALIKE,
+    inplace=True,
+)
+def fused_add_rms_norm(
+    x: Tensor,
+    x_residual: Tensor,
+    weight: Tensor | None,
+    epsilon: float,
+    variance_size: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    if weight is None:
+        # Kernel requires weight tensor, pass ones
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
+
+    assert variance_size is None
+    torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
+    return x, x_residual
+
+
 @ir.ops.gelu_and_mul.register_impl("vllm_c", supported=CUDA_ALIKE)
 def gelu_and_mul(x: Tensor, approximate: str = "none") -> Tensor:
     """

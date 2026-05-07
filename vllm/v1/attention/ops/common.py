@@ -265,6 +265,7 @@ def _pack_seq_kernel(
     D: tl.constexpr,
     Lmax: tl.constexpr,
     PAD_VALUE: tl.constexpr,
+    PAD_IS_UINT8: tl.constexpr,
     BLOCK_T: tl.constexpr,  # timesteps per program
     BLOCK_D: tl.constexpr,  # features per program
 ):
@@ -294,9 +295,15 @@ def _pack_seq_kernel(
     # out_ptr: row-major [B, Lmax, D]
     out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
 
-    # Initialize with PAD (cast will occur as needed based on out_ptr dtype)
+    # Initialize with PAD. PAD_IS_UINT8 selects the pad tensor's dtype so
+    # integer-typed outputs (e.g. MXFP4 packed nibbles, ue8m0 scale bytes)
+    # get an exact-byte pad rather than going through an fp32→uint8 cast
+    # that's implementation-defined outside of value 0.
     d_mask = off_d[None, :] < D
-    pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.float32)
+    if PAD_IS_UINT8:
+        pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.uint8)
+    else:
+        pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.float32)
     tl.store(out_row_ptr, pad_vals, mask=t_mask[:, None] & d_mask)
 
     # Load & write only where within seq_len
@@ -307,23 +314,36 @@ def _pack_seq_kernel(
 def pack_seq_triton(
     x: torch.Tensor,
     lengths: torch.Tensor,
-    pad_value: float = -float("inf"),
+    pad_value: float | int = -float("inf"),
     block_t: int = 64,
     block_d: int = 64,
 ) -> torch.Tensor:
-    """
-    Pack sequences of different lengths into a batched tensor.
+    """Pack sequences of different lengths into a batched tensor.
+
+    Supports float dtypes (any, via fp32 pad) and ``torch.uint8`` (exact-byte
+    pad — e.g. MXFP4 packed nibbles or ue8m0 scale bytes). For uint8 inputs
+    ``pad_value`` must be an integer in ``[0, 255]``.
 
     Args:
-        x: [N, ...] - input tensor where N is total number of tokens
-        lengths: [B] - sequence lengths for each batch
-        pad_value: value to use for padding
-        block_t: block size for time dimension
-        block_d: block size for feature dimension
+        x: [N, ...] — input tensor where N is total number of tokens.
+        lengths: [B] — sequence lengths for each batch.
+        pad_value: value to use for padding. Defaults to ``-inf`` which is
+            only sensible for float dtypes; pass ``0`` (or any byte) for
+            uint8 inputs.
+        block_t: block size for time dimension.
+        block_d: block size for feature dimension.
 
     Returns:
-        packed: [B, Lmax, ...] - packed tensor
+        packed: [B, Lmax, ...] — packed tensor.
     """
+    is_uint8 = x.dtype == torch.uint8
+    if is_uint8:
+        assert isinstance(pad_value, int) and 0 <= pad_value <= 255, (
+            f"uint8 pack requires an integer pad in [0, 255], got {pad_value!r}"
+        )
+        pad_constexpr: int | float = int(pad_value)
+    else:
+        pad_constexpr = float(pad_value)
 
     # Handle multi-dimensional input by reshaping to (N, -1)
     original_shape = x.shape
@@ -338,8 +358,6 @@ def pack_seq_triton(
     B = lengths.numel()
     Lmax = int(lengths.max().item())
 
-    # Starts are computed inside the kernel from lengths
-
     out = torch.empty((B, Lmax, D), device=x.device, dtype=x.dtype)
 
     grid = (B, triton.cdiv(Lmax, block_t), triton.cdiv(D, block_d))
@@ -350,17 +368,16 @@ def pack_seq_triton(
         N,
         D,
         Lmax,
-        PAD_VALUE=float(pad_value),
+        PAD_VALUE=pad_constexpr,
+        PAD_IS_UINT8=is_uint8,
         BLOCK_T=block_t,
         BLOCK_D=block_d,
         num_warps=4,
         num_stages=2,
     )
 
-    # Reshape output back to original dimensions (except first dimension)
     if len(original_shape) > 2:
-        output_shape = (B, Lmax) + original_shape[1:]
-        out = out.reshape(output_shape)
+        out = out.reshape((B, Lmax) + original_shape[1:])
 
     return out
 

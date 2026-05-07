@@ -26,6 +26,9 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.model_executor.layers.quantization.turboquant.centroids import (
+    get_centroids,
+)
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -49,6 +52,10 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
@@ -335,9 +342,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             H = _build_hadamard(D, str(device))
             layer._tq_PiT = H
             layer._tq_Pi = H
+            # fp16 copy for rotation in continuation prefill path
+            layer._tq_Pi_half = H.to(torch.float16)
 
-            c = layer._tq_centroids.to(device=device, dtype=torch.float32)
-            c_sorted, _ = c.sort()
+            # Centroids for Lloyd-Max quantization.
+            layer._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
+                device=device, dtype=torch.float32
+            )
+
+            c_sorted, _ = layer._tq_centroids.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
             layer._tq_cached = True
 
@@ -572,7 +585,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Pre-allocate cu_seqlens for single-request flash_attn calls
         # to avoid per-request host→device tensor creation.
-        _cu_2 = torch.zeros(2, device=query.device, dtype=torch.int32)
+        if not hasattr(self, "_cu_2"):
+            self._cu_2 = torch.zeros(2, device=query.device, dtype=torch.int32)
+        # Cache arange on self (avoid per-call kernel launch).
+        _max_seq = attn_metadata.max_seq_len
+        _ac: torch.Tensor | None = getattr(self, "_arange_cache", None)
+        if _ac is None or _ac.shape[0] <= _max_seq:
+            _ac = torch.arange(
+                0, _max_seq + 1, device=query.device, dtype=attn_metadata.seq_lens.dtype
+            )
+            self._arange_cache = _ac
+        _arange_cache: torch.Tensor = _ac
 
         for i in range(num_reqs):
             q_start = qsl[i]
@@ -589,8 +612,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
                 if _HAS_FLASH_ATTN:
-                    _cu_2[1] = q_len
-                    cu = _cu_2
+                    self._cu_2[1] = q_len
+                    cu = self._cu_2
                     out = self._flash_attn_varlen(
                         q=q_seq,
                         k=k_seq,
@@ -622,12 +645,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 if q_len <= _CONTINUATION_DECODE_THRESHOLD:
                     # Fast path: treat each query as a decode request
                     # with incremental seq_lens for causal masking.
-                    synth_seq_lens = torch.arange(
-                        cached_len + 1,
-                        seq_len + 1,
-                        device=query.device,
-                        dtype=attn_metadata.seq_lens.dtype,
-                    )
+                    # Slice from pre-built arange (no kernel launch)
+                    synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
                     out = triton_turboquant_decode_attention(
                         query=q_seq,
@@ -695,16 +714,17 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # Reuse cached buffers to avoid per-call allocation (~16MB at 8K).
         alloc_len = math.ceil(cached_len / block_size) * block_size
         buf_shape = (1, Hk, alloc_len, D)
-        k_buf = getattr(layer, "_tq_k_dequant_buf", None)
-        if k_buf is None or k_buf.shape[2] < alloc_len:
-            k_buf = torch.empty(buf_shape, dtype=torch.float16, device=device)
-            v_buf = torch.empty(buf_shape, dtype=torch.float16, device=device)
-            layer._tq_k_dequant_buf = k_buf
-            layer._tq_v_dequant_buf = v_buf
-        else:
-            v_buf = layer._tq_v_dequant_buf
-        k_cached = k_buf[:, :, :alloc_len, :].zero_()
-        v_cached = v_buf[:, :, :alloc_len, :].zero_()
+        # Use WorkspaceManager for dequant buffers.
+        # Shared across all layers — saves 60× memory at long context.
+        # Required for CUDA Graph capture (per-layer growth incompatible with CG).
+        k_buf, v_buf = current_workspace_manager().get_simultaneous(
+            (buf_shape, torch.float16),
+            (buf_shape, torch.float16),
+        )
+        # Skip .zero_() — kernel writes all positions up to cached_len,
+        # and we only read [:cached_len] afterwards.
+        k_cached = k_buf[:, :, :alloc_len, :]
+        v_cached = v_buf[:, :, :alloc_len, :]
 
         grid = (alloc_len, 1 * Hk)
         _tq_full_dequant_kv[grid](
@@ -740,29 +760,41 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Inverse-rotate MSE keys back to original space
         if not self.tq_config.key_fp8:
-            k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D).float()
-            k_flat = k_flat @ Pi
-            k_cached_trim = (
-                k_flat.to(torch.float16).reshape(Hk, cached_len, D).transpose(0, 1)
-            )  # (cached_len, Hk, D)
+            # fp16 matmul for rotation (2× less bandwidth, uses fp16 tensor cores)
+            Pi_half = layer._tq_Pi_half
+            k_flat = k_cached[0, :, :cached_len, :].reshape(-1, D)
+            k_flat = k_flat @ Pi_half
+            k_cached_trim = k_flat.reshape(Hk, cached_len, D).transpose(
+                0, 1
+            )  # (cached_len, Hk, D) — already fp16
         else:
-            k_cached_trim = (
-                k_cached[0, :, :cached_len, :].transpose(0, 1).contiguous()
+            k_cached_trim = k_cached[0, :, :cached_len, :].transpose(
+                0, 1
             )  # (cached_len, Hk, D)
 
-        v_cached_trim = (
-            v_cached[0, :, :cached_len, :].transpose(0, 1).contiguous()
-        )  # (cached_len, Hk, D)
+        # Skip .contiguous() — the copy into k_full/v_full handles layout
+        v_cached_trim = v_cached[0, :, :cached_len, :].transpose(0, 1)
 
         # Concatenate cached + current chunk K/V (match query dtype)
+        # Pre-allocate full K/V buffer, copy into slices (no cat alloc)
         qdtype = query.dtype
-        k_full = torch.cat([k_cached_trim.to(qdtype), key_chunk], dim=0)
-        v_full = torch.cat([v_cached_trim.to(qdtype), val_chunk], dim=0)
+        k_full = torch.empty(seq_len, Hk, D, dtype=qdtype, device=device)
+        v_full = torch.empty(seq_len, Hk, D, dtype=qdtype, device=device)
+        k_full[:cached_len] = k_cached_trim.to(qdtype)
+        k_full[cached_len:] = key_chunk
+        v_full[:cached_len] = v_cached_trim.to(qdtype)
+        v_full[cached_len:] = val_chunk
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
         if _HAS_FLASH_ATTN:
-            cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
-            cu_seqlens_k = torch.tensor([0, seq_len], device=device, dtype=torch.int32)
+            # Reuse pre-allocated cu_seqlens (avoid host→device transfer)
+            if not hasattr(self, "_cu_2_q"):
+                self._cu_2_q = torch.zeros(2, device=device, dtype=torch.int32)
+                self._cu_2_k = torch.zeros(2, device=device, dtype=torch.int32)
+            self._cu_2_q[1] = q_len
+            self._cu_2_k[1] = seq_len
+            cu_seqlens_q = self._cu_2_q
+            cu_seqlens_k = self._cu_2_k
             return self._flash_attn_varlen(
                 q=query,
                 k=k_full,
@@ -805,12 +837,23 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         PiT: torch.Tensor | None = None,
         layer: torch.nn.Module | None = None,
     ) -> torch.Tensor:
-        # Grab cached decode buffers from the layer (lazily allocated).
+        # Acquire shared decode scratch buffers from WorkspaceManager.
+        # Layers execute sequentially so one set of buffers is sufficient.
+        # Falls back to kernel-internal allocation if workspace unavailable.
+        B = query.shape[0]
+        D = self.head_size
+        S = self.max_num_kv_splits
+        Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
-        if layer is not None:
-            mid_o_buf = getattr(layer, "_tq_mid_o_buf", None)
-            output_buf = getattr(layer, "_tq_output_buf", None)
-            lse_buf = getattr(layer, "_tq_lse_buf", None)
+        if is_workspace_manager_initialized():
+            # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
+            mid_o_buf, output_buf, lse_buf = (
+                current_workspace_manager().get_simultaneous(
+                    ((B, Hq, S, D + 1), torch.float32),
+                    ((B, Hq, D), query.dtype),
+                    ((B, Hq), torch.float32),
+                )
+            )
 
         result = triton_turboquant_decode_attention(
             query=query,

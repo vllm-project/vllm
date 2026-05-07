@@ -91,6 +91,7 @@ def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
@@ -99,6 +100,7 @@ def _moe_forward(
         hidden_states,
         router_logits,
         shared_experts_input,
+        input_ids,
     )
 
 
@@ -106,6 +108,7 @@ def _moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
@@ -115,6 +118,7 @@ def _moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
@@ -123,6 +127,7 @@ def _moe_forward_shared(
         hidden_states,
         router_logits,
         shared_experts_input,
+        input_ids,
     )
 
 
@@ -130,6 +135,7 @@ def _moe_forward_shared_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     shared_experts_input: torch.Tensor | None,
+    input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # Output shapes:
@@ -214,7 +220,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
-        self.quant_method = quant_method
+        self._quant_method = quant_method
         self.enable_dbo = enable_dbo
 
         self._shared_experts: SharedExperts | None = None
@@ -257,7 +263,7 @@ class MoERunner(MoERunnerInterface):
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
-        self.quant_method = quant_method
+        self._quant_method = quant_method
 
     def is_internal_router(self) -> bool:
         return self.gate is not None
@@ -324,8 +330,8 @@ class MoERunner(MoERunnerInterface):
     @property
     def _fused_output_is_reduced(self) -> bool:
         return (
-            self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
+            self._quant_method.moe_kernel is not None
+            and self._quant_method.moe_kernel.output_is_reduced()
         )
 
     def _maybe_reduce_shared_expert_output(
@@ -401,7 +407,7 @@ class MoERunner(MoERunnerInterface):
         )
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
-            not self.quant_method.skip_forward_padding
+            not self._quant_method.skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
             hidden_states = F.pad(
@@ -433,6 +439,7 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -444,21 +451,23 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.quant_method.is_monolithic:
-            fused_out = self.quant_method.apply_monolithic(
+        if self._quant_method.is_monolithic:
+            fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
                 router_logits=router_logits,
+                input_ids=input_ids,
             )
         else:
             topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
+                input_ids=input_ids,
             )
 
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
-            fused_out = self.quant_method.apply(
+            fused_out = self._quant_method.apply(
                 layer=layer,
                 x=hidden_states,
                 topk_weights=topk_weights,
@@ -523,6 +532,7 @@ class MoERunner(MoERunnerInterface):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
@@ -550,15 +560,22 @@ class MoERunner(MoERunnerInterface):
             hidden_states
         )
 
+        # Record before `_maybe_pad_hidden_states` pads activations to match
+        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
+        # so routed output can be trimmed before
+        # shared+routed add / latent up proj if needed.
+        routed_hidden_dim = hidden_states.shape[-1]
         hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
             shared_experts_input,
             hidden_states,
         )
+        hidden_dim_was_padded = hidden_states.shape[-1] > routed_hidden_dim
 
         result = self._forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
+            input_ids,
             self._encode_layer_name(),
         )
 
@@ -573,6 +590,10 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
+        if (
+            shared_output is not None or self.routed_output_transform is not None
+        ) and hidden_dim_was_padded:
+            fused_output = fused_output[..., :routed_hidden_dim]
 
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.
@@ -597,7 +618,7 @@ class MoERunner(MoERunnerInterface):
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
+            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
         )
 
     def _maybe_dispatch(
@@ -662,6 +683,7 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Entry point called by the custom op to run the MoE computation.
 
@@ -702,6 +724,7 @@ class MoERunner(MoERunnerInterface):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
+                input_ids=input_ids,
             )
 
             return self._maybe_combine(

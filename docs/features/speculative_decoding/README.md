@@ -32,7 +32,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
 
 For reproducible measurements in your environment, use
-[`examples/offline_inference/spec_decode.py`](../../../examples/offline_inference/spec_decode.py)
+[`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
 ## `--speculative-config` schema

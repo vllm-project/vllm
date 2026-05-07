@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -90,6 +91,7 @@ from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -486,11 +488,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         device=self.device,
                     ),
                 )
+
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
+            # target returns a persistent buffer sized at max_num_batched_tokens;
+            # slice to the active token count that propose() expects.
+            spec_hidden_states = hidden_states
+            if hasattr(self.model, "get_mtp_target_hidden_states"):
+                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             self.speculator.propose(
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
                 slot_mappings=slot_mappings_by_layer,
-                last_hidden_states=hidden_states,
+                last_hidden_states=spec_hidden_states,
                 aux_hidden_states=aux_hidden_states,
                 num_sampled=torch.ones(
                     input_batch.num_reqs, dtype=torch.int32, device=self.device
@@ -549,6 +560,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, sample_hidden_states
         gc.collect()
 
+    def post_kv_cache_wake_up(self) -> None:
+        self.block_tables.init_block_table_layout_tensors()
+
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:
             self.encoder_cache.reset_mm_cache()
@@ -575,13 +589,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             return 0
 
+        compilation_counter.num_gpu_runner_capture_triggers += 1
+
         start_time = time.perf_counter()
         gc.collect()
         torch.accelerator.empty_cache()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            self.cudagraph_manager.capture(
+            captured_attn_states = self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
                 self.input_buffers,
@@ -593,7 +609,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
             )
             if self.speculator is not None:
-                self.speculator.capture_model()
+                self.speculator.capture(captured_attn_states)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -808,7 +824,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             out=seq_lens_cpu_upper_bound_np[:num_reqs],
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
-
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1233,11 +1248,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
+            # Let the target override the hidden state fed to the drafter
+            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
+            # target returns a persistent buffer sized at max_num_batched_tokens;
+            # slice to the active token count that propose() expects.
+            spec_hidden_states = hidden_states
+            if hasattr(self.model, "get_mtp_target_hidden_states"):
+                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings_by_layer,
-                hidden_states,
+                spec_hidden_states,
                 aux_hidden_states,
                 num_sampled,
                 num_rejected,
@@ -1316,6 +1339,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.req_states.num_computed_tokens_np[idx_mapping_np] += (
             input_batch.num_scheduled_tokens
         )
+
+    def shutdown(self) -> None:
+        """Release GPU tensors (model weights, KV caches, workspace) so that
+        memory is reclaimable when running in the same process."""
+        torch.accelerator.synchronize()
+        if hasattr(self, "kv_caches"):
+            self.kv_caches.clear()
+        if hasattr(self, "attn_groups"):
+            self.attn_groups.clear()
+        if hasattr(self, "kv_cache_config"):
+            del self.kv_cache_config
+        free_before_shutdown(self.vllm_config)
+        if hasattr(self, "model"):
+            del self.model
+
+        gc.collect()
+        torch.accelerator.empty_cache()
+        logger.debug("Cleaned up model weights, KV caches, and workspace")
 
     ########### EPLB methods start ###########
     @property

@@ -207,7 +207,8 @@ class MultiModalRegistry:
         Create a multi-modal processor for a specific model and tokenizer.
         """
         if not model_config.is_multimodal_model:
-            raise ValueError(f"{model_config.model} is not a multimodal model")
+            model_name = model_config.served_model_name or model_config.model
+            raise ValueError(f"{model_name} is not a multimodal model")
 
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
