@@ -47,12 +47,14 @@ For further details on pooling models, please refer to [this page](../../models/
 
 - Classification Usages
     - [Classification API](../../models/pooling_models/classify.md#online-serving)(`/classify`)
-    - Applicable to [classification models](../../models/pooling_models/classify.md).
+    - Only applicable to [classification models](../../models/pooling_models/classify.md).
 - Embedding Usages
     - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - [Openai-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - Scoring Usages
-    - [Score API](../../models/pooling_models/scoring.md#score-api)(/score)\n    - [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (/rerank, /v1/rerank, /v2/rerank)
+    - [Score API](../../models/pooling_models/scoring.md#score-api)(/score)
+    - [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (/rerank, /v1/rerank, /v2/rerank)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
@@ -78,7 +80,7 @@ For further details on pooling models, please refer to [this page](../../models/
 ## Custom APIs
 
 - [Classification API](../../models/pooling_models/classify.md#classification-api) (`/classify`)
-    - Applicable to [classification models](../../models/pooling_models/classify.md).
+    - Only applicable to [classification models](../../models/pooling_models/classify.md).
 - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
