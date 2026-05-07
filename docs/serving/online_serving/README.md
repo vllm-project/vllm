@@ -69,6 +69,7 @@ For further details on Pooling Models, please refer to [this page](../../models/
 ## Disaggregated APIs
 
 ### vLLM render APIs
+
 - [Completions render API](render.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions render API](render.md) (`/v1/chat/completions/render`)
