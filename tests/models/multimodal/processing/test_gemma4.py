@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
+
 import pytest
 from PIL import Image as PILImage
 
@@ -116,7 +118,7 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
 def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
     model_id: str,
-    limit_mm_per_prompt: dict[str, object],
+    limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]],
     expected_video_tokens: int,
 ):
     ctx = build_model_context(
