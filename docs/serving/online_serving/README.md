@@ -61,8 +61,10 @@ We currently support the following OpenAI APIs:
 
 ### vLLM render API
 
-- [Completions API]()
-- [Chat Completions API]() (`/v1/chat/completions`)
+- [Completions render API](render.md) (`/v1/completions/render`)
+   - Render completion requests
+- [Chat Completions render API](render.md) (`/v1/chat/completions/render`)
+   - Render Chat Completions
 - [Tokenizer API](render.md#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
 
