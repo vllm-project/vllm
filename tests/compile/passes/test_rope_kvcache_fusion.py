@@ -191,8 +191,29 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return [torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default]
 
 
-def _run_rope_kvcache_fusion_test(
-    *,
+@pytest.mark.parametrize(
+    "attn_backend",
+    [
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+    ],
+)
+@pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
+@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
+@pytest.mark.parametrize("num_heads", [64])
+@pytest.mark.parametrize("num_kv_heads", [8])
+@pytest.mark.parametrize("head_size", [64])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("is_neox", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+@pytest.mark.skipif(
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
+)
+def test_rope_kvcache_fusion(
     attn_backend: AttentionBackendEnum,
     enable_rope_custom_op: bool,
     enable_aiter_triton_rope: bool,
@@ -203,7 +224,6 @@ def _run_rope_kvcache_fusion_test(
     is_neox: bool,
     dtype: torch.dtype,
     kv_cache_dtype: str,
-    shuffle_kv_cache_layout: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
@@ -234,10 +254,6 @@ def _run_rope_kvcache_fusion_test(
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         m.setenv(
             "VLLM_ROCM_USE_AITER_TRITON_ROPE", "1" if enable_aiter_triton_rope else "0"
-        )
-        m.setenv(
-            "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
-            "1" if shuffle_kv_cache_layout else "0",
         )
         rocm_aiter_ops.refresh_env_variables()
 
@@ -317,95 +333,3 @@ def _run_rope_kvcache_fusion_test(
             atol=ATOL,
             rtol=RTOL,
         )
-
-
-@pytest.mark.parametrize(
-    "attn_backend",
-    [
-        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
-        AttentionBackendEnum.TRITON_ATTN,
-        AttentionBackendEnum.ROCM_ATTN,
-        AttentionBackendEnum.ROCM_AITER_FA,
-    ],
-)
-@pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
-@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
-@pytest.mark.parametrize("num_heads", [64])
-@pytest.mark.parametrize("num_kv_heads", [8])
-@pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("is_neox", [True, False])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
-)
-def test_rope_kvcache_fusion(
-    attn_backend: AttentionBackendEnum,
-    enable_rope_custom_op: bool,
-    enable_aiter_triton_rope: bool,
-    num_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    block_size: int,
-    is_neox: bool,
-    dtype: torch.dtype,
-    kv_cache_dtype: str,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _run_rope_kvcache_fusion_test(
-        attn_backend=attn_backend,
-        enable_rope_custom_op=enable_rope_custom_op,
-        enable_aiter_triton_rope=enable_aiter_triton_rope,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        block_size=block_size,
-        is_neox=is_neox,
-        dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
-        shuffle_kv_cache_layout=False,
-        monkeypatch=monkeypatch,
-    )
-
-
-@pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
-@pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
-@pytest.mark.parametrize("num_heads", [64])
-@pytest.mark.parametrize("num_kv_heads", [8])
-@pytest.mark.parametrize("head_size", [64])
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("is_neox", [True, False])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
-)
-def test_rope_kvcache_fusion_rocm_aiter_fa_shuffle(
-    enable_rope_custom_op: bool,
-    enable_aiter_triton_rope: bool,
-    num_heads: int,
-    num_kv_heads: int,
-    head_size: int,
-    block_size: int,
-    is_neox: bool,
-    dtype: torch.dtype,
-    kv_cache_dtype: str,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _run_rope_kvcache_fusion_test(
-        attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
-        enable_rope_custom_op=enable_rope_custom_op,
-        enable_aiter_triton_rope=enable_aiter_triton_rope,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_size=head_size,
-        block_size=block_size,
-        is_neox=is_neox,
-        dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
-        shuffle_kv_cache_layout=True,
-        monkeypatch=monkeypatch,
-    )
