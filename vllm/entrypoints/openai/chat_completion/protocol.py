@@ -200,6 +200,35 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "See GET /codec/schema for the protobuf schema."
         ),
     )
+    tool_watcher: bool = Field(
+        default=False,
+        description=(
+            "Codec server-side ToolWatcher (PR #24557 equivalent). When true, "
+            "the server runs a uint32-compare state machine over the outbound "
+            "token stream and surfaces completed `<start>..<end>` regions as "
+            "structured `tool_calls` on the matching CodecFrame. The marker "
+            "tokens themselves are consumed and not forwarded to the client. "
+            "Requires a binary stream_format (msgpack/protobuf) — has no "
+            "effect on the JSON/SSE path. Falls back silently when the marker "
+            "strings don't resolve to single tokens in the loaded vocab."
+        ),
+    )
+    tool_watcher_start: str | None = Field(
+        default=None,
+        description=(
+            "Override for the watcher's start marker. Defaults to "
+            "'<tool_call>' (Qwen 2.5+). Use '<|python_tag|>' for Llama 3.1+, "
+            "'<|tool|>' for Phi-4, '[TOOL_CALLS]' for Mistral-Nemo, etc. "
+            "Must resolve to exactly one special token in the loaded vocab."
+        ),
+    )
+    tool_watcher_end: str | None = Field(
+        default=None,
+        description=(
+            "Override for the watcher's end marker. Defaults to "
+            "'</tool_call>' (Qwen 2.5+)."
+        ),
+    )
     temperature: float | None = None
     top_p: float | None = None
     tools: list[ChatCompletionToolsParam] | None = None

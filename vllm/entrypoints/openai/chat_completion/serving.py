@@ -12,6 +12,13 @@ from typing import TYPE_CHECKING, Any, Final
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.codec_agent import (
+    ToolWatcher,
+    detokenize_region,
+    make_call_id,
+    parse_tool_call,
+    resolve_marker_id,
+)
 from vllm.entrypoints.codec_frame import encode_frame
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
@@ -365,9 +372,12 @@ class OpenAIServingChat(OpenAIServing):
                 # Binary Codec path: emit raw token IDs only. No role headers,
                 # no tool-call parsing, no reasoning-content split. The client
                 # owns any chat-protocol decoding it wants to do over the
-                # decoded text.
+                # decoded text. (When `tool_watcher` is set, the server runs
+                # an O(n) ID-compare state machine over the stream and
+                # surfaces structured tool_calls on the matching frame —
+                # mirrors sglang PR #24557.)
                 return self.chat_completion_binary_stream_generator(
-                    request, result_generator
+                    request, result_generator, tokenizer
                 )
             return self.chat_completion_stream_generator(
                 request,
@@ -1158,6 +1168,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
+        tokenizer: TokenizerLike | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream raw token IDs as Codec binary frames for chat completions.
 
@@ -1167,10 +1178,41 @@ class OpenAIServingChat(OpenAIServing):
         chunk. The client (e.g. @codecai/web) decodes the IDs and runs any
         chat-protocol parsing it wants over the decoded text.
 
+        When `request.tool_watcher` is true and the marker strings resolve
+        to single-token IDs in the loaded vocab, this also runs a uint32-
+        compare state machine over the outbound stream — completed
+        `<start>..<end>` regions surface as structured `tool_calls` on the
+        matching frame, with the marker tokens themselves consumed (not
+        forwarded to the client). Mirrors sglang PR #24557 / the libcodec
+        ToolWatcher / @codecai/web's ToolWatcher bit-for-bit.
+
         Validation in `ChatCompletionRequest.validate_stream_format` already
         forced `stream=True` and rejected `n > 1`, so we expect exactly one
         choice per chunk.
         """
+        # ── ToolWatcher setup ────────────────────────────────────────────
+        watcher: ToolWatcher | None = None
+        if getattr(request, "tool_watcher", False) and tokenizer is not None:
+            start_marker = (
+                getattr(request, "tool_watcher_start", None) or "<tool_call>"
+            )
+            end_marker = (
+                getattr(request, "tool_watcher_end", None) or "</tool_call>"
+            )
+            start_id = resolve_marker_id(tokenizer, start_marker)
+            end_id = resolve_marker_id(tokenizer, end_marker)
+            if start_id is not None and end_id is not None:
+                watcher = ToolWatcher(start_id=start_id, end_id=end_id)
+            else:
+                logger.warning(
+                    "Codec ToolWatcher: markers %r/%r do not resolve to single "
+                    "tokens in this model's vocab. Falling back to plain Codec "
+                    "streaming.",
+                    start_marker,
+                    end_marker,
+                )
+
+        next_call_seq = 1
         try:
             async for res in result_generator:
                 if not res.outputs:
@@ -1179,11 +1221,35 @@ class OpenAIServingChat(OpenAIServing):
                 ids = list(output.token_ids) if output.token_ids else []
                 finish_reason = output.finish_reason
                 done = finish_reason is not None
+
+                # Run the watcher if active. Otherwise pass through unchanged.
+                if watcher is not None and ids:
+                    passthrough_ids, completed_regions = watcher.feed(ids)
+                else:
+                    passthrough_ids, completed_regions = ids, []
+
+                tool_calls_wire: list[dict] | None = None
+                if completed_regions:
+                    wire: list[dict] = []
+                    for region in completed_regions:
+                        body_text = (
+                            detokenize_region(tokenizer, region)
+                            if tokenizer is not None
+                            else ""
+                        )
+                        ev = parse_tool_call(
+                            body_text, call_id=make_call_id(next_call_seq)
+                        )
+                        next_call_seq += 1
+                        wire.append(ev.to_wire_dict())
+                    tool_calls_wire = wire
+
                 yield encode_frame(
                     request.stream_format,
-                    ids,
+                    passthrough_ids,
                     done=done,
                     finish_reason=finish_reason,
+                    tool_calls=tool_calls_wire,
                 )
                 if done:
                     return
