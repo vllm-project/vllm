@@ -61,5 +61,10 @@ name = "minimax_m2_tool_parser"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "glm45_moe_tool_parser"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true

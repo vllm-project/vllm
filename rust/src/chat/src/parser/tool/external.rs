@@ -146,8 +146,6 @@ macro_rules! def_external_tool_parser {
 }
 
 // Markup-style tool-call formats.
-def_external_tool_parser!(Glm45MoeToolParser, Glm4MoeParser, glm45);
-def_external_tool_parser!(Glm47MoeToolParser, Glm4MoeParser, glm47);
 def_external_tool_parser!(Step3ToolParser, Step3Parser);
 
 // JSON tool-call formats.
