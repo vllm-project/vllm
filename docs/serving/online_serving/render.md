@@ -1,4 +1,4 @@
-# vLLM render APIs
+# Renderer APIs
 
 The vLLM render API is designed to disaggregate the render phase(preprocessing) and enable a token-in / token-out API server.
 
