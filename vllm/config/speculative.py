@@ -1003,6 +1003,7 @@ class SpeculativeConfig:
             "kimi_k25",
             "minimax_m2",
             "gemma4",
+            "laguna",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states", "dflash")
