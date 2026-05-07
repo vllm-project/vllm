@@ -712,34 +712,23 @@ class Step3VLForConditionalGeneration(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-    # =========================================================================
-    # CUDA Graph 支持 — 实现 SupportsEncoderCudaGraph Protocol
-    # =========================================================================
-
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
         """
-        返回 Step3-VL encoder CUDA Graph 的配置。
+        Returns the Step3-VL encoder CUDA Graph configuration.
 
-        Step3-VL 的 encoder 由 ViT + downsampler + projector 组成，输出为
-        未合并的 raw features，merge 在 graph replay 之后由
-        ``merge_encoder_cudagraph_output`` 完成。
+        The Step3-VL encoder consists of ViT + downsampler + projector,
+        outputting un-merged raw features. Merging happens outside the
+        graph after replay via ``merge_encoder_cudagraph_output``.
         """
         return EncoderCudaGraphConfig(
             modalities=["image"],
             input_key_by_modality={
                 "image": "pixel_values",
             },
-            # "pixel_values" 通过 input_buffer 机制更新
-            # （与 metadata_buffers["pixel_values"] 是同一 tensor），
-            # 因此只保留 "patch_pixel_values" 在 buffer_keys 中，
-            # 避免 _run_budget_graph 中的重复 zero_ + copy_。
-            # merge 所需的 indices 不在 graph 内完成，
-            # 而是在 replay 后的 merge_encoder_cudagraph_output 中使用
-            # 真实的 num_patches 按 item 逐项拼接。
             buffer_keys=[
                 "patch_pixel_values",
             ],
-            # Encoder 输出 hidden dim，等于 LLM 的 hidden_size
+            # Encoder output hidden dim, equal to the LLM hidden_size
             out_hidden_size=self.config.hidden_size,
         )
 
@@ -748,18 +737,14 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> str:
         """
-        根据 mm_kwargs 中的 key 判断当前输入的 modality。
-
-        Step3-VL 只支持 "image"，但保持此接口一致以便未来扩展。
+        Step3-VL only supports "image"
         """
-        # Step3-VL 只有 image modality，没有 video
-        if "pixel_values" in mm_kwargs or "image_grid_thw" in mm_kwargs:
-            return "image"
+        # Step3-VL only has image modality, no video
         return "image"
 
     def get_max_frames_per_video(self) -> int:
         """
-        Step3-VL 暂不支持视频，此方法返回 0 占位。
+        Step3-VL does not yet support video; returns 0 as a placeholder.
         """
         return 0
 
@@ -768,21 +753,19 @@ class Step3VLForConditionalGeneration(
         vllm_config: VllmConfig,
     ) -> tuple[int, int]:
         """
-        返回 token budget 的有效范围。
+        Returns the valid token budget range.
 
-        - min_budget: Step3-VL 能处理的最小输出 token 数。
-          对于一张不切 patch 的小图（short < 728）：
-          只产生 1 个 image_feature (num_image_feature_size=169)，加上
-          patch_feature (num_patch_feature_size=81) 最多约 250。
-          取 256 作为保守下界。
-        - max_budget: 受调度器 max_num_batched_tokens 和 max_model_len 限制。
+        - min_budget: Minimum output tokens the Step3-VL encoder can produce.
+          For a small image (short side < 728) with no patches:
+          only 1 image_feature (num_image_feature_size=169).
+        - max_budget: Limited by scheduler max_num_batched_tokens and
+          max_model_len.
         """
-        # 最小 budget：一张不切 patch 的小图产生的最少 token 数。
-        # num_image_feature_size=169 是 ViT 输出的图像特征 token 数，
-        # num_patch_feature_size=81 是每个 patch 的输出 token 数。
-        # 即使是最小的 patch count，总输出也在 169+81=250 以上。
-        # 但如果 num_patches=0（图像小于 728x728），就只有 169 个 image token。
-        min_budget = 169  # 最小图像的 image_feature token 数
+        # Minimum budget: output token count for a small image with no patches.
+        # num_image_feature_size=169 is the ViT image feature token count,
+        # num_patch_feature_size=81 is the per-patch output token count.
+        # But if num_patches=0 (image < 728x728), only 169 image tokens.
+        min_budget = 169
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             vllm_config.model_config.max_model_len,
@@ -794,11 +777,11 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         """
-        从 mm_kwargs 中提取 num_patches，并确保为 torch.Tensor。
+        Extracts num_patches from mm_kwargs and ensures it is a torch.Tensor.
 
-        mm_kwargs 中的 num_patches 可能是 list[int]（由 image processor 产生），
-        也可能在 CUDA Graph replay 时以其他形式传入。
-        此方法统一转换为 int64 Tensor。
+        num_patches in mm_kwargs may be list[int] (produced by the image
+        processor) or may come in other forms during CUDA Graph replay.
+        This method normalizes to int64 Tensor.
         """
         num_patches = mm_kwargs.get("num_patches")
         if num_patches is None:
@@ -814,10 +797,7 @@ class Step3VLForConditionalGeneration(
         num_patches_list: list[int],
     ) -> list[int]:
         """
-        根据每个图像的 patch 数，计算该图像的输出 token 数。
-
-        计算公式：
-            output_tokens[i] = num_patches[i] * patch_feature_size + image_feature_size
+        Computes the output token count for each image based on its patch count.
         """
         vision_config = self.config.vision_config
         num_patch_feature_size = getattr(vision_config, "num_patch_feature_size", 81)
@@ -832,9 +812,9 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> int:
         """
-        返回当前 batch 中图像（item）的数量。
+        Returns the number of images (items) in the current batch.
 
-        等于 num_patches 列表的长度。
+        Equal to the length of the num_patches list.
         """
         num_patches = mm_kwargs.get("num_patches")
         if num_patches is None:
@@ -848,7 +828,7 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> list[int]:
         """
-        返回每个图像的输出 token 数列表，用于贪心打包（greedy packing）。
+        Returns a list of output token counts per image for greedy packing.
         """
         num_patches = mm_kwargs.get("num_patches", [])
         if isinstance(num_patches, torch.Tensor):
@@ -859,12 +839,6 @@ class Step3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
     ) -> list[int]:
-        """
-        返回每个图像的输入 patch 数量列表。
-
-        用于 EncoderCudaGraphManager 计算 patch_pixel_values 的切分偏移。
-        这里每个图像的输入 size 即为 num_patches[i]。
-        """
         num_patches = mm_kwargs.get("num_patches", [])
         if isinstance(num_patches, torch.Tensor):
             num_patches = num_patches.tolist()
@@ -941,8 +915,13 @@ class Step3VLForConditionalGeneration(
         num_patch_feature_size = getattr(vision_config, "num_patch_feature_size", 81)
         num_image_feature_size = getattr(vision_config, "num_image_feature_size", 169)
 
-        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
+        # Use the full token_budget as the per-item maximum — a single item
+        # in the batch may consume the entire budget. Dividing by max_batch_size
+        # would under-count patches when items have unequal patch counts
+        # (e.g. a 250-token 1-patch image at max_batch_size=2 would get 0
+        #  capture patch slots, causing out-of-bounds on replay).
 
+        per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
         max_num_patches_per_item = max(
             0,
             int(
@@ -954,7 +933,7 @@ class Step3VLForConditionalGeneration(
 
         max_total_patch_count = max_num_patches_per_item * max_batch_size
 
-        return per_item_output, max_num_patches_per_item, max_total_patch_count
+        return max_num_patches_per_item, max_num_patches_per_item, max_total_patch_count
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1111,9 +1090,10 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
     ) -> torch.Tensor:
         """
-        当输入超出所有 token budget 时使用的 fallback forward（eager 模式）。
+        Fallback forward (eager mode) used when inputs exceed all token budgets.
 
-        不经过 CUDA Graph，直接执行完整的 vision encoder forward + merge。
+        Skips the CUDA Graph and runs the full vision encoder forward + merge
+        directly.
         """
         image_input = self._parse_and_validate_image_input(**mm_kwargs)
         if image_input is None:
