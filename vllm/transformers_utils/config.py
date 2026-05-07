@@ -401,6 +401,57 @@ def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> No
         config.rope_parameters["rope_theta"] = default_theta
 
 
+def patch_legacy_rope_type(rope_parameters: dict[str, Any] | None) -> None:
+    """Patch legacy RoPE type fields for backwards compatibility with
+    older custom models which would otherwise fail to load."""
+
+    # No RoPE parameters to patch
+    if rope_parameters is None:
+        return
+
+    def _patch_legacy_rope_type(rope_parameters: dict[str, Any]) -> None:
+        # Case 1: Both legacy and modern fields present - check for conflicts
+        if "rope_type" in rope_parameters and "type" in rope_parameters:
+            rope_type = rope_parameters["rope_type"]
+            rope_type_legacy = rope_parameters["type"]
+            if (rope_type_legacy == "su" and rope_type == "longrope") or (
+                rope_type_legacy == "mrope" and rope_type == "default"
+            ):
+                pass  # No action needed
+            elif rope_type != rope_type_legacy:
+                raise ValueError(
+                    f"Found conflicts between 'rope_type={rope_type}' (modern "
+                    f"field) and 'type={rope_type_legacy}' (legacy field). "
+                    "You should only specify one of them."
+                )
+        # Case 2: Only legacy field present - patch to modern format with warning
+        if "rope_type" not in rope_parameters and "type" in rope_parameters:
+            rope_parameters["rope_type"] = rope_parameters["type"]
+            logger.info("Replacing legacy 'type' key with 'rope_type'")
+        # Case 3: No rope_type field at all - cannot determine RoPE type, raise error
+        if "rope_type" not in rope_parameters:
+            raise ValueError("rope_parameters should have a 'rope_type' key")
+        # Patch legacy rope_type values with warning
+        if rope_parameters["rope_type"] == "su":
+            rope_parameters["rope_type"] = "longrope"
+            logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
+        elif rope_parameters["rope_type"] == "mrope":
+            if "mrope_section" not in rope_parameters:
+                raise ValueError(
+                    "Legacy rope_type 'mrope' requires "
+                    "'mrope_section' in rope_parameters"
+                )
+            rope_parameters["rope_type"] = "default"
+            logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
+
+    # Handle nested rope_parameters in interleaved sliding attention models
+    if is_rope_parameters_nested(rope_parameters):
+        for rope_parameters_layer_type in rope_parameters.values():
+            _patch_legacy_rope_type(rope_parameters_layer_type)
+    else:
+        _patch_legacy_rope_type(rope_parameters)
+
+
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     from vllm.config.utils import getattr_iter
@@ -415,15 +466,9 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
 
     if Version(version("transformers")) < Version("5.0.0"):
         # Transformers v4 installed, legacy config fields may be present.
-        existing_rp = getattr(config, "rope_parameters", None)
-        if isinstance(existing_rp, dict) and is_rope_parameters_nested(existing_rp):
-            # Interleaved-attention models (e.g. Laguna-XS.2) ship a nested
-            # {layer_type: {...}} rope_parameters that the model code indexes
-            # by layer_type. The per-layer-type sub-dicts already carry the
-            # correct rope_theta / partial_rotary_factor / ompe (the converter
-            # places top-level legacy fields inside full_attention), so don't
-            # merge top-level fields here — that would shadow the per-type
-            # values and break sliding-attention layers.
+        if is_rope_parameters_nested(getattr(config, "rope_parameters", {})):
+            # Loading nested rope_parameters (from Transformers v5) in Transformers v4.
+            # Skip legacy patching since it should already be in the correct format.
             pass
         else:
             if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
@@ -441,6 +486,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
                 config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
             if ompe is not None:
                 config.rope_parameters["original_max_position_embeddings"] = ompe
+            patch_legacy_rope_type(getattr(config, "rope_parameters", None))
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
         # Transformers v5 installed
         # Patch these fields in case they used non-standard names
@@ -449,53 +495,9 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         if partial_rotary_factor is not None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
+        patch_legacy_rope_type(getattr(config, "rope_parameters", None))
         config.standardize_rope_params()
         config.validate_rope()
-
-    # No RoPE parameters to patch
-    if getattr(config, "rope_parameters", None) is None:
-        return
-
-    # Handle nested rope_parameters in interleaved sliding attention models
-    if is_rope_parameters_nested(config.rope_parameters):
-        for rope_parameters_layer_type in config.rope_parameters.values():
-            patch_rope_parameters_dict(rope_parameters_layer_type)
-    else:
-        patch_rope_parameters_dict(config.rope_parameters)
-
-
-def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
-    if "rope_type" in rope_parameters and "type" in rope_parameters:
-        rope_type = rope_parameters["rope_type"]
-        rope_type_legacy = rope_parameters["type"]
-        if (rope_type_legacy == "su" and rope_type == "longrope") or (
-            rope_type_legacy == "mrope" and rope_type == "default"
-        ):
-            pass  # No action needed
-        elif rope_type != rope_type_legacy:
-            raise ValueError(
-                f"Found conflicts between 'rope_type={rope_type}' (modern "
-                f"field) and 'type={rope_type_legacy}' (legacy field). "
-                "You should only specify one of them."
-            )
-
-    if "rope_type" not in rope_parameters and "type" in rope_parameters:
-        rope_parameters["rope_type"] = rope_parameters["type"]
-        logger.info("Replacing legacy 'type' key with 'rope_type'")
-
-    if "rope_type" not in rope_parameters:
-        raise ValueError("rope_parameters should have a 'rope_type' key")
-
-    if rope_parameters["rope_type"] == "su":
-        rope_parameters["rope_type"] = "longrope"
-        logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_parameters["rope_type"] == "mrope":
-        if "mrope_section" not in rope_parameters:
-            raise ValueError(
-                "Legacy rope_type 'mrope' requires 'mrope_section' in rope_parameters"
-            )
-        rope_parameters["rope_type"] = "default"
-        logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
 def _uses_mrope(config: PretrainedConfig) -> bool:
