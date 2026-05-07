@@ -15,10 +15,7 @@ from starlette.datastructures import Headers
 from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-    ChatTemplateContentFormatOption,
-)
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -48,9 +45,7 @@ class PoolingServingBase(ABC):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
+        chat_template_config: ChatTemplateConfig,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
     ):
@@ -63,11 +58,7 @@ class PoolingServingBase(ABC):
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
-        self.chat_template_config = ChatTemplateConfig(
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            trust_request_chat_template=trust_request_chat_template,
-        )
+        self.chat_template_config = chat_template_config
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = models.renderer._executor

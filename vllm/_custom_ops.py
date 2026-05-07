@@ -404,10 +404,24 @@ def rotary_embedding(
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    rope_dim_offset: int = 0,
+    inverse: bool = False,
 ) -> None:
-    torch.ops._C.rotary_embedding(
-        positions, query, key, head_size, cos_sin_cache, is_neox
-    )
+    if rope_dim_offset == 0 and not inverse:
+        torch.ops._C.rotary_embedding(
+            positions, query, key, head_size, cos_sin_cache, is_neox
+        )
+    else:
+        torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox,
+            rope_dim_offset,
+            inverse,
+        )
 
 
 # layer norm ops
@@ -420,6 +434,7 @@ def rms_norm(
 def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
+    # Note: this func is batch invariant
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
@@ -2434,23 +2449,6 @@ def moe_wna16_gemm(
     )
 
 
-def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
-    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
-
-
-if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
-
-    @register_fake("_moe_C::router_gemm_bf16_fp32")
-    def router_gemm_bf16_fp32_fake(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.empty(
-            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
-        )
-
-
 def dsv3_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2499,6 +2497,30 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+    )
+
+
+def topk_hash_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        input_tokens,
+        hash_indices_table,
     )
 
 
@@ -3197,6 +3219,39 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
 
 _supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
 
+if hasattr(torch.ops._C, "fp8_scaled_mm_cpu"):
+
+    @register_fake("_C::fp8_scaled_mm_cpu")
+    def fp8_scaled_mm_cpu_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        block_size: list[int],
+        bias: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype, device=mat1.device)
+
+
+_supports_cpu_fp8_w8a16 = bool(hasattr(torch.ops._C, "fp8_scaled_mm_cpu"))
+
+
+def fp8_scaled_mm_cpu(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scales2: torch.Tensor,
+    block_size: list[int],
+    bias: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
+
 
 class CPUDNNLGEMMHandler:
     def __init__(self) -> None:
@@ -3364,6 +3419,9 @@ def cpu_attn_reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     isa: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
@@ -3372,6 +3430,9 @@ def cpu_attn_reshape_and_cache(
         value_cache,
         slot_mapping,
         isa,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 
@@ -3390,6 +3451,9 @@ def cpu_attention_with_kv_cache(
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache(
         query,
@@ -3407,6 +3471,9 @@ def cpu_attention_with_kv_cache(
         softcap,
         scheduler_metadata,
         s_aux,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 

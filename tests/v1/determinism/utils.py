@@ -26,6 +26,7 @@ TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 BACKENDS: list[str] = [
     "FLASH_ATTN",
     "TRITON_ATTN",
+    "FLEX_ATTENTION",
 ]
 
 # FlashInfer temporarily disabled due to invariant CTA sizes.
