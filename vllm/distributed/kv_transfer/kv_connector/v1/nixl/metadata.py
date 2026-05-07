@@ -32,8 +32,9 @@ GET_META_MSG = b"get_meta_msg"
 # Version History:
 #   1: Initial version with compatibility checking
 #   2: Add remote_request_id to kv_transfer_params
+#   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #
-NIXL_CONNECTOR_VERSION: int = 2
+NIXL_CONNECTOR_VERSION: int = 3
 
 
 @dataclass
@@ -48,6 +49,7 @@ class NixlAgentMetadata:
     block_size: int
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
+    physical_blocks_per_logical_kv_block: int
 
 
 @dataclass
