@@ -195,9 +195,11 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
         message(STATUS "RISC-V RVV VLEN=${VLLM_RVV_VLEN}")
-        # Sources gate FP16/BF16 paths on the compiler-provided
-        # __riscv_zvfh / __riscv_zvfbfmin macros, which GCC and clang
-        # define automatically when those extensions appear in -march.
+        # Sources gate the BF16 path on the compiler-provided
+        # __riscv_zvfbfmin macro, which GCC and clang define automatically
+        # when zvfbfmin appears in -march. FP16 is not gated: every RVV
+        # variant below adds zvfh to -march, so _Float16 / fixed_fp16*_t
+        # are always available when this branch is compiled.
         if(RVV_BF16_FOUND)
             message(STATUS "BF16 extension detected")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
