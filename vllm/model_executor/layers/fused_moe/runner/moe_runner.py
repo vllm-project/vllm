@@ -211,7 +211,6 @@ class MoERunner(MoERunnerInterface):
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
         shared_expert_gate: torch.nn.Module | None = None,
-        num_fused_shared_experts: int = 0,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
     ):
@@ -223,7 +222,7 @@ class MoERunner(MoERunnerInterface):
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
-        self.num_fused_shared_experts = num_fused_shared_experts
+        self.num_fused_shared_experts = moe_config.num_fused_shared_experts
         self._quant_method = quant_method
         self.enable_dbo = enable_dbo
 
@@ -235,7 +234,7 @@ class MoERunner(MoERunnerInterface):
         self._fse_fuse_gate = (
             gate is not None
             and shared_expert_gate is not None
-            and num_fused_shared_experts > 0
+            and self.num_fused_shared_experts > 0
         )
         self._combined_gate_weight: torch.Tensor | None = None
 

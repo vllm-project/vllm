@@ -1258,6 +1258,10 @@ class FusedMoEConfig:
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
 
+    # Number of shared experts whose computation is fused into the
+    # MoE routing kernel (0 = disabled).
+    num_fused_shared_experts: int = 0
+
     # This flag is used to disable the inplace optimization
     # in MoE kernels. If this flag is True then the kernel
     # should not be using inplace. If the flag is false, the

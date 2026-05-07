@@ -508,6 +508,7 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
+            num_fused_shared_experts=self.num_fused_shared_experts,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
         )
@@ -603,7 +604,6 @@ class FusedMoE(PluggableLayer):
             gate=gate,
             shared_experts=shared_experts,
             shared_expert_gate=self.shared_expert_gate,
-            num_fused_shared_experts=self.num_fused_shared_experts,
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
             routed_input_transform=routed_input_transform,
