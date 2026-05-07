@@ -6,6 +6,10 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
+from vllm.model_executor.models.config import (
+    MODELS_CONFIG_MAP,
+    ParakeetForTDTConfig,
+)
 from vllm.model_executor.models.parakeet_tdt import (
     ParakeetForTDT,
     ParakeetTDTForcedDecoderState,
@@ -90,6 +94,15 @@ def test_parakeet_tdt_forward_uses_request_ids_for_forced_tokens():
 
 def test_parakeet_tdt_uses_request_id_generation_path():
     assert ParakeetForTDT.uses_request_ids_for_generation is True
+
+
+def test_parakeet_tdt_config_enforces_eager_execution():
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(enforce_eager=False))
+
+    assert MODELS_CONFIG_MAP["ParakeetForTDT"] is ParakeetForTDTConfig
+    ParakeetForTDTConfig.verify_and_update_config(vllm_config)
+
+    assert vllm_config.model_config.enforce_eager is True
 
 
 def test_parakeet_tdt_pads_variable_length_audio_features():

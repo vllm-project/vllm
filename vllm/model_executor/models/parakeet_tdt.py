@@ -433,10 +433,11 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     supports_transcription_only = True
     supported_languages = PARAKEET_SUPPORTED_LANGUAGES
     no_space_languages: set[str] = set()
-    # The V1 runner passes request IDs to forward and forces eager execution
-    # for this request-stateful decoder. Future V2 support should move this
-    # into a ParakeetModelState using ModelState.prepare_inputs() and
-    # prepare_dummy_inputs(), matching the Whisper model-state pattern.
+    # The V1 runner uses this marker to pass request IDs to forward.
+    # Parakeet's config hook enforces eager execution for this request-stateful
+    # decoder. Future V2 support should move this into a ParakeetModelState
+    # using ModelState.prepare_inputs() and prepare_dummy_inputs(), matching the
+    # Whisper model-state pattern.
     uses_request_ids_for_generation = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
