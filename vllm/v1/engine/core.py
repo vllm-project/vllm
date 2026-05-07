@@ -206,8 +206,17 @@ class EngineCore:
             )
             init_none_hash(caching_hash_fn)
 
+            thinking_start_ids = None
+            if (vllm_config.cache_config.strip_thinking_tokens_from_cache
+                    and vllm_config.reasoning_config is not None
+                    and vllm_config.reasoning_config.enabled):
+                thinking_start_ids = (
+                    vllm_config.reasoning_config.reasoning_start_token_ids
+                )
+
             self.request_block_hasher = get_request_block_hasher(
-                hash_block_size, caching_hash_fn
+                hash_block_size, caching_hash_fn,
+                thinking_start_token_ids=thinking_start_ids,
             )
 
         self.step_fn = (

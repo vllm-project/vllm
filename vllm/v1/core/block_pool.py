@@ -236,8 +236,10 @@ class BlockPool:
         """
         if num_cached_blocks >= num_full_blocks:
             return
+        num_full_blocks = min(num_full_blocks, len(request.block_hashes))
+        if num_cached_blocks >= num_full_blocks:
+            return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
-        assert len(request.block_hashes) >= num_full_blocks
         if block_size == self.hash_block_size:
             # Common case.
             block_hashes: BlockHashList = request.block_hashes

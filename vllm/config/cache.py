@@ -90,6 +90,10 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    strip_thinking_tokens_from_cache: bool = False
+    """Stop caching KV blocks once thinking start tokens are detected.
+    Improves prefix cache hit rates for reasoning models. Requires
+    --reasoning-parser or --reasoning-config to be set."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 
@@ -193,6 +197,7 @@ class CacheConfig:
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
+            "strip_thinking_tokens_from_cache",
             "prefix_caching_hash_algo",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "hash_block_size",
