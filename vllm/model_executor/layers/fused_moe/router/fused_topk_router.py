@@ -109,7 +109,8 @@ def fused_topk(
             # The kernel applies routing softmax on [:num_experts] and
             # shared expert sigmoid on the last num_shared columns,
             # writing results into the pre-allocated buffer.
-            total_topk_weights, total_topk_ids = aiter_topK_meta_data
+            # None check is inside rocm_aiter_ops.fuse_sigmoid_in_kernel
+            total_topk_weights, total_topk_ids = aiter_topK_meta_data  # type: ignore[misc]
             total_topk_weights_slice = total_topk_weights[:M]
             topk_ids_slice = total_topk_ids[:M, :topk]
 
