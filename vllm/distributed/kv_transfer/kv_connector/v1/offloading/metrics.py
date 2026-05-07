@@ -11,12 +11,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.metrics import get_offloading_counter_metadata
 from vllm.v1.kv_offload.worker.worker import TransferType
 
 logger = init_logger(__name__)
 
-TRANSFERS_KEY = "transfers"
-GAUGES_KEY = "gauges"
+TRANSFER_PREFIX = "xfer:"
+COUNTER_PREFIX = "counter:"
 
 
 @dataclass
@@ -28,34 +29,36 @@ class OffloadingOperationMetrics:
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
     """
-    Offloading connector stats use two top-level sections:
+    Offloading connector stats encode the stat type in each key.
 
-    * ``transfers`` maps transfer-type strings to lists of serialized
+    * ``xfer:<transfer_type>`` maps to a list of serialized
       OffloadingOperationMetrics.
-    * ``gauges`` maps scalar gauge names to their latest int or float value.
+    * ``counter:<counter_name>`` maps to an int or float increment.
     """
 
     def __post_init__(self):
         if not self.data:
             # Empty container init, no data is passed in.
             self.reset()
-        else:
-            self.data.setdefault(TRANSFERS_KEY, {})
-            self.data.setdefault(GAUGES_KEY, {})
 
     def reset(self):
-        self.data: dict[str, Any] = {TRANSFERS_KEY: {}, GAUGES_KEY: {}}
+        self.data: dict[str, Any] = {}
 
     def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
         if not other.is_empty():
-            # Merge transfer ops: extend per-transfer-type lists.
-            for transfer_type, ops in other.data.get(TRANSFERS_KEY, {}).items():
-                if transfer_type not in self.data[TRANSFERS_KEY]:
-                    self.data[TRANSFERS_KEY][transfer_type] = ops
+            for key, value in other.data.items():
+                if key.startswith(TRANSFER_PREFIX):
+                    assert isinstance(value, list)
+                    if key not in self.data:
+                        self.data[key] = value
+                    else:
+                        assert isinstance(self.data[key], list)
+                        self.data[key].extend(value)
+                elif key.startswith(COUNTER_PREFIX):
+                    assert isinstance(value, int | float)
+                    self.data[key] = self.data.get(key, 0) + value
                 else:
-                    self.data[TRANSFERS_KEY][transfer_type].extend(ops)
-            # Merge gauges: last value wins (gauges are snapshots, not deltas).
-            self.data[GAUGES_KEY].update(other.data.get(GAUGES_KEY, {}))
+                    raise ValueError(f"Unknown offloading stats key: {key}")
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -66,31 +69,45 @@ class OffloadingConnectorStats(KVConnectorStats):
         stats for the last time interval.
         """
         return_dict: dict[str, int | float] = {}
-        for transfer_type, ops_list in self.data.get(TRANSFERS_KEY, {}).items():
-            assert isinstance(ops_list, list)
-            total_bytes = 0
-            total_time = 0.0
-            for op in ops_list:
-                assert isinstance(op, dict)
-                total_bytes += op["op_size"]
-                total_time += op["op_time"]
-            return_dict[f"{transfer_type}_total_bytes"] = total_bytes
-            return_dict[f"{transfer_type}_total_time"] = total_time
-        # Include gauges directly (snapshot values).
-        return_dict.update(self.data.get(GAUGES_KEY, {}))
+        for key, value in self.data.items():
+            if key.startswith(TRANSFER_PREFIX):
+                transfer_type = key.removeprefix(TRANSFER_PREFIX)
+                assert isinstance(value, list)
+                total_bytes = 0
+                total_time = 0.0
+                for op in value:
+                    assert isinstance(op, OffloadingOperationMetrics | dict)
+                    total_bytes += (
+                        op.op_size
+                        if isinstance(op, OffloadingOperationMetrics)
+                        else op["op_size"]
+                    )
+                    total_time += (
+                        op.op_time
+                        if isinstance(op, OffloadingOperationMetrics)
+                        else op["op_time"]
+                    )
+                return_dict[f"{transfer_type}_total_bytes"] = total_bytes
+                return_dict[f"{transfer_type}_total_time"] = total_time
+            elif key.startswith(COUNTER_PREFIX):
+                assert isinstance(value, int | float)
+                return_dict[key.removeprefix(COUNTER_PREFIX)] = value
+            else:
+                raise ValueError(f"Unknown offloading stats key: {key}")
         return return_dict
 
     def is_empty(self) -> bool:
-        return not self.data.get(TRANSFERS_KEY) and not self.data.get(GAUGES_KEY)
+        return not self.data
 
     def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
         src, dst = transfer_type
-        transfer_type_key = src + "_to_" + dst
+        transfer_type_key = TRANSFER_PREFIX + src + "_to_" + dst
         op = OffloadingOperationMetrics(num_bytes, time)
-        if transfer_type_key in self.data[TRANSFERS_KEY]:
-            self.data[TRANSFERS_KEY][transfer_type_key].append(op)
-        else:
-            self.data[TRANSFERS_KEY][transfer_type_key] = [op]
+        self.data.setdefault(transfer_type_key, []).append(op)
+
+    def set_counter(self, counter_name: str, counter_value: int | float) -> None:
+        """Set a counter increment on the stats payload."""
+        self.data[COUNTER_PREFIX + counter_name] = counter_value
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
@@ -106,6 +123,8 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
+        self._offloading_manager_counter_defs: dict[str, PromMetricT] = {}
+        self.offloading_manager_counters: dict[tuple[int, str], PromMetricT] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -141,14 +160,32 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
         Observe transfer statistics.
-
-        transfer_stats_data is expected to be a dict with a ``transfers`` key
-        mapping transfer-type strings to lists of OffloadingOperationMetrics,
-        and an optional ``gauges`` key (currently not emitted as Prometheus
-        metrics here).
         """
 
-        for transfer_type, ops in transfer_stats_data.get(TRANSFERS_KEY, {}).items():
+        for key, value in transfer_stats_data.items():
+            if key.startswith(COUNTER_PREFIX):
+                counter_name = key.removeprefix(COUNTER_PREFIX)
+                assert isinstance(value, int | float)
+                if counter_name not in self._offloading_manager_counter_defs:
+                    metadata = get_offloading_counter_metadata(counter_name)
+                    self._offloading_manager_counter_defs[counter_name] = (
+                        self._counter_cls(
+                            name=metadata.name,
+                            documentation=metadata.documentation,
+                            labelnames=self._labelnames,
+                        )
+                    )
+                if (engine_idx, counter_name) not in self.offloading_manager_counters:
+                    counter = self._offloading_manager_counter_defs[counter_name]
+                    self.offloading_manager_counters[(engine_idx, counter_name)] = (
+                        counter.labels(*self.per_engine_labelvalues[engine_idx])
+                    )
+                self.offloading_manager_counters[(engine_idx, counter_name)].inc(value)
+
+        for key, ops in transfer_stats_data.items():
+            if not key.startswith(TRANSFER_PREFIX):
+                continue
+            transfer_type = key.removeprefix(TRANSFER_PREFIX)
             # Cache:
             if (engine_idx, transfer_type) not in self.histogram_transfer_size:
                 self.histogram_transfer_size[(engine_idx, transfer_type)] = (
@@ -170,15 +207,23 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             # Process ops:
             assert isinstance(ops, list)
             for op in ops:  # ops is a list of serialized OffloadingOperationMetrics
-                assert isinstance(op, dict)
+                assert isinstance(op, OffloadingOperationMetrics | dict)
+                op_size = (
+                    op.op_size
+                    if isinstance(op, OffloadingOperationMetrics)
+                    else op["op_size"]
+                )
+                op_time = (
+                    op.op_time
+                    if isinstance(op, OffloadingOperationMetrics)
+                    else op["op_time"]
+                )
                 # Observe size histogram
                 self.histogram_transfer_size[(engine_idx, transfer_type)].observe(
-                    op["op_size"]
+                    op_size
                 )
 
                 # Increment byte and time counters
-                self.counter_kv_bytes[(engine_idx, transfer_type)].inc(op["op_size"])
+                self.counter_kv_bytes[(engine_idx, transfer_type)].inc(op_size)
 
-                self.counter_kv_transfer_time[(engine_idx, transfer_type)].inc(
-                    op["op_time"]
-                )
+                self.counter_kv_transfer_time[(engine_idx, transfer_type)].inc(op_time)

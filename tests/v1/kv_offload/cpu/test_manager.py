@@ -144,7 +144,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
 
 
-def test_filter_reused_manager_reports_stores_skipped_gauge():
+def test_filter_reused_manager_reports_stores_skipped_counter():
     cpu_manager = CPUOffloadingManager(num_blocks=4, cache_policy="lru")
     manager = FilterReusedOffloadingManager(
         backing=cpu_manager,
@@ -161,7 +161,10 @@ def test_filter_reused_manager_reports_stores_skipped_gauge():
             evicted_keys=[],
         ),
     )
-    assert manager.get_stats().reduce()["stores_skipped"] == 3
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()["stores_skipped"] == 3
+    assert manager.get_stats() is None
 
 
 def test_cpu_manager():

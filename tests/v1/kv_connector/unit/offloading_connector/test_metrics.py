@@ -1,13 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from prometheus_client import Counter, Gauge, Histogram
+
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    GAUGES_KEY,
-    TRANSFERS_KEY,
+    COUNTER_PREFIX,
+    TRANSFER_PREFIX,
     OffloadingConnectorStats,
+    OffloadPromMetrics,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+
+
+class _FakeMetric:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.children: list[_FakeMetric] = []
+        self.observed: list[int | float] = []
+        self.increments: list[int | float] = []
+
+    def labels(self, *labelvalues):
+        child = _FakeMetric(**self.kwargs)
+        child.labelvalues = labelvalues
+        self.children.append(child)
+        return child
+
+    def observe(self, value):
+        self.observed.append(value)
+
+    def inc(self, value):
+        self.increments.append(value)
+
+
+class _FakeVllmConfig:
+    kv_transfer_config = None
 
 
 def test_build_kv_connector_stats_with_none():
@@ -16,7 +43,7 @@ def test_build_kv_connector_stats_with_none():
 
     assert stats is not None
     assert isinstance(stats, OffloadingConnectorStats)
-    assert stats.data == {TRANSFERS_KEY: {}, GAUGES_KEY: {}}
+    assert stats.data == {}
     assert stats.is_empty()
 
 
@@ -26,7 +53,7 @@ def test_build_kv_connector_stats_with_empty_dict():
 
     assert stats is not None
     assert isinstance(stats, OffloadingConnectorStats)
-    assert stats.data == {TRANSFERS_KEY: {}, GAUGES_KEY: {}}
+    assert stats.data == {}
     assert stats.is_empty()
 
 
@@ -34,62 +61,56 @@ def test_build_kv_connector_stats_reconstructs_offload_stats():
     """Test that OffloadingConnector stats are properly reconstructed with
     correct data."""
     serialized_data = {
-        TRANSFERS_KEY: {
-            "CPU_to_GPU": [
-                {"op_size": 16, "op_time": 1.0},
-                {"op_size": 8, "op_time": 0.5},
-            ],
-            "GPU_to_CPU": [
-                {"op_size": 1, "op_time": 0.1},
-                {"op_size": 2, "op_time": 0.2},
-            ],
-        },
-        GAUGES_KEY: {"stores_skipped": 5},
+        TRANSFER_PREFIX + "CPU_to_GPU": [
+            {"op_size": 16, "op_time": 1.0},
+            {"op_size": 8, "op_time": 0.5},
+        ],
+        TRANSFER_PREFIX + "GPU_to_CPU": [
+            {"op_size": 1, "op_time": 0.1},
+            {"op_size": 2, "op_time": 0.2},
+        ],
+        COUNTER_PREFIX + "stores_skipped": 5,
     }
 
     stats = OffloadingConnector.build_kv_connector_stats(data=serialized_data)
 
     offload_connector_stats = stats
     assert isinstance(offload_connector_stats, OffloadingConnectorStats)
-    assert offload_connector_stats.data[TRANSFERS_KEY]["CPU_to_GPU"] == [
+    assert offload_connector_stats.data[TRANSFER_PREFIX + "CPU_to_GPU"] == [
         {"op_size": 16, "op_time": 1.0},
         {"op_size": 8, "op_time": 0.5},
     ]
-    assert offload_connector_stats.data[TRANSFERS_KEY]["GPU_to_CPU"] == [
+    assert offload_connector_stats.data[TRANSFER_PREFIX + "GPU_to_CPU"] == [
         {"op_size": 1, "op_time": 0.1},
         {"op_size": 2, "op_time": 0.2},
     ]
-    assert offload_connector_stats.data[GAUGES_KEY]["stores_skipped"] == 5
+    assert offload_connector_stats.data[COUNTER_PREFIX + "stores_skipped"] == 5
 
 
 def test_aggregate_same_connector():
     """Test aggregating stats from the same connector type."""
     stats1 = OffloadingConnectorStats(
         data={
-            TRANSFERS_KEY: {
-                "CPU_to_GPU": [
-                    {"op_size": 16, "op_time": 1.0},
-                    {"op_size": 8, "op_time": 0.5},
-                ],
-                "GPU_to_CPU": [
-                    {"op_size": 1, "op_time": 0.1},
-                    {"op_size": 2, "op_time": 0.2},
-                ],
-            },
-            GAUGES_KEY: {"stores_skipped": 1},
+            TRANSFER_PREFIX + "CPU_to_GPU": [
+                {"op_size": 16, "op_time": 1.0},
+                {"op_size": 8, "op_time": 0.5},
+            ],
+            TRANSFER_PREFIX + "GPU_to_CPU": [
+                {"op_size": 1, "op_time": 0.1},
+                {"op_size": 2, "op_time": 0.2},
+            ],
+            COUNTER_PREFIX + "stores_skipped": 1,
         }
     )
 
     stats2 = OffloadingConnectorStats(
         data={
-            TRANSFERS_KEY: {
-                "CPU_to_GPU": [
-                    {"op_size": 3, "op_time": 0.2},
-                    {"op_size": 7, "op_time": 0.9},
-                ],
-                "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
-            },
-            GAUGES_KEY: {"stores_skipped": 3},
+            TRANSFER_PREFIX + "CPU_to_GPU": [
+                {"op_size": 3, "op_time": 0.2},
+                {"op_size": 7, "op_time": 0.9},
+            ],
+            TRANSFER_PREFIX + "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
+            COUNTER_PREFIX + "stores_skipped": 3,
         }
     )
 
@@ -97,38 +118,36 @@ def test_aggregate_same_connector():
 
     assert result is stats1  # Should return self
     offload_connector_stats = result
-    assert offload_connector_stats.data[TRANSFERS_KEY]["CPU_to_GPU"] == [
+    assert offload_connector_stats.data[TRANSFER_PREFIX + "CPU_to_GPU"] == [
         {"op_size": 16, "op_time": 1.0},
         {"op_size": 8, "op_time": 0.5},
         {"op_size": 3, "op_time": 0.2},
         {"op_size": 7, "op_time": 0.9},
     ]
-    assert offload_connector_stats.data[TRANSFERS_KEY]["GPU_to_CPU"] == [
+    assert offload_connector_stats.data[TRANSFER_PREFIX + "GPU_to_CPU"] == [
         {"op_size": 1, "op_time": 0.1},
         {"op_size": 2, "op_time": 0.2},
         {"op_size": 16, "op_time": 2},
     ]
-    assert offload_connector_stats.data[GAUGES_KEY]["stores_skipped"] == 3
+    assert offload_connector_stats.data[COUNTER_PREFIX + "stores_skipped"] == 4
 
 
 def test_reduce():
-    """Test that reduce() correctly reduces all nested connector stats."""
+    """Test that reduce() correctly reduces connector stats."""
     stats = OffloadingConnectorStats(
         data={
-            TRANSFERS_KEY: {
-                "CPU_to_GPU": [
-                    {"op_size": 16, "op_time": 1.0},
-                    {"op_size": 8, "op_time": 0.5},
-                    {"op_size": 3, "op_time": 0.2},
-                    {"op_size": 7, "op_time": 0.9},
-                ],
-                "GPU_to_CPU": [
-                    {"op_size": 1, "op_time": 0.1},
-                    {"op_size": 2, "op_time": 0.2},
-                    {"op_size": 16, "op_time": 2},
-                ],
-            },
-            GAUGES_KEY: {"stores_skipped": 11},
+            TRANSFER_PREFIX + "CPU_to_GPU": [
+                {"op_size": 16, "op_time": 1.0},
+                {"op_size": 8, "op_time": 0.5},
+                {"op_size": 3, "op_time": 0.2},
+                {"op_size": 7, "op_time": 0.9},
+            ],
+            TRANSFER_PREFIX + "GPU_to_CPU": [
+                {"op_size": 1, "op_time": 0.1},
+                {"op_size": 2, "op_time": 0.2},
+                {"op_size": 16, "op_time": 2},
+            ],
+            COUNTER_PREFIX + "stores_skipped": 11,
         }
     )
 
@@ -148,17 +167,15 @@ def test_reduce():
 
 
 def test_reset():
-    """Test that reset() resets all nested connector stats."""
+    """Test that reset() resets all connector stats."""
     offload_connector_stats = OffloadingConnectorStats(
         data={
-            TRANSFERS_KEY: {
-                "CPU_to_GPU": [
-                    {"op_size": 3, "op_time": 0.2},
-                    {"op_size": 7, "op_time": 0.9},
-                ],
-                "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
-            },
-            GAUGES_KEY: {"stores_skipped": 4},
+            TRANSFER_PREFIX + "CPU_to_GPU": [
+                {"op_size": 3, "op_time": 0.2},
+                {"op_size": 7, "op_time": 0.9},
+            ],
+            TRANSFER_PREFIX + "GPU_to_CPU": [{"op_size": 16, "op_time": 2}],
+            COUNTER_PREFIX + "stores_skipped": 4,
         }
     )
 
@@ -168,4 +185,25 @@ def test_reset():
 
     # After reset, stats should be empty
     assert offload_connector_stats.is_empty()
-    assert offload_connector_stats.data == {TRANSFERS_KEY: {}, GAUGES_KEY: {}}
+    assert offload_connector_stats.data == {}
+
+
+def test_prom_metrics_observes_manager_counter():
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    prom_metrics.observe({COUNTER_PREFIX + "stores_skipped": 7})
+
+    counter = prom_metrics.offloading_manager_counters[(0, "stores_skipped")]
+    assert counter.increments == [7]
+    counter_def = prom_metrics._offloading_manager_counter_defs["stores_skipped"]
+    assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
+    assert counter.labelvalues == ("model", "0")
