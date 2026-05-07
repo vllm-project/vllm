@@ -90,6 +90,7 @@ from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
+    from vllm.v1.capture.consumer import CaptureConsumer
     from vllm.v1.metrics.reader import Metric
 
 logger = init_logger(__name__)
@@ -252,9 +253,61 @@ class LLM:
         | OnlineQuantizationConfigArgs
         | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
+        capture_consumers: "list[dict[str, Any] | CaptureConsumer] | None" = None,
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
+
+        # -- capture consumers: split into config dicts vs instances --------
+        # Dict entries become ``CaptureConsumerSpec``s that flow into a
+        # ``CaptureConsumersConfig`` on ``VllmConfig``; pre-constructed
+        # instances (driver-side only) ride on a transient attribute that
+        # the runner reads at init time.
+        from vllm.v1.capture.config import (
+            CaptureConsumersConfig,
+            CaptureConsumerSpec,
+            validate_consumer_specs,
+        )
+        from vllm.v1.capture.consumer import CaptureConsumer
+
+        self._capture_consumer_instances: list[CaptureConsumer] = []
+        _capture_consumer_specs: list[CaptureConsumerSpec] = []
+        for entry in capture_consumers or []:
+            if isinstance(entry, dict):
+                _capture_consumer_specs.append(
+                    CaptureConsumerSpec(
+                        name=entry["name"],
+                        instance_name=entry.get("instance_name"),
+                        params=dict(entry.get("params", {})),
+                    )
+                )
+            elif isinstance(entry, CaptureConsumer):
+                if entry.location != "driver":
+                    raise ValueError(
+                        "Pre-constructed CaptureConsumer instances passed "
+                        "to LLM() must have location='driver', but "
+                        f"{type(entry).__name__} has "
+                        f"location={entry.location!r}."
+                    )
+                self._capture_consumer_instances.append(entry)
+            else:
+                raise TypeError(
+                    "capture_consumers entries must be dicts or "
+                    f"CaptureConsumer instances, got {type(entry).__name__}"
+                )
+
+        self._capture_consumers_config: CaptureConsumersConfig | None = None
+        if _capture_consumer_specs or self._capture_consumer_instances:
+            if _capture_consumer_specs:
+                validate_consumer_specs(_capture_consumer_specs)
+            # Always materialize the config when there's *any* capture
+            # work to do — pre-constructed instances need it too so that
+            # ``vllm_config.capture_consumers_config`` is non-None in the
+            # runner and the capture manager actually gets set up.
+            self._capture_consumers_config = CaptureConsumersConfig(
+                consumers=_capture_consumer_specs,
+                instances=list(self._capture_consumer_instances),
+            )
 
         if "swap_space" in kwargs:
             kwargs.pop("swap_space")
@@ -337,6 +390,12 @@ class LLM:
                 "'examples/features/data_parallel/data_parallel_offline.py'."
             )
 
+        engine_args_kwargs: dict[str, Any] = {}
+        if self._capture_consumers_config is not None:
+            engine_args_kwargs["capture_consumers_config_override"] = (
+                self._capture_consumers_config
+            )
+
         engine_args = EngineArgs(
             model=model,
             runner=runner,
@@ -373,6 +432,7 @@ class LLM:
             compilation_config=compilation_config_instance,
             quantization_config=quantization_config,
             logits_processors=logits_processors,
+            **engine_args_kwargs,
             **kwargs,
         )
 

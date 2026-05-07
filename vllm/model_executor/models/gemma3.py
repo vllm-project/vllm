@@ -44,6 +44,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.steering import (
     HOOK_POINT_TABLE_ATTR,
     SteeringHookPoint,
+    apply_layer_steering,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -319,9 +320,7 @@ class Gemma3DecoderLayer(nn.Module):
         # as a splitting op — it's opaque to the tracer (preventing
         # constant-folding and AOT cache pickle issues) but does not
         # partition the compiled graph.
-        residual = torch.ops.vllm.apply_steering(
-            residual, self.steering_table_pre_attn, self.steering_index
-        )
+        residual = apply_layer_steering(self, residual, SteeringHookPoint.PRE_ATTN)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -330,18 +329,14 @@ class Gemma3DecoderLayer(nn.Module):
         )
         hidden_states = self.post_attention_layernorm(hidden_states)
 
-        residual = torch.ops.vllm.apply_steering(
-            residual, self.steering_table_post_attn, self.steering_index
-        )
+        residual = apply_layer_steering(self, residual, SteeringHookPoint.POST_ATTN)
 
         hidden_states, residual = self.pre_feedforward_layernorm(
             hidden_states, residual
         )
         hidden_states = self.mlp(hidden_states)
 
-        residual = torch.ops.vllm.apply_steering(
-            residual, self.steering_table_post_mlp, self.steering_index
-        )
+        residual = apply_layer_steering(self, residual, SteeringHookPoint.POST_MLP)
 
         hidden_states = self.post_feedforward_layernorm(hidden_states)
 

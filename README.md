@@ -11,24 +11,42 @@ vLLM — feat/steering branch
 </h3>
 
 <p align="center">
-Activation steering support for vLLM inference
+Activation steering and capture-consumer plugins for vLLM inference
 </p>
 
 ---
 
-This branch adds **activation steering** to vLLM: injecting precomputed
-vectors into the residual stream of decoder layers during inference, enabling
-tone/style changes, behavioral interventions, and SAE-derived steering vectors
-without fine-tuning.
+This branch adds two complementary subsystems to vLLM:
+
+- **Activation steering** — inject precomputed vectors into the residual
+  stream of decoder layers during inference. Enables tone/style changes,
+  behavioral interventions, and SAE-derived steering vectors without
+  fine-tuning.
+- **Capture consumers** — a pluggable system for observing and routing
+  hidden-state activations produced inside the forward pass. Consumers
+  receive captured tensors at request finalization and can stream them
+  to disk, feed them into a training loop, ship them to a dashboard, or
+  log that a capture occurred. Built-in `filesystem` and `logging`
+  consumers ship in the box; third-party plugins register under the
+  `vllm.capture_consumers` Python entry-point group.
+
+The two subsystems share the same hook-point topology
+(`pre_attn`, `post_attn`, `post_mlp`, `mlp_in`, `mlp_out`); capture
+observes the **pre-steering** residual at every hook point so probes
+see the unmodified activation stream.
 
 Full docs live in the repo:
 
-- [User guide](docs/features/steering.md) — setup, API reference, examples
-- [Runtime design](docs/design/steering_runtime.md) — internals for contributors
+- Steering: [user guide](docs/features/steering.md) ·
+  [runtime design](docs/design/steering_runtime.md)
+- Capture consumers: [user guide](docs/features/capture_consumers.md) ·
+  [design](docs/design/capture_consumers.md)
 
 ---
 
-## Steering Model
+## Steering
+
+### Steering Model
 
 Steering uses a three-tier additive composition:
 
@@ -47,9 +65,9 @@ Three hook points are available per decoder layer:
 
 ---
 
-## Quickstart
+### Quickstart
 
-### Serving
+#### Serving
 
 ```bash
 # Global steering only (always available for steerable models)
@@ -61,7 +79,7 @@ vllm serve google/gemma-3-4b-it \
   --max-steering-configs 4
 ```
 
-### Global steering via HTTP
+#### Global steering via HTTP
 
 Global endpoints require `VLLM_SERVER_DEV_MODE=1`.
 
@@ -87,7 +105,7 @@ curl -X POST http://localhost:8000/v1/steering/clear
 curl http://localhost:8000/v1/steering
 ```
 
-### Per-request steering (Python)
+#### Per-request steering (Python)
 
 ```python
 from vllm import LLM, SamplingParams
@@ -104,7 +122,7 @@ params = SamplingParams(
 outputs = llm.generate(["Hello"], params)
 ```
 
-### Per-request steering (OpenAI-compatible server)
+#### Per-request steering (OpenAI-compatible server)
 
 ```python
 from openai import OpenAI
@@ -122,7 +140,7 @@ response = client.chat.completions.create(
 )
 ```
 
-### Named steering modules
+#### Named steering modules
 
 Pre-register a config once; reference it by name in requests.
 
@@ -141,6 +159,116 @@ client.chat.completions.create(
 ```
 
 Named modules and inline vectors compose additively per tier.
+
+---
+
+## Capture Consumers
+
+Capture consumers are a pluggable system for observing and routing
+hidden-state activations produced inside vLLM's forward pass. Each
+consumer is registered under the `vllm.capture_consumers` Python
+entry-point group; once enabled, the engine routes activations from
+specific `(layer, hook)` points to the consumer as requests are
+processed. Two trigger modes:
+
+- **Global capture** — the consumer declares a `CaptureSpec` that
+  applies to every request (observability probes, reward trainers,
+  dashboards).
+- **Per-request capture** — the client opts in via
+  `SamplingParams.capture[consumer_name]` (built-in `filesystem`
+  consumer works this way).
+
+The two modes compose: a single request can trigger both, and
+`RequestOutput.capture_results` returns a per-consumer result dict.
+
+### Built-in consumers
+
+| Consumer | Mode | Location | Purpose |
+| --- | --- | --- | --- |
+| `filesystem` | per-request | worker | Stream captured activations to raw `.bin` files with sidecar JSON; atomic finalize. |
+| `logging` | global | driver | Log every capture event — useful as a sanity check. |
+
+### Quickstart
+
+#### Serving with capture consumers
+
+```bash
+# Repeat --capture-consumers per consumer; shorthand is name:k=v,k=v
+vllm serve google/gemma-3-4b-it \
+  --capture-consumers filesystem:root=/tmp/captures \
+  --capture-consumers logging
+```
+
+Capture is fully opt-in. Without `--capture-consumers`,
+`capture_consumers_config` is `None` on `VllmConfig`; the per-step
+hooks short-circuit and `maybe_capture_residual` constant-folds out of
+compiled graphs — no overhead.
+
+#### Per-request capture (Python)
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="google/gemma-3-4b-it",
+    capture_consumers=[
+        {"name": "filesystem", "params": {"root": "/tmp/captures"}},
+    ],
+)
+
+params = SamplingParams(
+    max_tokens=64,
+    capture={
+        "filesystem": {
+            "tag": "demo",
+            "hooks": ["post_mlp"],
+            "layers": [15],
+            "positions": "last_prompt",
+        },
+    },
+)
+outputs = llm.generate(["Hello"], params)
+print(outputs[0].capture_results["filesystem"].payload)
+# -> {"items": ["/tmp/captures/.../demo.bin"]}
+```
+
+#### Per-request capture (OpenAI-compatible server)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+
+response = client.chat.completions.create(
+    model="google/gemma-3-4b-it",
+    messages=[{"role": "user", "content": "Hello"}],
+    extra_body={
+        "capture": {
+            "filesystem": {
+                "tag": "demo",
+                "hooks": ["post_mlp"],
+                "layers": [15],
+                "positions": "last_prompt",
+            },
+        },
+    },
+)
+print(response.capture_results)
+```
+
+### Custom consumers
+
+Subclass `vllm.v1.capture.CaptureConsumer`, register it via an entry
+point in your package's `pyproject.toml`:
+
+```toml
+[project.entry-points."vllm.capture_consumers"]
+my_consumer = "my_package.consumer:MyConsumer"
+```
+
+See [docs/features/capture_consumers.md](docs/features/capture_consumers.md)
+for the full plugin API, validation hooks, location semantics
+(`worker` vs `driver`), and per-consumer payload schemas.
 
 ---
 

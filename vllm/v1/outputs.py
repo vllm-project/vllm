@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.capture.types import CaptureResult
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -200,6 +201,13 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # req_id -> consumer_name -> terminal capture result.  Only
+    # populated by the model runner for requests whose capture-consumer
+    # finalize fired on this step.  The nested shape flows through
+    # ``EngineCoreOutput.capture_results`` to the output processor,
+    # which surfaces it on ``RequestOutput.capture_results``.
+    capture_results: dict[str, dict[str, CaptureResult]] = field(default_factory=dict)
 
 
 # ModelRunnerOutput wrapper for async scheduling.
