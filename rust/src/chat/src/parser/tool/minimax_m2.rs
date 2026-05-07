@@ -1,5 +1,5 @@
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, repeat, terminated};
+use winnow::combinator::{alt, delimited, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -183,16 +183,16 @@ fn tool_block_end_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2
 
 /// Parse a complete MiniMax M2 invoke block.
 fn invoke_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    let (_, _, _, name, _, raw_params, _) = (
-        ws0,
-        literal(INVOKE_START),
-        (ws1, literal("name=")),
+    let (name, raw_params) = seq!(
+        _: ws0,
+        _: literal(INVOKE_START),
+        _: (ws1, literal("name=")),
         attr_value,
-        literal(">"),
+        _: literal(">"),
         repeat(0.., terminated(parameter, ws0)),
-        literal(INVOKE_END),
+        _: literal(INVOKE_END),
     )
-        .parse_next(input)?;
+    .parse_next(input)?;
 
     Ok(MinimaxM2Event::Invoke {
         name: name.trim().to_string(),
@@ -202,15 +202,15 @@ fn invoke_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
 
 /// Parse a MiniMax M2 parameter block.
 fn parameter(input: &mut MinimaxM2Input<'_>) -> ModalResult<(String, String)> {
-    let (_, _, name, _, value, _) = (
-        literal(PARAMETER_START),
-        (ws1, literal("name=")),
+    let (name, value) = seq!(
+        _: literal(PARAMETER_START),
+        _: (ws1, literal("name=")),
         attr_value,
-        literal(">"),
+        _: literal(">"),
         take_until(0.., PARAMETER_END),
-        literal(PARAMETER_END),
+        _: literal(PARAMETER_END),
     )
-        .parse_next(input)?;
+    .parse_next(input)?;
 
     Ok((name.trim().to_string(), value.to_string()))
 }

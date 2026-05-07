@@ -1,5 +1,5 @@
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, delimited, eof, repeat, terminated};
+use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
@@ -165,23 +165,27 @@ fn safe_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent
 
 /// Parse a complete Qwen Coder tool call.
 fn tool_call_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    let (_, body, _) =
-        (ws0, take_until(0.., TOOL_CALL_END), literal(TOOL_CALL_END)).parse_next(input)?;
+    let (body,) = seq!(
+        _: ws0,
+        take_until(0.., TOOL_CALL_END),
+        _: literal(TOOL_CALL_END),
+    )
+    .parse_next(input)?;
 
     parse_tool_call_body(body)
 }
 
 /// Parse a Qwen Coder function block.
 fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
-    let (_, name, _, _, raw_params, _) = (
-        literal(FUNCTION_START),
+    let (name, raw_params) = seq!(
+        _: literal(FUNCTION_START),
         take_until(1.., ">"),
-        ">",
-        ws0,
+        _: ">",
+        _: ws0,
         repeat(0.., terminated(parameter, ws0)),
-        literal(FUNCTION_END),
+        _: literal(FUNCTION_END),
     )
-        .parse_next(input)?;
+    .parse_next(input)?;
 
     Ok(QwenCoderEvent::ToolCall {
         name: name.to_string(),
@@ -191,14 +195,14 @@ fn function_event(input: &mut &str) -> ModalResult<QwenCoderEvent> {
 
 /// Parse a Qwen Coder parameter block.
 fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
-    let (_, name, _, value, _) = (
-        literal(PARAMETER_START),
+    let (name, value) = seq!(
+        _: literal(PARAMETER_START),
         take_until(1.., ">"),
-        ">",
+        _: ">",
         take_until(0.., PARAMETER_END),
-        literal(PARAMETER_END),
+        _: literal(PARAMETER_END),
     )
-        .parse_next(input)?;
+    .parse_next(input)?;
 
     Ok((
         name.to_string(),

@@ -1,5 +1,5 @@
 use winnow::ascii::{multispace0 as ws0, multispace1 as ws1};
-use winnow::combinator::{alt, delimited, eof, repeat, terminated};
+use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
@@ -254,16 +254,16 @@ fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult
 
 /// Parse a DSML invoke block.
 fn invoke_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
-    let (_, _, name, _, _, body, _) = (
-        literal(INVOKE_START),
-        ws1,
+    let (name, body) = seq!(
+        _: literal(INVOKE_START),
+        _: ws1,
         dsml_name_attr,
-        ws0,
-        ">",
+        _: ws0,
+        _: ">",
         take_until(0.., INVOKE_END),
-        literal(INVOKE_END),
+        _: literal(INVOKE_END),
     )
-        .parse_next(input)?;
+    .parse_next(input)?;
     let raw_params = parse_invoke_params(body)?;
     Ok(DsmlEvent::Invoke {
         name: name.to_string(),
@@ -279,23 +279,18 @@ fn parse_invoke_params(invoke_body: &str) -> ModalResult<Vec<DsmlParameter>> {
 
 /// Parse a DSML parameter block.
 fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
-    let (_, _, name, _, is_string, _, _, value, _) = (
-        literal(PARAMETER_START),
-        ws1,
-        name_attr,
-        ws1,
-        string_attr,
-        ws0,
-        ">",
-        take_until(0.., PARAMETER_END),
-        literal(PARAMETER_END),
-    )
-        .parse_next(input)?;
-    Ok(DsmlParameter {
-        name: name.to_string(),
-        value: value.to_string(),
-        is_string: is_string == "true",
-    })
+    seq! {DsmlParameter {
+        _: literal(PARAMETER_START),
+        _: ws1,
+        name: name_attr.map(|name: &str| name.to_string()),
+        _: ws1,
+        is_string: string_attr.map(|value| value == "true"),
+        _: ws0,
+        _: ">",
+        value: take_until(0.., PARAMETER_END).map(|value: &str| value.to_string()),
+        _: literal(PARAMETER_END),
+    }}
+    .parse_next(input)
 }
 
 /// Parse a name attribute.

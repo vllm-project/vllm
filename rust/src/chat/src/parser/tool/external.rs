@@ -145,15 +145,22 @@ macro_rules! def_external_tool_parser {
     };
 }
 
-def_external_tool_parser!(CohereToolParser, CohereParser);
-def_external_tool_parser!(DeepSeekV31ToolParser, DeepSeek31Parser);
-def_external_tool_parser!(DeepSeekV3ToolParser, DeepSeekParser);
+// Markup-style tool-call formats.
 def_external_tool_parser!(Glm45MoeToolParser, Glm4MoeParser, glm45);
 def_external_tool_parser!(Glm47MoeToolParser, Glm4MoeParser, glm47);
+def_external_tool_parser!(Step3ToolParser, Step3Parser);
+
+// JSON tool-call formats.
+def_external_tool_parser!(CohereToolParser, CohereParser);
 def_external_tool_parser!(JsonToolParser, JsonParser);
-def_external_tool_parser!(KimiK2ToolParser, KimiK2Parser);
 def_external_tool_parser!(Llama3JsonToolParser, LlamaParser);
 def_external_tool_parser!(MistralToolParser, MistralParser);
-def_external_tool_parser!(PythonicToolParser, PythonicParser);
 def_external_tool_parser!(Qwen3XmlToolParser, QwenParser);
-def_external_tool_parser!(Step3ToolParser, Step3Parser);
+
+// Custom envelopes with JSON arguments.
+def_external_tool_parser!(DeepSeekV31ToolParser, DeepSeek31Parser);
+def_external_tool_parser!(DeepSeekV3ToolParser, DeepSeekParser);
+def_external_tool_parser!(KimiK2ToolParser, KimiK2Parser);
+
+// Special-token or custom-syntax tool-call formats.
+def_external_tool_parser!(PythonicToolParser, PythonicParser);
