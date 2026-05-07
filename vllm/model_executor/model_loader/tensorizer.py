@@ -120,7 +120,7 @@ class MetaTensorMode(TorchDispatchMode):
     )
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs if kwargs is not None else {}
+        kwargs = kwargs or {}
 
         if func._schema.name in self._FACTORY_OPS:
             # Force device to meta, overriding any specified device
