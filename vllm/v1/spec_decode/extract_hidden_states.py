@@ -383,4 +383,4 @@ class ExtractHiddenStatesProposer:
             if layer in group.layer_names:
                 self.kv_cache_gid = gid
                 return
-        raise AssertionError(f"Cache-only layer {layer!r} not in any KV cache group")
+        raise ValueError(f"Cache-only layer {layer!r} not in any KV cache group")
