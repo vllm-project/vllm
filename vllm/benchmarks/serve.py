@@ -127,7 +127,7 @@ async def fetch_spec_decode_metrics(
                 if not line or line.startswith("#"):
                     continue
 
-                if line.startswith("vllm:spec_decode"):
+                if line.startswith("vllm:spec_decode") and "_total" in line:
                     found_spec_decode = True
                     parts = line.split()
                     if parts:
