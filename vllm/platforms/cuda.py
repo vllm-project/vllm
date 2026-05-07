@@ -171,6 +171,25 @@ class CudaPlatformBase(Platform):
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
 
+    @classmethod
+    def device_id_to_physical_device_id(cls, device_id: int) -> "int | str":
+        # MIG devices appear in CUDA_VISIBLE_DEVICES as UUID strings
+        # (e.g. "MIG-377e0049-554c-540b-93c6-d0976f8426cb") rather than
+        # integers. Return the raw string so callers can use
+        # nvmlDeviceGetHandleByUUID and get accurate per-partition info
+        # (e.g. 20 GiB for a 2g.20gb slice, not 80 GiB for the parent GPU).
+        if (
+            cls.device_control_env_var in os.environ
+            and os.environ[cls.device_control_env_var] != ""
+        ):
+            device_ids = os.environ[cls.device_control_env_var].split(",")
+            physical_device_id = device_ids[device_id]
+            try:
+                return int(physical_device_id)
+            except ValueError:
+                return physical_device_id  # MIG UUID string
+        return device_id
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.has_device_capability(80):
