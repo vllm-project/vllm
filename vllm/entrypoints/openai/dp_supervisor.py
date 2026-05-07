@@ -234,40 +234,38 @@ class DPSupervisor:
         failed_process: BaseProcess | None = None
         supervisor_server_exited = False
         supervisor_server_failure: BaseException | None = None
-        supervisor_server: uvicorn.Server | None = None
-        supervisor_server_task: asyncio.Task[None] | None = None
         loop = asyncio.get_running_loop()
+
+        def on_server_exit(task: asyncio.Task[None]) -> None:
+            nonlocal supervisor_server_exited, supervisor_server_failure
+            if self._shutdown_event.is_set():
+                return
+            supervisor_server_exited = True
+            try:
+                supervisor_server_failure = task.exception()
+            except asyncio.CancelledError as exc:
+                supervisor_server_failure = exc
+            self._shutdown_event.set()
+
+        host = self.args.host or "0.0.0.0"
+        app = _build_dp_supervisor_app(self)
+        config = uvicorn.Config(
+            app,
+            host=host,
+            port=self.supervisor_port,
+            log_level=self.args.uvicorn_log_level,
+            access_log=False,
+        )
+        supervisor_server = uvicorn.Server(config)
+        supervisor_server_task = asyncio.create_task(
+            supervisor_server.serve(),
+            name="multi-port-external-lb-supervisor",
+        )
+        supervisor_server_task.add_done_callback(on_server_exit)
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
         try:
-
-            def on_server_exit(task: asyncio.Task[None]) -> None:
-                nonlocal supervisor_server_exited, supervisor_server_failure
-                if self._shutdown_event.is_set():
-                    return
-                supervisor_server_exited = True
-                try:
-                    supervisor_server_failure = task.exception()
-                except asyncio.CancelledError as exc:
-                    supervisor_server_failure = exc
-                self._shutdown_event.set()
-
-            host = self.args.host or "0.0.0.0"
-            app = _build_dp_supervisor_app(self)
-            config = uvicorn.Config(
-                app,
-                host=host,
-                port=self.supervisor_port,
-                log_level=self.args.uvicorn_log_level,
-                access_log=False,
-            )
-            supervisor_server = uvicorn.Server(config)
-            supervisor_server_task = asyncio.create_task(
-                supervisor_server.serve(),
-                name="multi-port-external-lb-supervisor",
-            )
-            supervisor_server_task.add_done_callback(on_server_exit)
             deadline = (
                 time.monotonic() + self.args.data_parallel_probe_startup_timeout_s
             )
@@ -293,9 +291,8 @@ class DPSupervisor:
         finally:
             self._shutdown_event.set()
             await self._shutdown_children()
-            if supervisor_server is not None:
-                supervisor_server.should_exit = True
-            if supervisor_server_task is not None and not supervisor_server_task.done():
+            supervisor_server.should_exit = True
+            if not supervisor_server_task.done():
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(supervisor_server_task, timeout=5.0)
             for sig in (signal.SIGTERM, signal.SIGINT):
