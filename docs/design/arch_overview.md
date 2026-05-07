@@ -76,7 +76,7 @@ python -m vllm.entrypoints.openai.api_server --model <model>
 
 That code can be found in [vllm/entrypoints/openai/api_server.py](../../vllm/entrypoints/openai/api_server.py).
 
-More details on the API server can be found in the [Online Serving](../serving/online_serving) document.
+More details on the API server can be found in the [Online Serving](../serving/online_serving/README.md) document.
 
 ## V1 Process Architecture
 
