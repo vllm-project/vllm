@@ -1734,13 +1734,10 @@ def test_get_kv_cache_config_one_worker():
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
     )[0]
     assert kv_cache_config_hybrid == KVCacheConfig(
-        num_blocks=16,
+        num_blocks=32,
         kv_cache_tensors=[
             KVCacheTensor(
-                size=mem_per_block_per_layer * 16, shared_by=["layer_1"]
-            ),
-            KVCacheTensor(
-                size=mem_per_block_per_layer * 16, shared_by=["layer_2"]
+                size=mem_per_block_per_layer * 32, shared_by=["layer_1", "layer_2"]
             ),
         ],
         kv_cache_groups=[
@@ -1785,10 +1782,7 @@ def test_kv_cache_tensor_sharing_requires_uniform_cache_layout_id():
         kv_cache_config: KVCacheConfig,
     ) -> None:
         layer_to_layout = {
-            layer_name: (
-                group.kv_cache_spec.block_size,
-                getattr(group.kv_cache_spec, "cache_layout_id", None),
-            )
+            layer_name: getattr(group.kv_cache_spec, "cache_layout_id", None)
             for group in kv_cache_config.kv_cache_groups
             for layer_name in group.layer_names
         }
@@ -1803,17 +1797,6 @@ def test_kv_cache_tensor_sharing_requires_uniform_cache_layout_id():
             )
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
-    kv_cache_specs_hybrid = {
-        "layer_1": new_kv_cache_spec(head_size=64),
-        "layer_2": new_sliding_window_spec(head_size=32),
-    }
-    kv_cache_config_hybrid = get_kv_cache_configs(
-        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
-    )[0]
-
-    # Do not share tensors across different block sizes.
-    assert_shared_tensors_have_uniform_cache_layout_id(kv_cache_config_hybrid)
-
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(
             head_size=64, cache_layout_id=("test", "layout_a")

@@ -1236,7 +1236,7 @@ def _build_uniform_page_size_kv_cache_tensor_specs(
     """Build KV cache tensor specs for groups with uniform page size.
 
     Groups may share a raw tensor only within the same compatibility bucket:
-    same manager block size and same backend KV cache layout.
+    same backend KV cache layout.
 
     Within each bucket, create group_size memory pools, each shared by one
     layer from each group. For example, for groups (full.0, full.1),
@@ -1251,16 +1251,11 @@ def _build_uniform_page_size_kv_cache_tensor_specs(
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
-    compatible_groups: dict[tuple[int, Any], list[KVCacheGroupSpec]] = defaultdict(
-        list
-    )
+    compatible_groups: dict[Any, list[KVCacheGroupSpec]] = defaultdict(list)
     for group in kv_cache_groups:
-        compatible_groups[
-            (
-                group.kv_cache_spec.block_size,
-                getattr(group.kv_cache_spec, "cache_layout_id", None),
-            )
-        ].append(group)
+        compatible_groups[getattr(group.kv_cache_spec, "cache_layout_id", None)].append(
+            group
+        )
 
     tensor_group_size = sum(
         max(len(group.layer_names) for group in groups)
@@ -1341,12 +1336,10 @@ def get_kv_cache_config_from_groups(
         )
     else:
         # General case: build raw tensor pools for groups with a uniform page
-        # size. A pool can only be shared by layers with compatible slot
-        # mapping and backend KV cache layout.
-        num_blocks, kv_cache_tensors = (
-            _build_uniform_page_size_kv_cache_tensor_specs(
-                vllm_config, kv_cache_groups, available_memory
-            )
+        # size. A pool can only be shared by layers with compatible backend KV
+        # cache layout.
+        num_blocks, kv_cache_tensors = _build_uniform_page_size_kv_cache_tensor_specs(
+            vllm_config, kv_cache_groups, available_memory
         )
 
     return KVCacheConfig(

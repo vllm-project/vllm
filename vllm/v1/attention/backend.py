@@ -155,6 +155,9 @@ class AttentionBackend(ABC):
     def get_kv_cache_layout_id(cls) -> Hashable:
         """Return the physical KV cache layout identifier for this backend.
 
+        By default, use the backend class name as a proxy for the physical KV
+        cache layout.
+
         Backends may return the same layout id only when they interpret a raw
         KV cache tensor with the same physical memory layout.
         """
