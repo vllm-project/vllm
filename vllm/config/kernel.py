@@ -118,6 +118,8 @@ class IrOpPriorityConfig:
         A helper to create an IrOpPriorityConfig where all ops use the given
         default list, with specified overrides.
 
+        Overrides that match the default are automatically filtered out.
+
         Args:
             default: Default priority list for all ops.
             **overrides: Keyword arguments mapping op_name to its priority list.
@@ -127,17 +129,21 @@ class IrOpPriorityConfig:
         """
         from vllm.ir.op import IrOp
 
-        # Validate overrides
-        for op_name in overrides:
+        # Validate overrides and filter out those matching default
+        filtered_overrides = {}
+        for op_name, priority in overrides.items():
             if op_name not in IrOp.registry:
                 raise KeyError(
                     f"Unknown IR op '{op_name}'. "
                     f"Available ops: {list(IrOp.registry.keys())}"
                 )
+            # Only keep overrides that differ from default
+            if priority != default:
+                filtered_overrides[op_name] = priority
 
         priorities = {}
         for op_name in IrOp.registry:
-            priorities[op_name] = list(overrides.get(op_name, default))
+            priorities[op_name] = list(filtered_overrides.get(op_name, default))
 
         return cls(priorities=priorities)  # type: ignore[call-arg]
 
