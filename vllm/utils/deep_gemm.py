@@ -469,14 +469,7 @@ def tf32_hc_prenorm_gemm(
         out = x.float() @ fn.T
         sqrsum = x.float().square().sum(-1)
 
-    See the caller function for shape requirement.
-
-    The DeepGEMM kernel splits the K dimension into ``num_split`` partial
-    sums for parallelism (``out`` has a leading ``num_split`` axis and the
-    consumer reduces over it). When DeepGEMM is not available (e.g. on
-    ROCm), fall back to a single-shot torch matmul written into split 0
-    while zeroing the remaining splits, which is mathematically equivalent
-    after the consumer's reduction.
+    See the caller function for shape requirement
     """
     _lazy_init()
     if _tf32_hc_prenorm_gemm_impl is None:
