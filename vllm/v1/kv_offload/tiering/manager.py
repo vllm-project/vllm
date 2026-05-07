@@ -166,6 +166,10 @@ class TieringOffloadingManager(OffloadingManager):
             SecondaryTierManager, dict[int, _PendingPromotion]
         ] = {}
 
+        # Gate for once-per-step execution of _maybe_process_finished_jobs().
+        # Reset at the end of each step in take_events().
+        self._processed_jobs_this_step: bool = False
+
         # Wire each secondary tier with a long-lived memoryview of the primary
         # CPU buffer. One view is shared across all tiers; released in shutdown().
         self._primary_kv_view = primary_tier.create_kv_memoryview()
@@ -178,9 +182,22 @@ class TieringOffloadingManager(OffloadingManager):
         self._job_id_counter += 1
         return job_id
 
+    def _maybe_process_finished_jobs(self):
+        """
+        Poll secondary tiers for completed jobs (at most once per step).
+
+        Guarded by _processed_jobs_this_step: the first call in an engine step
+        does the actual polling; subsequent calls are no-ops. The flag is reset
+        in take_events() at the end of each step.
+        """
+        if self._processed_jobs_this_step:
+            return
+        self._processed_jobs_this_step = True
+        self._process_finished_jobs()
+
     def _process_finished_jobs(self):
         """
-        Poll all secondary tiers for completed jobs and update state accordingly.
+        Unconditionally poll all secondary tiers for completed jobs.
 
         This method:
         1. Calls get_finished() on each secondary tier
@@ -240,7 +257,7 @@ class TieringOffloadingManager(OffloadingManager):
             None if no tier has the block but at least one tier is busy
                 (retry later).
         """
-        self._process_finished_jobs()
+        self._maybe_process_finished_jobs()
 
         # Always query every tier to warm up caches / prefetch state
         primary_hit = self.primary_tier.lookup(key, req_context)
@@ -339,7 +356,7 @@ class TieringOffloadingManager(OffloadingManager):
         """
         Prepare blocks to be loaded from primary tier to GPU.
 
-        CRITICAL: This method calls _process_finished_jobs() FIRST to ensure
+        CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
         that any completed promotions have been finalized and blocks are ready.
 
         This increments ref_cnt on the blocks in the primary tier, protecting
@@ -353,7 +370,7 @@ class TieringOffloadingManager(OffloadingManager):
             LoadStoreSpec for reading from primary tier.
         """
         # Process completed promotions to ensure blocks are ready
-        self._process_finished_jobs()
+        self._maybe_process_finished_jobs()
 
         return self.primary_tier.prepare_load(keys, req_context)
 
@@ -388,7 +405,7 @@ class TieringOffloadingManager(OffloadingManager):
         """
         Prepare blocks to be stored from GPU to primary tier.
 
-        CRITICAL: This method calls _process_finished_jobs() FIRST to ensure
+        CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
         that any completed async transfers have their ref_cnt decremented
         before the primary tier makes eviction decisions.
 
@@ -403,7 +420,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 1: Poll for completed async jobs FIRST
         # This decrements ref_cnt on primary blocks that have been
         # successfully transferred to secondary tiers.
-        self._process_finished_jobs()
+        self._maybe_process_finished_jobs()
 
         # Step 2: Store to primary tier
         primary_result = self.primary_tier.prepare_store(keys, req_context)
@@ -467,15 +484,17 @@ class TieringOffloadingManager(OffloadingManager):
 
             tier.submit_store(job_metadata)
 
-        # Note: The async transfers are now in flight.
-        # Their completion is tracked via get_finished() / _process_finished_jobs().
+        # Note: The async transfers are now in flight. Their completion is
+        # tracked via get_finished() / _maybe_process_finished_jobs().
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
-        Take offloading events from the primary tier.
+        End-of-step hook: flush deferred work, yield events, reset per-step state.
 
-        Note: Currently only primary tier events are tracked. Secondary tier
-        events could be added in the future if needed.
+        Called once per engine step from Scheduler.update_from_output() →
+        connector.take_events(). Ensures _maybe_process_finished_jobs() has run
+        at least once this step, flushes pending promotions, yields collected
+        events, and resets the per-step flag.
 
         Yields:
             New OffloadingEvents collected since the last call.
@@ -484,14 +503,20 @@ class TieringOffloadingManager(OffloadingManager):
         # hook once one exists. For now, take_events() serves as the flush
         # point under the assumption that it is called at the end of each
         # engine step (Scheduler.update_from_output() → connector.take_events()).
-        # Update the relevant tests the rely on take_events() to signal end of step.
+        # When the dedicated hook is added, update tests that rely on
+        # take_events() to signal end of step.
+
+        self._maybe_process_finished_jobs()
+
         self._flush_pending_promotions()
+
+        # Reset the per-step gate so next step's first call does real work.
+        self._processed_jobs_this_step = False
 
         if self.events is not None:
             yield from self.events
             self.events.clear()
 
-        # Also yield events from primary tier
         yield from self.primary_tier.take_events()
 
     def shutdown(self) -> None:

@@ -200,15 +200,23 @@ class TestTieringOffloadingManager:
         """Test that blocks are cascaded to ALL secondary tiers."""
         blocks = to_keys(range(3))
 
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+
         # Store to primary
         result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
 
-        # Complete store (triggers cascade)
+        # Complete store (triggers cascade via submit_store on each tier)
         self.manager.complete_store(blocks, _CTX, success=True)
 
-        # Process finished jobs to complete cascade
-        self.manager._process_finished_jobs()
+        # submit_store was called once per secondary tier
+        self.secondary_tier1.submit_store.assert_called_once()
+        self.secondary_tier2.submit_store.assert_called_once()
 
         # Blocks should be in both secondary tiers
         assert self.secondary_tier1.get_num_blocks() == 3
@@ -234,13 +242,34 @@ class TestTieringOffloadingManager:
             # ref_cnt should be 2 (one for each secondary tier)
             assert block.ref_cnt == 2
 
-        # Process finished jobs to complete cascade
-        self.manager._process_finished_jobs()
+        # End of step 1: _maybe_process_finished_jobs() was already called by
+        # prepare_store() above (setting the per-step flag), so take_events()
+        # does NOT poll get_finished() again — cascade completions remain
+        # unprocessed until the next step.
+        list(self.manager.take_events())
+
+        # ref_cnt still held: cascade jobs finished (sync tier) but haven't
+        # been polled yet because the per-step guard skipped the second call.
+        for block_hash in blocks:
+            block = self.primary_tier._policy.get(block_hash)
+            assert block.ref_cnt == 2
+
+        # Secondary tiers have completed jobs waiting to be drained
+        assert len(self.secondary_tier1.completed_jobs) > 0
+        assert len(self.secondary_tier2.completed_jobs) > 0
+
+        # End of step 2: flag was reset, so _maybe_process_finished_jobs()
+        # runs and processes the cascade completions (complete_read → ref_cnt--)
+        list(self.manager.take_events())
 
         # After cascade completes, ref_cnt should be 0
         for block_hash in blocks:
             block = self.primary_tier._policy.get(block_hash)
             assert block.ref_cnt == 0
+
+        # All completed jobs have been drained
+        assert len(self.secondary_tier1.completed_jobs) == 0
+        assert len(self.secondary_tier2.completed_jobs) == 0
 
     def test_lookup_from_primary(self, manager_setup):
         """Test lookup when blocks are in primary tier."""
@@ -266,11 +295,11 @@ class TestTieringOffloadingManager:
             result = self.manager.lookup(block, _CTX)
             assert result is None  # Retry later (promotion initiated)
 
-        # Flush deferred submit_load() calls (normally done at end of engine step)
+        # End of step 1: flushes deferred submit_load() calls
         list(self.manager.take_events())
 
-        # Process finished jobs to complete promotion
-        self.manager._process_finished_jobs()
+        # End of step 2: processes the completed promotion jobs
+        list(self.manager.take_events())
 
         # Now blocks should be in primary tier
         assert count_hits(self.primary_tier, blocks) == 3
@@ -299,8 +328,8 @@ class TestTieringOffloadingManager:
         assert len(result.keys_to_store) == 5
         self.manager.complete_store(blocks, _CTX, success=True)
 
-        # Process finished jobs to release ref_cnt from cascade
-        self.manager._process_finished_jobs()
+        # End of step: release ref_cnt from cascade
+        list(self.manager.take_events())
 
         # Now try to store 2 more blocks (should trigger eviction)
         more_blocks = to_keys(range(5, 7))
@@ -318,7 +347,7 @@ class TestTieringOffloadingManager:
         # Store blocks
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
-        self.manager._process_finished_jobs()
+        list(self.manager.take_events())
 
         # Touch blocks
         self.manager.touch(blocks, _CTX)
@@ -339,19 +368,23 @@ class TestTieringOffloadingManager:
         """Test that failed GPU→primary store doesn't cascade."""
         blocks = to_keys(range(3))
 
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+
         # Prepare store
         result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
 
-        # Complete store with failure
+        # Complete store with failure — cascade must not happen
         self.manager.complete_store(blocks, _CTX, success=False)
 
-        # Process finished jobs
-        self.manager._process_finished_jobs()
-
-        # Blocks should NOT be in secondary tiers
-        assert self.secondary_tier1.get_num_blocks() == 0
-        assert self.secondary_tier2.get_num_blocks() == 0
+        # submit_store was never called on either secondary tier
+        self.secondary_tier1.submit_store.assert_not_called()
+        self.secondary_tier2.submit_store.assert_not_called()
 
     def test_multiple_secondary_tiers_independent_eviction(self):
         """Test that secondary tiers manage their own evictions."""
@@ -375,7 +408,7 @@ class TestTieringOffloadingManager:
         result = manager.prepare_store(blocks1, _CTX)
         assert result is not None
         manager.complete_store(blocks1, _CTX, success=True)
-        manager._process_finished_jobs()
+        list(manager.take_events())
 
         # Both tiers should have 5 blocks
         assert small_tier.get_num_blocks() == 5
@@ -386,7 +419,7 @@ class TestTieringOffloadingManager:
         result = manager.prepare_store(blocks2, _CTX)
         assert result is not None
         manager.complete_store(blocks2, _CTX, success=True)
-        manager._process_finished_jobs()
+        list(manager.take_events())
 
         # Small tier should still have 5 blocks (evicted 3, added 3)
         assert small_tier.get_num_blocks() == 5
@@ -394,11 +427,11 @@ class TestTieringOffloadingManager:
         # Large tier should have all 8 blocks
         assert large_tier.get_num_blocks() == 8
 
-    def test_prepare_store_processes_finished_jobs_first(self, manager_setup):
-        """Test that prepare_store() calls _process_finished_jobs() first."""
+    def test_prepare_store_processes_finished_jobs_on_new_step(self, manager_setup):
+        """Test that prepare_store() processes finished jobs on first call of a step."""
         blocks = to_keys(range(3))
 
-        # Store blocks
+        # Step 1: Store blocks and cascade
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
 
@@ -407,7 +440,10 @@ class TestTieringOffloadingManager:
             block = self.primary_tier._policy.get(block_hash)
             assert block.ref_cnt == 2
 
-        # Call prepare_store again (should process finished jobs first)
+        # End of step 1 (resets per-step flag; cascade completions pending)
+        list(self.manager.take_events())
+
+        # Step 2: prepare_store processes finished cascade jobs on first call
         more_blocks = to_keys(range(3, 5))
         self.manager.prepare_store(more_blocks, _CTX)
 
