@@ -37,7 +37,13 @@ We currently support the following OpenAI APIs:
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
 
+## SageMaker-compatible
+
+- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
+
 ## Pooling models APIs
+
+For further details on Pooling Models, please refer to [this page](../../models/pooling_models/README.md).
 
 - Classification Usages
     - [Classification API](../../models/pooling_models/classify.md#online-serving)(`/classify`)
@@ -70,8 +76,6 @@ We currently support the following OpenAI APIs:
 
 ## Custom APIs
 
-- [Tokenizer API](others.md#tokenizer-api) (`/tokenize`, `/detokenize`)
-    - Applicable to any model with a tokenizer.
 - [Classification API](../../models/pooling_models/classify.md#classification-api) (`/classify`)
     - Applicable to [classification models](../../models/pooling_models/classify.md).
 - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
@@ -81,6 +85,24 @@ We currently support the following OpenAI APIs:
 - [Generative Scoring API](./generative_scoring_api.md#generative-scoring-api) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
+
+## Utility APIs
+
+- `/tokenize` - Tokenize text
+- `/detokenize` - Detokenize tokens
+- `/health` - Health check
+- `/ping` - SageMaker health check
+- `/version` - Version information
+- `/load` - Server load metrics
+
+## Sleep Mode
+
+For further details on sleep mode, please refer to [this page](../../features/sleep_mode.md).
+
+- `/sleep` - Put engine to sleep (causes denial of service)
+- `/wake_up` - Wake engine from sleep
+- `/is_sleeping` - Check if engine is sleeping
+- `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
 ## Chat Template
 
