@@ -747,47 +747,123 @@ compute_rocm_csrc_content_hash_if_needed() {
     echo "ROCm csrc content cache ref: ${ROCM_CSRC_CONTENT_CACHE_REF}"
 }
 
-write_rocm_csrc_content_cache_override() {
-    local export_wheel_cache_to=""
+write_hcl_string_list_entries() {
+    local indent="$1"
+    local value=""
+    shift
 
-    if [[ -z "${ROCM_CSRC_CONTENT_CACHE_REF:-}" ]]; then
+    for value in "$@"; do
+        value="${value//\\/\\\\}"
+        value="${value//\"/\\\"}"
+        printf '%s"%s",\n' "${indent}" "${value}"
+    done
+}
+
+write_hcl_string_list() {
+    local indent="$1"
+    shift
+
+    printf '%s[\n' "${indent}"
+    write_hcl_string_list_entries "${indent}  " "$@"
+    printf '%s]\n' "${indent}"
+}
+
+write_hcl_string_list_attr() {
+    local indent="$1"
+    local attr="$2"
+    shift 2
+
+    printf '%s%s = [\n' "${indent}" "${attr}"
+    write_hcl_string_list_entries "${indent}  " "$@"
+    printf '%s]\n' "${indent}"
+}
+
+write_rocm_cache_override() {
+    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+    local -a content_cache_from=()
+    local -a csrc_cache_to=()
+    local -a rocm_cache_to=()
+    local -a export_wheel_cache_to=()
+
+    if ! uses_rocm_csrc_cache; then
         return 0
     fi
 
-    if [[ "${TARGET}" == "test-rocm-ci-with-wheel" ]]; then
-        export_wheel_cache_to="
-  cache-to = []"
+    if [[ -n "${ROCM_CSRC_CONTENT_CACHE_REF:-}" ]]; then
+        content_cache_from+=("type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}")
+        csrc_cache_to+=(
+            "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=min,ignore-error=true"
+        )
     fi
 
-    cat > "${CSRC_CACHE_OVERRIDE_PATH}" <<EOF
+    # Docker Hub cache exports are best-effort. A cache-only target failure can
+    # otherwise cancel the sibling image target before its manifest is pushed.
+    if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
+        csrc_cache_to+=(
+            "type=registry,ref=${cache_repo}:csrc-rocm-${BUILDKITE_COMMIT},mode=min,ignore-error=true"
+        )
+        rocm_cache_to+=(
+            "type=registry,ref=${cache_repo}:rocm-${BUILDKITE_COMMIT},mode=min,ignore-error=true"
+        )
+    fi
+
+    if [[ -n "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
+        csrc_cache_to+=(
+            "type=registry,ref=${cache_repo}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=min,ignore-error=true"
+        )
+        rocm_cache_to+=(
+            "type=registry,ref=${cache_repo}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=min,ignore-error=true"
+        )
+    fi
+
+    if [[ "${TARGET}" == "test-rocm-ci-with-wheel" ]]; then
+        export_wheel_cache_to=()
+    else
+        export_wheel_cache_to=("${rocm_cache_to[@]}")
+    fi
+
+    {
+        cat <<EOF
 target "csrc-rocm-ci" {
   cache-from = concat(
     get_cache_from_rocm_csrc(),
-    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"],
+EOF
+        write_hcl_string_list "    " "${content_cache_from[@]}"
+        cat <<EOF
   )
-  cache-to = concat(
-    get_cache_to_rocm_csrc(),
-    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=min,ignore-error=true"],
-  )
+EOF
+        write_hcl_string_list_attr "  " "cache-to" "${csrc_cache_to[@]}"
+        cat <<EOF
 }
 
 target "test-rocm-ci" {
   cache-from = concat(
     get_cache_from_rocm(),
-    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"],
+EOF
+        write_hcl_string_list "    " "${content_cache_from[@]}"
+        cat <<EOF
   )
+EOF
+        write_hcl_string_list_attr "  " "cache-to" "${rocm_cache_to[@]}"
+        cat <<EOF
 }
 
 target "export-wheel-rocm" {
   cache-from = concat(
     get_cache_from_rocm(),
-    ["type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}"],
-  )${export_wheel_cache_to}
+EOF
+        write_hcl_string_list "    " "${content_cache_from[@]}"
+        cat <<EOF
+  )
+EOF
+        write_hcl_string_list_attr "  " "cache-to" "${export_wheel_cache_to[@]}"
+        cat <<EOF
 }
 EOF
+    } > "${CSRC_CACHE_OVERRIDE_PATH}"
 
     BAKE_FILES+=(-f "${CSRC_CACHE_OVERRIDE_PATH}")
-    echo "Appended ROCm csrc content-addressed cache override"
+    echo "Appended ROCm cache override with non-fatal registry exports"
 }
 
 extract_dependency_pins() {
@@ -1065,7 +1141,7 @@ main() {
     write_ci_base_label_override
     extract_dependency_pins
     compute_rocm_csrc_content_hash_if_needed
-    write_rocm_csrc_content_cache_override
+    write_rocm_cache_override
     resolve_ci_base_dependency_targets
     print_bake_config
     if [[ "${BAKE_PRINT_ONLY:-0}" == "1" ]]; then
