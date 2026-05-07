@@ -60,17 +60,18 @@ We currently support the following OpenAI APIs:
 - [Realtime API](./speech_to_text.md#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#realtime-transcription).
 
-## vLLM render API
+## Disaggregated APIs
 
+### vLLM render APIs
 - [Completions render API](render.md) (`/v1/completions/render`)
     - Render completion requests
 - [Chat Completions render API](render.md) (`/v1/chat/completions/render`)
     - Render Chat Completions
-- [Tokenizer API](render.md#tokenizer-api) (`/tokenize`, `/detokenize`)
-    - Applicable to any model with a tokenizer.
 
 ## Custom APIs
 
+- [Tokenizer API](others.md#tokenizer-api) (`/tokenize`, `/detokenize`)
+    - Applicable to any model with a tokenizer.
 - [Classification API](../../models/pooling_models/classify.md#classification-api) (`/classify`)
     - Applicable to [classification models](../../models/pooling_models/classify.md).
 - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
