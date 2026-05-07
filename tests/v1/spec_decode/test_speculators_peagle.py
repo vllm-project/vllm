@@ -9,7 +9,7 @@ from vllm import LLM
 from vllm.config import SpeculativeConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_PATH = "shanjiaz/qwen3-8b-peagle-speculators"
+MODEL_PATH = "nm-testing/qwen3-8b-peagle-speculators"
 
 EXPECTED_GSM8K_ACCURACY = 0.88
 ACCURACY_RTOL = 0.05
