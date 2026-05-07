@@ -246,7 +246,15 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
         # Video: each frame ≤ 70 soft tokens + boi + eoi + ~6 ts tokens.
-        tokens["video"] = _VIDEO_MAX_FRAMES * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
+        num_frames = _VIDEO_MAX_FRAMES
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        video_opts = mm_config.limit_per_prompt.get("video")
+        if (
+            isinstance(video_opts, VideoDummyOptions)
+            and video_opts.num_frames is not None
+        ):
+            num_frames = min(num_frames, video_opts.num_frames)
+        tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
