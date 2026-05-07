@@ -329,7 +329,7 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
+        from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_moe
         return fused_flydsl_moe(
             x,
             layer.w13_weight_packed,
