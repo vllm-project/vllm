@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 
 
 class CapturedAttentionState(NamedTuple):
-    attn_metadata: dict[str, Any]
+    attn_metadata: dict[str, Any] | None
     slot_mappings: dict[str, torch.Tensor]
 
 
@@ -100,6 +100,7 @@ class CudaGraphManager:
         self.decode_query_len = decode_query_len
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.is_first_pp_rank = get_pp_group().is_first_rank
         self.is_last_pp_rank = get_pp_group().is_last_rank
 
@@ -109,6 +110,10 @@ class CudaGraphManager:
         self._graphs_captured = False
         self._candidates: list[list[BatchExecutionDescriptor]] = []
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        # adjust the cudagraph sizes to be a multiple of the uniform decode query length
+        self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+            self.decode_query_len, self.tp_size
+        )
         self._init_candidates()
 
     def _init_candidates(self) -> None:
@@ -340,16 +345,16 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
+                skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
             )
 
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
-                batch_descriptor = (
-                    BatchDescriptor(num_tokens=num_tokens)
-                    if cg_mode == CUDAGraphMode.PIECEWISE
-                    else None
-                )
+                batch_descriptor = None
+                if cg_mode == CUDAGraphMode.PIECEWISE:
+                    assert attn_metadata is None
+                    batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
                 with set_forward_context(
-                    attn_metadata if cg_mode != CUDAGraphMode.PIECEWISE else None,
+                    attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     cudagraph_runtime_mode=cg_mode,
@@ -419,6 +424,7 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
+    skip_attn: bool = False,
 ) -> CapturedAttentionState:
     input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
@@ -439,13 +445,15 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata = model_state.prepare_attn(
-        input_batch,
-        CUDAGraphMode.NONE,
-        input_block_tables,
-        slot_mappings,
-        attn_groups,
-        kv_cache_config,
-        for_capture=True,
-    )
+    attn_metadata = None
+    if not skip_attn:
+        attn_metadata = model_state.prepare_attn(
+            input_batch,
+            CUDAGraphMode.NONE,
+            input_block_tables,
+            slot_mappings,
+            attn_groups,
+            kv_cache_config,
+            for_capture=True,
+        )
     return CapturedAttentionState(attn_metadata, slot_mappings_by_layer)
