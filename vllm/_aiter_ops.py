@@ -2437,22 +2437,20 @@ class rocm_aiter_ops:
             return
 
         hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
-        full_fn = torch.empty(
+
+        full_fn = torch.zeros(
             hc_mult3,
             hc_mult * hidden_size,
             dtype=fn.dtype,
             device=fn.device,
         )
-        full_fn.zero_()
-        full_fn[:hc_mult].copy_(fn)
+        full_fn[:hc_mult] = fn
 
-        full_base = torch.empty(hc_mult3, dtype=hc_base.dtype, device=hc_base.device)
-        full_base.zero_()
-        full_base[:hc_mult].copy_(hc_base)
+        full_base = torch.zeros(hc_mult3, dtype=hc_base.dtype, device=hc_base.device)
+        full_base[:hc_mult] = hc_base
 
-        full_scale = torch.empty(3, dtype=hc_scale.dtype, device=hc_scale.device)
-        full_scale.zero_()
-        full_scale[0].copy_(hc_scale[0])
+        full_scale = torch.zeros(3, dtype=hc_scale.dtype, device=hc_scale.device)
+        full_scale[0] = hc_scale[0]
 
         _, _, layer_input = rocm_aiter_ops.mhc_pre(
             hs_flat,
