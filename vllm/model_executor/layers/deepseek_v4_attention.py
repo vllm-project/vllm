@@ -715,8 +715,13 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         self.kv_cache_dtype = kv_cache_dtype
 
-        # Register with compilation context for metadata lookup
+        # Full CUDA graphs require topk_length / extra_topk_length to be
+        # constant between capture and replay for the FlashMLA tile scheduler.
         compilation_config = vllm_config.compilation_config
+        self.needs_constant_topk = (
+            compilation_config.cudagraph_mode.has_full_cudagraphs()
+        )
+
         if prefix and prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         if prefix:
@@ -829,6 +834,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
+                    needs_constant_topk=self.needs_constant_topk,
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
