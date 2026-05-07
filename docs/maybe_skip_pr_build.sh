@@ -20,5 +20,5 @@ elif grep -qE '"name": *"(documentation|ready)"' /tmp/pr_response.json; then
   echo "Found required label, proceeding with build."
 else
   echo "PR #${READTHEDOCS_VERSION} lacks 'documentation' or 'ready' label, cancelling build."
-  exit 1
+  exit 183
 fi
