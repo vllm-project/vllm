@@ -238,6 +238,56 @@ def _log_gdn_backend_decision(
         )
 
 
+def _resolve_gdn_decode_backend(ssm_state_dtype: torch.dtype) -> str:
+    """Resolve the GDN decode backend. Returns ``"flashinfer"``
+    or ``"triton"``.
+    FlashInfer requires SM90+ and ``state.dtype in (bfloat16, float32)``.
+    Respect ``--gdn-decode-backend`` engine arg.
+    """
+    additional_config = get_current_vllm_config().additional_config
+    assert isinstance(additional_config, dict)
+    backend_cfg = additional_config.get("gdn_decode_backend", "auto")
+    backend = str(backend_cfg).strip().lower()
+
+    supports_flashinfer = (
+        current_platform.is_cuda() and current_platform.has_device_capability(90)
+    )
+    state_dtype_ok = ssm_state_dtype in (torch.bfloat16, torch.float32)
+
+    if backend == "triton":
+        use_flashinfer = False
+    elif backend == "flashinfer":
+        if not supports_flashinfer:
+            logger.warning_once(
+                "GDN decode backend 'flashinfer' is selected but cannot be "
+                "used on the current platform (requires CUDA SM90+). "
+                "Falling back to Triton/FLA."
+            )
+            use_flashinfer = False
+        elif not state_dtype_ok:
+            logger.warning_once(
+                "GDN decode backend 'flashinfer' is selected but the "
+                "Mamba SSM cache dtype is %s; FlashInfer's "
+                "gated_delta_rule_decode_pretranspose only supports "
+                "bfloat16/float32 state. Falling back to Triton/FLA.",
+                ssm_state_dtype,
+            )
+            use_flashinfer = False
+        else:
+            use_flashinfer = True
+    else:
+        # Default / unset: implicit auto -- use FlashInfer when the
+        # platform and SSM-state dtype support it.
+        use_flashinfer = supports_flashinfer and state_dtype_ok
+
+    if not use_flashinfer:
+        logger.info_once("Using Triton/FLA GDN decode kernel")
+        return "triton"
+
+    logger.info_once("Using FlashInfer GDN decode kernel")
+    return "flashinfer"
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -558,6 +608,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
 
+        _, ssm_state_dtype = self.get_state_dtype()
+        self.gdn_decode_backend = _resolve_gdn_decode_backend(ssm_state_dtype)
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -839,6 +892,28 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         key = k_contig.view(1, seq_len, -1, self.head_k_dim)
         value = v_contig.view(1, seq_len, -1, self.head_v_dim)
 
+        return query, key, value
+
+    def _rearrange_mixed_qkv_for_fi(
+        self, mixed_qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Copy-free unpack of ``mixed_qkv`` into FlashInfer's layout:
+        ``q``, ``k`` -> ``[B, 1, H, K]``; ``v`` -> ``[B, 1, HV, V]``.
+        """
+        query, key, value = torch.split(
+            mixed_qkv,
+            [
+                self.key_dim // self.tp_size,
+                self.key_dim // self.tp_size,
+                self.value_dim // self.tp_size,
+            ],
+            dim=-1,
+        )
+        query, key = map(
+            lambda x: rearrange(x, "l (h d) -> l 1 h d", d=self.head_k_dim),
+            (query, key),
+        )
+        value = rearrange(value, "l (h d) -> l 1 h d", d=self.head_v_dim)
         return query, key, value
 
     def forward(
@@ -1589,6 +1664,80 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out.reshape(-1),
         )
 
+    def _fi_decode(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        b_bhv: torch.Tensor,
+        a_bhv: torch.Tensor,
+        ssm_state: torch.Tensor,
+        state_indices: torch.Tensor,
+        out_bthv: torch.Tensor,
+    ) -> None:
+        """Call FlashInfer's gated_delta_rule_decode_pretranspose.
+
+        ``q``/``k``/``v`` are passed straight through as strided views
+        (no ``.contiguous()``). FI's CuTe kernel only requires
+        ``stride(-1) == 1`` on q/k/v, which the post-split views from
+        :meth:`_rearrange_mixed_qkv_for_fi` already satisfy.
+
+        Args:
+            q, k: ``[B, T=1, H, K]`` strided view from
+                ``self._rearrange_mixed_qkv_for_fi``.
+            v: ``[B, T=1, HV, V]`` strided view from
+                ``self._rearrange_mixed_qkv_for_fi``.
+            b_bhv, a_bhv: ``[B, HV]`` (the non-spec slice).
+            ssm_state: ``[pool_size, HV, V, K]``, dtype matches the
+                Mamba SSM cache dtype (bf16 or fp32 in supported cases).
+            state_indices: ``[B]`` int32/int64 pool indices. vLLM uses
+                NULL_BLOCK_ID=0 to mark CUDAGraph-padded entries; we
+                remap those to -1 because that is FI's documented
+                "skip / null" sentinel for the pretranspose kernel
+                (Triton uses ``state_idx <= 0`` -> skip, FI uses
+                ``pool_idx < 0`` -> skip; pool slot 0 is a real slot
+                for FI). Without this remap, padded entries write
+                garbage state into pool slot 0 -> downstream illegal
+                memory access in subsequent steps.
+            out_bthv: pre-allocated ``[B, 1, HV, V]`` view of
+                ``core_attn_out`` to be written in place.
+        """
+        a = a_bhv.unsqueeze(1)
+        b = b_bhv.unsqueeze(1)
+
+        # TODO: remove it when FI supports NULL_BLOCK_ID=0.
+        # Remap NULL_BLOCK_ID (=0) padding -> FI's -1 skip sentinel.
+        state_indices_fi = torch.where(
+            state_indices > 0,
+            state_indices,
+            torch.full_like(state_indices, -1),
+        )
+
+        # NOTE: omit `output_state_indices` -- older flashinfer
+        # releases (e.g. 0.6.8.post1) reject the kwarg, and the
+        # default (write back to read slot) is what we want.
+        #
+        # `.detach()` on `nn.Parameter`s: FI ingests via `from_dlpack`
+        # which rejects `requires_grad=True`. detach is a free view
+        # and preserves strides, so the FI compile cache stays stable.
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+
+        gated_delta_rule_decode_pretranspose(
+            q=q,
+            k=k,
+            v=v,
+            state=None,
+            A_log=self.A_log.detach(),
+            a=a,
+            dt_bias=self.dt_bias.detach(),
+            b=b,
+            scale=self.head_k_dim**-0.5,
+            output=out_bthv,
+            use_qk_l2norm=True,
+            initial_state=ssm_state,
+            initial_state_indices=state_indices_fi,
+        )
+
     def _forward_core_decode_non_spec(
         self,
         mixed_qkv: torch.Tensor,
@@ -1629,18 +1778,31 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        fused_recurrent_gated_delta_rule_packed_decode(
-            mixed_qkv=mixed_qkv_non_spec,
-            a=a,
-            b=b,
-            A_log=self.A_log,
-            dt_bias=self.dt_bias,
-            scale=self.head_k_dim**-0.5,
-            initial_state=ssm_state,
-            out=out_buf,
-            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
-            use_qk_l2norm_in_kernel=True,
-        )
+        if self.gdn_decode_backend == "flashinfer":
+            q, k_t, v_t = self._rearrange_mixed_qkv_for_fi(mixed_qkv_non_spec)
+            self._fi_decode(
+                q,
+                k_t,
+                v_t,
+                b_bhv=b,
+                a_bhv=a,
+                ssm_state=ssm_state,
+                state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                out_bthv=out_buf,
+            )
+        else:
+            fused_recurrent_gated_delta_rule_packed_decode(
+                mixed_qkv=mixed_qkv_non_spec,
+                a=a,
+                b=b,
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                scale=self.head_k_dim**-0.5,
+                initial_state=ssm_state,
+                out=out_buf,
+                ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+                use_qk_l2norm_in_kernel=True,
+            )
         return
 
 

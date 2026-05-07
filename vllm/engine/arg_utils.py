@@ -713,6 +713,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    gdn_decode_backend: Literal["flashinfer", "triton"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1536,6 +1537,14 @@ class EngineArgs:
             default=None,
             help="Select GDN prefill backend.",
         )
+
+        parser.add_argument(
+            "--gdn-decode-backend",
+            dest="gdn_decode_backend",
+            choices=["flashinfer", "triton"],
+            default=None,
+            help="Select GDN decode backend.",
+        )
         return parser
 
     @classmethod
@@ -2225,6 +2234,9 @@ class EngineArgs:
 
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
+
+        if self.gdn_decode_backend is not None:
+            self.additional_config["gdn_decode_backend"] = self.gdn_decode_backend
 
         config = VllmConfig(
             model_config=model_config,
