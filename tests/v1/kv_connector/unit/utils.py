@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -429,12 +430,123 @@ class MockKVConnector(KVConnectorBase_V1):
         pass
 
 
+class DelayedKVConnectorMetadata(KVConnectorMetadata):
+    """Metadata for DelayedKVConnector to share pending request state."""
+
+    def __init__(self, pending_requests: dict[str, float]):
+        self.pending_requests = pending_requests
+
+
+class DelayedKVConnector(KVConnectorBase_V1):
+    """Test connector that delays block freeing to test shutdown behavior.
+
+    Simulates async KV transfers by delaying the completion signal for a
+    configurable duration. This tests that the scheduler properly waits for
+    async transfers to complete before shutting down.
+
+    Sequence of events:
+    1. Scheduler calls request_finished() when the prefill completes, we
+       return True to keep the blocks around (delay_free_blocks=True)
+    2. build_connector_meta() ensures the pending list is transferred to
+       the worker side via DelayedKVConnectorMetadata
+    3. bind_connector_metadata() receives the pending list on the worker side
+    4. get_finished() is called each step on the worker side, we return a
+       pending request as done after the configurable delay has elapsed
+    5. This is sent back to the scheduler via KVConnectorOutput.finished_sending,
+       causing the blocks to be freed via _free_blocks()
+    """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+        extra_config = self._kv_transfer_config.kv_connector_extra_config
+        self.delay_duration = float(extra_config.get("delay_duration"))
+
+        self._pending_requests: dict[str, float] = {}
+
+    def get_num_new_matched_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+    ) -> tuple[int | None, bool]:
+        return 0, False
+
+    def update_state_after_alloc(
+        self,
+        request: Request,
+        blocks: KVCacheBlocks,
+        num_external_tokens: int,
+    ):
+        pass
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        meta = DelayedKVConnectorMetadata(self._pending_requests.copy())
+        self._pending_requests.clear()
+        return meta
+
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        if isinstance(connector_metadata, DelayedKVConnectorMetadata):
+            self._pending_requests.update(connector_metadata.pending_requests)
+
+    def request_finished(
+        self,
+        request: Request,
+        block_ids: list[int],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        # Only store timestamp once (request_finished can be called multiple times)
+        if request.request_id not in self._pending_requests:
+            self._pending_requests[request.request_id] = time.time()
+        return True, None  # Delay freeing blocks
+
+    def get_finished(
+        self, finished_req_ids: set[str]
+    ) -> tuple[set[str] | None, set[str] | None]:
+        finished_sending = set()
+        current_time = time.time()
+
+        for req_id in self._pending_requests:
+            if self.delay_duration > 0:
+                start_time = self._pending_requests[req_id]
+                elapsed = current_time - start_time
+                if elapsed < self.delay_duration:
+                    continue
+
+            finished_sending.add(req_id)
+
+        for req_id in finished_sending:
+            del self._pending_requests[req_id]
+
+        return finished_sending, None
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+
 KVConnectorFactory.register_connector(
     "TestExampleConnector", __name__, TestExampleConnector.__name__
 )
 
 KVConnectorFactory.register_connector(
     "MockKVConnector", __name__, MockKVConnector.__name__
+)
+
+KVConnectorFactory.register_connector(
+    "DelayedKVConnector", __name__, DelayedKVConnector.__name__
 )
 
 
