@@ -384,6 +384,17 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+        additional_config = get_current_vllm_config().additional_config
+        assert isinstance(additional_config, dict)
+        decode_backend_cfg = additional_config.get("gdn_decode_backend", "auto")
+        self.gdn_decode_backend = str(decode_backend_cfg).strip().lower()
+        self.use_flashinfer_gdn_decode = self.gdn_decode_backend != "triton"
+        if self.use_flashinfer_gdn_decode:
+            logger.info_once(
+                "Using FlashInfer GDN decode kernel for non-spec decode tokens"
+            )
+        else:
+            logger.info_once("Using Triton/FLA GDN decode kernel")
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -770,6 +781,38 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         if (
+            self.use_flashinfer_gdn_decode
+            and attn_metadata.spec_sequence_masks is None
+            and attn_metadata.num_decodes > 0
+        ):
+            return self._forward_core_flashinfer_non_spec(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                core_attn_out=core_attn_out,
+                attn_metadata=attn_metadata,
+            )
+
+        return self._forward_core_fla(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            core_attn_out=core_attn_out,
+            attn_metadata=attn_metadata,
+        )
+
+    def _forward_core_fla(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ):
+        """
+        Core attention computation with the existing Triton/FLA kernels.
+        """
+        if (
             self.enable_packed_recurrent_decode
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
@@ -1007,6 +1050,152 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
+
+    def _forward_core_flashinfer_non_spec(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ):
+        """
+        Core attention computation with FlashInfer for non-spec batches.
+
+        Mixed batches are laid out as decode tokens first, followed by prefill
+        tokens.  Process decode with FlashInfer's decode kernel and keep the
+        prefill suffix on the chunked prefill kernel.
+        """
+        non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
+        non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+        assert non_spec_state_indices_tensor is not None
+        assert non_spec_query_start_loc is not None
+        self_kv_cache = self.kv_cache
+        conv_state = (
+            self_kv_cache[0]
+            if is_conv_state_dim_first()
+            else self_kv_cache[0].transpose(-1, -2)
+        )
+        ssm_state = self_kv_cache[1]
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        mixed_qkv = mixed_qkv[:num_actual_tokens]
+        b = b[:num_actual_tokens]
+        a = a[:num_actual_tokens]
+
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+
+        if attn_metadata.num_prefills == 0:
+            decode_token_count = num_actual_tokens
+        else:
+            decode_token_count = attn_metadata.num_decode_tokens
+
+        mixed_qkv_decode = causal_conv1d_update(
+            mixed_qkv[:decode_token_count],
+            conv_state,
+            conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=non_spec_state_indices_tensor[:decode_token_count],
+            validate_data=False,
+        )
+
+        q_decode, k_decode, v_decode = self.rearrange_mixed_qkv(mixed_qkv_decode)
+        q_decode = q_decode.transpose(0, 1).contiguous()
+        k_decode = k_decode.transpose(0, 1).contiguous()
+        v_decode = v_decode.transpose(0, 1).contiguous()
+        decode_out = core_attn_out[:decode_token_count].unsqueeze(1)
+        from flashinfer.gdn_decode import gated_delta_rule_decode_pretranspose
+
+        gated_delta_rule_decode_pretranspose(
+            q=q_decode,
+            k=k_decode,
+            v=v_decode,
+            state=None,
+            A_log=self.A_log.detach().float(),
+            a=a[:decode_token_count].unsqueeze(1).contiguous(),
+            dt_bias=self.dt_bias.detach(),
+            b=b[:decode_token_count].unsqueeze(1).contiguous(),
+            scale=q_decode.shape[-1] ** -0.5,
+            output=decode_out,
+            use_qk_l2norm=True,
+            initial_state=ssm_state,
+            initial_state_indices=(
+                non_spec_state_indices_tensor[:decode_token_count]
+                - (non_spec_state_indices_tensor[:decode_token_count] == 0).to(
+                    non_spec_state_indices_tensor.dtype
+                )
+            ),
+        )
+
+        if attn_metadata.num_prefills > 0:
+            prefill_token_start = attn_metadata.num_decode_tokens
+            mixed_qkv_prefill = mixed_qkv[prefill_token_start:]
+            mixed_qkv_prefill_T = mixed_qkv_prefill.transpose(0, 1)
+            prefill_state_indices = non_spec_state_indices_tensor[
+                attn_metadata.num_decodes : attn_metadata.num_decodes
+                + attn_metadata.num_prefills
+            ]
+            prefill_query_start_loc = (
+                non_spec_query_start_loc[attn_metadata.num_decodes :]
+                - attn_metadata.num_decode_tokens
+            ).contiguous()
+            has_initial_state = attn_metadata.has_initial_state
+            assert has_initial_state is not None
+            prefill_has_initial_state = has_initial_state[
+                attn_metadata.num_decodes :
+            ].contiguous()
+
+            mixed_qkv_prefill = causal_conv1d_fn(
+                mixed_qkv_prefill_T,
+                conv_weights,
+                self.conv1d.bias,
+                activation=self.activation,
+                conv_states=conv_state,
+                has_initial_state=prefill_has_initial_state,
+                cache_indices=prefill_state_indices,
+                query_start_loc=prefill_query_start_loc,
+            ).transpose(0, 1)
+
+            (
+                query_prefill,
+                key_prefill,
+                value_prefill,
+                g_prefill,
+                beta_prefill,
+            ) = fused_post_conv_prep(
+                conv_output=mixed_qkv_prefill,
+                a=a[prefill_token_start:],
+                b=b[prefill_token_start:],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                num_k_heads=self.num_k_heads // self.tp_size,
+                head_k_dim=self.head_k_dim,
+                head_v_dim=self.head_v_dim,
+                apply_l2norm=True,
+                output_g_exp=False,
+            )
+
+            initial_state = ssm_state[prefill_state_indices].contiguous()
+            initial_state[~prefill_has_initial_state, ...] = 0
+            core_attn_out_prefill, last_recurrent_state = self.chunk_gated_delta_rule(
+                q=query_prefill.unsqueeze(0),
+                k=key_prefill.unsqueeze(0),
+                v=value_prefill.unsqueeze(0),
+                g=g_prefill.unsqueeze(0),
+                beta=beta_prefill.unsqueeze(0),
+                initial_state=initial_state,
+                output_final_state=True,
+                cu_seqlens=prefill_query_start_loc,
+                use_qk_l2norm_in_kernel=False,
+            )
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            core_attn_out[prefill_token_start:num_actual_tokens] = (
+                core_attn_out_prefill.squeeze(0)
+            )
+        return
 
     def _forward_core_decode_non_spec(
         self,
