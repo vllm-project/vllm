@@ -381,7 +381,7 @@ def convert_to_nvfp4_moe_kernel_format(
     elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
         # Move the E2M1 lookup table to the device now, because
         # `.to(device)` is not allowed during CUDA graph capture.
-        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
+        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(w13.device)
 
         if a13_scale is None or a2_scale is None:
             raise ValueError(

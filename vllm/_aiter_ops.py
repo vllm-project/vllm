@@ -2,9 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from collections.abc import Callable
+from contextlib import contextmanager
+from typing import Protocol
 
 import torch
 from torch._ops import OpOverload
+from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
@@ -37,6 +40,27 @@ def is_aiter_found() -> bool:
 # been checked in forward passes that are torch compiled.
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
+
+
+class AiterCustomAllreduceProto(Protocol):
+    max_size: int
+    world_size: int
+    fully_connected: bool
+
+    @contextmanager
+    def capture(self): ...
+    def close(self) -> None: ...
+    def fused_ar_rms(
+        self,
+        inp: torch.Tensor,
+        res_inp: torch.Tensor,
+        *,
+        w: torch.Tensor,
+        eps: float,
+        registered: bool = False,
+        use_1stage: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def should_custom_ar(self, inp: torch.Tensor) -> bool: ...
 
 
 def is_aiter_found_and_supported() -> bool:
@@ -623,58 +647,6 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     return Y
 
 
-def _rocm_aiter_rms_norm_impl(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from aiter import rms_norm
-
-    if x.dim() > 2:
-        x_original_shape = x.shape
-        x = x.reshape(-1, x_original_shape[-1])
-        x = rms_norm(x, weight, variance_epsilon)
-        return x.reshape(x_original_shape)
-
-    return rms_norm(x, weight, variance_epsilon)
-
-
-def _rocm_aiter_rms_norm_fake(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import rmsnorm2d_fwd_with_add
-
-    residual_out = torch.empty_like(residual)
-    out = torch.empty_like(x)
-    rmsnorm2d_fwd_with_add(
-        out,  # output
-        x,  # input
-        residual,  # residual input
-        residual_out,  # residual output
-        weight,
-        variance_epsilon,
-    )
-    return out, residual_out
-
-
-def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    residual_out = torch.empty_like(residual)
-    out = torch.empty_like(x)
-    return out, residual_out
-
-
 def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -748,6 +720,55 @@ def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
     out = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
 
     return out, y_scale
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+
+    total_bytes = input_.numel() * input_.element_size()
+    hidden_dim = input_.shape[-1]
+    token_num = input_.shape[0]
+    hidden_ok = hidden_dim in (512, 1024, 2048, 4096, 7168)
+    token_ok = token_num <= 80
+    world_size = aiter_ar.world_size
+    full_nvlink = aiter_ar.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 256 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 128 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+
+    result = aiter_ar.fused_ar_rms(
+        input_,
+        residual,
+        w=weight,
+        eps=epsilon,
+        registered=torch.cuda.is_current_stream_capturing(),
+        use_1stage=use_1stage,
+    )
+    assert result is not None
+    return result[0], result[1]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(input_), torch.empty_like(residual)
 
 
 def _rocm_aiter_per_tensor_quant_impl(
@@ -1156,10 +1177,9 @@ class rocm_aiter_ops:
 
         # Check if aiter is enabled before using operations
         if rocm_aiter_ops.is_enabled():
-            result = rocm_aiter_ops.rms_norm(x, weight, epsilon)
+            result = rocm_aiter_ops.per_token_quant(x, FP8_DTYPE)
 
     Operations:
-        - RMS normalization: rms_norm, rms_norm2d_with_add
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
         - Routing: topk_softmax, biased_grouped_topk, grouped_topk
@@ -1171,7 +1191,6 @@ class rocm_aiter_ops:
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-    _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -1188,6 +1207,9 @@ class rocm_aiter_ops:
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
 
+    _ALL_REDUCE_MAX_SIZE: int = 8192 * 1024 * 8 * 2
+    _CUSTOM_ALL_REDUCE: AiterCustomAllreduceProto | None = None
+
     @classmethod
     def refresh_env_variables(cls):
         """
@@ -1199,7 +1221,6 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-        cls._RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -1293,11 +1314,6 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_rmsnorm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
-
-    @classmethod
-    @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
@@ -1361,6 +1377,35 @@ class rocm_aiter_ops:
         from vllm.platforms.rocm import on_gfx950
 
         return cls.is_linear_enabled() and on_gfx950()
+
+    @classmethod
+    def initialize_aiter_allreduce(
+        cls, group: ProcessGroup, device: torch.device
+    ) -> None:
+        try:
+            from aiter.dist.device_communicators.custom_all_reduce import (
+                CustomAllreduce as AiterCustomAllreduce,
+            )
+
+            cls._CUSTOM_ALL_REDUCE = AiterCustomAllreduce(group, device)
+        except Exception:
+            cls._CUSTOM_ALL_REDUCE = None
+
+    @classmethod
+    def get_aiter_allreduce(cls) -> AiterCustomAllreduceProto | None:
+        return cls._CUSTOM_ALL_REDUCE
+
+    @classmethod
+    def destroy_aiter_allreduce(cls) -> None:
+        if cls._CUSTOM_ALL_REDUCE is not None:
+            cls._CUSTOM_ALL_REDUCE.close()
+            cls._CUSTOM_ALL_REDUCE = None
+
+    @classmethod
+    def get_aiter_allreduce_max_size(cls) -> int | None:
+        # effective max input size (based on upstream aiter version: v0.1.10.post3)
+        # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/aiter/dist/device_communicators/custom_all_reduce.py#L272-L273
+        return int(cls._ALL_REDUCE_MAX_SIZE / 2)
 
     @staticmethod
     @if_aiter_supported
@@ -1456,19 +1501,6 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_rms_norm",
-                op_func=_rocm_aiter_rms_norm_impl,
-                fake_impl=_rocm_aiter_rms_norm_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
-                op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
                 op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
                 fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
@@ -1553,6 +1585,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm",
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_impl,
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="fused_mla_dual_rms_norm",
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
@@ -1560,14 +1598,6 @@ class rocm_aiter_ops:
             )
 
             _OPS_REGISTERED = True
-
-    @staticmethod
-    def get_rmsnorm_fused_add_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
-
-    @staticmethod
-    def get_rmsnorm_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rms_norm.default
 
     @staticmethod
     def get_rmsnorm_fused_add_dynamic_quant_op() -> OpOverload:
@@ -1606,25 +1636,12 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
+    def get_fused_allreduce_rmsnorm_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
+
+    @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm.default
-
-    @staticmethod
-    def rms_norm(
-        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-    ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
-
-    @staticmethod
-    def rms_norm2d_with_add(
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        weight: torch.Tensor,
-        variance_epsilon: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-            x, residual, weight, variance_epsilon
-        )
 
     @staticmethod
     def w8a8_gemm(

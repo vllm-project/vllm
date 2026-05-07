@@ -729,15 +729,20 @@ def test_eagle_correctness_heavy(
             False,
             0.20,
         ),  # hybrid + MTP, ref: ~34%-35%
+        (
+            ("mtp", "google/gemma-4-E4B-it", 1, "google/gemma-4-E4B-it-assistant"),
+            False,
+            0.50,
+        ),  # gemma4 MTP with assistant model, ref: ~62%
     ],
-    ids=["mimo", "deepseek", "qwen3_5-hybrid"],
+    ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b"],
 )
 @single_gpu_only
 @large_gpu_mark(min_gb=20)
 def test_mtp_correctness(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
-    model_setup: tuple[str, str, int],
+    model_setup: tuple[str, str, int] | tuple[str, str, int, str],
     mm_enabled: bool,
     expected_accuracy_threshold: float,
 ):
@@ -753,7 +758,11 @@ def test_mtp_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_MLA_DISABLE", "1")
 
-        method, model_name, tp_size = model_setup
+        if len(model_setup) == 4:
+            method, model_name, tp_size, draft_model = model_setup
+        else:
+            method, model_name, tp_size = model_setup
+            draft_model = None
         _skip_if_insufficient_gpus_for_tp(tp_size)
 
         if "Qwen3.5" in model_name and os.environ.get("VLLM_USE_V2_MODEL_RUNNER"):
@@ -764,13 +773,22 @@ def test_mtp_correctness(
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
 
-        # Qwen3.5 is a VLM; without this, profile_run runs the ViT warmup
-        # and peaks well above the 18GB MIG slice used by one of the CI
-        # lanes. This test only exercises text generation, so the vision
-        # tower is never needed.
+        # Skip multimodal profiling for models that don't need it in this test.
         extra_kwargs: dict[str, Any] = {}
         if "Qwen3.5" in model_name:
             extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+        elif "gemma-4" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "audio": 0}
+
+        if draft_model is not None and "gemma-4" in draft_model:
+            import transformers
+            from packaging.version import Version
+
+            if Version(transformers.__version__) < Version("5.8.0"):
+                pytest.skip(
+                    "Gemma4 MTP assistant requires transformers>=5.8.0, "
+                    f"got {transformers.__version__}"
+                )
 
         ref_llm = LLM(
             model=model_name,
@@ -788,15 +806,20 @@ def test_mtp_correctness(
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
+        speculative_config: dict[str, Any] = {
+            "method": method,
+            "num_speculative_tokens": 1,
+            "max_model_len": 2048,
+        }
+        if draft_model is not None:
+            speculative_config["model"] = draft_model
+            speculative_config["num_speculative_tokens"] = 2
+
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
-            speculative_config={
-                "method": method,
-                "num_speculative_tokens": 1,
-                "max_model_len": 2048,
-            },
+            speculative_config=speculative_config,
             max_model_len=2048,
             attention_backend=attn_backend,
             **extra_kwargs,
