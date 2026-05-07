@@ -160,7 +160,6 @@ class BaseRouter(FusedMoERouter):
             top_k: Number of experts to select per token
             global_num_experts: Total number of experts
             eplb_state: Optional EPLBLayerState for load balancing
-            indices_type_getter: Optional callback to get indices dtype
         """
         super().__init__()
         self.top_k = top_k
