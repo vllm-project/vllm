@@ -46,6 +46,10 @@ vllm = "vllm.entrypoints.cli.main:main"
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"
 
+[project.entry-points."vllm.capture_consumers"]
+logging = "vllm.v1.capture.consumers.logging:LoggingConsumer"
+filesystem = "vllm.v1.capture.consumers.filesystem:FilesystemConsumer"
+
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
 
