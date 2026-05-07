@@ -1297,3 +1297,45 @@ def test_fast_greedy_multiple_sequences_with_mismatches(rejection_sampler):
         device=DEVICE_TYPE,
     )
     assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_fast_greedy_synthetic_all_accepted():
+    """Synthetic mode with rates=1.0 -> every draft accepted, bonus appended."""
+    sampler = _make_synthetic_sampler([1.0, 1.0])
+    spec_tokens = [[1, 2], [3, 4]]
+    # target argmax is [10, 20] / [30, 40] (irrelevant since accepted),
+    # bonus argmax is 50 / 60.
+    output_tokens = [[10, 20, 50], [30, 40, 60]]
+
+    logits, metadata = create_logits_and_metadata_with_bonus(spec_tokens, output_tokens)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    output = sampler(metadata, None, logits, sampling_metadata)
+
+    expected = torch.tensor(
+        [[1, 2, 50], [3, 4, 60]],
+        dtype=torch.int,
+        device=DEVICE_TYPE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)
+
+
+def test_fast_greedy_synthetic_all_rejected():
+    """Synthetic mode with rates=0.0 -> first draft rejected, replaced by
+    target argmax; remaining positions are placeholders (no bonus)."""
+    sampler = _make_synthetic_sampler([0.0, 0.0])
+    spec_tokens = [[1, 2], [3, 4]]
+    output_tokens = [[10, 20, 50], [30, 40, 60]]
+
+    logits, metadata = create_logits_and_metadata_with_bonus(spec_tokens, output_tokens)
+    sampling_metadata = create_sampling_metadata(all_greedy=True)
+    output = sampler(metadata, None, logits, sampling_metadata)
+
+    expected = torch.tensor(
+        [
+            [10, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+            [30, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID],
+        ],
+        dtype=torch.int,
+        device=DEVICE_TYPE,
+    )
+    assert torch.equal(output.sampled_token_ids, expected)

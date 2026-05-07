@@ -119,7 +119,7 @@ class RejectionSampler(nn.Module):
         assert metadata.max_spec_len <= MAX_SPEC_LEN
 
         if self._can_use_fast_greedy_path(sampling_metadata, metadata):
-            return self._fast_greedy_path(metadata, logits)
+            return self._fast_greedy_path(metadata, logits, sampling_metadata)
 
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
@@ -212,7 +212,9 @@ class RejectionSampler(nn.Module):
         - No logprobs requested (fast path doesn't compute them)
         - No penalties/bad_words/allowed_token_ids
         - Only argmax-invariant logits processors
+        - No active thinking-budget forcing (not argmax-invariant)
         """
+        holder = sampling_metadata.thinking_budget_state_holder
         return (
             sampling_metadata.all_greedy
             and sampling_metadata.max_num_logprobs is None
@@ -220,6 +222,7 @@ class RejectionSampler(nn.Module):
             and not sampling_metadata.bad_words_token_ids
             and sampling_metadata.allowed_token_ids_mask is None
             and not sampling_metadata.logitsprocs.non_argmax_invariant
+            and not (holder is not None and holder.has_tracked_requests())
             and metadata.bonus_logits_indices.numel() > 0
         )
 
@@ -227,6 +230,7 @@ class RejectionSampler(nn.Module):
         self,
         metadata: SpecDecodeMetadata,
         logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         """Fast path for greedy sampling.
 
@@ -249,6 +253,16 @@ class RejectionSampler(nn.Module):
             all_argmax[metadata.bonus_logits_indices].unsqueeze(1).to(torch.int32)
         )
 
+        # Synthetic mode
+        uniform_probs: torch.Tensor | None = None
+        if self.synthetic_mode:
+            uniform_probs = generate_uniform_probs(
+                metadata.draft_token_ids.shape[0],
+                metadata.num_draft_tokens,
+                sampling_metadata.generators,
+                device,
+            )
+
         # Create output buffer.
         output_token_ids = torch.full(
             (num_requests, metadata.max_spec_len + 1),
@@ -266,9 +280,9 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             None,  # is_greedy=None since all are greedy
             metadata.max_spec_len,
-            None,  # uniform_probs_ptr (synthetic mode only)
-            None,  # synthetic_conditional_rates_ptr (synthetic mode only)
-            SYNTHETIC_MODE=False,
+            uniform_probs,
+            self.synthetic_conditional_rates,
+            SYNTHETIC_MODE=self.synthetic_mode,
         )
 
         return SamplerOutput(
