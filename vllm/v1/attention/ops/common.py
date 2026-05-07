@@ -152,9 +152,13 @@ def cp_all_gather_heads(
     batch_size, local_heads, head_dim = cp_attn_in.shape
     world_size = cp_group.world_size
 
-    (gathered,) = current_workspace_manager().get_simultaneous(
-        ((batch_size * world_size, local_heads, head_dim), cp_attn_in.dtype),
-    )
+    shape = (batch_size * world_size, local_heads, head_dim)
+    if is_workspace_manager_initialized():
+        (gathered,) = current_workspace_manager().get_simultaneous(
+            (shape, cp_attn_in.dtype),
+        )
+    else:
+        gathered = torch.empty(shape, dtype=cp_attn_in.dtype, device=cp_attn_in.device)
     cp_group.all_gather_into_tensor(gathered, cp_attn_in)
 
     out = torch.empty(
@@ -333,16 +337,20 @@ def cp_lse_ag_out_rs(
     cp_attn_lse: [ B, H ]
     """
     if workspaces is None:
-        workspaces = current_workspace_manager().get_simultaneous(
-            *cp_lse_ag_out_rs_workspace_shapes(
-                num_tokens=cp_attn_out.shape[0],
-                total_heads=cp_attn_out.shape[1],
-                head_dim=cp_attn_out.shape[2],
-                cp_world_size=cp_group.world_size,
-                dtype=cp_attn_out.dtype,
-                lse_dtype=cp_attn_lse.dtype,
-            )
+        shapes = cp_lse_ag_out_rs_workspace_shapes(
+            num_tokens=cp_attn_out.shape[0],
+            total_heads=cp_attn_out.shape[1],
+            head_dim=cp_attn_out.shape[2],
+            cp_world_size=cp_group.world_size,
+            dtype=cp_attn_out.dtype,
+            lse_dtype=cp_attn_lse.dtype,
         )
+        if is_workspace_manager_initialized():
+            workspaces = current_workspace_manager().get_simultaneous(*shapes)
+        else:
+            workspaces = [
+                torch.empty(s, dtype=d, device=cp_attn_out.device) for s, d in shapes
+            ]
     lse_buffer, rs_input, rs_output = workspaces
 
     out, lse = _cp_lse_common(

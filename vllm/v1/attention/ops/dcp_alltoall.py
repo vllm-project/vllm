@@ -26,7 +26,10 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.workspace import current_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -429,15 +432,19 @@ def dcp_a2a_lse_reduce(
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
     if workspaces is None:
-        workspaces = current_workspace_manager().get_simultaneous(
-            *dcp_a2a_lse_reduce_workspace_shapes(
-                num_tokens=B,
-                total_heads=H,
-                head_dim=D,
-                cp_world_size=world_size,
-                dtype=cp_attn_out.dtype,
-            )
+        shapes = dcp_a2a_lse_reduce_workspace_shapes(
+            num_tokens=B,
+            total_heads=H,
+            head_dim=D,
+            cp_world_size=world_size,
+            dtype=cp_attn_out.dtype,
         )
+        if is_workspace_manager_initialized():
+            workspaces = current_workspace_manager().get_simultaneous(*shapes)
+        else:
+            workspaces = [
+                torch.empty(s, dtype=d, device=cp_attn_out.device) for s, d in shapes
+            ]
     send_buffer, recv_buffer = workspaces
 
     _dcp_a2a_pack_send(
