@@ -295,11 +295,11 @@ def xpu_batch_invariant_lib():
     )
 
     lib = torch.library.Library("aten", "IMPL")
-    lib.impl("aten::_log_softmax", _log_softmax_batch_invariant, "XPU")
-    lib.impl("aten::softmax", softmax_batch_invariant, "XPU")
-    lib.impl("aten::_softmax", softmax_batch_invariant, "XPU")
-    lib.impl("aten::mean.dim", mean_batch_invariant, "XPU")
-    lib.impl("aten::bmm", bmm_batch_invariant, "XPU")
+    lib.impl("aten::_log_softmax", _log_softmax_batch_invariant, "XPU", allow_override=True)
+    lib.impl("aten::softmax", softmax_batch_invariant, "XPU", allow_override=True)
+    lib.impl("aten::_softmax", softmax_batch_invariant, "XPU", allow_override=True)
+    lib.impl("aten::mean.dim", mean_batch_invariant, "XPU", allow_override=True)
+    lib.impl("aten::bmm", bmm_batch_invariant, "XPU", allow_override=True)
     yield lib
     del lib
 
