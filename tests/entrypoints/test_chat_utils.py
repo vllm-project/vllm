@@ -1490,6 +1490,118 @@ def test_parse_chat_messages_openai_format_image_url(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
+def test_parse_chat_messages_openai_format_preserves_extra_fields_on_text(
+    phi3v_model_config,
+):
+    """Extra (non-OpenAI-spec) fields on a text content part should survive
+    parsing in 'openai' content format so a model's chat template can read
+    them. Used by e.g. TranslateGemma's bundled template, which keys off
+    ``source_lang_code``/``target_lang_code`` per content part."""
+    content = [
+        {
+            "type": "text",
+            "text": "The quick brown fox jumps over the lazy dog.",
+            "source_lang_code": "en",
+            "target_lang_code": "es",
+        }
+    ]
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{"role": "user", "content": content}],
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The quick brown fox jumps over the lazy dog.",
+                    "source_lang_code": "en",
+                    "target_lang_code": "es",
+                }
+            ],
+        }
+    ]
+    assert mm_data is None
+    assert mm_uuids is None
+
+
+def test_parse_chat_messages_openai_format_preserves_extra_fields_on_image(
+    phi3v_model_config,
+    image_url,
+):
+    """Extra (non-OpenAI-spec) fields on a multimodal content part should
+    survive parsing in 'openai' content format and end up alongside the
+    ``{"type": "image"}`` placeholder. Covers the MM branch of
+    ``_collect_extra_fields`` in ``_parse_chat_message_content_part``."""
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": image_url},
+            "source_lang_code": "en",
+            "target_lang_code": "es",
+        },
+        {"type": "text", "text": "What's in the image?"},
+    ]
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{"role": "user", "content": content}],
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source_lang_code": "en",
+                    "target_lang_code": "es",
+                },
+                {"type": "text", "text": "What's in the image?"},
+            ],
+        }
+    ]
+    _assert_mm_data_is_image_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
+def test_parse_chat_messages_string_format_drops_extra_fields(
+    phi3v_model_config,
+    image_url,
+):
+    """In 'string' content format we flatten content parts to placeholders
+    and concatenated text; extra fields have nowhere to live and should be
+    silently ignored without raising."""
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {"url": image_url},
+            "source_lang_code": "en",
+            "target_lang_code": "es",
+        },
+        {
+            "type": "text",
+            "text": "What's in the image?",
+            "source_lang_code": "en",
+            "target_lang_code": "es",
+        },
+    ]
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{"role": "user", "content": content}],
+        phi3v_model_config,
+        content_format="string",
+    )
+
+    assert conversation == [
+        {"role": "user", "content": "<|image_1|>\nWhat's in the image?"}
+    ]
+    _assert_mm_data_is_image_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
     phi3v_model_config,
     image_url,
