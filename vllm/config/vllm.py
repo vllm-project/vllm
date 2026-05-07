@@ -96,7 +96,9 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
 
-    rms_priority = cfg.kernel_config.ir_op_priority.priorities.get("rms_norm", ["native"])
+    rms_priority = cfg.kernel_config.ir_op_priority.priorities.get(
+        "rms_norm", ["native"]
+    )
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")

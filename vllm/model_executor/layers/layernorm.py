@@ -74,8 +74,14 @@ class RMSNorm(CustomOp):
         # https://github.com/vllm-project/vllm/issues/39370
         priority = get_current_vllm_config().kernel_config.ir_op_priority
         var_override = self.variance_size_override is not None
-        native_rms_norm = priority.priorities.get("rms_norm", ["native"])[0] == "native" or var_override
-        native_add_rms_norm = priority.priorities.get("fused_add_rms_norm", ["native"])[0] == "native" or var_override
+        native_rms_norm = (
+            priority.priorities.get("rms_norm", ["native"])[0] == "native"
+            or var_override
+        )
+        native_add_rms_norm = (
+            priority.priorities.get("fused_add_rms_norm", ["native"])[0] == "native"
+            or var_override
+        )
         self.pass_weight = self.has_weight or not native_rms_norm
         self.pass_weight_add = self.has_weight or not native_add_rms_norm
 

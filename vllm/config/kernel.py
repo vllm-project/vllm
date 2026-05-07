@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Callable
-from dataclasses import asdict, fields
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, field_validator
@@ -140,7 +139,7 @@ class IrOpPriorityConfig:
         for op_name in IrOp.registry:
             priorities[op_name] = list(overrides.get(op_name, default))
 
-        return cls(priorities=priorities)
+        return cls(priorities=priorities)  # type: ignore[call-arg]
 
 
 @config
@@ -226,7 +225,8 @@ class KernelConfig:
         missing_ops = all_known_ops - will_have_priorities
         if missing_ops:
             logger.warning(
-                "IR ops without explicit priority config (will use platform defaults): %s",
+                "IR ops without explicit priority config "
+                "(will use platform defaults): %s",
                 list(missing_ops),
             )
 
