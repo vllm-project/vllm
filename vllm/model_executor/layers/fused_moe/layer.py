@@ -610,7 +610,7 @@ class FusedMoE(PluggableLayer):
             router=self.router,
             gate=gate,
             shared_experts=shared_experts,
-            shared_expert_gate=shared_expert_gate,
+            shared_expert_gate=self.shared_expert_gate,
             num_fused_shared_experts=self.num_fused_shared_experts,
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
