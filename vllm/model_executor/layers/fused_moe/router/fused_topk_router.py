@@ -101,10 +101,7 @@ def fused_topk(
         # into the topk_softmax kernel, so routing softmax and shared
         # expert scoring happen in a single kernel launch.
         fuse_sigmoid_in_kernel = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            and rocm_aiter_ops.is_fused_moe_enabled()
-            and rocm_aiter_ops.topk_softmax_supports_fused_sigmoid()
-            and aiter_topK_meta_data is not None
+            rocm_aiter_ops.fuse_sigmoid_in_kernel(aiter_topK_meta_data)
             and num_fused_shared_experts > 0
         )
         if fuse_sigmoid_in_kernel:
@@ -112,7 +109,6 @@ def fused_topk(
             # The kernel applies routing softmax on [:num_experts] and
             # shared expert sigmoid on the last num_shared columns,
             # writing results into the pre-allocated buffer.
-            assert aiter_topK_meta_data is not None
             total_topk_weights, total_topk_ids = aiter_topK_meta_data
             total_topk_weights_slice = total_topk_weights[:M]
             topk_ids_slice = total_topk_ids[:M, :topk]

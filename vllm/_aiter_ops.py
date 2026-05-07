@@ -1364,6 +1364,25 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def fuse_sigmoid_in_kernel(cls, aiter_topK_meta_data: object) -> bool:
+        """Whether fused shared-expert sigmoid in the topk kernel is usable.
+
+        Combines the cached static capability checks (FSE enabled, fused-moe
+        enabled, topk_softmax supports fused sigmoid) with the runtime
+        readiness check (topK meta-data buffer initialized).
+
+        ``aiter_topK_meta_data`` is accepted as a parameter rather than
+        imported internally so callers cannot hit initialization-order
+        issues where the module-level global has not been set yet.
+        """
+        return (
+            cls.is_fusion_moe_shared_experts_enabled()
+            and cls.topk_softmax_supports_fused_sigmoid()
+            and aiter_topK_meta_data is not None
+        )
+
+    @classmethod
+    @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
 
