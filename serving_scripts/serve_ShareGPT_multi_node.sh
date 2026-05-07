@@ -9,6 +9,7 @@
 
 set -euo pipefail
 export GLOO_SOCKET_IFNAME=eth0 # for InfiniBand communication
+SCRIPT_VERSION="arc-bench-ipv4-2026-05-07"
 
 resolve_host_ipv4() {
   local nodename="$1"
@@ -110,6 +111,7 @@ fi
 RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 
 echo "STARTING VLLM BENCH SERVE ON RAY CLUSTER"
+echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
 echo "RAY_JOBID=${RAY_JOBID}"
 echo "HEAD_NODE=${HEAD_NODE}"
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"

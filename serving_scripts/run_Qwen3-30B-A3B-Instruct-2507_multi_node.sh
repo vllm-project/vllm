@@ -10,6 +10,8 @@
 
 set -euo pipefail
 
+SCRIPT_VERSION="arc-ray-ipv4-2026-05-07"
+
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 slurm_debug() {
@@ -23,6 +25,7 @@ export HEAD_NODE=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
 export WORKER_NODES=$(scontrol show hostnames $SLURM_NODELIST | tail -n+2)
 
 echo "=== vLLM multi-node host job ==="
+echo "SCRIPT_VERSION=${SCRIPT_VERSION}"
 echo "Date: $(date -Is 2>/dev/null || date)"
 echo "SLURM_JOB_ID=${SLURM_JOB_ID:-}"
 echo "SLURM_JOB_NODELIST=${SLURM_JOB_NODELIST:-}"
