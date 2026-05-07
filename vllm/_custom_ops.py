@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -3150,6 +3151,13 @@ if hasattr(torch.ops._C, "weight_packed_linear"):
         )
 
 
+class CPUQuantMethod(IntEnum):
+    UNQUANT = 0
+    INT8_W8A8 = 1
+    FP8_W8A16 = 2
+    INT4_W4A8 = 3
+
+
 if hasattr(torch.ops._C, "fused_experts_cpu"):
 
     @register_fake("_C::fused_experts_cpu")
@@ -3160,16 +3168,47 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         inplace: bool,
-        use_int8_w8a8: bool,
-        use_fp8_w8a16: bool,
+        moe_comp_method: CPUQuantMethod,
         w1_scale: torch.Tensor | None,
         w2_scale: torch.Tensor | None,
+        w1_zero: torch.Tensor | None,
+        w2_zero: torch.Tensor | None,
         block_size: list[int] | None,
-        a1_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
+
+
+def fused_experts_cpu(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool,
+    moe_comp_method: CPUQuantMethod,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_size: list[int] | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fused_experts_cpu(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace,
+        moe_comp_method,
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_size,
+        is_vnni,
+    )
 
 
 if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
@@ -3188,6 +3227,11 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         return torch.empty((M, N), dtype=out_dtype)
 
 
+class CPUQuantAlgo(IntEnum):
+    AWQ = 0
+    GPTQ = 1
+
+
 if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
 
     @register_fake("_C::convert_weight_packed_scale_zp")
@@ -3195,12 +3239,27 @@ if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
         qweight: torch.Tensor,
         qzeros: torch.Tensor,
         scales: torch.Tensor,
+        quant_method_4bit: CPUQuantAlgo,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return (
             torch.empty_like(qweight),
             torch.empty_like(qzeros),
             torch.empty_like(scales),
         )
+
+
+def convert_weight_packed_scale_zp(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    quant_method_4bit: CPUQuantAlgo,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops._C.convert_weight_packed_scale_zp(
+        qweight,
+        qzeros,
+        scales,
+        quant_method_4bit,
+    )
 
 
 if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
@@ -3217,7 +3276,59 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
         return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
 
 
-_supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
+def int4_scaled_mm_cpu(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_zeros: torch.Tensor,
+    w_scales: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    x_shape = x.shape
+    x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
+
+    out = torch.ops._C.int4_scaled_mm_cpu(
+        x_2d,
+        w,
+        w_zeros,
+        w_scales,
+        bias,
+    )
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
+
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_cpu"):
+
+    @register_fake("_C::fp8_scaled_mm_cpu")
+    def fp8_scaled_mm_cpu_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        block_size: list[int],
+        bias: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype, device=mat1.device)
+
+
+_supports_cpu_fp8_w8a16 = bool(hasattr(torch.ops._C, "fp8_scaled_mm_cpu"))
+
+
+def fp8_scaled_mm_cpu(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scales2: torch.Tensor,
+    block_size: list[int],
+    bias: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
 
 
 class CPUDNNLGEMMHandler:
