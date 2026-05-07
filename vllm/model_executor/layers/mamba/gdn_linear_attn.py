@@ -271,9 +271,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             else 0
         )
         self.gqa_interleaved_layout = gqa_interleaved_layout
-        self._forward_method = (
-            self.forward_xpu if current_platform.is_xpu() else self.forward_cuda
-        )
+        self._forward_method = self.forward_cuda
+        if current_platform.is_xpu():
+            self._forward_method = self.forward_xpu
+        elif current_platform.is_cpu():
+            from vllm.model_executor.layers.mamba.ops.cpu.gdn_attention import (
+                register_cpu_gdn_attention_ops,
+            )
+
+            register_cpu_gdn_attention_ops()
+            self._forward_method = self.forward_cpu
 
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
@@ -638,6 +645,56 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         z_shape_og = z.shape
         # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
+        core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
+        core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def forward_cpu(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ):
+        assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
+
+        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        ba, _ = self.in_proj_ba(hidden_states)
+
+        if self.gqa_interleaved_layout:
+            # Qwen3-Next: unpack the interleaved GQA layout
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                mixed_qkvz, ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
+        else:
+            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+            z_size = self.value_dim // self.tp_size
+            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+            z = z.reshape(z.size(0), -1, self.head_v_dim)
+            b, a = ba.chunk(2, dim=-1)
+
+        num_tokens = hidden_states.size(0)
+        core_attn_out = torch.zeros(
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        torch.ops.vllm.cpu_gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            _encode_layer_name(self.prefix),
+        )
+
+        z_shape_og = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
