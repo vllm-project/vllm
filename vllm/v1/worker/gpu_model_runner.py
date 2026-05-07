@@ -1065,34 +1065,6 @@ class GPUModelRunner(
     def _uses_request_ids_for_generation(self) -> bool:
         return bool(getattr(self.get_model(), "uses_request_ids_for_generation", False))
 
-    def _uses_generation_step_preparation(self) -> bool:
-        return callable(getattr(self.get_model(), "prepare_generation_step", None))
-
-    def _get_dummy_generation_step_kwargs(
-        self,
-        *,
-        num_tokens: int,
-        device: torch.device,
-    ) -> dict[str, Any]:
-        prepare_dummy_generation_step = getattr(
-            self.get_model(), "prepare_dummy_generation_step", None
-        )
-        if not callable(prepare_dummy_generation_step):
-            return {}
-
-        return prepare_dummy_generation_step(
-            num_tokens=num_tokens,
-            device=device,
-        )
-
-    def _requires_eager_generation_forward(self) -> bool:
-        return bool(
-            getattr(self.get_model(), "requires_eager_generation_forward", False)
-        ) or (
-            self._uses_request_ids_for_generation()
-            and not self._uses_generation_step_preparation()
-        )
-
     def _get_encoder_request_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3600,30 +3572,9 @@ class GPUModelRunner(
             # We are not doing any prompt replacement. We also will only
             # ever have a single encoder input.
             encoder_outputs = self._execute_mm_encoder(scheduler_output)
-            if not self._uses_generation_step_preparation():
-                model_kwargs.update({"encoder_outputs": encoder_outputs})
+            model_kwargs.update({"encoder_outputs": encoder_outputs})
 
-        if self._uses_generation_step_preparation():
-            finished_request_ids = scheduler_output.finished_req_ids | getattr(
-                scheduler_output, "preempted_req_ids", set()
-            )
-            encoder_request_ids = (
-                self._get_encoder_request_ids(scheduler_output)
-                if is_encoder_decoder and scheduler_output.scheduled_encoder_inputs
-                else None
-            )
-            model_kwargs.update(
-                self.get_model().prepare_generation_step(
-                    finished_request_ids=tuple(finished_request_ids),
-                    request_ids=self.input_batch.req_ids.copy(),
-                    request_indices=self.req_indices.gpu[:num_scheduled_tokens],
-                    positions=positions,
-                    device=positions.device,
-                    encoder_outputs=encoder_outputs,
-                    encoder_request_ids=encoder_request_ids,
-                )
-            )
-        elif self._uses_request_ids_for_generation():
+        if self._uses_request_ids_for_generation():
             finished_request_ids = scheduler_output.finished_req_ids | getattr(
                 scheduler_output, "preempted_req_ids", set()
             )
@@ -4234,7 +4185,7 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                force_eager=self._requires_eager_generation_forward(),
+                force_eager=self._uses_request_ids_for_generation(),
             )
 
             logger.debug(
@@ -5988,13 +5939,6 @@ class GPUModelRunner(
                 positions = self.xdrope_positions.gpu[:, :num_tokens_padded]
             else:
                 positions = self.positions[:num_tokens_padded]
-
-            model_kwargs.update(
-                self._get_dummy_generation_step_kwargs(
-                    num_tokens=num_tokens_padded,
-                    device=positions.device,
-                )
-            )
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None

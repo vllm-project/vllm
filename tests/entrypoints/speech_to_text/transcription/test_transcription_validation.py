@@ -215,6 +215,25 @@ async def test_basic_audio_parakeet(mary_had_lamb, parakeet_server):
 
 
 @pytest.mark.asyncio
+async def test_streaming_audio_parakeet_strips_eos(mary_had_lamb, parakeet_server):
+    transcription = ""
+    async with parakeet_server.get_async_client() as client:
+        res = await client.audio.transcriptions.create(
+            model=PARAKEET_MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            temperature=0.0,
+            stream=True,
+        )
+
+        async for chunk in res:
+            transcription += chunk.choices[0]["delta"]["content"]
+
+    assert "Mary had a little lamb" in transcription
+    assert "<|endoftext|>" not in transcription
+
+
+@pytest.mark.asyncio
 async def test_long_audio_parakeet(mary_had_lamb, parakeet_server):
     long_audio, expected_seconds = make_long_audio(mary_had_lamb, repeats=3)
 

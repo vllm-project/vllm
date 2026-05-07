@@ -1206,6 +1206,16 @@ class SupportsTranscription(Protocol):
         return text
 
     @classmethod
+    def post_process_streaming_output(cls, text: str) -> str:
+        """
+        Post-process a streaming delta from the model.
+
+        This is separate from ``post_process_output`` because streaming deltas
+        may not contain enough context for full-output cleanup.
+        """
+        return text
+
+    @classmethod
     def get_language_detection_prompt(
         cls,
         audio: np.ndarray,

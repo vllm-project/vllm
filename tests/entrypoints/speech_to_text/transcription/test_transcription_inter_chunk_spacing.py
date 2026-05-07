@@ -90,6 +90,20 @@ class _StubTranscriptionModel:
     def post_process_output(cls, text: str) -> str:
         return text
 
+    @classmethod
+    def post_process_streaming_output(cls, text: str) -> str:
+        return text
+
+    @classmethod
+    def get_transcription_stop_token_ids(cls, model_config: ModelConfig) -> list[int]:
+        return []
+
+
+class _StreamingCleanupTranscriptionModel(_StubTranscriptionModel):
+    @classmethod
+    def post_process_streaming_output(cls, text: str) -> str:
+        return text.replace("<|endoftext|>", "")
+
 
 def _request_output(text: str) -> RequestOutput:
     return RequestOutput(
@@ -201,6 +215,40 @@ async def test_transcription_stream_generator_chinese_no_space_between_chunks():
         out_lines.append(line)
     combined = "".join(_sse_delta_contents("".join(out_lines)))
     assert combined == "你好世界"
+
+
+@pytest.mark.asyncio
+async def test_transcription_stream_generator_applies_streaming_post_process():
+    async def gen_text() -> AsyncGenerator[RequestOutput, None]:
+        yield _request_output("hello")
+        yield _request_output("<|endoftext|>")
+
+    serving = OpenAIServingTranscription.__new__(OpenAIServingTranscription)
+    serving.enable_force_include_usage = False
+    serving.model_cls = _StreamingCleanupTranscriptionModel
+    serving.task_type = "transcribe"
+    request = SimpleNamespace(
+        model="stub-model",
+        stream_include_usage=False,
+        stream_continuous_usage_stats=False,
+    )
+
+    out_lines: list[str] = []
+    agen = OpenAIServingTranscription.transcription_stream_generator(
+        serving,
+        request=request,
+        result_generator=[gen_text()],
+        request_id="test-req-cleanup",
+        request_metadata=RequestResponseMetadata(request_id="test-req-cleanup"),
+        audio_duration_s=1.0,
+        separator=" ",
+    )
+    async for line in agen:
+        out_lines.append(line)
+
+    contents = _sse_delta_contents("".join(out_lines))
+    assert "".join(contents) == "hello"
+    assert all("<|endoftext|>" not in content for content in contents)
 
 
 @pytest.mark.asyncio

@@ -433,6 +433,10 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     supports_transcription_only = True
     supported_languages = PARAKEET_SUPPORTED_LANGUAGES
     no_space_languages: set[str] = set()
+    # The V1 runner passes request IDs to forward and forces eager execution
+    # for this request-stateful decoder. Future V2 support should move this
+    # into a ParakeetModelState using ModelState.prepare_inputs() and
+    # prepare_dummy_inputs(), matching the Whisper model-state pattern.
     uses_request_ids_for_generation = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -453,14 +457,6 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
 
         self._forced_decoder_state = ParakeetTDTForcedDecoderState(
             eos_token_id=self.config.eos_token_id
-        )
-        self._max_num_forced_token_ids = (
-            vllm_config.scheduler_config.max_num_batched_tokens
-        )
-        self.register_buffer(
-            "_forced_token_ids_buffer",
-            torch.empty(0, dtype=torch.long),
-            persistent=False,
         )
 
     @classmethod
@@ -511,37 +507,20 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     ) -> torch.Tensor:
         return self.model.decoder.embedding(input_ids)
 
-    def _get_forced_token_ids_buffer(
+    def forward(
         self,
-        num_tokens: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        max_num_tokens = getattr(self, "_max_num_forced_token_ids", num_tokens)
-        if num_tokens > max_num_tokens:
-            max_num_tokens = num_tokens
-            self._max_num_forced_token_ids = max_num_tokens
-
-        buffer = getattr(self, "_forced_token_ids_buffer", None)
-        if (
-            not isinstance(buffer, torch.Tensor)
-            or buffer.device != device
-            or buffer.numel() < max_num_tokens
-        ):
-            buffer = torch.empty(max_num_tokens, dtype=torch.long, device=device)
-            self.register_buffer("_forced_token_ids_buffer", buffer, persistent=False)
-        return buffer
-
-    def prepare_generation_step(
-        self,
-        *,
-        request_ids: Sequence[str],
-        request_indices: torch.Tensor | None,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
-        device: torch.device,
+        intermediate_tensors: IntermediateTensors | None = None,
         encoder_outputs: list[torch.Tensor] | None = None,
+        request_ids: Sequence[str] | None = None,
+        request_indices: torch.Tensor | None = None,
         encoder_request_ids: Sequence[str] | None = None,
         finished_request_ids: Iterable[str] | None = None,
-    ) -> dict[str, torch.Tensor]:
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del intermediate_tensors, kwargs
+
         if finished_request_ids is not None:
             self._forced_decoder_state.remove_sequences(finished_request_ids)
 
@@ -552,50 +531,14 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
             ]
             if encoder_request_ids is not None:
                 sequence_request_ids = encoder_request_ids
-            else:
+            elif request_ids is not None:
                 sequence_request_ids = request_ids[: len(sequences)]
+            else:
+                sequence_request_ids = [str(i) for i in range(len(sequences))]
             self._forced_decoder_state.set_sequences(sequence_request_ids, sequences)
 
-        forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
-            request_ids=request_ids,
-            request_indices=request_indices,
-            positions=positions,
-            device=device,
-        )
-        buffer = self._get_forced_token_ids_buffer(forced_token_ids.numel(), device)
-        buffer[: forced_token_ids.numel()].copy_(forced_token_ids)
-        return {"forced_token_ids": buffer[: forced_token_ids.numel()]}
-
-    def prepare_dummy_generation_step(
-        self,
-        *,
-        num_tokens: int,
-        device: torch.device,
-    ) -> dict[str, torch.Tensor]:
-        buffer = self._get_forced_token_ids_buffer(num_tokens, device)
-        buffer[:num_tokens].fill_(self.config.eos_token_id)
-        return {"forced_token_ids": buffer[:num_tokens]}
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        forced_token_ids: torch.Tensor | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor:
-        del intermediate_tensors, positions, kwargs
-
-        if input_ids is not None:
-            batch_size = input_ids.shape[0]
-            device = input_ids.device
-        elif forced_token_ids is not None:
-            batch_size = forced_token_ids.shape[0]
-            device = forced_token_ids.device
-        else:
-            raise ValueError(
-                "Parakeet TDT forward requires input_ids or forced_token_ids."
-            )
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
 
         vocab_size = self.config.vocab_size
         logits = torch.full(
@@ -605,11 +548,18 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
             device=device,
         )
 
-        if forced_token_ids is None:
+        if request_ids is None:
             forced_token_ids = torch.full(
                 (batch_size,),
                 self.config.eos_token_id,
                 dtype=torch.long,
+                device=device,
+            )
+        else:
+            forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
+                request_ids=request_ids,
+                request_indices=request_indices,
+                positions=positions,
                 device=device,
             )
 
@@ -675,6 +625,12 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         for special_token in ("<blank>", "<|endoftext|>"):
             text = text.replace(special_token, "")
         return text.strip()
+
+    @classmethod
+    def post_process_streaming_output(cls, text: str) -> str:
+        for special_token in ("<blank>", "<|endoftext|>"):
+            text = text.replace(special_token, "")
+        return text
 
 
 __all__ = ["ParakeetForTDT", "ParakeetTDTForcedDecoderState"]
