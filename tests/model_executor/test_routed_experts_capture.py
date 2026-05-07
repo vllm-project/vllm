@@ -18,13 +18,19 @@ def test_bind_routing_capture_to_model_sets_layer_view(monkeypatch):
     class _DummyQuantMethod:
         supports_internal_mk = True
 
-    class DummyFusedMoE:
-        _routing_replay_out: torch.Tensor
+    class _DummyRouter:
+        _routing_replay_out: torch.Tensor | None = None
 
+    class DummyFusedMoE:
         def __init__(self, moe_layer_id):
             self.moe_layer_id = moe_layer_id
             self.moe_config = _DummyMoEConfig()
             self.quant_method = _DummyQuantMethod()
+            self.router = _DummyRouter()
+
+        @property
+        def layer_id(self) -> int:
+            return self.moe_layer_id
 
     monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
 
@@ -39,6 +45,9 @@ def test_bind_routing_capture_to_model_sets_layer_view(monkeypatch):
         def get_device_cache(self):
             return DummyDeviceCache(buffer)
 
+        def map_layer_id(self, id: int) -> int:
+            return id
+
     monkeypatch.setattr(rec_mod, "get_global_experts_capturer", lambda: DummyCapturer())
 
     m0 = DummyFusedMoE(moe_layer_id=0)
@@ -50,8 +59,8 @@ def test_bind_routing_capture_to_model_sets_layer_view(monkeypatch):
 
     rec_mod.bind_routing_capture_to_model(DummyModel())
 
-    assert torch.equal(m0._routing_replay_out, buffer[0])
-    assert torch.equal(m2._routing_replay_out, buffer[2])
+    assert torch.equal(m0.router._routing_replay_out, buffer[0])
+    assert torch.equal(m2.router._routing_replay_out, buffer[2])
 
 
 def test_bind_routing_capture_to_model_noop_when_disabled(monkeypatch):
