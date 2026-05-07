@@ -259,7 +259,7 @@ class EncoderCudaGraphManager:
         # Copy the input tensor. Buffers are sized for the full budget;
         # actual inputs may be smaller. Zero then slice-copy so padded
         # positions are invisible to attention (cu_seqlens masks them out).
-        input_key = input_key = self.config.input_key_by_modality[
+        input_key = self.config.input_key_by_modality[
             self.model.get_input_modality(mm_kwargs)
         ]
         src = mm_kwargs[input_key]
