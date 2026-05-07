@@ -340,8 +340,9 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
 
     # silu & mul
     act_in = act_in.to(tl.float32)
+    mul_in = mul_in.to(tl.float32)
     if HAS_CLAMP:
-        mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit)
+        mul_in = tl.clamp(mul_in, -clamp_limit, clamp_limit)
         act_in = tl.minimum(act_in, clamp_limit)
     one_f32 = tl.cast(1, tl.float32)
     silu_out = (act_in / (one_f32 + tl.exp(-act_in))).to(y_ptr.dtype.element_ty)
