@@ -218,13 +218,12 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         topk_weight,
         topk_ids,
         False,
-        False,
-        True,
+        ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
+        None,
+        None,
         BLOCK_SIZE,
-        None,
-        None,
         True,
     )
     torch.testing.assert_close(
@@ -242,13 +241,12 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         topk_weight,
         topk_ids,
         True,
-        False,
-        True,
+        ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
+        None,
+        None,
         BLOCK_SIZE,
-        None,
-        None,
         True,
     )
     torch.testing.assert_close(out_inplace, out, atol=0, rtol=0)
