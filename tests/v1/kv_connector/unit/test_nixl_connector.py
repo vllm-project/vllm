@@ -2243,7 +2243,12 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
 )
 @pytest.mark.parametrize(
     "failure_mode",
-    ["handshake", "transfer_setup"],
+    [
+        "handshake",
+        "transfer_setup",
+        "transfer_failed",
+        "transfer_exception",
+    ],
 )
 def test_failed_request_skips_kv_postprocessing(
     default_vllm_config, dist_init, failure_mode
@@ -2251,11 +2256,32 @@ def test_failed_request_skips_kv_postprocessing(
     """Test that failed requests skip KV sync and post-processing in
     get_finished().
 
-    This is the core safety behavior: when a handshake or transfer setup
-    fails, the request must still appear in done_recving (so the scheduler
-    can apply kv_load_failure_policy), but sync_recved_kv_to_device and
-    post-processing must NOT be called since no valid KV data was received.
+    This is the core safety behavior: when a KV transfer fails at any stage,
+    the request must still appear in done_recving (so the scheduler can apply
+    kv_load_failure_policy), but sync_recved_kv_to_device and post-processing
+    must NOT be called since no valid KV data was received.
+
+    Covers all failure paths that involve an actual (attempted) KV transfer:
+    - handshake: add_remote_agent raises during async handshake
+    - transfer_setup: make_prepped_xfer raises before handle is in transfers
+    - transfer_failed: check_xfer_state returns bad state ("ERR") in
+      _pop_done_transfers — this is the path that previously had the bug
+      where post-processing was NOT skipped
+    - transfer_exception: check_xfer_state raises in _pop_done_transfers
+
+    Note: notification_failed (send_notif raises on the full-cache-hit path)
+    is intentionally excluded. That path is a best-effort D→P courtesy
+    notification; the blocks are already in D's cache, so no KV transfer
+    was attempted and done_recving is correctly empty.
     """
+    # Map each failure mode to the FailingNixlWrapper attribute to set.
+    _WRAPPER_CONFIG: dict[str, str] = {
+        "handshake": "fail_handshake",
+        "transfer_setup": "fail_transfer_setup",
+        "transfer_failed": "fail_transfer_state",
+        "transfer_exception": "fail_transfer_exception",
+    }
+
     # Use enable_permute_local_kv=True so that
     # post_process_device_kv_on_receive would be called on the success path,
     # making the assertion meaningful (not trivially true).
@@ -2270,11 +2296,7 @@ def test_failed_request_skips_kv_postprocessing(
         hand_shake_latency=0.1 if failure_mode == "handshake" else 0,
     )
     worker = connector.connector_worker
-
-    if failure_mode == "handshake":
-        worker.nixl_wrapper.fail_handshake = True
-    else:
-        worker.nixl_wrapper.fail_transfer_setup = True
+    setattr(worker.nixl_wrapper, _WRAPPER_CONFIG[failure_mode], True)
 
     request_id = f"test_{failure_mode}_skip_postprocess"
     metadata = NixlConnectorMetadata()
@@ -2300,10 +2322,13 @@ def test_failed_request_skips_kv_postprocessing(
     connector.start_load_kv(dummy_ctx)
 
     if failure_mode == "handshake":
-        # Wait for async handshake to fail
+        # Wait for async handshake to fail.
         time.sleep(0.3)
     else:
-        # Transfer setup failure: process ready_requests queue
+        # All other modes: let the handshake complete, then process the
+        # ready_requests queue. For transfer_failed / transfer_exception the
+        # handle ends up in _recving_transfers; the failure surfaces in
+        # get_finished() via _pop_done_transfers below.
         connector.bind_connector_metadata(NixlConnectorMetadata())
         time.sleep(0.1)
         connector.start_load_kv(dummy_ctx)
