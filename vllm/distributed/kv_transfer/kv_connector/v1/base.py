@@ -483,10 +483,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def update_state_after_alloc(
-        self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
-        num_external_tokens: int,
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         """
         Update KVConnector state after block allocation.
@@ -625,7 +622,7 @@ class KVConnectorBase_V1(ABC):
         return None
 
     def set_xfer_handshake_metadata(
-        self, metadata: dict[Any, KVConnectorHandshakeMetadata]
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
     ) -> None:
         """
         Set the KV connector handshake metadata for this connector.

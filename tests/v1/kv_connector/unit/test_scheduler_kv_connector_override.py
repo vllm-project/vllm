@@ -35,10 +35,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         return (0, False)
 
     def update_state_after_alloc(
-        self,
-        request: Request,
-        blocks: KVCacheBlocks,
-        num_external_tokens: int,
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         pass
 

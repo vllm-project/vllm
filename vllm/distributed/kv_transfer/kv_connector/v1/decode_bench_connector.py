@@ -142,10 +142,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
-        num_external_tokens: int,
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -219,10 +216,7 @@ class DecodeBenchConnectorScheduler:
         return num_tokens_to_fill, False
 
     def update_state_after_alloc(
-        self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
-        num_external_tokens: int,
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         """
         Called after blocks are allocated. Store the block IDs so we can

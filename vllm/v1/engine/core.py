@@ -172,10 +172,9 @@ class EngineCore:
 
             if xfer_handshake_metadata:
                 # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure
-                # {(tp_rank, dcp_rank): metadata}
+                # Each dict already has structure {tp_rank: metadata}
                 # Merge all worker dicts into a single dict
-                content: dict[Any, Any] = {}
+                content: dict[int, Any] = {}
                 for worker_dict in xfer_handshake_metadata:
                     if worker_dict is not None:
                         content.update(worker_dict)

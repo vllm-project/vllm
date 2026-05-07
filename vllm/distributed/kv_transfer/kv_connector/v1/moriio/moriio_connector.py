@@ -147,17 +147,11 @@ class MoRIIOConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
-        num_external_tokens: int,
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request,
-            blocks,
-            num_external_tokens,
-            self.connector_worker,
+            request, blocks, num_external_tokens, self.connector_worker
         )
 
     def build_connector_meta(
