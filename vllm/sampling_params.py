@@ -14,7 +14,6 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -468,17 +467,11 @@ class SamplingParams(
                 f"{self.repetition_penalty}."
             )
         if self.temperature < 0.0:
-            raise VLLMValidationError(
-                f"temperature must be non-negative, got {self.temperature}.",
-                parameter="temperature",
-                value=self.temperature,
+            raise ValueError(
+                f"temperature must be non-negative, got {self.temperature}."
             )
         if not 0.0 < self.top_p <= 1.0:
-            raise VLLMValidationError(
-                f"top_p must be in (0, 1], got {self.top_p}.",
-                parameter="top_p",
-                value=self.top_p,
-            )
+            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
             raise ValueError(
@@ -491,11 +484,7 @@ class SamplingParams(
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
-            raise VLLMValidationError(
-                f"max_tokens must be at least 1, got {self.max_tokens}.",
-                parameter="max_tokens",
-                value=self.max_tokens,
-            )
+            raise ValueError(f"max_tokens must be at least 1, got {self.max_tokens}.")
         if self.min_tokens < 0:
             raise ValueError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
@@ -506,21 +495,17 @@ class SamplingParams(
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
-            raise VLLMValidationError(
-                f"logprobs must be non-negative or -1, got {self.logprobs}.",
-                parameter="logprobs",
-                value=self.logprobs,
+            raise ValueError(
+                f"logprobs must be non-negative or -1, got {self.logprobs}."
             )
         if (
             self.prompt_logprobs is not None
             and self.prompt_logprobs != -1
             and self.prompt_logprobs < 0
         ):
-            raise VLLMValidationError(
+            raise ValueError(
                 f"prompt_logprobs must be non-negative or -1, got "
-                f"{self.prompt_logprobs}.",
-                parameter="prompt_logprobs",
-                value=self.prompt_logprobs,
+                f"{self.prompt_logprobs}."
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
@@ -537,10 +522,9 @@ class SamplingParams(
             )
         assert isinstance(self.bad_words, list)
         if any(not bad_word for bad_word in self.bad_words):
-            raise VLLMValidationError(
-                "bad_words cannot contain an empty string.",
-                parameter="bad_words",
-                value=self.bad_words,
+            raise ValueError(
+                f"bad_words cannot contain an empty string. "
+                f"Got bad_words={self.bad_words}"
             )
 
     def _verify_greedy_sampling(self) -> None:
@@ -608,14 +592,13 @@ class SamplingParams(
             if token_id < 0 or token_id > tokenizer.max_token_id
         ]
         if len(invalid_token_ids) > 0:
-            raise VLLMValidationError(
+            raise ValueError(
                 f"The model vocabulary size is {tokenizer.max_token_id + 1},"
                 f" but the following tokens"
                 f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}.",
-                parameter="bad_words",
-                value=self.bad_words,
+                f" 0 <= token_id <= {tokenizer.max_token_id}. Got "
+                f"bad_words={self.bad_words}"
             )
 
     @cached_property
@@ -680,22 +663,18 @@ class SamplingParams(
             if num_logprobs == -1:
                 num_logprobs = model_config.get_vocab_size()
             if num_logprobs > max_logprobs:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
-                    parameter="logprobs",
-                    value=num_logprobs,
+                    f"which is greater than max allowed: {max_logprobs}"
                 )
 
         # Validate logprob_token_ids.
         if self.logprob_token_ids is not None:
             n = len(self.logprob_token_ids)
             if n > MAX_LOGPROB_TOKEN_IDS:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"Requested logprob_token_ids of length {n}, "
-                    f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
-                    parameter="logprob_token_ids",
-                    value=n,
+                    f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}"
                 )
 
         # Validate prompt logprobs.
@@ -703,11 +682,9 @@ class SamplingParams(
             if num_prompt_logprobs == -1:
                 num_prompt_logprobs = model_config.get_vocab_size()
             if num_prompt_logprobs > max_logprobs:
-                raise VLLMValidationError(
+                raise ValueError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}",
-                    parameter="prompt_logprobs",
-                    value=num_prompt_logprobs,
+                    f"which is greater than max allowed: {max_logprobs}"
                 )
 
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
@@ -723,11 +700,9 @@ class SamplingParams(
         ]
 
         if invalid_token_ids:
-            raise VLLMValidationError(
+            raise ValueError(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
-                parameter="logit_bias",
-                value=invalid_token_ids,
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}"
             )
 
     def _validate_logits_processors(self, model_config: ModelConfig) -> None:
@@ -743,10 +718,9 @@ class SamplingParams(
             return
 
         if len(allowed_token_ids) == 0:
-            raise VLLMValidationError(
-                "allowed_token_ids is not None and empty!",
-                parameter="allowed_token_ids",
-                value=allowed_token_ids,
+            raise ValueError(
+                f"allowed_token_ids is not None and empty! Got "
+                f"allowed_token_ids={allowed_token_ids}"
             )
 
         if tokenizer is not None:
@@ -757,10 +731,10 @@ class SamplingParams(
                 if token_id < 0 or token_id >= vocab_size
             ]
             if invalid_token_ids:
-                raise VLLMValidationError(
-                    "allowed_token_ids contains out-of-vocab token id!",
-                    parameter="allowed_token_ids",
-                    value=invalid_token_ids,
+                raise ValueError(
+                    f"allowed_token_ids contains out-of-vocab token id! "
+                    f"Got invalid_token_ids={invalid_token_ids}, "
+                    f"vocab_size={vocab_size}"
                 )
 
     def _validate_spec_decode(
