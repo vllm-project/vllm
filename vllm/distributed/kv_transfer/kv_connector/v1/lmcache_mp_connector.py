@@ -930,12 +930,31 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+
+        params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
+        return_params: dict[str, Any] | None = {} if params is not None else None
+
+        if (
+            params is not None
+            and return_params is not None
+            and "num_lmcache_extra_cached_tokens" in params
+        ):
+            request_tracker = self._get_request_tracker(request.request_id)
+            num_extra_cached_blocks = max(
+                0,
+                request_tracker.num_lmcache_hit_blocks
+                - request_tracker.num_vllm_hit_blocks,
+            )
+            return_params["num_lmcache_extra_cached_tokens"] = (
+                num_extra_cached_blocks * self.vllm_block_size
+            )
+
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
         # Notify LMCache to end the session for this request
         self.scheduler_adapter.end_session(request.request_id)
 
-        return True, None
+        return True, return_params
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """

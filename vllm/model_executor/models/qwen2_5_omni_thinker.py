@@ -952,8 +952,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_audio_input(
         self,
         audio_input: Qwen2_5OmniAudioFeatureInputs,
-        audio_hashes: list[str] | None = None,
-        cached_audio_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
@@ -990,8 +988,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     def _process_video_input(
         self,
         video_input: Qwen2_5_VLVideoInputs,
-        video_hashes: list[str] = None,
-        cached_video_embeds: torch.Tensor = None,
     ) -> torch.Tensor:
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"].type(self.visual.dtype)
