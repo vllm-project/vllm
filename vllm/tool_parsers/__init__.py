@@ -34,6 +34,18 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv32_tool_parser",
         "DeepSeekV32ToolParser",
     ),
+    "deepseek_v4": (
+        "deepseekv4_tool_parser",
+        "DeepSeekV4ToolParser",
+    ),
+    "cohere_command3": (
+        "cohere_command_tool_parser",
+        "CohereCommand3ToolParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_tool_parser",
+        "CohereCommand4ToolParser",
+    ),
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
@@ -62,9 +74,17 @@ _TOOL_PARSERS_TO_REGISTER = {
         "hermes_tool_parser",
         "Hermes2ProToolParser",
     ),
+    "poolside_v1": (
+        "poolside_v1_tool_parser",
+        "PoolsideV1ToolParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_tool_parser",
         "HunyuanA13BToolParser",
+    ),
+    "hy_v3": (
+        "hy_v3_tool_parser",
+        "HYV3ToolParser",
     ),
     "internlm": (
         "internlm2_tool_parser",
@@ -93,6 +113,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "longcat": (
         "longcat_tool_parser",
         "LongcatFlashToolParser",
+    ),
+    "mimo": (
+        "qwen3xml_tool_parser",
+        "Qwen3XMLToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",

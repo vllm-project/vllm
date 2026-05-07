@@ -9,14 +9,14 @@
 - Online APIs:
     - Pooling API (`/pooling`)
 
-The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
+The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
 !!! note
 
     Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
-    what you want, you need to manually specify it via via `PoolerConfig(task="token_embed")` offline or
+    what you want, you need to manually specify it via `PoolerConfig(task="token_embed")` offline or
     `--pooler-config.task token_embed` online.
 
 ## Typical Use Cases

@@ -91,6 +91,12 @@ def test_multiple_priority(llm: LLM):
         outputs = llm.generate(PROMPTS, sampling_params=None, priority=[])
 
 
+def test_single_prompt_priority(llm: LLM):
+    # Single string prompts should be normalized to one request.
+    outputs = llm.generate(PROMPTS[0], sampling_params=None, priority=[0])
+    assert len(outputs) == 1
+
+
 def test_max_model_len():
     max_model_len = 20
     llm = LLM(
