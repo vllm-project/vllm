@@ -24,11 +24,15 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
+)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
     MoERunner,
+    MoERunnerInterface,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
@@ -131,6 +135,7 @@ def FusedMoE(
     pcp_size: int | None = None,
     prefix: str = "",
     custom_routing_function: Callable | None = None,
+    router: FusedMoERouter | None = None,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     swiglu_limit: float | None = None,
@@ -151,6 +156,8 @@ def FusedMoE(
     apply_routed_scale_to_output: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    runner_cls: type[MoERunnerInterface] | None = None,
+    runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
 ) -> MoERunner:
@@ -241,30 +248,31 @@ def FusedMoE(
 
     # TODO(bnell): we should not have to create a router if the kernel is
     # monolithic.
-    router = create_fused_moe_router(
-        top_k=top_k,
-        global_num_experts=global_num_experts,
-        renormalize=renormalize,
-        use_grouped_topk=use_grouped_topk,
-        num_expert_group=num_expert_group,
-        topk_group=topk_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        # When apply_routed_scale_to_output is True, we set the scaling factor
-        # to 1.0 so it ends up being a nop. Applying the scale will be handled
-        # by the runner in this case.
-        # The member variable must be set in the same way as the router since
-        # some quantization methods can access it.
-        routed_scaling_factor=routed_scaling_factor
-        if not apply_routed_scale_to_output
-        else 1.0,
-        e_score_correction_bias=e_score_correction_bias,
-        num_fused_shared_experts=num_fused_shared_experts,
-        eplb_state=eplb_state,
-        zero_expert_type=zero_expert_type,
-        num_logical_experts=logical_num_experts,
-        hash_indices_table=hash_indices_table,
-    )
+    if router is None:
+        router = create_fused_moe_router(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            # When apply_routed_scale_to_output is True, we set the scaling factor
+            # to 1.0 so it ends up being a nop. Applying the scale will be handled
+            # by the runner in this case.
+            # The member variable must be set in the same way as the router since
+            # some quantization methods can access it.
+            routed_scaling_factor=routed_scaling_factor
+            if not apply_routed_scale_to_output
+            else 1.0,
+            e_score_correction_bias=e_score_correction_bias,
+            num_fused_shared_experts=num_fused_shared_experts,
+            eplb_state=eplb_state,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=logical_num_experts,
+            hash_indices_table=hash_indices_table,
+        )
 
     # TODO: move this???????????  is this even needed???
     # When using zero experts, slice e_score_correction_bias to cover
@@ -318,6 +326,7 @@ def FusedMoE(
         moe_config,
         quant_config,
         expert_map_manager=expert_map_manager,
+        expert_mapping=expert_mapping,
         # Extra params that are needed by quant_methods, pass along for now
         top_k=top_k,  # can get from moe_config
         use_grouped_topk=use_grouped_topk,
@@ -334,7 +343,10 @@ def FusedMoE(
         **routed_experts_args if routed_experts_args is not None else {},
     )
 
-    runner = MoERunner(
+    if runner_cls is None:
+        runner_cls = MoERunner
+
+    runner = runner_cls(
         layer_name=layer_name,
         moe_config=moe_config,
         router=router,
@@ -350,6 +362,7 @@ def FusedMoE(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
+        **runner_args if runner_args is not None else {},
     )
 
     # For smuggling this layer into the fused moe custom op
@@ -365,6 +378,7 @@ def fused_moe_make_expert_params_mapping(
     ckpt_up_proj_name: str,
     num_experts: int,
     num_redundant_experts: int = 0,
+    routed_experts_prefix: str = "routed_experts",
 ) -> list[tuple[str, str, int, str]]:
     """Delegate to EPLB manager."""
     return RoutedExperts.make_expert_params_mapping(
@@ -374,4 +388,5 @@ def fused_moe_make_expert_params_mapping(
         ckpt_up_proj_name,
         num_experts,
         num_redundant_experts,
+        routed_experts_prefix,
     )

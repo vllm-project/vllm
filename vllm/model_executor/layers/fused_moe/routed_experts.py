@@ -60,12 +60,14 @@ class RoutedExperts(PluggableLayer):
         moe_config: FusedMoEConfig,
         quant_config: QuantizationConfig | None,
         expert_map_manager: ExpertMapManager,
+        expert_mapping: list[tuple[str, str, int, str]] | None = None,
         **kwargs,
     ):
         super().__init__()
         self.layer_name = layer_name
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.expert_mapping = expert_mapping
         self.expert_map_manager = expert_map_manager
         self.hidden_size = moe_config.hidden_dim
         self.global_num_experts = moe_config.num_experts
@@ -869,6 +871,7 @@ class RoutedExperts(PluggableLayer):
         ckpt_up_proj_name: str,
         num_experts: int,
         num_redundant_experts: int = 0,
+        routed_experts_prefix: str = "routed_experts",
     ) -> list[tuple[str, str, int, str]]:
         """
         Create expert parameter mapping for weight loading with redundant experts.
@@ -910,13 +913,16 @@ class RoutedExperts(PluggableLayer):
             else ""
         )
 
+        if routed_experts_prefix != "":
+            routed_experts_prefix = f"{routed_experts_prefix}."
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                f"experts.routed_experts.{base_layer}w13_"
+                f"experts.{routed_experts_prefix}{base_layer}w13_"
                 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                else f"experts.routed_experts.{base_layer}w2_",
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
+                else f"experts.{routed_experts_prefix}{base_layer}w2_",
+                f"experts.{routed_experts_prefix}{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
                 expert_id,
                 shard_id,
             )
@@ -981,7 +987,7 @@ class RoutedExperts(PluggableLayer):
             "w2_input_scale",
         }
 
-        # Parameters of non-expert submodules that live inside runner (MoERunner).
+        # Parameters of non-expert submodules that live inside runner (RoutedExperts).
         # These must be excluded from EPLB weight rearrangement.
         NON_EXPERT_PREFIXES = ()
 
