@@ -28,6 +28,11 @@ class LRUCachePolicy(CachePolicy):
             if key in self.blocks:
                 self.blocks.move_to_end(key)
 
+    def clear(self) -> list[OffloadKey]:
+        keys = list(self.blocks.keys())
+        self.blocks.clear()
+        return keys
+
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
