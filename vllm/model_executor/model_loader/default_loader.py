@@ -428,14 +428,7 @@ class DefaultModelLoader(BaseModelLoader):
         weights_not_loaded = weights_to_load - (loaded_weights or set())
         
         if weights_not_loaded:
-            if model_config.quantization is not None:
-                logger.warning(
-                    "Following weights were not initialized from "
-                    "checkpoint (quantized model): %s",
-                    weights_not_loaded,
-                )
-            else:
-                raise ValueError(
-                    "Following weights were not initialized from "
-                    f"checkpoint: {weights_not_loaded}"
-                )
+            raise ValueError(
+                "Following weights were not initialized from "
+                 f"checkpoint: {weights_not_loaded}"
+            )
