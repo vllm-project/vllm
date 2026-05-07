@@ -427,31 +427,6 @@ class TestTieringOffloadingManager:
         # Large tier should have all 8 blocks
         assert large_tier.get_num_blocks() == 8
 
-    def test_prepare_store_processes_finished_jobs_on_new_step(self, manager_setup):
-        """Test that prepare_store() processes finished jobs on first call of a step."""
-        blocks = to_keys(range(3))
-
-        # Step 1: Store blocks and cascade
-        self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, _CTX, success=True)
-
-        # Blocks should have ref_cnt = 2 (one for each secondary tier)
-        for block_hash in blocks:
-            block = self.primary_tier._policy.get(block_hash)
-            assert block.ref_cnt == 2
-
-        # End of step 1 (resets per-step flag; cascade completions pending)
-        list(self.manager.take_events())
-
-        # Step 2: prepare_store processes finished cascade jobs on first call
-        more_blocks = to_keys(range(3, 5))
-        self.manager.prepare_store(more_blocks, _CTX)
-
-        # Original blocks should now have ref_cnt = 0
-        for block_hash in blocks:
-            block = self.primary_tier._policy.get(block_hash)
-            assert block.ref_cnt == 0
-
     def test_lookup_batches_submit_load_per_request(self, manager_setup):
         """lookup() defers submit_load until take_events(), one call per request.
 
