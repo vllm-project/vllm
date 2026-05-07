@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import queue
 import threading
 import time
 import traceback
@@ -40,7 +39,6 @@ class EngineCoreSentinel(BaseSentinel):
     def __init__(
         self,
         parallel_config: ParallelConfig,
-        engine_input_q: queue.Queue,
         engine_fault_socket_addr: str,
         sentinel_identity: bytes,
         engine: "EngineCoreProc",
@@ -58,7 +56,6 @@ class EngineCoreSentinel(BaseSentinel):
         )
         self.stop_busy_loop = threading.Event()
         self.busy_loop_paused = threading.Event()
-        self.engine_input_q = engine_input_q
         self.worker_cmd_socket = make_zmq_socket(
             ctx=self.ctx,
             path=worker_cmd_addr,
@@ -110,7 +107,7 @@ class EngineCoreSentinel(BaseSentinel):
         self.stop_busy_loop.set()
         # Put a wakeup request to unblock the busy loop
         # if it's blocked on input_queue.get()
-        self.engine_input_q.put((EngineCoreRequestType.WAKEUP, None))
+        self.engine.input_queue.put((EngineCoreRequestType.WAKEUP, None))
         self._execute_command_on_workers(
             FaultToleranceRequest(str(uuid.uuid4()), "pause", ft_request.params),
             self.worker_identities,

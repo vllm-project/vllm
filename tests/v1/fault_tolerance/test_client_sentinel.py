@@ -55,6 +55,8 @@ def client_sentinel(mock_parallel_config, mock_ft_addresses, mock_call_utility_a
 
     mock_client = Mock()
     mock_client.vllm_config = Mock(parallel_config=mock_parallel_config)
+    mock_client.core_engines = [b"engine_0", b"engine_1"]
+    mock_client._call_utility_async = mock_call_utility_async
     mock_client.shutdown = Mock()
 
     with (
@@ -76,8 +78,6 @@ def client_sentinel(mock_parallel_config, mock_ft_addresses, mock_call_utility_a
         mock_create_task.side_effect = _capture_task
         sentinel = ClientSentinel(
             fault_tolerance_addresses=mock_ft_addresses,
-            call_utility_async=mock_call_utility_async,
-            core_engines=[b"engine_0", b"engine_1"],
             client=mock_client,
         )
 

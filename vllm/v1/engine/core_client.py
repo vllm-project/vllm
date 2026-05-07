@@ -954,8 +954,6 @@ class AsyncMPClient(MPClient):
                 self.client_sentinel = ClientSentinel(
                     fault_tolerance_addresses=ft_addr,
                     client=self,
-                    call_utility_async=self._call_utility_async,
-                    core_engines=self.core_engines,
                 )
                 self.resources.client_sentinel = self.client_sentinel
             self.engine_status = {

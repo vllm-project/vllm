@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 from typing import TYPE_CHECKING
 
-import threading
 import msgspec
 import torch
 import zmq
@@ -72,24 +72,20 @@ class WorkerSentinel(BaseSentinel):
         return self.host
 
     def run(self):
-        # Wait for fault tolerance instructions from EngineCoreSentinel
-        while not self.sentinel_dead:
-            self.poll_and_execute_upstream_cmd()
-
-    def poll_and_execute_upstream_cmd(self):
         """
         Receive and execute a command from upstream sentinel and send back
         the execution result.
         """
-        try:
-            _, msg = self.engine_core_cmd_socket.recv_multipart()
-            ft_request = msgspec.msgpack.decode(msg, type=FaultToleranceRequest)
-            ft_result = self._execute_cmd(ft_request)
-            msg_bytes = msgspec.msgpack.encode(ft_result)
-            self.engine_core_cmd_socket.send_multipart([b"", msg_bytes])
-        except zmq.ZMQError:
-            logger.info("Socket closed, terminating.")
-            self.sentinel_dead = True
+        while not self.sentinel_dead:
+            try:
+                _, msg = self.engine_core_cmd_socket.recv_multipart()
+                ft_request = msgspec.msgpack.decode(msg, type=FaultToleranceRequest)
+                ft_result = self._execute_cmd(ft_request)
+                msg_bytes = msgspec.msgpack.encode(ft_result)
+                self.engine_core_cmd_socket.send_multipart([b"", msg_bytes])
+            except zmq.ZMQError:
+                logger.info("Socket closed, terminating.")
+                self.sentinel_dead = True
 
     def pause(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         get_pause_event().set()

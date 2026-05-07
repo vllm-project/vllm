@@ -894,7 +894,6 @@ class EngineCoreProc(EngineCore):
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
                 self.engine_core_sentinel = EngineCoreSentinel(
                     parallel_config=vllm_config.parallel_config,
-                    engine_input_q=self.input_queue,
                     engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     engine=self,
@@ -1728,9 +1727,7 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        dp_group, dp_store = parallel_config.stateless_init_dp_group(
-            return_store=True,
-        )
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):

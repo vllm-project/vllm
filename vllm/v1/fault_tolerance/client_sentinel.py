@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import uuid
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import msgspec.msgpack
@@ -46,15 +45,12 @@ class ClientSentinel(BaseSentinel):
         self,
         fault_tolerance_addresses: FaultToleranceZmqAddresses,
         client: "AsyncMPClient",
-        call_utility_async: Callable,
-        core_engines: list[bytes],
     ):
         self.ctx = zmq.asyncio.Context()
         super().__init__(None, b"client_sentinel", client)
         parallel_config = client.vllm_config.parallel_config
         self.ft_config = parallel_config.fault_tolerance_config
-        self.engine_identities = core_engines
-        self.call_utility_async = call_utility_async
+        self.engine_identities = client.core_engines
 
         self.gloo_timeout_seconds: int = (
             parallel_config.gloo_timeout_seconds
@@ -156,11 +152,11 @@ class ClientSentinel(BaseSentinel):
         """Expected params: timeout, exclude_engine_index (optional)."""
         exclude_engine_index = ft_request.params.get("exclude_engine_index")
 
-        # Pause all engines except ones already marked dead or being excluded.
+        # Pause all healthy engines except ones being excluded.
         target_engines = [
             self.engine_identities[i - self.start_rank]
             for i, status in self.engine_status_dict.items()
-            if status["status"] != "dead"
+            if status["status"] == "healthy"
             and (exclude_engine_index is None or i not in exclude_engine_index)
         ]
         res = await self._execute_cmd_on_engines(ft_request, target_engines)
@@ -193,7 +189,7 @@ class ClientSentinel(BaseSentinel):
         coroutines = []
         # dispatch commands to target engines
         for core_engine in target_engines:
-            coro = self.call_utility_async(
+            coro = self.client._call_utility_async(
                 "handle_fault", ft_request, engine=core_engine
             )
             coroutines.append(coro)
