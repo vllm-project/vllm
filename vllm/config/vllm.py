@@ -1806,6 +1806,21 @@ class VllmConfig:
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
+            if (self.kv_transfer_config is not None
+                    and self.kv_transfer_config.kv_connector is not None):
+                interleave = self.parallel_config.cp_kv_cache_interleave_size
+                dcp_size = self.parallel_config.decode_context_parallel_size
+                assert (
+                    interleave == block_size
+                ), (
+                    f"When using PD disaggregation with DCP "
+                    f"(decode_context_parallel_size={dcp_size}),"
+                    f" cp_kv_cache_interleave_size({interleave}) must match"
+                    f" the block_size({block_size}).\n"
+                    f"Set --cp-kv-cache-interleave-size to {block_size}"
+                    f" for block-level alignment."
+                )
+
         # Mamba cache align-mode constraints
         if self.cache_config.mamba_cache_mode == "align":
             assert block_size <= self.scheduler_config.max_num_batched_tokens, (
