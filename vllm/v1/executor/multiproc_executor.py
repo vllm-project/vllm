@@ -128,9 +128,9 @@ class MultiprocExecutor(Executor):
         # a TOCTOU window where two callers can both observe the same port
         # as free and then both try to bind it → EADDRINUSE.  A UUID-keyed
         # file:// rendezvous is guaranteed unique with no port binding at all.
-        _init_file = os.path.join(tempfile.gettempdir(),
-                                  f"vllm_dist_{uuid.uuid4().hex}")
-        distributed_init_method = f"file://{_init_file}"
+        self._init_file = os.path.join(tempfile.gettempdir(),
+                                       f"vllm_dist_{uuid.uuid4().hex}")
+        distributed_init_method = f"file://{self._init_file}"
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -470,6 +470,11 @@ class MultiprocExecutor(Executor):
             for mq in response_mqs:
                 mq.shutdown()
             self.response_mqs = []
+
+        with suppress(OSError):
+            if init_file := getattr(self, "_init_file", None):
+                os.remove(init_file)
+                self._init_file = None
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
