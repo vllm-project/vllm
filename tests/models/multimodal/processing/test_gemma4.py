@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
+
 import pytest
 from PIL import Image as PILImage
 
@@ -100,6 +102,39 @@ def test_get_mm_max_tokens_per_item_respects_configured_max_soft_tokens(
     assert tokens is not None
     assert tokens["image"] == expected_image_tokens
     assert tokens["video"] == 32 * (70 + 2 + 6)
+
+
+@pytest.mark.parametrize(
+    ("limit_mm_per_prompt", "expected_video_tokens"),
+    [
+        ({"video": 1}, 32 * (70 + 2 + 6)),
+        ({"video": {"count": 1}}, 32 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 1}}, 1 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 8}}, 8 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 32}}, 32 * (70 + 2 + 6)),
+        ({"video": {"count": 1, "num_frames": 40}}, 32 * (70 + 2 + 6)),
+    ],
+)
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_get_mm_max_tokens_per_item_respects_configured_video_num_frames(
+    model_id: str,
+    limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]],
+    expected_video_tokens: int,
+):
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    tokens = processor.info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len,
+        mm_counts={"video": 1},
+    )
+
+    assert tokens is not None
+    assert tokens["image"] == 280
+    assert tokens["video"] == expected_video_tokens
 
 
 @pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
