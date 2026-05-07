@@ -34,9 +34,7 @@ def compute_spec_decode_stats(
 
     acceptance_len = 1 + (n_accepted / n_drafts) if n_drafts > 0 else 1.0
     draft_tokens_per_step = (n_draft_tokens / n_drafts) if n_drafts > 0 else 0
-    overall_acceptance_rate = (
-        (n_accepted / n_draft_tokens) if n_draft_tokens > 0 else 0
-    )
+    overall_acceptance_rate = (n_accepted / n_draft_tokens) if n_draft_tokens > 0 else 0
     per_pos_rates = [v / n_drafts for v in per_pos_vec] if n_drafts > 0 else []
 
     return {
@@ -108,9 +106,7 @@ def test_peagle_speculators_model(vllm_runner, example_prompts, monkeypatch):
         )
 
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens=20)
-        assert vllm_outputs, (
-            f"No outputs generated for speculators model {MODEL_PATH}"
-        )
+        assert vllm_outputs, f"No outputs generated for speculators model {MODEL_PATH}"
 
 
 @pytest.mark.slow_test
