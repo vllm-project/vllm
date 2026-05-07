@@ -110,32 +110,34 @@ class ServingEmbedding(PoolingServing):
             and self.json_response_cls.__name__ == "ORJSONResponse"
         )
         if use_ndarray_response:
-            items: list[dict[str, object]] = []
-            num_prompt_tokens = 0
+            ndarray_items: list[dict[str, object]] = []
+            ndarray_num_tokens = 0
 
             for idx, final_res in enumerate(final_res_batch):
-                item = EmbeddingResponseData(
+                item_dict = EmbeddingResponseData(
                     index=idx,
                     embedding=[],
                 ).model_dump()
-                item["embedding"] = encode_pooling_output_float_or_ndarray(final_res)
-                items.append(item)
-                num_prompt_tokens += len(final_res.prompt_token_ids)
+                item_dict["embedding"] = encode_pooling_output_float_or_ndarray(
+                    final_res
+                )
+                ndarray_items.append(item_dict)
+                ndarray_num_tokens += len(final_res.prompt_token_ids)
 
-            usage = UsageInfo(
-                prompt_tokens=num_prompt_tokens,
-                total_tokens=num_prompt_tokens,
+            ndarray_usage = UsageInfo(
+                prompt_tokens=ndarray_num_tokens,
+                total_tokens=ndarray_num_tokens,
             )
-            response = EmbeddingResponse(
+            ndarray_response = EmbeddingResponse(
                 id=request_id,
                 created=created_time,
                 model=model_name,
                 data=[],  # type: ignore[arg-type]
-                usage=usage,
+                usage=ndarray_usage,
             ).model_dump()
-            response["data"] = items
+            ndarray_response["data"] = ndarray_items
 
-            return self.json_response_cls(content=response)
+            return self.json_response_cls(content=ndarray_response)
 
         encode_fn = cast(
             Callable[[PoolingRequestOutput], list[float] | str],

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import importlib.util
 import json
 import warnings
 from types import SimpleNamespace
