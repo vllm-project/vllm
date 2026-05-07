@@ -32,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
     MoERunner,
-    MoERunnerInterface,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
@@ -156,7 +155,7 @@ def FusedMoE(
     apply_routed_scale_to_output: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
-    runner_cls: type[MoERunnerInterface] | None = None,
+    runner_cls: type[MoERunner] | None = None,
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
     routed_experts_args: dict[str, Any] | None = None,
