@@ -22,5 +22,8 @@ class EngineLoopPausedError(Exception):
     PREFIX = "[EnginePaused]"
 
     def __init__(self, message=""):
-        full_message = f"{self.PREFIX} {message}" if message else self.PREFIX
+        if message.startswith(self.PREFIX):
+            full_message = message
+        else:
+            full_message = f"{self.PREFIX} {message}"
         super().__init__(full_message)
