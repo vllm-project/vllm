@@ -546,12 +546,14 @@ class CaptureManager:
                         continue
 
                     # Slice rows for this consumer on the CPU.  All
-                    # consumers share the same already-transferred tensor.
+                    # consumers share the same already-transferred tensor
+                    # in ``cpu_scratch``; use that — not ``scratch``,
+                    # which is leftover from the GPU→CPU transfer loop
+                    # above and points at whichever (layer, hook) was
+                    # iterated last.
                     row_indices = [e.scratch_row for e in chunk_entries]
-                    idx_tensor = torch.tensor(
-                        row_indices, dtype=torch.long, device=scratch.device
-                    )
-                    chunk_tensor = scratch.index_select(0, idx_tensor).cpu()
+                    idx_tensor = torch.tensor(row_indices, dtype=torch.long)
+                    chunk_tensor = cpu_scratch.index_select(0, idx_tensor)
 
                     step_index = chunk_entries[0].step_index
 
