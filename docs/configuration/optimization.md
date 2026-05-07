@@ -155,9 +155,9 @@ switch to `--physcpubind=<cpu-list> --membind=<node>`.
 
 These `--numa-bind*` options only apply to GPU execution processes. They do not
 configure the CPU backend's separate thread-affinity controls. Automatic
-GPU-to-NUMA detection is currently implemented for CUDA/NVML-based platforms;
-other GPU backends must provide explicit binding lists if they use these
-options.
+GPU-to-NUMA detection is currently implemented for CUDA/NVML-based as well as
+ROCM-based platforms; other GPU backends must provide explicit binding lists if
+they use these options.
 
 `--numa-bind-nodes` takes one non-negative NUMA node index per visible GPU, in
 the same order as the GPU indices.

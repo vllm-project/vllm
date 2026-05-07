@@ -3,7 +3,6 @@
 import httpx
 import openai
 import pytest
-import pytest_asyncio
 import torch
 
 from ....utils import RemoteOpenAIServer
@@ -25,29 +24,42 @@ sentences_2 = [
 similarity_reference = [[0.6259, 0.3474], [0.3309, 0.6734]]
 lexical_score_reference = [0.19554901123046875, 0.0]
 colbert_score_reference = [0.7797, 0.4620]
+SUPPORTED_TASKS = ["embed", "token_embed", "token_classify"]
+
+
+@pytest.fixture(scope="module", params=SUPPORTED_TASKS)
+def pooling_task(request):
+    yield request.param
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(pooling_task):
     args = [
         "--max-model-len",
         str(MAX_MODEL_LEN),
         "--hf-overrides",
         '{"architectures": ["BgeM3EmbeddingModel"]}',
+        "--pooler-config.task",
+        pooling_task,
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
-
-
 @pytest.mark.asyncio
-async def test_bge_m3_api_server_embedding(client: openai.AsyncOpenAI):
+async def test_bge_m3_api_server_embedding(server, pooling_task):
+    client = server.get_async_client()
+
+    if pooling_task != "embed":
+        with pytest.raises(openai.InternalServerError):
+            await run_client_embeddings(
+                client,
+                MODEL_NAME,
+                sentences_1,
+            )
+        return
+
     embeddings_list_1 = await run_client_embeddings(
         client,
         MODEL_NAME,
@@ -117,7 +129,14 @@ def compute_lexical_matching_score(
 
 
 @pytest.mark.asyncio
-async def test_bge_m3_api_server_sparse_embedding(client: openai.AsyncOpenAI):
+async def test_bge_m3_api_server_sparse_embedding(server, pooling_task):
+    client = server.get_async_client()
+
+    if pooling_task != "token_classify":
+        with pytest.raises(openai.BadRequestError):
+            await sparse_embeddings(client, sentences_1)
+        return
+
     embeddings_1 = await sparse_embeddings(client, sentences_1)
     embeddings_2 = await sparse_embeddings(client, sentences_2)
 
@@ -137,9 +156,11 @@ async def test_bge_m3_api_server_sparse_embedding(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_bge_m3_api_server_sparse_embedding_corner_case(
-    client: openai.AsyncOpenAI,
-):
+async def test_bge_m3_api_server_sparse_embedding_corner_case(server, pooling_task):
+    if pooling_task != "token_classify":
+        return
+
+    client = server.get_async_client()
     embeddings = await sparse_embeddings(client, ["Hi"])
     assert len(embeddings) == 1
     assert 2673 in embeddings[0]
@@ -155,7 +176,18 @@ def colbert_score(q_reps: torch.Tensor, p_reps: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.asyncio
-async def test_bge_m3_api_server_multi_vector(client: openai.AsyncOpenAI):
+async def test_bge_m3_api_server_multi_vector(server, pooling_task):
+    client = server.get_async_client()
+
+    if pooling_task != "token_embed":
+        with pytest.raises(openai.BadRequestError):
+            await client.post(
+                "../pooling",
+                body={"model": MODEL_NAME, "input": sentences_1, "task": "token_embed"},
+                cast_to=httpx.Response,
+            )
+        return
+
     result_1 = await client.post(
         "../pooling",
         body={"model": MODEL_NAME, "input": sentences_1, "task": "token_embed"},

@@ -147,7 +147,7 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
     offline inference with tensor parallelism.
 
     see https://github.com/vllm-project/vllm/issues/11400 for
-    the motivation, and examples/offline_inference/torchrun_example.py
+    the motivation, and examples/features/torchrun/torchrun_example_offline.py
     for the usage example.
 
     The key idea: although it is tensor-parallel inference, we only

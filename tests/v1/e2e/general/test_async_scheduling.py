@@ -57,6 +57,8 @@ def test_without_spec_decoding(
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
+        dict(prompt_logprobs=2),
+        dict(prompt_logprobs=2, logprobs=2),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
@@ -126,6 +128,8 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
+        dict(prompt_logprobs=2),
+        dict(prompt_logprobs=2, logprobs=2),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
@@ -324,10 +328,13 @@ def run_test(
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
-        # Force preemptions
-        dict(num_gpu_blocks_override=32)
+        # Force preemptions: with 32 blocks the cache holds at most a single
+        # max-length request, so the ~34 concurrent prompts contend and trigger
+        # preemption. (Prompts here are << max_model_len, so dropping
+        # max_model_len from 4096 to 512 doesn't change generation behavior.)
+        dict(num_gpu_blocks_override=32, max_model_len=512)
         if test_preemption
-        else dict(gpu_memory_utilization=0.9)
+        else dict(gpu_memory_utilization=0.9, max_model_len=4096)
     )
     spec_mml = (spec_config or {}).get("max_model_len")
     spec_method = (spec_config or {}).get("method", "none")
@@ -343,7 +350,6 @@ def run_test(
 
     with VllmRunner(
         model,
-        max_model_len=4096,
         enable_chunked_prefill=test_prefill_chunking,
         # Force prefill chunking
         max_num_batched_tokens=48 if test_prefill_chunking else None,
@@ -411,7 +417,12 @@ def _all_logprobs_match(req_a, req_b) -> bool:
     )
 
 
-def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> bool:
+def _logprobs_match(
+    lps_a: dict[int, Logprob] | None,
+    lps_b: dict[int, Logprob] | None,
+) -> bool:
+    if lps_a is None or lps_b is None:
+        return lps_a is lps_b
     rel_tol, abs_tol = 1e-3, 1e-6
     return (
         len(lps_a) == len(lps_b)

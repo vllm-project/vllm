@@ -321,3 +321,20 @@ def supports_pdl(device: torch.device | None = None) -> bool:
 def supports_tma(device: torch.device | None = None) -> bool:
     # TMA requires compute capability SM90 or above
     return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+
+def _normalize_lora_config_keys(
+    config: dict[str, int | None],
+) -> dict[str, int | None]:
+    """Normalize Triton config dict keys to uppercase BLOCK_SIZE_* format."""
+    out: dict[str, int | None] = {}
+    for key, val in config.items():
+        if key.islower():
+            if key.startswith("block_"):
+                nk = "BLOCK_SIZE_" + key.split("_")[-1].upper()
+            else:
+                nk = key.upper()
+        else:
+            nk = key
+        out[nk] = val
+    return out

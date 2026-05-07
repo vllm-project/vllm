@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.renderers.inputs.preprocess import prompt_to_seq
+import pytest
+
+from vllm.renderers.inputs.preprocess import (
+    parse_dec_only_prompt,
+    parse_enc_dec_prompt,
+    prompt_to_seq,
+)
 
 
 def test_empty_input():
@@ -39,3 +45,23 @@ def test_dict_input():
         {"prompt": "foo"},
         {"prompt_token_ids": [1, 2]},
     ]
+
+
+def test_parse_dec_only_prompt_rejects_non_string_prompt_field():
+    with pytest.raises(TypeError, match="Prompt text should be a string"):
+        parse_dec_only_prompt({"prompt": [1, 2, 3], "cache_salt": "abc"})
+
+
+def test_parse_dec_only_prompt_rejects_non_string_prompt_list():
+    with pytest.raises(TypeError, match="Prompt text should be a string"):
+        parse_dec_only_prompt({"prompt": [1, "x"]})
+
+
+def test_parse_enc_dec_prompt_rejects_nested_non_string_prompt_field():
+    with pytest.raises(TypeError, match="Prompt text should be a string"):
+        parse_enc_dec_prompt(
+            {
+                "encoder_prompt": {"prompt": [1, 2, 3]},
+                "decoder_prompt": {"prompt": [4, 5]},
+            }
+        )

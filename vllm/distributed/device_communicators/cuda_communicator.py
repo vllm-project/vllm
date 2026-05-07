@@ -115,13 +115,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         if self.use_all2all:
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
-
-                self.all2all_manager = NaiveAll2AllManager(
-                    self.cpu_group, tcp_store_group
-                )
-            elif self.all2all_backend == "allgather_reducescatter":
+            if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(

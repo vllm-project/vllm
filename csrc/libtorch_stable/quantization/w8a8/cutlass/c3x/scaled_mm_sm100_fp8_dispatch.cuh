@@ -92,7 +92,7 @@ struct cutlass_3x_gemm_sm100_fp8 {
   // -----------------------------------------------------------
   // Kernel definition
   // -----------------------------------------------------------
-  using GemmKernel = enable_sm100f_only<cutlass::gemm::kernel::GemmUniversal<
+  using GemmKernel = enable_sm100_to_sm120<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 

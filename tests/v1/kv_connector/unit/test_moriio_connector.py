@@ -3,6 +3,7 @@
 import importlib.util
 import os
 import subprocess
+import uuid
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -98,6 +99,11 @@ def _setup_kv_transfer_request(
             "remote_handshake_port": fake_port,
             "remote_engine_id": "test_engine",
         }
+    )
+    zmq_addr = f"host:{remote_host},handshake:{fake_port},notify:{fake_port}"
+    fake_uuid = uuid.uuid4().hex
+    request.request_id = (
+        f"___prefill_addr_{zmq_addr}___decode_addr_{zmq_addr}_{fake_uuid}"
     )
     return request
 
@@ -254,12 +260,13 @@ def test_write_mode_saves_local_block_ids():
         do_remote_decode=True,
         do_remote_prefill=False,
     )
+
+    # Setup KV transfer params and embed ZMQ addrs in request_id before
+    # adding to scheduler so the ID is consistent everywhere.
+    request = _setup_kv_transfer_request(request)
     request_id = request.request_id
 
     scheduler.add_request(request)
-
-    # Fake Config
-    request = _setup_kv_transfer_request(request)
 
     # Remote Prefill, triggers MoRIIOConnectorMetadata.
     scheduler_output = scheduler.schedule()
@@ -312,12 +319,13 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
         do_remote_decode=True,
         do_remote_prefill=False,
     )
+
+    # Setup KV transfer params and embed ZMQ addrs in request_id before
+    # adding to scheduler so the ID is consistent everywhere.
+    request = _setup_kv_transfer_request(request)
     request_id = request.request_id
 
     scheduler.add_request(request)
-
-    # Fake Config
-    request = _setup_kv_transfer_request(request)
 
     # Remote Prefill with chunked prefill, triggers multiple schedules.
     expected_counts = [(0, 0, 0), (0, 0, 0), (1, 0, 0)]
@@ -363,14 +371,16 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
         do_remote_decode=False,
         do_remote_prefill=True,
     )
+
+    # Setup KV transfer params and embed ZMQ addrs in request_id before
+    # adding to scheduler so the ID is consistent everywhere.
+    request = _setup_kv_transfer_request(request)
     request_id = request.request_id
 
     scheduler.add_request(request)
     block_list = scheduler.kv_cache_manager.coordinator.single_type_managers[
         0
     ].req_to_blocks[request_id]
-
-    request = _setup_kv_transfer_request(request)
 
     # Set remote block ids to be fetched.
     request.kv_transfer_params["remote_block_ids"] = block_list

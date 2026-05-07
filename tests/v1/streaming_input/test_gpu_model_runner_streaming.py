@@ -39,7 +39,6 @@ def mock_model_runner_with_input_batch():
         vocab_size=32000,
         block_sizes=[16],
         kernel_block_sizes=[16],
-        is_spec_decode=False,
         logitsprocs=None,
         is_pooling_model=False,
     )

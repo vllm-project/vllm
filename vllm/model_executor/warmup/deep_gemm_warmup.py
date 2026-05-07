@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-from vllm.model_executor.layers.quantization.mxfp8 import Mxfp8OnlineLinearMethod
+from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineLinearMethod
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,

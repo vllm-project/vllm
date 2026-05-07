@@ -845,9 +845,10 @@ async def test_chat_completion_n_parameter_non_streaming(
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_completion_tokens=20,
-        temperature=0.7,
+        max_completion_tokens=50,
+        temperature=1.0,
         n=3,
+        seed=42,
         stream=False,
     )
 
@@ -859,7 +860,6 @@ async def test_chat_completion_n_parameter_non_streaming(
         assert choice.message.content is not None
         assert len(choice.message.content) > 0
 
-    # Verify all responses are different (highly likely with temperature > 0)
     contents = [choice.message.content for choice in chat_completion.choices]
     assert len(set(contents)) > 1, "Expected different responses with n=3"
 
@@ -1000,6 +1000,31 @@ def test_chat_completion_request_n_parameter_default():
 
     # SamplingParams.from_optional converts None to 1
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
+
+
+def test_chat_completion_request_accepts_model_specific_reasoning_effort():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        reasoning_effort="max",
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert request.reasoning_effort == "max"
+    assert chat_params.chat_template_kwargs["reasoning_effort"] == "max"
+
+
+def test_chat_completion_request_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="Input should be"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="extra_high",
+        )
 
 
 def test_chat_completion_request_n_parameter_various_values():

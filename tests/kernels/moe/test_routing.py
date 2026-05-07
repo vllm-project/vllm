@@ -662,6 +662,52 @@ def test_eplb_map_no_redundancy(
         assert load.sum().item() == 0
 
 
+@pytest.mark.parametrize("top_k,R", [(2, 2), (4, 2), (8, 4), (8, 8)])
+def test_eplb_map_hot_expert_replica_balance(top_k, R):
+    """Hot logical expert with R replicas must be balanced across replicas
+    even when ``top_k`` is a multiple of ``R``. In that regime every top-k
+    offset for the hot expert lands on a multiple of ``top_k`` in the flat
+    ``topk_ids`` view, so per-replica assignment must not collapse onto a
+    single replica.
+    """
+    num_tokens = 8192
+    num_logical = 16
+    num_physical = R + (num_logical - 1)
+
+    l2p = torch.full((num_logical, R), -1, dtype=torch.int64, device="cuda")
+    l2p[0] = torch.arange(R, dtype=torch.int64, device="cuda")
+    for i in range(1, num_logical):
+        l2p[i, 0] = R + i - 1
+    rc = torch.tensor([R] + [1] * (num_logical - 1), dtype=torch.int64, device="cuda")
+
+    torch.manual_seed(0)
+    topk_ids = torch.randint(
+        1,
+        num_logical,
+        (num_tokens, top_k),
+        dtype=torch.int32,
+        device="cuda",
+    )
+    topk_ids[:, 0] = 0
+
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+
+    eplb_map_to_physical_and_record(
+        topk_ids=topk_ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+    )
+
+    hot_load = load[:R].float()
+    max_mean = (hot_load.max() / hot_load.mean()).item()
+    assert max_mean < 1.15, (
+        f"Hot expert replicas uneven: {hot_load.tolist()}, max/mean={max_mean:.3f}"
+    )
+
+
 @pytest.mark.parametrize("record_enabled", [True, False])
 @pytest.mark.parametrize(
     "l2p_map, replica_count, num_physical, topk_ids, expected_out, expected_load",
@@ -672,10 +718,12 @@ def test_eplb_map_no_redundancy(
             [2, 2, 1, 1],
             6,
             [[0, 1], [2, 3], [0, 2]],
-            # offs: 0→0%2=0→p0, 1→1%2=1→p5, 2→2%1=0→p2,
-            #        3→3%1=0→p3, 4→4%2=0→p0, 5→5%1=0→p2
-            [[0, 5], [2, 3], [0, 2]],
-            [2, 0, 2, 1, 0, 1],
+            # replica = (token_idx * KNUTH) & 0xFFFFFFFF % R.
+            # token 0 hash=0x00000000: %2=0, %1=0.
+            # token 1 hash=0x9E3779B9: %2=1, %1=0.
+            # token 2 hash=0x3C6EF372: %2=0, %1=0.
+            [[0, 1], [2, 3], [0, 2]],
+            [2, 1, 2, 1, 0, 0],
             id="partial",
         ),
         pytest.param(
@@ -684,10 +732,11 @@ def test_eplb_map_no_redundancy(
             [2, 2, 2, 2],
             8,
             [[0, 1], [2, 3], [0, 2]],
-            # offs: 0→0%2=0→p0, 1→1%2=1→p5, 2→2%2=0→p2,
-            #        3→3%2=1→p7, 4→4%2=0→p0, 5→5%2=1→p6
-            [[0, 5], [2, 7], [0, 6]],
-            [2, 0, 1, 0, 0, 1, 1, 1],
+            # token 0 hash=0x00000000: %2=0.
+            # token 1 hash=0x9E3779B9: %2=1.
+            # token 2 hash=0x3C6EF372: %2=0.
+            [[0, 1], [6, 7], [0, 2]],
+            [2, 1, 1, 0, 0, 0, 1, 1],
             id="full",
         ),
         pytest.param(
@@ -696,10 +745,11 @@ def test_eplb_map_no_redundancy(
             [4, 2, 2],
             8,
             [[0, 1], [2, 0], [1, 2]],
-            # offs: 0→0%4=0→p0, 1→1%2=1→p4, 2→2%2=0→p2,
-            #        3→3%4=3→p7, 4→4%2=0→p1, 5→5%2=1→p6
-            [[0, 4], [2, 7], [1, 6]],
-            [1, 1, 1, 0, 1, 0, 1, 1],
+            # token 0 hash=0x00000000: %4=0, %2=0.
+            # token 1 hash=0x9E3779B9: %4=1, %2=1.
+            # token 2 hash=0x3C6EF372: %4=2, %2=0.
+            [[0, 1], [6, 3], [1, 2]],
+            [1, 2, 1, 1, 0, 0, 1, 0],
             id="uneven",
         ),
     ],

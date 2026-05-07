@@ -241,11 +241,13 @@ def forward_attention(
         )
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
     builder = builder_cls(kv_cache_spec, [], vllm_config, q.device)
+    seq_lens_cpu = seq_lens.cpu()
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
-        _seq_lens_cpu=seq_lens.cpu(),
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
         _num_computed_tokens_cpu=context_lens.cpu(),
         num_reqs=batch_size,
         num_actual_tokens=num_actual_tokens,

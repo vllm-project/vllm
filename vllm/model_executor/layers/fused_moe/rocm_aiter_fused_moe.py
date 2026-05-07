@@ -152,7 +152,7 @@ def rocm_aiter_grouped_topk(
     if e_score_correction_bias is not None:
         rocm_aiter_ops.biased_grouped_topk(
             gating_output,
-            e_score_correction_bias.to(gating_output.dtype),
+            e_score_correction_bias,
             topk_weights,
             topk_ids,
             num_expert_group,
@@ -252,7 +252,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
+        # mxfp4 i.e. w4a4, w4a16 uses BLOCK_1X32
+        # mxfp6 and mxfp8 are unsupported in AITER currently and use emulation instead
         if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled

@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: EPLB Algorithm
+  key: eplb-algorithm
   timeout_in_minutes: 15
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -15,6 +16,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
 
 - label: EPLB Execution # 17min
+  key: eplb-execution
   timeout_in_minutes: 27
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
@@ -26,6 +28,7 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
 - label: Elastic EP Scaling Test
+  key: elastic-ep-scaling-test
   timeout_in_minutes: 20
   device: h100
   working_dir: "/vllm-workspace/tests"

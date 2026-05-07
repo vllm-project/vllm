@@ -1336,3 +1336,312 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
     hf_model.model.generate = patched_generate  # type: ignore[method-assign]
     return hf_model
+
+
+def moondream3_processor(model: str):
+    from vllm.transformers_utils.processors.moondream3 import Moondream3Processor
+
+    return Moondream3Processor.from_pretrained(model, trust_remote_code=True)
+
+
+def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patch HfRunner for Moondream3."""
+    moondream_processor = hf_model.processor
+
+    def processor(*args, text="", images=None, **kwargs):
+        if images is None:
+            return moondream_processor(text=text, **kwargs)
+
+        images_list = [images] if isinstance(images, Image) else images
+        return moondream_processor(images=images_list, text=text, **kwargs)
+
+    hf_model.processor = processor
+
+    # Expose the LM head for logprob extraction.
+    hf_model.model.get_output_embeddings = lambda: hf_model.model.model.text.lm_head
+
+    native_model = hf_model.model.model  # MoondreamModel instance
+
+    from torch.nn import functional as F
+
+    from vllm.model_executor.models.moondream3 import reconstruct_from_crops
+
+    # Resolve the placeholder tokens from the tokenizer instead of hard-coding.
+    image_placeholder_ids = moondream_processor.tokenizer.encode(
+        "<image>", add_special_tokens=False
+    )
+
+    def _normalize_tiling(tilings):
+        """Extract (h, w) tuple from various tiling container formats."""
+        tiling = tilings
+        if isinstance(tiling, torch.Tensor):
+            tiling = tuple(tiling.squeeze().tolist())
+        elif isinstance(tiling, (list, tuple)):
+            t0 = tiling[0]
+            if isinstance(t0, torch.Tensor):
+                tiling = tuple(t0.tolist())
+            elif isinstance(t0, (list, tuple)):
+                tiling = tuple(t0)
+        return tiling
+
+    def _encode_vision(pixel_values, tilings):
+        """Run preprocessed crops through vision encoder + projection."""
+        device = native_model.device
+        dtype = native_model.vision.pos_emb.dtype
+        config = native_model.config
+
+        pv = pixel_values
+        while pv.dim() > 4:
+            pv = pv.squeeze(0)
+        pv = pv.to(device=device, dtype=dtype)
+
+        features = native_model._vis_enc(pv)
+        grid_size = config.vision.crop_size // config.vision.enc_patch_size
+        global_feat = features[0]
+
+        if features.shape[0] > 1 and tilings is not None:
+            tiling = _normalize_tiling(tilings)
+            local = features[1:].view(-1, grid_size, grid_size, config.vision.enc_dim)
+            reconstructed = reconstruct_from_crops(
+                local,
+                tiling,
+                config.vision.overlap_margin,
+                patch_size=1,
+            )
+        else:
+            reconstructed = global_feat.view(
+                grid_size, grid_size, config.vision.enc_dim
+            )
+
+        return native_model._vis_proj(global_feat, reconstructed)
+
+    def _find_subsequence(seq, subseq):
+        """Find start index of subseq in seq, or None."""
+        n = len(subseq)
+        for i in range(len(seq) - n + 1):
+            if seq[i : i + n] == subseq:
+                return i
+        return None
+
+    def _generate(
+        self,
+        input_ids=None,
+        pixel_values=None,
+        tilings=None,
+        attention_mask=None,
+        **kwargs,
+    ):
+        max_new_tokens = kwargs.get("max_new_tokens", 128)
+        return_dict = kwargs.get("return_dict_in_generate", False)
+        output_hs = kwargs.get("output_hidden_states", False)
+
+        if pixel_values is None:
+            sequences = input_ids
+            if return_dict:
+                return types.SimpleNamespace(
+                    sequences=sequences,
+                    hidden_states=() if output_hs else None,
+                )
+            return sequences
+
+        # Processor may return lists; extract the single element.
+        if isinstance(pixel_values, (list, tuple)):
+            pixel_values = pixel_values[0]
+        if (
+            isinstance(tilings, (list, tuple))
+            and tilings
+            and not isinstance(tilings[0], int)
+        ):
+            tilings = tilings[0]
+
+        hf_model.model._setup_caches()
+        native_model.use_flex_decoding = False
+
+        device = native_model.device
+        config = native_model.config
+
+        with torch.inference_mode():
+            for block in native_model.text.blocks:
+                block.kv_cache.k_cache.zero_()
+                block.kv_cache.v_cache.zero_()
+
+            img_emb = _encode_vision(pixel_values, tilings)
+
+            bos_emb = F.embedding(
+                torch.tensor([[config.tokenizer.bos_id]], device=device),
+                native_model.text.wte,
+            )
+            img_input = torch.cat([bos_emb, img_emb.unsqueeze(0)], dim=1)
+            prefix_len = img_input.size(1)
+
+            mask = native_model.attn_mask[:, :, :prefix_len, :]
+            pos_ids = torch.arange(prefix_len, dtype=torch.long, device=device)
+            native_model._prefill(img_input, mask, pos_ids, None)
+
+            ids = input_ids.squeeze(0).tolist()
+            img_start = _find_subsequence(ids, image_placeholder_ids)
+
+            if img_start is None:
+                sequences = input_ids
+                if return_dict:
+                    return types.SimpleNamespace(
+                        sequences=sequences,
+                        hidden_states=() if output_hs else None,
+                    )
+                return sequences
+
+            prompt_tokens = ids[img_start + len(image_placeholder_ids) :]
+
+            if not prompt_tokens:
+                sequences = input_ids
+                if return_dict:
+                    return types.SimpleNamespace(
+                        sequences=sequences,
+                        hidden_states=() if output_hs else None,
+                    )
+                return sequences
+
+            prompt_tensor = torch.tensor([prompt_tokens], device=device)
+            prompt_emb = F.embedding(prompt_tensor, native_model.text.wte)
+            prompt_len = prompt_emb.size(1)
+
+            mask = native_model.attn_mask[:, :, prefix_len : prefix_len + prompt_len, :]
+            pos_ids = torch.arange(
+                prefix_len,
+                prefix_len + prompt_len,
+                dtype=torch.long,
+                device=device,
+            )
+            hidden = native_model._prefill(prompt_emb, mask, pos_ids, None)
+            pos = prefix_len + prompt_len
+
+            hidden_last = native_model.text.post_ln(hidden[:, -1:, :])
+            logits = native_model.text.lm_head(hidden_last.squeeze(1))
+
+            generated = []
+            all_hidden_states = []
+            # Record the hidden state that predicted each generated token.
+            prev_hs = hidden_last
+            for _ in range(max_new_tokens):
+                next_token = logits.argmax(dim=-1).item()
+                if next_token == 0:
+                    break
+                generated.append(next_token)
+                if output_hs:
+                    all_hidden_states.append((prev_hs,))
+
+                next_emb = F.embedding(
+                    torch.tensor([[next_token]], device=device),
+                    native_model.text.wte,
+                )
+                mask = native_model.attn_mask[:, :, pos : pos + 1, :]
+                pos_ids_step = torch.tensor([pos], dtype=torch.long, device=device)
+                hidden = native_model._prefill(next_emb, mask, pos_ids_step, None)
+                hidden_last = native_model.text.post_ln(hidden[:, -1:, :])
+                prev_hs = hidden_last
+                logits = native_model.text.lm_head(hidden_last.squeeze(1))
+                pos += 1
+
+            result_ids = ids + generated
+            sequences = torch.tensor([result_ids], device=device)
+
+            if return_dict:
+                return types.SimpleNamespace(
+                    sequences=sequences,
+                    hidden_states=tuple(all_hidden_states) if output_hs else None,
+                )
+            return sequences
+
+    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+    return hf_model
+
+
+def qianfan_ocr_hf_model_kwargs(model_name: str) -> dict:
+    """Return hf_model_kwargs with a patched config for QianfanOCR."""
+    from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
+
+    config = QianfanOCRConfig.from_pretrained(model_name)
+    vc = config.vision_config
+    if isinstance(vc.image_size, int):
+        vc.image_size = (vc.image_size, vc.image_size)
+    if isinstance(vc.patch_size, int):
+        vc.patch_size = (vc.patch_size, vc.patch_size)
+    return {"config": config}
+
+
+def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches an HfRunner instance to run QianfanOCR model inference.
+
+    QianfanOCR shares the same architecture as InternVLChatModel, so the
+    patching logic mirrors ``internvl_patch_hf_runner``.  The only difference
+    is that we load the config via vllm's registered ``QianfanOCRConfig``
+    instead of relying on ``trust_remote_code``.
+    """
+
+    class QianfanOCRProcessor:
+        def __init__(self, hf_runner: HfRunner):
+            self.tokenizer = hf_runner.tokenizer
+
+            from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
+
+            self.config = QianfanOCRConfig.from_pretrained(hf_runner.model_name)
+            self.vision_config = self.config.vision_config
+            self.use_thumbnail = self.config.use_thumbnail
+            self.min_num = self.config.min_dynamic_patch
+            self.max_num = self.config.max_dynamic_patch
+            self.image_size = self.vision_config.image_size
+
+            # Compute num_image_token from config instead of model attribute,
+            # since the transformers-native model doesn't expose it.
+            image_size = self.config.force_image_size or self.vision_config.image_size
+            patch_size = self.vision_config.patch_size
+            downsample_ratio = self.config.downsample_ratio
+            self.num_image_token = int(
+                (image_size // patch_size) ** 2 * (downsample_ratio**2)
+            )
+
+        def __call__(
+            self,
+            text: str,
+            images: PIL.Image.Image | list[PIL.Image.Image] = None,
+            **kwargs,
+        ):
+            from vllm.transformers_utils.processors.internvl import (
+                image_to_pixel_values_internvl,
+            )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
+
+            images = [images] if isinstance(images, PIL.Image.Image) else images
+            pixel_values_list = [
+                image_to_pixel_values_internvl(
+                    image,
+                    input_size=self.image_size,
+                    min_num=self.min_num,
+                    max_num=self.max_num,
+                    use_thumbnail=self.use_thumbnail,
+                )
+                for image in images
+            ]
+            num_patches_list = [pv.shape[0] for pv in pixel_values_list]
+            pixel_values = torch.cat(pixel_values_list, dim=0)
+
+            for num_patches in num_patches_list:
+                context_tokens = IMG_CONTEXT * self.num_image_token * num_patches
+                image_tokens = IMG_START + context_tokens + IMG_END
+                text = text.replace("<image>", image_tokens, 1)
+
+            prompt = self.tokenizer(text, return_tensors="pt")
+            prompt.update({"pixel_values": pixel_values})
+            return prompt
+
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
+    hf_model.model.img_context_token_id = img_context_token_id
+    hf_model.processor = QianfanOCRProcessor(hf_model)
+    hf_model.model.get_output_embeddings = (
+        lambda: hf_model.model.language_model.get_output_embeddings()
+    )
+    hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
+    return hf_model

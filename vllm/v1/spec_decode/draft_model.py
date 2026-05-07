@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 logger = init_logger(__name__)
 

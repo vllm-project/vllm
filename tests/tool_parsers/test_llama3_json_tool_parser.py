@@ -4,15 +4,22 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.engine.protocol import ExtractedToolCallInformation
-from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+
+LLAMA_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+
+
+@pytest.fixture(scope="module")
+def llama_tokenizer():
+    return AutoTokenizer.from_pretrained(LLAMA_MODEL)
 
 
 @pytest.fixture
-def parser(default_tokenizer: TokenizerLike):
-    return Llama3JsonToolParser(default_tokenizer)
+def parser(llama_tokenizer):
+    return Llama3JsonToolParser(llama_tokenizer)
 
 
 def test_extract_tool_calls_simple(parser):

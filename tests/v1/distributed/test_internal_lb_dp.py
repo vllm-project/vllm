@@ -228,13 +228,13 @@ class MultinodeInternalLBServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop all server instances."""
-        while self.servers:
-            if server := self.servers.pop():
-                try:
-                    server[0].__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    print(f"Error stopping server: {e}")
-                    traceback.print_exc()
+        servers = [entry[0] for entry in self.servers if entry is not None]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
+            traceback.print_exc()
 
 
 class APIOnlyServerManager:
@@ -370,13 +370,13 @@ class APIOnlyServerManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Stop both server instances."""
-        while self.servers:
-            if server := self.servers.pop():
-                try:
-                    server[0].__exit__(exc_type, exc_val, exc_tb)
-                except Exception as e:
-                    print(f"Error stopping server: {e}")
-                    traceback.print_exc()
+        servers = [entry[0] for entry in self.servers if entry is not None]
+        self.servers.clear()
+        try:
+            RemoteOpenAIServer.shutdown_many(servers)
+        except Exception as e:
+            print(f"Error stopping servers: {e}")
+            traceback.print_exc()
 
 
 @pytest.fixture(scope="module")

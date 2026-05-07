@@ -393,29 +393,48 @@ def get_requests(args, tokenizer):
     elif args.dataset_name == "hf":
         if args.output_len is not None:
             sample_kwargs["output_len"] = args.output_len
-        if args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS:
+        common_kwargs["hf_name"] = args.hf_name
+        if (
+            args.dataset_path in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = VisionArenaDataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = InstructCoderDataset
             common_kwargs["dataset_split"] = "train"
-        elif args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = MultiModalConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
             common_kwargs["dataset_split"] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = ConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
             common_kwargs["dataset_split"] = args.hf_split
             sample_kwargs["enable_multimodal_chat"] = True
-        elif args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in AIMODataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = AIMODataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
-        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+        elif (
+            args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
+        ):
             dataset_cls = ASRDataset
             common_kwargs["dataset_subset"] = args.hf_subset
             common_kwargs["dataset_split"] = args.hf_split
@@ -557,11 +576,19 @@ def validate_args(args):
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
             | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
+        ) or args.hf_name in (
+            VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm-chat", (
                 f"{args.dataset_path} needs to use vllm-chat as the backend."
             )
         elif args.dataset_path in (
+            InstructCoderDataset.SUPPORTED_DATASET_PATHS
+            | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
+        ) or args.hf_name in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
             | ASRDataset.SUPPORTED_DATASET_PATHS
@@ -795,7 +822,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "context in a request (default: 0).",
     )
 
-    # hf dtaset
+    # hf dataset
     parser.add_argument(
         "--hf-subset",
         type=str,
@@ -807,6 +834,17 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Split of the HF dataset.",
+    )
+    parser.add_argument(
+        "--hf-name",
+        type=str,
+        default=None,
+        help=(
+            "Name of the dataset on HuggingFace "
+            "(e.g., 'lmms-lab/LLaVA-OneVision-Data'). "
+            "Specify this when --dataset-path is a local filesystem path "
+            "so the benchmark can identify the correct dataset class."
+        ),
     )
     parser.add_argument(
         "--profile",

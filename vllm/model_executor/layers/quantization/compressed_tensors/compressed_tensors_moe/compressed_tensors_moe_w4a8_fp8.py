@@ -198,11 +198,15 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # encode and reorder weight tensors, and get the layout to pass to
         # the grouped gemm kernel. `b_strides1/2` specifies the entire layout
         convert_packed_uint4b8_to_signed_int4_inplace(layer.w13_weight_packed)
+        # mirror the sync in CutlassW4A8LinearKernel; required for tp>1 correctness
+        torch.accelerator.synchronize()
         w13_weight_shuffled, self.b_strides1 = (
             ops.cutlass_encode_and_reorder_int4b_grouped(layer.w13_weight_packed)
         )
         replace_parameter(layer, "w13_weight_packed", w13_weight_shuffled)
         convert_packed_uint4b8_to_signed_int4_inplace(layer.w2_weight_packed)
+        # mirror the sync in CutlassW4A8LinearKernel; required for tp>1 correctness
+        torch.accelerator.synchronize()
         w2_weight_shuffled, self.b_strides2 = (
             ops.cutlass_encode_and_reorder_int4b_grouped(layer.w2_weight_packed)
         )
@@ -311,7 +315,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
         assert self.moe_quant_config is not None
 
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             cutlass_moe_w4a8_fp8,
         )
 

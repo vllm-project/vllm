@@ -152,6 +152,17 @@ class AlwaysHitShapeEnv:
         return ""
 
 
+def _get_vllm_functorch_config() -> dict[str, Any]:
+    """Return the functorch config overrides that vLLM applies at compile time.
+
+    Used by both set_functorch_config() and get_inductor_factors() to ensure
+    the compile-time config and cache key are always consistent."""
+    cfg: dict[str, Any] = {}
+    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        cfg["bundled_autograd_cache"] = False
+    return cfg
+
+
 def get_inductor_factors() -> list[Any]:
     factors: list[Any] = []
     # summarize system state
@@ -165,6 +176,13 @@ def get_inductor_factors() -> list[Any]:
 
     torch_factors = torch_key()
     factors.append(torch_factors)
+
+    from torch._functorch import config as functorch_config
+    from torch._inductor import config as inductor_config
+
+    factors.append(inductor_config.save_config_portable())
+    with functorch_config.patch(_get_vllm_functorch_config()):
+        factors.append(functorch_config.save_config_portable())
     return factors
 
 
@@ -294,6 +312,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
                 "config_patches": current_config,
             },
         }
+
+        if is_torch_equal_or_newer("2.13.0.dev"):
+            compile_kwargs["donate_graph_module"] = True  # type: ignore[assignment]
 
         use_aot: bool = supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
         # only add 'aot' parameter if both supported and enabled...
@@ -736,8 +757,8 @@ def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
 
 
 def set_functorch_config() -> None:
-    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-        torch._functorch.config.bundled_autograd_cache = False
+    for k, v in _get_vllm_functorch_config().items():
+        setattr(torch._functorch.config, k, v)
 
 
 class EagerAdaptor(CompilerInterface):

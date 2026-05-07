@@ -30,6 +30,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -621,6 +622,19 @@ def run_attention_backend(
             k_scale=k_scale,
         )
 
+        # Attach prefill backend (normally created by MLAAttention.__init__)
+        prefill_scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
+        prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+        mock_layer.prefill_backend = prefill_backend_cls(
+            num_heads=num_heads,
+            scale=prefill_scale,
+            kv_lora_rank=kv_lora_rank,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            vllm_config=vllm_config,
+        )
+
         # Populate static_forward_context with mock attention layers
         for layer_name in layer_names:
             vllm_config.compilation_config.static_forward_context[layer_name] = (
@@ -672,6 +686,7 @@ def run_attention_backend(
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
+    workspace_init,
     batch_spec_name: str,
     model: str,
     tensor_parallel_size: int,
@@ -784,7 +799,9 @@ def test_backend_correctness(
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
     )
-    scale = 1.0 / (total_head_size**0.5)
+    decode_scale = 1.0 / (total_head_size**0.5)
+    qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+    prefill_scale = qk_head_dim**-0.5
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
@@ -901,7 +918,7 @@ def test_backend_correctness(
         v_sdpa_in = v_mqa.unsqueeze(0).transpose(1, 2)
 
         sdpa_out_i_decode = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=decode_scale
         )
         sdpa_out_i_decode = sdpa_out_i_decode.transpose(1, 2).squeeze(
             0
@@ -937,7 +954,7 @@ def test_backend_correctness(
 
         # Single attention call with custom mask
         sdpa_out_i_prefill = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
+            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=prefill_scale
         )
         sdpa_out_i_prefill = sdpa_out_i_prefill.transpose(1, 2).squeeze(0)
         sdpa_out_i_prefill = sdpa_out_i_prefill.flatten(start_dim=-2)

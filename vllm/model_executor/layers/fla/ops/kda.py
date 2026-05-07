@@ -1076,10 +1076,10 @@ def chunk_gla_fwd_kernel_o(
         )
         p_h = tl.make_block_ptr(
             h + (i_tg * H + i_h) * K * V,
-            (K, V),
-            (V, 1),
-            (i_k * BK, i_v * BV),
-            (BK, BV),
+            (V, K),
+            (K, 1),
+            (i_v * BV, i_k * BK),
+            (BV, BK),
             (1, 0),
         )
 
@@ -1090,12 +1090,11 @@ def chunk_gla_fwd_kernel_o(
         b_g = tl.load(p_g, boundary_check=(0, 1))
         # [BT, BK]
         b_qg = (b_q * exp(b_g)).to(b_q.dtype)
-        # [BK, BV]
+        # [BV, BK]
         b_h = tl.load(p_h, boundary_check=(0, 1))
-        # works but dkw, owing to divine benevolence
         # [BT, BV]
         if i_k >= 0:
-            b_o += tl.dot(b_qg, b_h.to(b_qg.dtype))
+            b_o += tl.dot(b_qg, tl.trans(b_h).to(b_qg.dtype))
     p_v = tl.make_block_ptr(
         v + (bos * H + i_h) * V,
         (T, V),

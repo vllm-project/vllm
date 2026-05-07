@@ -67,13 +67,15 @@ class EncoderCudaGraphManager:
 
         comp_config = vllm_config.compilation_config
         user_budgets = comp_config.encoder_cudagraph_token_budgets
-        user_max_mm_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
+        user_max_vision_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
 
-        if user_budgets and user_max_mm_items > 0:
+        multimodal_config = vllm_config.model_config.multimodal_config
+
+        if user_budgets and user_max_vision_items > 0:
             # Fully user-specified
             self.token_budgets = sorted(user_budgets)
-            self.max_batch_size = user_max_mm_items
+            self.max_batch_size = user_max_vision_items
         else:
             # Auto-infer missing values from model
             min_budget, max_budget = model.get_encoder_cudagraph_budget_range(
@@ -85,14 +87,20 @@ class EncoderCudaGraphManager:
                 else self._generate_budgets(min_budget, max_budget)
             )
             self.max_batch_size = (
-                user_max_mm_items if user_max_mm_items > 0 else max_budget // min_budget
+                user_max_vision_items
+                if user_max_vision_items > 0
+                else max_budget // min_budget
             )
 
-        if user_max_frames > 0:
+        assert multimodal_config is not None
+        if multimodal_config.get_limit_per_prompt("video") == 0:
+            self.max_frames_per_batch = 0
+        elif user_max_frames is not None:
             self.max_frames_per_batch = user_max_frames
         else:
-            # TODO(shen-shanshan): optimize this auto-infer for max_frames_per_batch.
-            self.max_frames_per_batch = self.max_batch_size * 2
+            # Set it to the model-specific value according to its `processing_info`.
+            max_frames_per_video = self.model.get_max_frames_per_video()
+            self.max_frames_per_batch = self.max_batch_size * max_frames_per_video
 
         mm_config = vllm_config.model_config.multimodal_config
         self.use_dp = (
@@ -111,7 +119,7 @@ class EncoderCudaGraphManager:
             "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
             self.token_budgets,
             self.max_batch_size,
-            self.max_frames_per_batch if self.max_frames_per_batch > 0 else "auto",
+            self.max_frames_per_batch,
             self.use_dp,
         )
 

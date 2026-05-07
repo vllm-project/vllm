@@ -67,6 +67,21 @@ function cpu_tests() {
       --num-prompts 20 \
       --endpoint /v1/completions
     kill -s SIGTERM $server_pid &'
+
+  # smoke test for Gated DeltaNet
+  docker exec cpu-test bash -c '
+    set -e
+    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS vllm serve Qwen/Qwen3.5-0.8B --max-model-len 2048 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+      --backend vllm \
+      --dataset-name random \
+      --model Qwen/Qwen3.5-0.8B \
+      --num-prompts 20 \
+      --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
+
 }
 
 # All of CPU tests are expected to be finished less than 40 mins.

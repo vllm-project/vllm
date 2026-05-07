@@ -2,3 +2,5 @@ DeepSeek-R1-TP_MI325.yaml
 DeepSeek-R1-DP_MI325.yaml
 DeepSeek-V3.2-TP_MI325.yaml
 DeepSeek-V3.2-DP_MI325.yaml
+Qwen3-30B-A3B-NVFP4.yaml
+Qwen3.5-35B-A3B-MXFP4-TP2.yaml

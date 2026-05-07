@@ -62,7 +62,7 @@ def test_supports_batch_invariant_disables():
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability",
+    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
     return_value=True,
 )
 @patch("vllm.utils.flashinfer.has_nvidia_artifactory", return_value=True)
@@ -72,7 +72,7 @@ def test_supports_sm100_with_artifactory(_art, _cap):
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability",
+    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
     return_value=False,
 )
 def test_supports_non_sm100_platform(_cap):
@@ -81,7 +81,7 @@ def test_supports_non_sm100_platform(_cap):
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability",
+    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
     return_value=True,
 )
 @patch("vllm.utils.flashinfer.has_nvidia_artifactory", return_value=False)

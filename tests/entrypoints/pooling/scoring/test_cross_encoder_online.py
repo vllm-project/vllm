@@ -453,25 +453,6 @@ async def test_pooling_classify(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_pooling_token_classify(server: RemoteOpenAIServer):
-    response = requests.post(
-        server.url_for("pooling"),
-        json={
-            "model": MODEL_NAME,
-            "task": "token_classify",
-            "input": input_text,
-            "encoding_format": "float",
-        },
-    )
-
-    poolings = PoolingResponse.model_validate(response.json())
-
-    assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == len(input_tokens)
-    assert len(poolings.data[0].data[0]) == 1
-
-
-@pytest.mark.asyncio
 async def test_rerank_max_tokens_per_doc(
     server: RemoteOpenAIServer,
 ):
@@ -544,7 +525,7 @@ async def test_rerank_max_tokens_per_doc_validation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "token_classify", "plugin"])
 async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
     response = requests.post(
         server.url_for("pooling"),
@@ -558,6 +539,8 @@ async def test_pooling_not_supported(server: RemoteOpenAIServer, task: str):
     assert response.json()["error"]["type"] == "BadRequestError"
     if task == "plugin":
         err_msg = "No IOProcessor plugin installed."
+    elif task == "token_classify":
+        err_msg = "Try switching the model's pooling_task via"
     else:
         err_msg = f"Unsupported task: {task!r}"
     assert response.json()["error"]["message"].startswith(err_msg)

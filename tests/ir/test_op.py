@@ -21,7 +21,7 @@ class CustomError(Exception):
     pass
 
 
-@vllm.ir.register_op
+@vllm.ir.register_op(allow_inplace=True)
 def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return x + y
 
@@ -129,11 +129,15 @@ class TestIrOpCustomAdd:
 
     @pytest.mark.parametrize("enable_torch_wrap", [True, False])
     @pytest.mark.parametrize("symbolic_trace", [True, False])
+    @pytest.mark.parametrize("overload", ["default", "maybe_inplace"])
     def test_trace_sees_single_custom_op(
-        self, symbolic_trace: bool, enable_torch_wrap: bool
+        self, symbolic_trace: bool, enable_torch_wrap: bool, overload: str
     ):
+        op_fn = _custom_add if overload == "default" else _custom_add.maybe_inplace
+        torch_op = getattr(torch.ops.vllm_ir._custom_add, overload)
+
         def fn(x, y):
-            return _custom_add(x, y)
+            return op_fn(x, y)
 
         def find_fn(target: Any, gm: fx.GraphModule):
             return gm.graph.find_nodes(op="call_function", target=target)
@@ -155,7 +159,7 @@ class TestIrOpCustomAdd:
         torch.testing.assert_close(out_fx, out_eager)
 
         # check that IR nodes only appear if enable_torch_wrap=True
-        ir_nodes = find_fn(torch.ops.vllm_ir._custom_add.default, gm)
+        ir_nodes = find_fn(torch_op, gm)
         if enable_torch_wrap:
             assert len(ir_nodes) == 1, gm.code
         else:
@@ -167,7 +171,7 @@ class TestIrOpCustomAdd:
         else:
             gm = make_fx(fn)(torch.randn(2, 2), torch.randn(2, 2))
 
-        ir_nodes = find_fn(torch.ops.vllm_ir._custom_add.default, gm)
+        ir_nodes = find_fn(torch_op, gm)
         assert len(ir_nodes) == 1, gm.code
 
 
@@ -176,9 +180,12 @@ def impl_a(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return x + y + 10
 
 
-@_custom_add.register_impl("impl_b")
+@_custom_add.register_impl("impl_b", inplace=True)
 def impl_b(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return x + y + 20
+    """Computes x+y+20"""
+    x.add_(y)
+    x.add_(20)
+    return x
 
 
 @_custom_add.register_impl("impl_even", supports_args=lambda x, y: x.size(1) % 2 == 0)
@@ -243,19 +250,23 @@ class TestIrOpImplDispatch:
         # Restored to empty
         assert _custom_add.get_priority() == []
 
-    def test_dispatch_priority_order(self):
+    @pytest.mark.parametrize("overload", ["default", "maybe_inplace"])
+    def test_dispatch_priority_order(self, overload: str):
+        op_fn = _custom_add if overload == "default" else _custom_add.maybe_inplace
+        torch_op = getattr(torch.ops.vllm_ir._custom_add, overload)
+
         x = torch.tensor(1, dtype=torch.int32)
         y = torch.tensor(2, dtype=torch.int32)
 
         with _custom_add.set_priority(["impl_b", "impl_a"]):
             assert _custom_add.dispatch(x, y) is impl_b
-            out1 = _custom_add(x, y)
-            out2 = torch.ops.vllm_ir._custom_add(x, y)
+            out1 = op_fn(x.clone(), y)
+            out2 = torch_op(x.clone(), y)
 
             with _custom_add.set_priority(["impl_a"]):
                 assert _custom_add.dispatch(x, y) is impl_a
-                out3 = _custom_add(x, y)
-                out4 = torch.ops.vllm_ir._custom_add(x, y)
+                out3 = op_fn(x.clone(), y)
+                out4 = torch_op(x.clone(), y)
 
         # impl_b
         assert out1.item() == 1 + 2 + 20
@@ -265,18 +276,18 @@ class TestIrOpImplDispatch:
         assert out4.item() == 1 + 2 + 10
 
     def test_unsupported_impl_filtered(self):
-        @_custom_add.register_impl("unsupported", supported=False)
-        def impl_bad(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        @_custom_add.register_impl("impl_unsupported", supported=False)
+        def impl_unsupported(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             return x + y + 999
 
         x = torch.tensor(1, dtype=torch.int32)
         y = torch.tensor(2, dtype=torch.int32)
 
-        with _custom_add.set_priority(["unsupported", "impl_a"]):
+        with _custom_add.set_priority(["impl_unsupported", "impl_a"]):
             assert _custom_add.get_priority() == ["impl_a"]
             out = _custom_add(x, y)
 
-        # impl_bad skipped → impl_a
+        # impl_unsupported skipped → impl_a
         assert out.item() == 1 + 2 + 10
 
     def test_supports_args_runtime_dispatch_and_warning(
@@ -495,3 +506,68 @@ def test_uuid_and_oot(tmp_path: Path):
     assert uuid2 == uuid
     assert uuid2 != uuid1
     del _custom_mm.impls["impl_mm_oot"]
+
+
+def _test_native(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y
+
+
+def _make_op_with_generator(name: str = "_ig_test"):
+    op = IrOp(name, _test_native)
+
+    @op.register_input_generator
+    def _gen(n: int = 4):
+        x = torch.randn(n, 3)
+        y = torch.randn(n, 3)
+        return x, y
+
+    return op
+
+
+def _test_native_single(x: torch.Tensor) -> torch.Tensor:
+    return x
+
+
+class TestInputGenerator:
+    def test_no_input_generator_by_default(self):
+        op = IrOp("_ig_test_no_gen", _test_native_single)
+        assert not op.has_input_generator
+
+    def test_register_input_generator(self):
+        op = _make_op_with_generator("_ig_test_reg")
+        assert op.has_input_generator
+
+    def test_generate_inputs_returns_tuple(self):
+        op = _make_op_with_generator("_ig_test_tuple")
+        result = op.generate_inputs(n=2)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert result[0].shape == (2, 3)
+        assert result[1].shape == (2, 3)
+
+    def test_generate_inputs_default_kwargs(self):
+        op = _make_op_with_generator("_ig_test_default")
+        result = op.generate_inputs()
+        assert result[0].shape == (4, 3)
+
+    def test_generate_inputs_without_registration_raises(self):
+        op = IrOp("_ig_test_no_gen_raises", _test_native_single)
+        with pytest.raises(RuntimeError, match="No input generator"):
+            op.generate_inputs()
+
+
+class TestTolerance:
+    def test_override_and_get_tolerance(self):
+        op = IrOp("_tol_test", _test_native)
+
+        tol = op.get_tolerance(torch.float32)
+        assert tol == {"atol": 1e-5, "rtol": 1.3e-6}
+
+        op.override_tolerance(torch.float32, atol=0.1, rtol=0.2)
+        assert op.get_tolerance(torch.float32) == {"atol": 0.1, "rtol": 0.2}
+        assert op.get_tolerance(torch.float16) == {"atol": 1e-3, "rtol": 1e-3}
+
+    def test_get_tolerance_raises_for_unknown_dtype(self):
+        op = IrOp("_tol_test_unknown", _test_native)
+        with pytest.raises(ValueError, match="No tolerance defined"):
+            op.get_tolerance(torch.complex64)

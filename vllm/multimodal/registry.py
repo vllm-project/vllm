@@ -193,6 +193,9 @@ class MultiModalRegistry:
         ctx = self._create_processing_ctx(model_config, tokenizer)
         return factories.info(ctx)
 
+    def get_processing_info(self, model_config: "ModelConfig") -> BaseProcessingInfo:
+        return self._create_processing_info(model_config, tokenizer=None)
+
     def create_processor(
         self,
         model_config: "ModelConfig",
@@ -204,7 +207,8 @@ class MultiModalRegistry:
         Create a multi-modal processor for a specific model and tokenizer.
         """
         if not model_config.is_multimodal_model:
-            raise ValueError(f"{model_config.model} is not a multimodal model")
+            model_name = model_config.served_model_name or model_config.model
+            raise ValueError(f"{model_name} is not a multimodal model")
 
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory

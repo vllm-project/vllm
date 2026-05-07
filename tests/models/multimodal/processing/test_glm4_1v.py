@@ -6,7 +6,7 @@ import pytest
 from vllm.assets.video import VideoAsset
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import batched_tensors_equal
-from vllm.multimodal.video import OpenCVDynamicVideoBackend, OpenCVVideoBackend
+from vllm.multimodal.video import DynamicVideoBackend, VideoBackend
 
 from ...utils import build_model_context
 
@@ -70,9 +70,11 @@ def test_processor_override(
 
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("fps", [2])
+@pytest.mark.parametrize("backend", ["opencv", "pyav"])
 def test_video_loader_consistency(
     model_id: str,
     fps: int,
+    backend: str,
 ):
     """
     Ensure dynamic video loader (pre-sampled by loader) and normal video
@@ -93,9 +95,11 @@ def test_video_loader_consistency(
     with open(video_path, "rb") as f:
         video_bytes = f.read()
 
-    static_video, static_metadata = OpenCVVideoBackend.load_bytes(video_bytes)
-    dynamic_video, dynamic_metadata = OpenCVDynamicVideoBackend.load_bytes(
-        video_bytes, fps=fps
+    static_video, static_metadata = VideoBackend.load_bytes(
+        video_bytes, backend=backend
+    )
+    dynamic_video, dynamic_metadata = DynamicVideoBackend.load_bytes(
+        video_bytes, fps=fps, backend=backend
     )
 
     # pre-sampled loader shouldn't read all frames

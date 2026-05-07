@@ -6,6 +6,7 @@ import pytest
 
 from tests.utils import get_attn_backend_list_based_on_platform
 from vllm import LLM, SamplingParams
+from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 
@@ -77,3 +78,23 @@ def test_eagle_max_len(
             "is longer than the eagle max length"
         )
         assert o.outputs[0].text == "a b c d e " * 15
+
+
+@pytest.mark.parametrize("spec_max_model_len", [80, 150])
+def test_mtp_speculative_config_max_model_len(spec_max_model_len: int):
+    """Regression test for #41456: max_model_len in speculative config
+    should be respected for the draft model."""
+    model_config = ModelConfig(
+        model="XiaomiMiMo/MiMo-7B-Base",
+        runner="generate",
+        max_model_len=200,
+        trust_remote_code=True,
+    )
+    spec_config = SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        method="mtp",
+        num_speculative_tokens=1,
+        max_model_len=spec_max_model_len,
+    )
+    assert spec_config.draft_model_config.max_model_len == spec_max_model_len

@@ -24,7 +24,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -162,7 +164,6 @@ class MiniMaxText01MoE(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=self.intermediate_size * self.tp_size,
             params_dtype=self.params_dtype,
-            reduce_results=True,
             renormalize=True,
             quant_config=self.quant_config,
             tp_size=self.tp_size,

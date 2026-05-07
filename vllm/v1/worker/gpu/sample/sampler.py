@@ -12,7 +12,10 @@ from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
-from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
+from vllm.v1.worker.gpu.sample.logprob import (
+    LogprobTokenIdsState,
+    compute_topk_logprobs,
+)
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
@@ -38,6 +41,7 @@ class Sampler:
         self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
+        self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(
@@ -47,12 +51,14 @@ class Sampler:
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
+        self.logprob_token_ids_state.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes()
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
+        self.logprob_token_ids_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -79,13 +85,23 @@ class Sampler:
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        if max_num_logprobs != NO_LOGPROBS:
+        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
+            idx_mapping_np
+        )
+        if max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0:
             if self.logprobs_mode == "processed_logprobs":
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
+            num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
             logprobs_tensors = compute_topk_logprobs(
-                logits, max_num_logprobs, sampled, cu_num_logits
+                logits,
+                num_logprobs,
+                sampled,
+                cu_num_logits,
+                logprob_token_ids_state=self.logprob_token_ids_state,
+                expanded_idx_mapping=input_batch.expanded_idx_mapping,
+                max_per_req_token_ids=max_per_req_token_ids,
             )
         else:
             logprobs_tensors = None

@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
 
 
 @dataclass
@@ -47,3 +50,6 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+    # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
+    # thinking-token-budget logits (holder may exist with an empty tracking set).
+    thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None

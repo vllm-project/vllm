@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 from dataclasses import replace
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -17,6 +20,10 @@ from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+if TYPE_CHECKING:
+    from vllm.config.speculative import SpeculativeConfig
 
 logger = init_logger(__name__)
 
@@ -50,12 +57,32 @@ class RejectionSampler(nn.Module):
         output tokens = accepted tokens + recovered tokens + bonus tokens
     """
 
-    def __init__(self, sampler: Sampler):
+    def __init__(
+        self,
+        sampler: Sampler,
+        spec_config: SpeculativeConfig | None = None,
+        device: torch.device | None = None,
+    ):
         super().__init__()
         self.sampler = sampler
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
+
+        self.synthetic_conditional_rates: torch.Tensor | None = None
+        if (
+            spec_config is not None
+            and spec_config.rejection_sample_method == "synthetic"
+        ):
+            assert spec_config.synthetic_acceptance_rates is not None
+            self.synthetic_conditional_rates = torch.tensor(
+                unconditional_to_conditional_rates(
+                    spec_config.synthetic_acceptance_rates
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+        self.synthetic_mode = self.synthetic_conditional_rates is not None
 
     def forward(
         self,
@@ -147,6 +174,8 @@ class RejectionSampler(nn.Module):
             target_logits,
             bonus_token_ids,
             sampling_metadata,
+            synthetic_mode=self.synthetic_mode,
+            synthetic_conditional_rates=self.synthetic_conditional_rates,
         )
 
         logprobs_tensors = None
@@ -261,16 +290,24 @@ class RejectionSampler(nn.Module):
         any_penalties_or_bad_words = (
             sampling_metadata.bad_words_token_ids or has_penalties
         )
+        holder = sampling_metadata.thinking_budget_state_holder
+        needs_thinking = holder is not None and holder.has_tracked_requests()
 
         output_token_ids = sampling_metadata.output_token_ids
-        if any_penalties_or_bad_words:
+        if any_penalties_or_bad_words or needs_thinking:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
                 sampling_metadata.spec_token_ids,
             )
 
         # Calculate indices of target logits.
-        if sampling_metadata.allowed_token_ids_mask is not None or has_penalties:
+        repeat_indices: torch.Tensor | None = None
+        need_repeat_indices = (
+            sampling_metadata.allowed_token_ids_mask is not None
+            or has_penalties
+            or needs_thinking
+        )
+        if need_repeat_indices:
             num_requests = len(metadata.num_draft_tokens)
             num_draft_tokens = torch.tensor(metadata.num_draft_tokens, device="cpu")
             original_indices = torch.arange(num_requests, device="cpu")
@@ -298,7 +335,12 @@ class RejectionSampler(nn.Module):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
-
+        if holder is not None and holder.has_tracked_requests():
+            logits = holder.apply_to_logits(
+                logits,
+                predict_bonus_token=False,
+                spec_token_ids=sampling_metadata.spec_token_ids,
+            )
         return logits
 
     @staticmethod
@@ -362,6 +404,8 @@ def rejection_sample(
     # [batch_size, 1]
     bonus_token_ids: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    synthetic_mode: bool = False,
+    synthetic_conditional_rates: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -389,6 +433,20 @@ def rejection_sample(
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+
+    # Generate uniform probabilities before either kernel because synthetic
+    # mode needs them in the greedy kernel too.  Skip only when all requests
+    # are greedy *and* synthetic mode is off (the standard fast-path).
+    # [num_tokens]
+    uniform_probs: torch.Tensor | None = None
+    if synthetic_mode or not sampling_metadata.all_greedy:
+        uniform_probs = generate_uniform_probs(
+            num_tokens,
+            num_draft_tokens,
+            sampling_metadata.generators,
+            device,
+        )
+
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
@@ -400,6 +458,9 @@ def rejection_sample(
             bonus_token_ids,
             is_greedy,
             max_spec_len,
+            uniform_probs,
+            synthetic_conditional_rates,
+            SYNTHETIC_MODE=synthetic_mode,
         )
         if sampling_metadata.all_greedy:
             return output_token_ids
@@ -407,15 +468,6 @@ def rejection_sample(
     # Compute probability distribution from target logits.
     target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
     assert target_probs.is_contiguous()
-
-    # Generate uniform probabilities for rejection sampling.
-    # [num_tokens]
-    uniform_probs = generate_uniform_probs(
-        num_tokens,
-        num_draft_tokens,
-        sampling_metadata.generators,
-        device,
-    )
 
     # Sample recovered tokens for each position.
     # [num_tokens]
@@ -431,6 +483,7 @@ def rejection_sample(
     )
 
     # Rejection sampling for random sampling requests.
+    assert uniform_probs is not None
     rejection_random_sample_kernel[(batch_size,)](
         output_token_ids,
         cu_num_draft_tokens,
@@ -443,7 +496,9 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
+        synthetic_conditional_rates,
         NO_DRAFT_PROBS=draft_probs is None,
+        SYNTHETIC_MODE=synthetic_mode,
     )
     return output_token_ids
 
@@ -658,6 +713,9 @@ def rejection_greedy_sample_kernel(
     bonus_token_ids_ptr,  # [batch_size]
     is_greedy_ptr,  # [batch_size] or None
     max_spec_len,
+    uniform_probs_ptr,  # [num_tokens] or None (synthetic mode only)
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
+    SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     # FIXME(woosuk): Because is_greedy_ptr is not None at profiling run,
@@ -675,14 +733,20 @@ def rejection_greedy_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos)
+            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos).to(tl.int32)
+            if SYNTHETIC_MODE:
+                uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
+                rate = tl.load(synthetic_conditional_rates_ptr + pos)
+                accepted = uniform_prob < rate
+                token_id = draft_token_id if accepted else target_argmax_id
+                rejected = not accepted
+            else:
+                token_id = target_argmax_id
+                rejected = draft_token_id != target_argmax_id
             tl.store(
                 output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
-                target_argmax_id,
+                token_id,
             )
-            if draft_token_id != target_argmax_id:
-                # Reject.
-                rejected = True
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.
@@ -707,7 +771,9 @@ def rejection_random_sample_kernel(
     is_greedy_ptr,  # [batch_size]
     max_spec_len,
     vocab_size,
+    synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
     NO_DRAFT_PROBS: tl.constexpr,
+    SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     is_greedy = tl.load(is_greedy_ptr + req_idx)
@@ -723,23 +789,28 @@ def rejection_random_sample_kernel(
     for pos in range(num_draft_tokens):
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
-            if NO_DRAFT_PROBS:
-                draft_prob = 1
-            else:
-                draft_prob = tl.load(
-                    draft_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
-                )
-            target_prob = tl.load(
-                target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
-            )
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-            # NOTE(woosuk): While the draft probability should never be 0,
-            # we check it to avoid NaNs. If it happens to be 0, we reject.
-            if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
-                # Accept.
+            if SYNTHETIC_MODE:
+                rate = tl.load(synthetic_conditional_rates_ptr + pos)
+                accepted = uniform_prob < rate
+            else:
+                if NO_DRAFT_PROBS:
+                    draft_prob = 1
+                else:
+                    draft_prob = tl.load(
+                        draft_probs_ptr
+                        + (start_idx + pos) * vocab_size
+                        + draft_token_id
+                    )
+                target_prob = tl.load(
+                    target_probs_ptr + (start_idx + pos) * vocab_size + draft_token_id
+                )
+                # NOTE(woosuk): While the draft probability should never be 0,
+                # we check it to avoid NaNs. If it happens to be 0, we reject.
+                accepted = draft_prob > 0 and target_prob / draft_prob >= uniform_prob
+            if accepted:
                 token_id = draft_token_id
             else:
-                # Reject. Use recovered token.
                 rejected = True
                 token_id = tl.load(recovered_token_ids_ptr + start_idx + pos)
             tl.store(

@@ -134,3 +134,13 @@ print(f"Data: {data!r}")
 ## Online Serving
 
 Please refer to the [pooling API](README.md#pooling-api). Pooling task corresponding to reward model types refer to the [table above](#summary).
+
+## More examples
+
+More examples can be found here: [examples/pooling/reward](../../../examples/pooling/reward)
+
+## Deprecated Features
+
+### `LLM.reward`
+
+`llm.reward` api is deprecated and will be removed in v0.23. Please use `LLM.encode` with `pooling_task="classify"` or `pooling_task="token_classify"` instead.
