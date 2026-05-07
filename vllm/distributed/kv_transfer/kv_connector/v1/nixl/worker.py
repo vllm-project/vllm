@@ -53,6 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_representative_spec_type,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -426,8 +427,10 @@ class NixlConnectorWorker:
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
+        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
-            type(g.kv_cache_spec) for g in self.kv_cache_config.kv_cache_groups
+            get_representative_spec_type(g.kv_cache_spec)
+            for g in self.kv_cache_config.kv_cache_groups
         )
 
         # Per-engine TP mappings. Generated during handshake.

@@ -75,10 +75,8 @@ def compute_tp_mapping(
     factor in a single pass.
     """
     # --- Attention source ranks ---
-    if is_mla:
-        # All heads replicated across all ranks.
-        attn_ranks = [0]
-    elif tp_size >= remote_tp_size:
+    # For MLA, we only need one remote since cache is duplicated, use the same mapping.
+    if tp_size >= remote_tp_size:
         # D (local TP) > P (remote TP): multiple local ranks read different chunks from
         # *one* remote rank, corresponding to different kv heads.
         attn_ranks = [tp_rank * remote_tp_size // tp_size]
