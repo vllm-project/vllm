@@ -713,7 +713,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_numa_node(cls, device_id: int = 0) -> int | None:
         """Get the NUMA node ID for a GPU device."""
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        handle = _nvml_device_handle(physical_device_id)
 
         try:
             numa_node = pynvml.nvmlDeviceGetNumaNodeId(handle)
