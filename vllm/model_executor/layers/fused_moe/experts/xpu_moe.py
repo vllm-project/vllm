@@ -47,6 +47,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.is_fp8 = False
         self.is_mxfp4 = False
+        self.is_mxfp8 = False
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -148,6 +149,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             output=output,
             is_fp8=self.is_fp8,
             is_mxfp4=self.is_mxfp4,
+            is_mxfp8=self.is_mxfp8,
         )
 
 
@@ -165,7 +167,10 @@ class XPUExpertsFp8(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        self.is_fp8 = True
+        if quant_config.quant_dtype == "mxfp8":
+            self.is_mxfp8 = True
+        else:
+            self.is_fp8 = True
 
 
 class XPUExpertsMXFp4(XPUExperts):
