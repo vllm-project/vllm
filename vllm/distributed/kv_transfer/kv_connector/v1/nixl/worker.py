@@ -1026,9 +1026,10 @@ class NixlConnectorWorker:
             # are smaller than D's. self._conv_decomp has D-sized dimensions,
             # but we need P-sized offsets. Scale down by |tp_ratio|.
             abs_ratio = -tp_ratio
-            xb_p = self._conv_decomp.x_bytes // abs_ratio
-            bb_p = self._conv_decomp.b_bytes // abs_ratio
-            conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
+            p0_p = self._conv_decomp.p0_bytes // abs_ratio
+            p1_p = self._conv_decomp.p1_bytes // abs_ratio
+            p2_p = self._conv_decomp.p2_bytes // abs_ratio
+            conv_offsets = [(0, p0_p), (p0_p, p1_p), (p0_p + p1_p, p2_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical

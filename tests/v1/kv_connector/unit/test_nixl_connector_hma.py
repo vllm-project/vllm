@@ -564,3 +564,58 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
     )
 
     assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
+
+
+@pytest.mark.cpu_test
+def test_derive_mamba_conv_split_gdn_layout():
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        derive_mamba_conv_split,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    # GDN local conv layout [K, K, V] with TP-local dims:
+    # K=48, V=16, conv_rows=3 -> conv_dim_local=112
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((112, 3), (4, 4, 8)),
+        dtypes=(torch.float16, torch.float16),
+        mamba_type="gdn_attention",
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils.is_conv_state_dim_first",
+        return_value=True,
+    ):
+        split = derive_mamba_conv_split(spec, local_tp=2)
+    assert (split.p0_local, split.p1_local, split.p2_local) == (48, 48, 16)
+    assert split.local_conv_offsets == [(0, 288), (288, 288), (576, 96)]
+    # tp_ratio=2 means this D rank reads one half of the remote page.
+    assert split.remote_conv_offsets(local_rank_offset=1, tp_ratio=2) == [
+        (288, 288),
+        (864, 288),
+        (1440, 96),
+    ]
+
+
+@pytest.mark.cpu_test
+def test_derive_mamba_conv_split_mamba2_still_supported():
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        derive_mamba_conv_split,
+    )
+    from vllm.v1.kv_cache_interface import MambaSpec
+
+    # Mamba2 local conv layout [x, B, C] with x=64, B=16, C=16 and conv_rows=3.
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((96, 3), (8, 16)),
+        dtypes=(torch.float16, torch.float16),
+        mamba_type="mamba2",
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils.is_conv_state_dim_first",
+        return_value=True,
+    ):
+        split = derive_mamba_conv_split(spec, local_tp=2)
+    assert (split.p0_local, split.p1_local, split.p2_local) == (64, 16, 16)
+    assert split.local_conv_offsets == [(0, 384), (384, 96), (480, 96)]
