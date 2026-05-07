@@ -729,12 +729,14 @@ class Step3VLForConditionalGeneration(
             input_key_by_modality={
                 "image": "pixel_values",
             },
-            # 只保留输入 pixtel 相关的 buffer_key。
+            # "pixel_values" 通过 input_buffer 机制更新
+            # （与 metadata_buffers["pixel_values"] 是同一 tensor），
+            # 因此只保留 "patch_pixel_values" 在 buffer_keys 中，
+            # 避免 _run_budget_graph 中的重复 zero_ + copy_。
             # merge 所需的 indices 不在 graph 内完成，
             # 而是在 replay 后的 merge_encoder_cudagraph_output 中使用
             # 真实的 num_patches 按 item 逐项拼接。
             buffer_keys=[
-                "pixel_values",
                 "patch_pixel_values",
             ],
             # Encoder 输出 hidden dim，等于 LLM 的 hidden_size
@@ -942,7 +944,7 @@ class Step3VLForConditionalGeneration(
         per_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         max_num_patches_per_item = max(
-            1,
+            0,
             int(
                 math.ceil(
                     (per_item_output - num_image_feature_size) / num_patch_feature_size
@@ -1055,14 +1057,16 @@ class Step3VLForConditionalGeneration(
         patch_pixel_values = buffers["patch_pixel_values"]
         image_features = self._get_vision_model_output(pixel_values)
         image_features = self._process_image_features(image_features)
-
-        patch_features = self._get_vision_model_output(patch_pixel_values)
-        patch_features = self._process_image_features(patch_features)
         H = image_features.shape[-1]
-        patch_flat = patch_features.view(-1, H)  # (P_total * NPFS, H)
         image_flat = image_features.view(-1, H)  # (B * IMFS, H)
 
-        return torch.cat([patch_flat, image_flat], dim=0)
+        if patch_pixel_values.numel() > 0:
+            patch_features = self._get_vision_model_output(patch_pixel_values)
+            patch_features = self._process_image_features(patch_features)
+            patch_flat = patch_features.view(-1, H)  # (TP * NPFS, H)
+            return torch.cat([patch_flat, image_flat], dim=0)
+        else:
+            return image_flat
 
     def merge_encoder_cudagraph_output(
         self,
