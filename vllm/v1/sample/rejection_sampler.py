@@ -118,7 +118,7 @@ class RejectionSampler(nn.Module):
         assert metadata.max_spec_len <= MAX_SPEC_LEN
 
         if self._can_use_fast_greedy_path(sampling_metadata, metadata):
-            return self._fast_greedy_path(metadata, logits)
+            return self._fast_greedy_path(metadata, logits, sampling_metadata)
 
         bonus_logits_indices = metadata.bonus_logits_indices
         target_logits_indices = metadata.target_logits_indices
@@ -225,6 +225,7 @@ class RejectionSampler(nn.Module):
         self,
         metadata: SpecDecodeMetadata,
         logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
         """Fast path for greedy sampling.
 
@@ -247,6 +248,16 @@ class RejectionSampler(nn.Module):
             all_argmax[metadata.bonus_logits_indices].unsqueeze(1).to(torch.int32)
         )
 
+        # Synthetic mode
+        uniform_probs: torch.Tensor | None = None
+        if self.synthetic_mode:
+            uniform_probs = generate_uniform_probs(
+                metadata.draft_token_ids.shape[0],
+                metadata.num_draft_tokens,
+                sampling_metadata.generators,
+                device,
+            )
+
         # Create output buffer.
         output_token_ids = torch.full(
             (num_requests, metadata.max_spec_len + 1),
@@ -264,9 +275,9 @@ class RejectionSampler(nn.Module):
             bonus_token_ids,
             None,  # is_greedy=None since all are greedy
             metadata.max_spec_len,
-            None,  # uniform_probs_ptr (synthetic mode only)
-            None,  # synthetic_conditional_rates_ptr (synthetic mode only)
-            SYNTHETIC_MODE=False,
+            uniform_probs,
+            self.synthetic_conditional_rates,
+            SYNTHETIC_MODE=self.synthetic_mode,
         )
 
         return SamplerOutput(
