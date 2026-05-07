@@ -46,6 +46,7 @@ Your custom class must accept a `VllmConfig` upon instantiation and implement a 
 
 - `speculative_config.method = "custom_class"`
 - `speculative_config.model = "your_module.YourCustomProposerClass"`
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON
