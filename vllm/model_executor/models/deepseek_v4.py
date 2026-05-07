@@ -68,6 +68,19 @@ from .utils import (
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 
+_DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD: dict[int, int] = {
+    2048: 64,  # DeepSeek-V4-Flash
+    3072: 128,  # DeepSeek-V4-Pro
+}
+
+# When overlap is engaged, cap deep_gemm at this fraction of total SMs so
+# mega_moe (default stream) leaves room for shared_experts on the aux stream.
+# Fork happens before self.gate, so by the time mega_moe starts, shared has
+# usually finished its first GEMM — a soft cap (0.8) is enough to avoid
+# starving shared without crippling mega_moe (50% cap saw -60% throughput).
+_DEEPSEEK_V4_OVERLAP_SM_RATIO: float = 0.8
+
+
 class DeepseekV4MLP(nn.Module):
     def __init__(
         self,
@@ -403,7 +416,13 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        shared_experts: torch.nn.Module | None = None,
+        gate: nn.Module,
+        shared_experts: nn.Module | None,
+        scoring_func: str,
+        renormalize: bool,
+        hash_indices_dtype: torch.dtype,
+        routed_scaling_factor: float,
+        swiglu_limit: float | None,
         overlap_stream: torch.cuda.Stream | None = None,
         overlap_events: tuple[torch.cuda.Event, torch.cuda.Event] | None = None,
         prefix: str = "",
@@ -419,10 +438,22 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.intermediate_size = intermediate_size
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
+        # Routing + shared MLP live on this module so the dynamo-opaque op
+        # can reach them via a single ``no_compile_layers[layer_name]`` lookup
+        # (mirrors ``FusedMoE``'s arg-style: gate / shared_experts injected by
+        # the wrapping DeepseekV4MoE).
+        self.gate = gate
         self.shared_experts = shared_experts
+        self.scoring_func = scoring_func
+        self.renormalize = renormalize
+        self.hash_indices_dtype = hash_indices_dtype
+        self.routed_scaling_factor = routed_scaling_factor
+        self.swiglu_limit = swiglu_limit
         self._overlap_stream = overlap_stream
         self._overlap_events = overlap_events
+
         self._sm_count = current_platform.num_compute_units()
+        self.layer_name = prefix
 
         weight_attrs = {"weight_loader": self.weight_loader}
         self.w13_weight = nn.Parameter(
@@ -605,33 +636,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             self._symm_buffer_cache[key] = symm_buffer
         return symm_buffer
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        *,
-        activation_clamp: float | None,
-        fast_math: bool = True,
-    ) -> torch.Tensor:
-        if hidden_states.shape[0] > self.max_num_tokens:
-            raise ValueError(
-                f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "
-                f"but the symmetric buffer was sized for {self.max_num_tokens}."
-            )
-        y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
-        torch.ops.vllm.deepseek_v4_mega_moe_experts(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            y,
-            self.prefix,
-            activation_clamp,
-            fast_math,
-        )
-
-        return y
-
     def _run_mega_moe(
         self,
         hidden_states: torch.Tensor,
@@ -674,49 +678,59 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 DeepseekV4MegaMoEExperts.weight_loader.supports_moe_loading = True  # type: ignore[attr-defined]
 
 
-def _deepseek_v4_mega_moe_experts_op(
+def _deepseek_v4_mega_moe_op(
     hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
+    input_ids: torch.Tensor | None,
     out: torch.Tensor,
     layer_name: str,
-    activation_clamp: float | None,
     fast_math: bool,
 ) -> None:
+    """End-to-end MoE block as one dynamo-opaque op.
+
+    Encapsulates the entire routed branch (self.gate -> fused_topk_bias ->
+    mega_moe) plus the shared_experts merge. The runtime decides between
+    sequential and overlapped execution based on ``hidden_states.shape[0]``;
+    keeping that decision *inside* the custom op is required because
+    torch.compile cannot specialize on data-dependent shapes — the path
+    selection would force graph breaks if exposed to dynamo.
+
+    When overlap is engaged, shared_experts is forked onto an aux stream
+    *before* self.gate runs. By the time mega_moe starts on the default
+    stream, shared has already finished its first GEMM; the SM cap
+    (``_DEEPSEEK_V4_OVERLAP_SM_RATIO``) on deep_gemm is just a soft cushion
+    against late-arriving shared kernels.
+    """
+
     from vllm.third_party.deep_gemm import get_num_sms, set_num_sms
 
     self = get_forward_context().no_compile_layers[layer_name]
 
-    # Sequential path: no shared_experts, no aux stream, or overlap disabled
-    # at runtime. mega_moe writes ``out`` directly; shared_experts (if any)
-    # is added in-place after.
-    # NOTE Currently, we reuse the  overlap logic of FusedMoE
-    overlap_enabled = (
-        self.shared_experts is not None
-        and self._overlap_stream is not None
-        and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
-        and hidden_states.shape[0] <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-    )
-    if not overlap_enabled:
-        self._run_mega_moe(
-            hidden_states, topk_weights, topk_ids, out, activation_clamp, fast_math
+    if hidden_states.shape[0] > self.max_num_tokens:
+        raise ValueError(
+            f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "
+            f"but the symmetric buffer was sized for {self.max_num_tokens}."
         )
-        if self.shared_experts is not None:
-            out.add_(self.shared_experts(hidden_states))
-        return
 
-    # Overlap path: cap deep_gemm at half SM so mega_moe doesn't saturate
-    # the device and starve the shared_experts FP8 GEMMs on the aux stream.
-    # Both fn0 and fn1 use deep_gemm and read this global; restoring after
-    # ensures other DG kernels (next layer's pre-MoE GEMMs, big-batch
-    # fallbacks) keep running with the full SM count.
-    original_sms = get_num_sms()
+    activation_clamp = (
+        float(self.swiglu_limit) if self.swiglu_limit is not None else None
+    )
 
-    event0, event1 = self._overlap_events
-
-    set_num_sms(max(1, self._sm_count // 2))
-
-    def _experts_fn() -> None:
+    def _routed_branch() -> None:
+        router_logits, _ = self.gate(hidden_states)
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias.data
+            if self.gate.e_score_correction_bias is not None
+            else None,
+            topk=self.top_k,
+            renormalize=self.renormalize,
+            indices_type=self.hash_indices_dtype,
+            input_tokens=input_ids,
+            hash_indices_table=self.gate.tid2eid,
+            routed_scaling_factor=self.routed_scaling_factor,
+        )
         self._run_mega_moe(
             hidden_states,
             topk_weights,
@@ -726,38 +740,63 @@ def _deepseek_v4_mega_moe_experts_op(
             fast_math,
         )
 
-    def _shared_fn() -> torch.Tensor:
-        return self.shared_experts(hidden_states)
-
-    _, shared_output = maybe_execute_in_parallel(
-        _experts_fn,
-        _shared_fn,
-        event0,
-        event1,
-        self._overlap_stream,
+    # Threshold is empirically tuned per model (Flash @ 2048 -> 64,
+    # Pro @ 3072 -> 128).
+    overlap_token_threshold = _DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD.get(
+        self.intermediate_size
     )
-    out.add_(shared_output)
-    # recover original SMs
-    set_num_sms(original_sms)
+    overlap_enabled = (
+        overlap_token_threshold is not None
+        and self.shared_experts is not None
+        and self._overlap_stream is not None
+        and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
+        and hidden_states.shape[0] <= overlap_token_threshold
+    )
+
+    if not overlap_enabled:
+        _routed_branch()
+        if self.shared_experts is not None:
+            out.add_(self.shared_experts(hidden_states))
+        return
+
+    # Overlap: fork shared *before* self.gate runs. Cap deep_gemm SMs so the
+    # aux stream has room. Restored on every exit path so other deep_gemm
+    # kernels (next layer, big-batch fallbacks) keep the full SM count.
+
+    event0, event1 = self._overlap_events
+    original_sms = get_num_sms()
+    # deep_gemm mega_moe scheduler asserts SM count is even (2-CTA cluster);
+    # round down to the nearest even.
+    capped_sm = max(2, (int(self._sm_count * _DEEPSEEK_V4_OVERLAP_SM_RATIO) // 2) * 2)
+    set_num_sms(capped_sm)
+    try:
+        _, shared_output = maybe_execute_in_parallel(
+            _routed_branch,
+            lambda: self.shared_experts(hidden_states),
+            event0,
+            event1,
+            self._overlap_stream,
+        )
+        out.add_(shared_output)
+    finally:
+        set_num_sms(original_sms)
 
 
-def _deepseek_v4_mega_moe_experts_op_fake(
+def _deepseek_v4_mega_moe_op_fake(
     hidden_states: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
+    input_ids: torch.Tensor | None,
     out: torch.Tensor,
     layer_name: str,
-    activation_clamp: float | None,
     fast_math: bool,
 ) -> None:
     return None
 
 
 direct_register_custom_op(
-    op_name="deepseek_v4_mega_moe_experts",
-    op_func=_deepseek_v4_mega_moe_experts_op,
+    op_name="deepseek_v4_mega_moe",
+    op_func=_deepseek_v4_mega_moe_op,
     mutates_args=["out"],
-    fake_impl=_deepseek_v4_mega_moe_experts_op_fake,
+    fake_impl=_deepseek_v4_mega_moe_op_fake,
 )
 
 
@@ -892,7 +931,13 @@ class DeepseekV4MoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
+            gate=self.gate,
             shared_experts=self.shared_experts,
+            scoring_func=self.scoring_func,
+            renormalize=self.renormalize,
+            hash_indices_dtype=self.hash_indices_dtype,
+            routed_scaling_factor=self.routed_scaling_factor,
+            swiglu_limit=self.swiglu_limit,
             overlap_stream=self._overlap_stream,
             overlap_events=self._overlap_events,
             prefix=f"{prefix}.experts",
@@ -964,36 +1009,21 @@ class DeepseekV4MoE(nn.Module):
     def _forward_mega_moe(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
+        # Single dynamo-opaque op owns the entire MoE block: gate +
+        # fused_topk_bias + mega_moe + shared_experts merge (with optional
+        # multi-stream overlap). Picking sequential vs overlapped at runtime
+        # would otherwise force graph breaks under torch.compile because the
+        # decision depends on hidden_states.shape[0].
         org_shape = hidden_states.shape
-        router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias.data
-            if self.gate.e_score_correction_bias is not None
-            else None,
-            topk=self.n_activated_experts,
-            renormalize=self.renormalize,
-            indices_type=self.hash_indices_dtype,
-            input_tokens=input_ids,
-            hash_indices_table=self.gate.tid2eid,
-            routed_scaling_factor=self.routed_scaling_factor,
-        )
-        activation_clamp = (
-            float(self.swiglu_limit) if self.swiglu_limit is not None else None
-        )
-        # Both the shared_experts merge and the mega_moe + shared_experts
-        # multi-stream overlap (with the deep_gemm SM cap) are handled
-        # inside the deepseek_v4_mega_moe_experts custom op, which is the
-        # only dynamo-opaque region in this path.
-        final_hidden_states = self.experts(
+        out = torch.empty_like(hidden_states, dtype=torch.bfloat16)
+        torch.ops.vllm.deepseek_v4_mega_moe(
             hidden_states,
-            topk_weights,
-            topk_ids,
-            activation_clamp=activation_clamp,
+            input_ids,
+            out,
+            self.experts.layer_name,
+            True,  # fast_math
         )
-        return final_hidden_states.view(org_shape)
+        return out.view(org_shape)
 
     def finalize_mega_moe_weights(self) -> None:
         if self.use_mega_moe:
