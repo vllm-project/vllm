@@ -131,176 +131,47 @@ jobs:
           path: dist/*.whl
           retention-days: 90
 
-  test-kernels:
-    name: test-kernels (${{ matrix.name }})
-    runs-on: ${{ matrix.runs-on }}
+  test-kernels-correctness:
+    name: test-kernels (correctness)
     needs: build-wheel
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: correctness
-            runs-on: linux-strix-halo-gpu-rocm-oem
-            timeout: 300
-            pytest_args: >-
-              tests/kernels/moe/test_exllama_moe.py
-              tests/kernels/moe/test_hybrid_w4a16_moe.py
-              tests/kernels/quantization/test_awq_gemv_moe.py
-              tests/kernels/quantization/test_hip_w4a16.py
-              tests/kernels/quantization/test_hybrid_w4a16_triton.py
-              tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py
-              tests/kernels/quantization/test_rocm_skinny_gemms.py
-              tests/kernels/quantization/test_dynamic_int8_lm_head.py
-              tests/quantization/test_hip_w4a16_kernel.py
-          - name: performance
-            runs-on: linux-strix-halo-gpu-rocm-noneng
-            timeout: 300
-            # TODO: Until we understand the reason for inconsistent
-            # performance on different runners, don't let performance
-            # tests fail the whole workflow.  Runner VRAM
-            # configuration is one idea.
-            allow_failure: true
-            pytest_args: >-
-              tests/kernels/quantization/test_hybrid_w4a16_perf.py
-    container:
-      image: ghcr.io/rocm/vllm/gfx11-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      options: >-
-        --device /dev/kfd
-        --device /dev/dri
-        --group-add video
-        --group-add render
-        --security-opt seccomp=unconfined
-    permissions:
-      contents: read
-      packages: read
+    uses: ./.github/workflows/test-rocm-kernels.yml
+    with:
+      test_name: correctness
+      runs_on: linux-strix-halo-gpu-rocm-oem
+      ci_image: ghcr.io/rocm/vllm/gfx11-ci:latest
+      pytorch_index: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
+      timeout: 300
+      pytest_args: >-
+        tests/kernels/moe/test_exllama_moe.py
+        tests/kernels/moe/test_hybrid_w4a16_moe.py
+        tests/kernels/quantization/test_awq_gemv_moe.py
+        tests/kernels/quantization/test_hip_w4a16.py
+        tests/kernels/quantization/test_hybrid_w4a16_triton.py
+        tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py
+        tests/kernels/quantization/test_rocm_skinny_gemms.py
+        tests/kernels/quantization/test_dynamic_int8_lm_head.py
+        tests/quantization/test_hip_w4a16_kernel.py
 
-    env:
-      PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download wheel artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: vllm-rocm-wheel
-          path: dist/
-
-      - name: GPU sanity check
-        run: |
-          echo "=== uname -a ==="
-          uname -a
-          echo ""
-          echo "=== /dev/kfd and /dev/dri ==="
-          ls -la /dev/kfd /dev/dri || true
-          echo ""
-          echo "=== id ==="
-          id
-          echo ""
-          echo "=== rocm-smi (product + VRAM/GTT) ==="
-          if command -v rocm-smi >/dev/null 2>&1; then
-            rocm-smi --showproductname --showid
-            rocm-smi --showmeminfo vram gtt
-          else
-            echo "rocm-smi not found"
-          fi
-          echo ""
-          echo "=== rocminfo (agents) ==="
-          if command -v rocminfo >/dev/null 2>&1; then
-            rocminfo | grep -E "Name:|Marketing Name:|Device Type:" | head -40
-          else
-            echo "rocminfo not found"
-          fi
-          echo ""
-          echo "=== amd-smi (product + memory) ==="
-          if command -v amd-smi >/dev/null 2>&1; then
-            amd-smi list || true
-            amd-smi static --asic --vram || true
-          else
-            echo "amd-smi not found"
-          fi
-          echo "=== GPU clocks, power profile, and temperature ==="
-          for card in /sys/class/drm/card[0-9]/device /sys/class/drm/card[0-9][0-9]/device; do
-            [ -d "$card" ] || continue
-            echo "--- ${card} ---"
-            for f in "$card"/hwmon/hwmon*/temp*_input; do
-              [ -f "$f" ] || continue
-              echo "${f#"$card"/}: $(( $(cat "$f") / 1000 )) °C"
-            done
-            f=power_dpm_force_performance_level
-            [ -f "$card/$f" ] && echo "$f: $(cat "$card/$f")"
-            for f in pp_dpm_mclk pp_dpm_sclk pp_power_profile_mode; do
-              [ -f "$card/$f" ] || continue
-              echo "$f:"
-              head -20 "$card/$f" | sed 's/^/  /'
-            done
-          done
-
-      - name: Install wheel and test dependencies
-        run: |
-          # Pin torch from the nightly ROCm index *only* (no PyPI
-          # fallback) so we always get the ROCm wheel.
-          uv pip install --system \
-            --upgrade-package torch \
-            torch \
-            --index-url ${{ env.PYTORCH_INDEX_URL }}
-          uv pip install --system dist/*.whl \
-            pytest pytest-timeout numpy \
-            tblib transformers huggingface_hub sentencepiece pillow \
-            --index-url ${{ env.PYTORCH_INDEX_URL }} \
-            --extra-index-url https://pypi.org/simple/ \
-            --index-strategy unsafe-first-match
-          # Nightly torchvision has operator ABI mismatch with nightly torch.
-          # Our kernel tests don't need it; remove to prevent conftest crash.
-          uv pip uninstall --system torchvision 2>/dev/null || true
-
-      - name: Prepare test environment
-        run: |
-          # Remove the source vllm/ directory so Python imports from the
-          # installed wheel (which has compiled C extensions) instead of
-          # the checkout source tree (which has no .so files).
-          mv vllm vllm_src
-
-          # Verify torch, vllm._C, and ROCm platform detection work.
-          python -c "
-          import torch
-          print(f'PyTorch {torch.__version__}, HIP: {torch.version.hip}')
-          print(f'GPU: {torch.cuda.get_device_name(0)}')
-          import vllm._C
-          print('vllm._C loaded successfully')
-          from vllm.platforms import current_platform
-          print(f'Platform: {type(current_platform).__name__}')
-          "
-
-      - name: Test kernel ${{ matrix.name }}
-        run: |
-          set +e
-          python -m pytest -v --timeout=${{ matrix.timeout }} ${{ matrix.pytest_args }}
-          status=$?
-          set -e
-
-          if [ "$status" -ne 0 ]; then
-            if [ "${{ matrix.allow_failure }}" = "true" ]; then
-              echo "::warning::Non-blocking ${{ matrix.name }} tests failed with exit code $status"
-              {
-                echo "## Non-blocking test failure"
-                echo ""
-                echo "\`${{ matrix.name }}\` failed with exit code \`$status\`."
-                echo ""
-              } >> "$GITHUB_STEP_SUMMARY"
-              exit 0
-            fi
-
-            exit "$status"
-          fi
+  test-kernels-performance:
+    name: test-kernels (performance)
+    needs: build-wheel
+    uses: ./.github/workflows/test-rocm-kernels.yml
+    with:
+      test_name: performance
+      runs_on: linux-strix-halo-gpu-rocm-noneng
+      ci_image: ghcr.io/rocm/vllm/gfx11-ci:latest
+      pytorch_index: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
+      timeout: 300
+      pytest_args: >-
+        tests/kernels/quantization/test_hybrid_w4a16_perf.py
 
   upload-wheel:
     runs-on: ubuntu-latest
-    needs: [build-wheel, test-kernels]
+    # TODO: Until we understand the reason for inconsistent
+    # performance on different runners, we don't let
+    # tests-kernels-performance block the upload.  Runner VRAM
+    # configuration is one idea.
+    needs: [build-wheel, test-kernels-correctness]
     if: github.event_name == 'push' && github.repository_owner == 'ROCm'
     permissions:
       id-token: write
