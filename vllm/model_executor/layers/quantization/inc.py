@@ -627,6 +627,8 @@ def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None, Any | Non
         import auto_round_kernel
         from auto_round_kernel.qlinear import QuantLinear
 
+        logger.info("Successfully imported auto_round_kernel.")
+
     except ImportError as error:
         return False, str(error), None, None
 
@@ -641,25 +643,12 @@ def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None, Any | Non
 
 
 def _get_auto_round_ark_instance() -> Any:
-    is_available, error_str, ark_instance, quant_linear_class = (
-        _get_auto_round_ark_state()
-    )
+    is_available, error_str, ark_instance, ark_linear = _get_auto_round_ark_state()
     if not is_available or ark_instance is None:
         reason = error_str or "unknown error"
         raise ImportError(f"Failed to import auto_round_kernel. {reason}")
-    return quant_linear_class
 
-
-def _get_ark_type_str(dtype: torch.dtype) -> str:
-    """Helper: Convert PyTorch's dtype to a string format recognized by ARK"""
-    if dtype == torch.float16:
-        return "fp16"
-    elif dtype == torch.bfloat16:
-        return "bf16"
-    elif dtype == torch.float32:
-        return "fp32"
-    else:
-        raise ValueError(f"Unsupported dtype for ARK: {dtype}")
+    return ark_linear
 
 
 class INCXPULinearMethod(_INCXPULinearBase):
@@ -797,7 +786,7 @@ class INCARKLinearMethod(_INCXPULinearBase):
 
         ark_module.post_init()
 
-        layer.ark_engine = ark_module
+        layer.ark_linear = ark_module
 
         del layer.qweight
         if hasattr(layer, "qzeros"):
@@ -810,4 +799,4 @@ class INCARKLinearMethod(_INCXPULinearBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return layer.ark_engine.forward(x)
+        return layer.ark_linear.forward(x)
