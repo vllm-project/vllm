@@ -3,6 +3,8 @@ kind: Service
 metadata:
   name: "{{ .Release.Name }}-service"
   namespace: {{ .Release.Namespace }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
 spec:
   type: ClusterIP
   ports:
@@ -11,4 +13,4 @@ spec:
       targetPort: {{ include "chart.container-port-name" . }}
       protocol: TCP
   selector:
-  {{- include "chart.labels" . | nindent 4 }}
+  {{- include "chart.selectorLabels" . | nindent 4 }}

@@ -4,6 +4,8 @@ kind: Job
 metadata:
   name: "{{ .Release.Name }}-init-vllm"
   namespace: {{ .Release.Namespace }}
+  labels:
+  {{- include "chart.labels" . | nindent 4 }}
 spec:
   ttlSecondsAfterFinished: 100
   template:

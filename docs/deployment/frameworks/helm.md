@@ -105,7 +105,7 @@ The following table describes configurable parameters of the chart in `values.ya
 | secrets | object | {} | Secrets configuration |
 | serviceName | string | "" | Service name |
 | servicePort | int | 80 | Service port |
-| labels.environment | string | test | Environment name |
+| labels | object | {} | Additional labels for Kubernetes resources |
 
 ## Configuration Examples
 
