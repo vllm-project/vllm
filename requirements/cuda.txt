@@ -1,7 +1,7 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.65.0 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
 torch==2.11.0
@@ -11,6 +11,8 @@ torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytor
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.6.8.post1
 flashinfer-cubin==0.6.8.post1
+apache-tvm-ffi==0.1.9
+tilelang==0.1.9
 # Cap nvidia-cudnn-frontend (transitive dep of flashinfer) due to
 # breaking changes in 1.19.0
 nvidia-cudnn-frontend>=1.13.0,<1.19.0
