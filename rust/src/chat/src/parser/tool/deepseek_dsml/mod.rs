@@ -6,8 +6,14 @@ use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
 use super::utils::{parse_buffered_event, safe_text_len};
-use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
+use super::{Result, ToolCallDelta, ToolParseResult, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
+
+mod deepseek_v32;
+mod deepseek_v4;
+
+pub use deepseek_v4::DeepSeekV4ToolParser;
+pub use deepseek_v32::DeepSeekV32ToolParser;
 
 const INVOKE_START: &str = "<｜DSML｜invoke";
 const INVOKE_END: &str = "</｜DSML｜invoke>";
@@ -17,15 +23,19 @@ const PARAMETER_END: &str = "</｜DSML｜parameter>";
 type DsmlInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct DsmlTokens {
-    pub tool_calls_start: &'static str,
-    pub tool_calls_end: &'static str,
+struct DsmlTokens {
+    tool_calls_start: &'static str,
+    tool_calls_end: &'static str,
 }
 
 impl DsmlTokens {
     const V32: Self = Self {
         tool_calls_start: "<｜DSML｜function_calls>",
         tool_calls_end: "</｜DSML｜function_calls>",
+    };
+    const V4: Self = Self {
+        tool_calls_start: "<｜DSML｜tool_calls>",
+        tool_calls_end: "</｜DSML｜tool_calls>",
     };
 }
 
@@ -57,29 +67,8 @@ struct DsmlParameter {
     is_string: bool,
 }
 
-/// Tool parser for DeepSeek V3.2 models.
-///
-/// Example tool call content:
-///
-/// ```text
-/// <｜DSML｜function_calls>
-/// <｜DSML｜invoke name="get_weather">
-/// <｜DSML｜parameter name="location" string="true">杭州</｜DSML｜parameter>
-/// <｜DSML｜parameter name="date" string="true">2024-01-16</｜DSML｜parameter>
-/// </｜DSML｜invoke>
-/// <｜DSML｜invoke name="get_weather">
-/// <｜DSML｜parameter name="location" string="true">北京</｜DSML｜parameter>
-/// <｜DSML｜parameter name="date" string="true">2024-01-16</｜DSML｜parameter>
-/// </｜DSML｜invoke>
-/// </｜DSML｜function_calls>
-/// ```
-///
-/// Arguments are emitted only after a full `invoke` block is parsed.
-///
-/// DeepSeek V3.2 relies on DSML markers such as `｜DSML｜`, which are
-/// represented as special tokens in the tokenizer and therefore must be
-/// preserved during decode for parsing to work.
-pub struct DeepSeekV32ToolParser {
+/// Tool parser core for DeepSeek DSML tool calls.
+struct DeepSeekDsmlToolParser {
     buffer: String,
     mode: DsmlMode,
     emitted_invoke_count: usize,
@@ -87,15 +76,9 @@ pub struct DeepSeekV32ToolParser {
     tokens: DsmlTokens,
 }
 
-impl DeepSeekV32ToolParser {
-    /// Create a parser with DeepSeek V3.2 DSML tokens.
-    fn new(tools: &[ChatTool]) -> Self {
-        Self::with_tokens(tools, DsmlTokens::V32)
-    }
-
-    /// Create a parser with custom DSML tokens, for reuse by DeepSeek V4 which
-    /// has different markers but mostly shared logic.
-    pub(super) fn with_tokens(tools: &[ChatTool], tokens: DsmlTokens) -> Self {
+impl DeepSeekDsmlToolParser {
+    /// Create a parser with DSML tokens for one DeepSeek format.
+    fn new(tools: &[ChatTool], tokens: DsmlTokens) -> Self {
         Self {
             buffer: String::new(),
             mode: DsmlMode::Text,
@@ -147,16 +130,6 @@ impl DeepSeekV32ToolParser {
         self.buffer.clear();
         self.mode = DsmlMode::Text;
         self.emitted_invoke_count = 0;
-    }
-}
-
-impl ToolParser for DeepSeekV32ToolParser {
-    /// Create a boxed DeepSeek V3.2 tool parser.
-    fn create(tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
-    where
-        Self: Sized + 'static,
-    {
-        Ok(Box::new(Self::new(tools)))
     }
 
     /// Preserve DSML special tokens when tool parsing is enabled.
@@ -312,7 +285,8 @@ fn dsml_name_attr<'i>(input: &mut DsmlInput<'i>) -> ModalResult<&'i str> {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{DeepSeekV32ToolParser, ToolParser};
+    use super::DeepSeekV32ToolParser;
+    use crate::parser::tool::ToolParser;
     use crate::parser::tool::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {

@@ -6,8 +6,14 @@ use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
 use super::utils::{parse_buffered_event, safe_text_len};
-use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
+use super::{Result, ToolCallDelta, ToolParseResult, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
+
+mod glm45_moe;
+mod glm47_moe;
+
+pub use glm45_moe::Glm45MoeToolParser;
+pub use glm47_moe::Glm47MoeToolParser;
 
 const TOOL_CALL_START: &str = "<tool_call>";
 const TOOL_CALL_END: &str = "</tool_call>";
@@ -25,9 +31,8 @@ enum GlmMode {
     AfterToolCall,
 }
 
-/// Function-name separator used by GLM MoE tool-call variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Separator {
+enum Separator {
     /// GLM-4.5/4.6 format: function name must end at a newline before
     /// arguments.
     Newline,
@@ -49,19 +54,8 @@ enum GlmEvent {
     IgnoredRest,
 }
 
-/// Tool parser for GLM-4.5/4.6 MoE XML-style tool calls.
-///
-/// Example tool call content:
-///
-/// ```text
-/// <tool_call>get_weather
-/// <arg_key>city</arg_key>
-/// <arg_value>Hangzhou</arg_value>
-/// </tool_call>
-/// ```
-///
-/// Arguments are emitted only after a full `tool_call` block is parsed.
-pub struct Glm45MoeToolParser {
+/// Tool parser core for GLM XML-style tool calls.
+struct GlmXmlToolParser {
     buffer: String,
     mode: GlmMode,
     emitted_tool_count: usize,
@@ -69,14 +63,9 @@ pub struct Glm45MoeToolParser {
     separator: Separator,
 }
 
-impl Glm45MoeToolParser {
-    /// Create a GLM-4.5/4.6 MoE tool parser.
-    fn new(tools: &[ChatTool]) -> Self {
-        Self::with_separator(tools, Separator::Newline)
-    }
-
-    /// Create a GLM MoE tool parser with a custom function-name separator.
-    pub(super) fn with_separator(tools: &[ChatTool], separator: Separator) -> Self {
+impl GlmXmlToolParser {
+    /// Create a GLM XML tool parser with a function-name separator.
+    fn new(tools: &[ChatTool], separator: Separator) -> Self {
         Self {
             buffer: String::new(),
             mode: GlmMode::Text,
@@ -116,16 +105,6 @@ impl Glm45MoeToolParser {
         self.buffer.clear();
         self.mode = GlmMode::Text;
         self.emitted_tool_count = 0;
-    }
-}
-
-impl ToolParser for Glm45MoeToolParser {
-    /// Create a boxed GLM-4.5/4.6 MoE tool parser.
-    fn create(tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
-    where
-        Self: Sized + 'static,
-    {
-        Ok(Box::new(Self::new(tools)))
     }
 
     /// Push one decoded text chunk through the GLM MoE parser.
@@ -276,7 +255,8 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::{Glm45MoeToolParser, ToolParser};
+    use super::Glm45MoeToolParser;
+    use crate::parser::tool::ToolParser;
     use crate::parser::tool::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {

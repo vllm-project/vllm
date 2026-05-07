@@ -1,5 +1,5 @@
-use super::glm45_moe::{Glm45MoeToolParser, Separator};
-use super::{Result, ToolParseResult, ToolParser};
+use super::{GlmXmlToolParser, Separator};
+use crate::parser::tool::{Result, ToolParseResult, ToolParser};
 use crate::request::ChatTool;
 
 /// Tool parser for GLM-4.7 MoE XML-style tool calls.
@@ -7,14 +7,11 @@ use crate::request::ChatTool;
 /// GLM-4.7 reuses the GLM-4.5 parser with a more flexible function-name
 /// separator, so the name may be followed by whitespace, a newline, or the
 /// first `<arg_key>` tag directly.
-pub struct Glm47MoeToolParser(Glm45MoeToolParser);
+pub struct Glm47MoeToolParser(GlmXmlToolParser);
 
 impl Glm47MoeToolParser {
     fn new(tools: &[ChatTool]) -> Self {
-        Self(Glm45MoeToolParser::with_separator(
-            tools,
-            Separator::Flexible,
-        ))
+        Self(GlmXmlToolParser::new(tools, Separator::Flexible))
     }
 }
 

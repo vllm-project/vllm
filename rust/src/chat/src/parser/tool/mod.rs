@@ -7,13 +7,11 @@
 //! first, so later steps can attach adaptor-based implementations and then
 //! gradually replace them with native parsers as needed.
 
+mod deepseek_dsml;
 mod deepseek_json;
-mod deepseek_v32;
-mod deepseek_v4;
 mod external;
 mod gemma4;
-mod glm45_moe;
-mod glm47_moe;
+mod glm_xml;
 mod kimi_k2;
 mod minimax_m2;
 mod parameters;
@@ -35,13 +33,11 @@ use crate::request::{ChatRequest, ChatTool};
 /// Result alias for tool parser operations.
 pub type Result<T> = std::result::Result<T, ToolParserError>;
 
+pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
-pub use deepseek_v4::DeepSeekV4ToolParser;
-pub use deepseek_v32::DeepSeekV32ToolParser;
 pub use external::*;
 pub use gemma4::Gemma4ToolParser;
-pub use glm45_moe::Glm45MoeToolParser;
-pub use glm47_moe::Glm47MoeToolParser;
+pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;

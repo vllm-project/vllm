@@ -1,5 +1,5 @@
-use super::deepseek_v32::{DeepSeekV32ToolParser, DsmlTokens};
-use super::{Result, ToolParseResult, ToolParser};
+use super::{DeepSeekDsmlToolParser, DsmlTokens};
+use crate::parser::tool::{Result, ToolParseResult, ToolParser};
 use crate::request::ChatTool;
 
 /// Tool parser for DeepSeek V4 models.
@@ -23,18 +23,11 @@ use crate::request::ChatTool;
 ///
 /// V4 reuses the V3.2 DSML invoke/parameter grammar but wraps calls in
 /// `<｜DSML｜tool_calls>` instead of `<｜DSML｜function_calls>`.
-pub struct DeepSeekV4ToolParser(DeepSeekV32ToolParser);
-
-impl DsmlTokens {
-    const V4: Self = Self {
-        tool_calls_start: "<｜DSML｜tool_calls>",
-        tool_calls_end: "</｜DSML｜tool_calls>",
-    };
-}
+pub struct DeepSeekV4ToolParser(DeepSeekDsmlToolParser);
 
 impl DeepSeekV4ToolParser {
     fn new(tools: &[ChatTool]) -> Self {
-        Self(DeepSeekV32ToolParser::with_tokens(tools, DsmlTokens::V4))
+        Self(DeepSeekDsmlToolParser::new(tools, DsmlTokens::V4))
     }
 }
 
