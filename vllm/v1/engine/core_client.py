@@ -945,12 +945,12 @@ class AsyncMPClient(MPClient):
             )
             if self.client_index == 0:
                 self.client_sentinel = ClientSentinel(
-                    parallel_config=vllm_config.parallel_config,
                     fault_tolerance_addresses=ft_addr,
-                    shutdown_callback=self.shutdown,
+                    client=self,
                 )
                 self.resources.client_sentinel = self.client_sentinel
             self.engine_status = {
+                "schema_version": 1,
                 "total_engines": len(self.engine_ranks_managed),
                 "engines": [
                     {"id": rank, "status": "healthy"}

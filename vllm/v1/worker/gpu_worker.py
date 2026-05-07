@@ -315,10 +315,7 @@ class Worker(WorkerBase):
             report_usage_stats(self.vllm_config)
 
         if self.parallel_config.enable_fault_tolerance:
-            self.worker_sentinel = WorkerSentinel(
-                self.parallel_config,
-                self.device,
-            )
+            self.worker_sentinel = WorkerSentinel(self, self.device)
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.

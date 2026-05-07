@@ -51,12 +51,15 @@ def create_engine_core_sentinel(
     addr_dict: dict,
     sentinel_identity: bytes = b"engine_sentinel_0",
 ):
-    return EngineCoreSentinel(
+    engine = Mock()
+    engine.engine_index = 0
+    sentinel = EngineCoreSentinel(
         parallel_config,
-        engine_index=0,
         engine_fault_socket_addr=addr_dict["engine_fault_socket_addr"],
         sentinel_identity=sentinel_identity,
+        engine=engine,
     )
+    return sentinel
 
 
 def test_engine_core_sentinel_initialization(addr_dict, mock_parallel_config):
@@ -70,9 +73,9 @@ def test_engine_core_sentinel_initialization(addr_dict, mock_parallel_config):
 
 def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config):
     """
-    Verify that when an engine exception is put into fault_signal_q,
-    EngineCoreSentinel forwards a FaultInfo message to the
-    client-facing engine fault socket.
+    Verify that an engine exception reported to EngineCoreSentinel
+    is forwarded as a FaultInfo message to the client-facing
+    engine fault socket.
     """
     sentinel_identity = b"engine_sentinel_0"
     sentinel = create_engine_core_sentinel(
@@ -86,7 +89,7 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config
 
     try:
         time.sleep(0.1)
-        sentinel.fault_signal_q.put(RuntimeError("test exception"))
+        sentinel.report_fault_events(RuntimeError("test exception"))
         # Wait for the sentinel to forward the fault to the engine_fault socket.
         if not engine_fault_receiver.poll(timeout=5000):
             pytest.fail("Timeout waiting for engine fault message from sentinel")

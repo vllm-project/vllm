@@ -43,6 +43,10 @@ def client_sentinel(mock_parallel_config, mock_ft_addresses):
     fault_receiver_socket = AsyncMock()
     fault_state_pub_socket = AsyncMock()
 
+    mock_client = Mock()
+    mock_client.vllm_config = Mock(parallel_config=mock_parallel_config)
+    mock_client.shutdown = Mock()
+
     with (
         patch(
             "vllm.v1.fault_tolerance.client_sentinel.make_zmq_socket",
@@ -60,14 +64,11 @@ def client_sentinel(mock_parallel_config, mock_ft_addresses):
             return Mock()
 
         mock_create_task.side_effect = _capture_task
-        shutdown_callback = AsyncMock()
         sentinel = ClientSentinel(
-            parallel_config=mock_parallel_config,
             fault_tolerance_addresses=mock_ft_addresses,
-            shutdown_callback=shutdown_callback,
+            client=mock_client,
         )
 
-    sentinel.instance_shutdown_callback = shutdown_callback
     return sentinel
 
 

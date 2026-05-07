@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
+
 import torch
 
-from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.v1.fault_tolerance import BaseSentinel
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
@@ -23,16 +27,17 @@ class WorkerSentinel(BaseSentinel):
 
     def __init__(
         self,
-        parallel_config: ParallelConfig,
+        worker: "Worker",
         device: torch.device,
     ):
-        dp_rank = parallel_config.data_parallel_rank
+        dp_rank = worker.parallel_config.data_parallel_rank
         tp_rank = get_tp_group().rank_in_group
         pp_rank = get_pp_group().rank_in_group
         identity_str = f"PP{pp_rank}_TP{tp_rank}"
-        super().__init__(f"{dp_rank}_{identity_str}", identity_str.encode())
+        super().__init__(f"{dp_rank}_{identity_str}", identity_str.encode(), worker)
         self.device = device
         torch.accelerator.set_device_index(self.device)
 
-    def run(self) -> None:
-        pass
+    @property
+    def worker(self) -> "Worker":
+        return self.host

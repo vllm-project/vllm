@@ -883,9 +883,9 @@ class EngineCoreProc(EngineCore):
                 engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
                 self.engine_core_sentinel = EngineCoreSentinel(
                     parallel_config=vllm_config.parallel_config,
-                    engine_index=self.engine_index,
                     engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
+                    engine=self,
                 )
 
             super().__init__(

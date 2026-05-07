@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import msgspec.msgpack
 import zmq.asyncio
 
-from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import close_sockets, make_zmq_socket
 from vllm.v1.engine import EngineStatusType
@@ -16,6 +15,9 @@ from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
     FaultToleranceZmqAddresses,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.core_client import AsyncMPClient
 
 logger = init_logger(__name__)
 
@@ -34,15 +36,14 @@ class ClientSentinel(BaseSentinel):
 
     def __init__(
         self,
-        parallel_config: ParallelConfig,
         fault_tolerance_addresses: FaultToleranceZmqAddresses,
-        shutdown_callback: Callable,
+        client: "AsyncMPClient",
     ):
         self.ctx = zmq.asyncio.Context()
-        super().__init__(None, b"client_sentinel")
+        super().__init__(None, b"client_sentinel", client)
+        parallel_config = client.vllm_config.parallel_config
         self.ft_config = parallel_config.fault_tolerance_config
 
-        self.instance_shutdown_callback = shutdown_callback
         self.sentinel_dead = False
         self._shutdown_task: asyncio.Task | None = None
 
@@ -75,6 +76,10 @@ class ClientSentinel(BaseSentinel):
             for engine_index in range(self.start_rank, self.start_rank + num_dp_managed)
         }
         asyncio.create_task(self.run())
+
+    @property
+    def client(self) -> "AsyncMPClient":
+        return self.host
 
     async def _pub_engine_status(self):
         engine_status = self.engine_status_dict.copy()
@@ -113,7 +118,7 @@ class ClientSentinel(BaseSentinel):
 
     async def _shutdown_after_timeout(self):
         await asyncio.sleep(self.ft_config.engine_recovery_timeout_sec)
-        self.instance_shutdown_callback()
+        self.client.shutdown()
 
     async def refresh_engine_status(self, new_data_parallel_size: int):
         # Update the engine status dict and publish the new status.

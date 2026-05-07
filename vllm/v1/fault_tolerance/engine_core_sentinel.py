@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import queue
-import threading
 import time
 import traceback
 from collections.abc import Callable
@@ -33,17 +31,17 @@ class EngineCoreSentinel(BaseSentinel):
     def __init__(
         self,
         parallel_config: ParallelConfig,
-        engine_index: int,
         engine_fault_socket_addr: str,
         sentinel_identity: bytes,
+        engine: "EngineCoreProc",
     ):
-        self.engine_index = engine_index
+        self.engine_index = engine.engine_index
         super().__init__(
-            f"DP_{engine_index}",
+            f"DP_{self.engine_index}",
             sentinel_identity,
+            engine,
         )
 
-        self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
         self.engine_recovery_timeout_sec = (
             parallel_config.fault_tolerance_config.engine_recovery_timeout_sec
         )
@@ -57,33 +55,16 @@ class EngineCoreSentinel(BaseSentinel):
             identity=sentinel_identity,
         )
 
-        threading.Thread(
-            target=self.run, daemon=True, name="EngineCoreSentinelMonitorThread"
-        ).start()
+    @property
+    def engine(self) -> "EngineCoreProc":
+        return self.host
 
-    def run(self):
-        """Continuously poll for fault signals and report to client sentinel."""
-        while not self.sentinel_dead:
-            # Check for engine fault signals
-            self.poll_and_report_fault_events()
-
-    def poll_and_report_fault_events(self):
-        try:
-            engine_exception = self.fault_signal_q.get(timeout=1)
-            logger.error(
-                "%s Detected exception %s: %s\n Call Stack:\n%s",
-                self.sentinel_name,
-                type(engine_exception).__name__,
-                engine_exception,
-                "".join(traceback.format_tb(engine_exception.__traceback__)),
-            )
-            msg = FaultInfo.from_exception(
-                engine_exception, self.engine_index, EngineStatusType.UNHEALTHY
-            )
-            msg_bytes = msgspec.msgpack.encode(msg)
-            self.engine_fault_socket.send_multipart([b"", msg_bytes])
-        except queue.Empty:
-            pass
+    def report_fault_events(self, engine_exception):
+        msg = FaultInfo.from_exception(
+            engine_exception, self.engine_index, EngineStatusType.UNHEALTHY
+        )
+        msg_bytes = msgspec.msgpack.encode(msg)
+        self.engine_fault_socket.send_multipart([b"", msg_bytes])
 
     def shutdown(self):
         self.engine_fault_socket.close(linger=0)
@@ -104,11 +85,13 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
                 raise
             except Exception as original_exc:
                 if self.enable_fault_tolerance:
-                    self.engine_core_sentinel.fault_signal_q.put(original_exc)
                     logger.warning(
-                        "[BusyLoopWrapper] EngineCore busy loop raised a %s exception.",
+                        "[BusyLoopWrapper] EngineCore %s: %s\n Call Stack:\n%s",
                         type(original_exc).__name__,
+                        original_exc,
+                        "".join(traceback.format_tb(original_exc.__traceback__)),
                     )
+                    self.engine_core_sentinel.report_fault_events(original_exc)
                     # todo: Currently only wait a certain time before shutting
                     #  down the engine. Will implement fault tolerance methods
                     #  in the upcoming PRs.
