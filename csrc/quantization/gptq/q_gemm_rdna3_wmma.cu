@@ -2246,8 +2246,28 @@ torch::Tensor gptq_gemm_rdna3_wmma(torch::Tensor a, torch::Tensor b_q_weight,
   // for K_SPLIT > 1). In that case the output must be pre-zeroed because
   // multiple K-segments add into each cell. For K_SPLIT == 1 the kernel
   // does a direct write per cell and an empty buffer is fine.
-  const bool need_zero_init =
-      vllm::gptq_rdna3_wmma::compute_wmma_k_split(size_k) > 1;
+  //
+  // Must match the actual k_split the launcher will use (M/N-aware
+  // heuristic), not the K-only heuristic which is overly conservative and
+  // zero-fills unnecessarily for large grids (e.g. gate_up 34816×8192
+  // wasted 570 MB of zeroing per call).
+  int actual_k_split;
+  if (size_m >= 128 && size_n >= 64) {
+    actual_k_split = vllm::gptq_rdna3_wmma::compute_wmma_k_split_mn(
+        size_m, size_n, size_k, 128, 64);
+  } else if (size_m >= 64 && size_n >= 64) {
+    actual_k_split = vllm::gptq_rdna3_wmma::compute_wmma_k_split_mn(
+        size_m, size_n, size_k, 64, 64);
+  } else if (size_m >= 64 && size_n >= 32) {
+    actual_k_split = vllm::gptq_rdna3_wmma::compute_wmma_k_split_mn(
+        size_m, size_n, size_k, 64, 32);
+  } else if (size_m >= 64) {
+    actual_k_split = vllm::gptq_rdna3_wmma::compute_wmma_k_split_mn(
+        size_m, size_n, size_k, 64, 16);
+  } else {
+    actual_k_split = vllm::gptq_rdna3_wmma::compute_wmma_k_split(size_k);
+  }
+  const bool need_zero_init = actual_k_split > 1;
   at::Tensor c = need_zero_init ? torch::zeros({size_m, size_n}, opts)
                                 : torch::empty({size_m, size_n}, opts);
 
