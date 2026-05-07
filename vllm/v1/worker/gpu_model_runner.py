@@ -4507,7 +4507,7 @@ class GPUModelRunner(
             )
         elif spec_config.method == "custom_class":
             assert isinstance(sampled_token_ids, list)
-            draft_token_ids = self.drafter.propose(  # type: ignore[union-attr]
+            draft_token_ids = cast(Any, self.drafter).propose(
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
