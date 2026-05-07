@@ -962,7 +962,11 @@ def get_requirements() -> list[str]:
         # nccl4py is not in cuda.txt because the Docker build installs that
         # file directly (bypassing setup.py), and nccl4py[cuXX] must match
         # the installed CUDA version exactly to avoid cuda-bindings conflicts.
+        # cuda-pathfinder>=1.5.0 is pinned explicitly because Docker base images
+        # may have an older pre-installed version satisfying ~=1.1 that lacks
+        # cuda.pathfinder._optional_cuda_import required by cuda.core>=0.6.
         requirements.append(f"nccl4py[cu{cuda_major}]")
+        requirements.append("cuda-pathfinder>=1.5.0")
     elif _is_hip():
         requirements = _read_requirements("rocm.txt")
     elif _is_tpu():

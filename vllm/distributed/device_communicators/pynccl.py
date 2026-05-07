@@ -133,7 +133,8 @@ class PyNcclCommunicator:
         except ImportError:
             logger.warning(
                 "nccl4py is not available. NCCL operations will be disabled. "
-                "Install with: pip install nccl4py[cu12]"
+                "Install with: pip install 'nccl4py[cu12]' or 'nccl4py[cu13]' "
+                "depending on your CUDA version."
             )
             self.available = False
             self.disabled = True
