@@ -1499,6 +1499,11 @@ class NemotronH_Nano_VL_V2(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        mm_config = self.model_config.multimodal_config
+        load_multimodal_weights = not all(
+            mm_config.get_limit_per_prompt(modality) == 0
+            for modality in ("image", "video", "audio")
+        )
         adapter_dict = dict(self.mlp1.named_parameters())
 
         def is_llm(name: str) -> bool:
@@ -1523,23 +1528,30 @@ class NemotronH_Nano_VL_V2(
                 # Strip 'language_model.' prefix for LLM weights
                 llm_weights.append((".".join(name.split(".")[1:]), w))
             elif is_adapter_weights((name, w)):
+                if not load_multimodal_weights:
+                    continue
                 # Load vision-language adapter weights directly
                 trimmed_name = ".".join(name.split(".")[1:])
                 param = adapter_dict[trimmed_name]
                 with torch.no_grad():
                     default_weight_loader(param, w)
             elif is_vision_weights(name):
+                if not load_multimodal_weights:
+                    continue
                 # Convert: vision_model.radio_model.* → radio_model.*
                 hf_key = name[len("vision_model.") :]  # Remove "vision_model." prefix
                 vision_weights.append((hf_key, w))
             elif is_sound_weights(name):
+                if not load_multimodal_weights:
+                    continue
                 assert self.sound_encoder is not None
                 sound_weights.append((name, w))
 
         self.language_model.load_weights(llm_weights)
-        self.vision_model.load_weights(vision_weights)
-        if self.sound_encoder is not None and len(sound_weights) > 0:
-            self.sound_encoder.load_weights(sound_weights)
+        if load_multimodal_weights:
+            self.vision_model.load_weights(vision_weights)
+            if self.sound_encoder is not None and len(sound_weights) > 0:
+                self.sound_encoder.load_weights(sound_weights)
 
     def get_vit_model_from_radio_config(self, hf_config):
         hf_config_vision = hf_config.vision_config
