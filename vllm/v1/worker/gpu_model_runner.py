@@ -4185,7 +4185,6 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                force_eager=self._uses_request_ids_for_generation(),
             )
 
             logger.debug(

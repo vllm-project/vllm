@@ -358,7 +358,7 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        pooling_type = pooling_type_map.get(hf_config.pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
 
@@ -556,6 +556,18 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class ParakeetForTDTConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        if not vllm_config.model_config.enforce_eager:
+            logger.warning_once(
+                "Parakeet TDT uses request-keyed decoder state; enforcing "
+                "eager execution to avoid CUDA graph replaying stale forced "
+                "tokens."
+            )
+        vllm_config.model_config.enforce_eager = True
+
+
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -683,6 +695,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
     "NomicBertModel": NomicBertModelConfig,
+    "ParakeetForTDT": ParakeetForTDTConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
