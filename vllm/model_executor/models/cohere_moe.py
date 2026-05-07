@@ -37,6 +37,7 @@ from vllm.sequence import IntermediateTensors
 from .commandr import LayerNorm
 from .interfaces import SupportsPP, SupportsQuant
 from .utils import (
+    AutoWeightsLoader,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -330,6 +331,7 @@ class CohereMoeModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.quant_config = quant_config
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
         self.embed_tokens = VocabParallelEmbedding(
@@ -377,63 +379,6 @@ class CohereMoeModel(nn.Module):
             )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-
-
-class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
-    is_text_generation_model = True
-
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        assert getattr(config, "tie_word_embeddings", True)
-        self.unpadded_vocab_size = config.vocab_size
-        self.quant_config = quant_config
-        self.logits_scale = config.logit_scale
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, scale=self.logits_scale
-        )
-        self.model = CohereMoeModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
-
-    @torch.no_grad()
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        return self.logits_processor(self.model.embed_tokens, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -507,8 +452,6 @@ class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
                     )
                     break
                 else:
-                    if "lm_head.weight" in name:
-                        continue
                     if (
                         name.endswith(".bias") or name.endswith("_bias")
                     ) and name not in params_dict:
@@ -526,3 +469,64 @@ class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             loaded_params.add(name)
 
         return loaded_params
+
+
+class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+    is_text_generation_model = True
+
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        assert getattr(config, "tie_word_embeddings", True)
+        self.unpadded_vocab_size = config.vocab_size
+        self.quant_config = quant_config
+        self.logits_scale = config.logit_scale
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size, scale=self.logits_scale
+        )
+        self.model = CohereMoeModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.logits_processor(self.model.embed_tokens, hidden_states)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
+        return loader.load_weights(weights)
