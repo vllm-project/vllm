@@ -30,13 +30,6 @@ from typing import Any, Optional
 
 import numpy as np
 import torch
-
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1,
-    KVConnectorMetadata,
-    KVConnectorRole,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_metadata_server import (
     Hf3fsGlobalMetadataClient as Hf3fsMetadataClient,
 )
@@ -52,6 +45,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.common import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.utils.gather_scatter_helper import (  # noqa: E501
     CopyBufferAllocator,
+)
+
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -73,7 +73,6 @@ HF3FS_AVAILABLE = True
 Hf3fsClient = None
 try:
     from hf3fs_fuse.io import deregister_fd  # noqa: F401
-
     from vllm.distributed.kv_transfer.kv_connector.v1.hf3fs.hf3fs_client import (
         Hf3fsClient as _RealClient,
     )

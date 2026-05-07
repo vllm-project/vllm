@@ -1806,13 +1806,13 @@ class VllmConfig:
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
-            if (self.kv_transfer_config is not None
-                    and self.kv_transfer_config.kv_connector is not None):
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.kv_connector is not None
+            ):
                 interleave = self.parallel_config.cp_kv_cache_interleave_size
                 dcp_size = self.parallel_config.decode_context_parallel_size
-                assert (
-                    interleave == block_size
-                ), (
+                assert interleave == block_size, (
                     f"When using PD disaggregation with DCP "
                     f"(decode_context_parallel_size={dcp_size}),"
                     f" cp_kv_cache_interleave_size({interleave}) must match"

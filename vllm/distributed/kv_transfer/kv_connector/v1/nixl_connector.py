@@ -866,9 +866,15 @@ class NixlConnectorScheduler:
         pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
         scheduler_block_size = self.block_size * dcp_size * pcp_size
-        num_hashed_blocks = sum(
-            1 for b in blocks.blocks[0] if b.block_hash is not None and not b.is_null
-        ) if blocks.blocks else 0
+        num_hashed_blocks = (
+            sum(
+                1
+                for b in blocks.blocks[0]
+                if b.block_hash is not None and not b.is_null
+            )
+            if blocks.blocks
+            else 0
+        )
         local_num_computed_tokens = num_hashed_blocks * scheduler_block_size
         logger.debug(
             "NIXLConnector update_state_after_alloc: "
