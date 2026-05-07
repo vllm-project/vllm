@@ -124,8 +124,14 @@ def inject_shared_expert_weights(
     For routers that return only routed slots (e.g. FusedTopKRouter), this also
     copies the routed results into the pre-allocated combined buffer.
     """
-    if num_fused_shared_experts == 0 or aiter_topK_meta_data is None:
+    if num_fused_shared_experts == 0:
         return topk_weights, topk_ids
+
+    assert aiter_topK_meta_data is not None, (
+        "aiter_topK_meta_data is not initialized but "
+        "num_fused_shared_experts > 0. Ensure init_aiter_topK_meta_data "
+        "is called before routing."
+    )
 
     total_topk_weights, total_topk_ids = aiter_topK_meta_data
     token = topk_weights.shape[0]
