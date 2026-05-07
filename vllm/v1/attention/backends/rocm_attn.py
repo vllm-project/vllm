@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
+    has_native_kv_cache_layout,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -468,14 +469,9 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
-        key_block_stride = key_cache.shape[1:].numel()
-        value_block_stride = value_cache.shape[1:].numel()
-        has_contiguous_blocks = (
-            key_cache.stride(0) == key_block_stride
-            and value_cache.stride(0) == value_block_stride
-        )
+        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
-        if block_size in (16, 32) and has_contiguous_blocks:
+        if block_size in (16, 32) and has_native_layout:
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,
