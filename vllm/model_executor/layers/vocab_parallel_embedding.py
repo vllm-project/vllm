@@ -77,6 +77,12 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
 
+    def tie_weights(
+        self, layer: torch.nn.Module, embed_tokens: "VocabParallelEmbedding"
+    ):
+        layer.weight = embed_tokens.weight
+        return layer
+
 
 def pad_vocab_size(vocab_size: int, pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
     """Pad the vocab size to the given value."""
@@ -544,8 +550,7 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""
-        self.weight = embed_tokens.weight
-        return self
+        return self.quant_method.tie_weights(self, embed_tokens)
 
     def forward(self, input_):
         del input_
