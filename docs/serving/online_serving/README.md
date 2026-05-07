@@ -1,4 +1,4 @@
-# Online serving
+# Online Serving
 
 vLLM provides an HTTP server that is compatible with many interfaces!
 
