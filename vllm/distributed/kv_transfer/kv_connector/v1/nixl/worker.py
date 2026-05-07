@@ -625,12 +625,7 @@ class NixlConnectorWorker:
                     error=e,
                     meta=meta,
                 )
-                if (
-                    req_meta := self._recving_metadata.get(req_id)
-                ) and not self._is_hma_required:
-                    # Create new set instead of providing a mutable reference
-                    self._invalid_block_ids.put(set(req_meta.local_block_ids[0]))
-                self._failed_recv_reqs.put(req_id)
+                self._handle_failed_transfer(req_id, None)
 
         fut.add_done_callback(request_ready)
 
@@ -1842,7 +1837,7 @@ class NixlConnectorWorker:
                 transfers[req_id] = in_progress
         return done_req_ids
 
-    def _handle_failed_transfer(self, req_id: str, handle: int):
+    def _handle_failed_transfer(self, req_id: str, handle: int | None):
         """
         Handle a failed transfer by marking all (logical) blocks as invalid and
         recording the failure.
@@ -1855,7 +1850,9 @@ class NixlConnectorWorker:
         # TODO (NickLucche) handle failed transfer for HMA.
         if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-        self.nixl_wrapper.release_xfer_handle(handle)
+        self._failed_recv_reqs.put(req_id)
+        if handle is not None:
+            self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
@@ -2138,14 +2135,7 @@ class NixlConnectorWorker:
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
-            if (
-                meta := self._recving_metadata.get(request_id)
-            ) and not self._is_hma_required:
-                self._invalid_block_ids.put(set(meta.local_block_ids[0]))
-            self.xfer_stats.record_failed_transfer()
-            if handle is not None:
-                self.nixl_wrapper.release_xfer_handle(handle)
-            self._failed_recv_reqs.put(request_id)
+            self._handle_failed_transfer(request_id, handle)
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int
