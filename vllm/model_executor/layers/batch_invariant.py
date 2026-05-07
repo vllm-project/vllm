@@ -918,6 +918,19 @@ _original_cublaslt_workspace_size = None
 _fp16_block_size_n = 256
 
 
+def _register_common_overrides(lib, dispatch_keys: list[str]):
+    """Register batch-invariant overrides shared across CUDA and XPU."""
+    for key in dispatch_keys:
+        lib.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
+        lib.impl("aten::softmax", softmax_batch_invariant, key)
+        lib.impl("aten::_softmax", softmax_batch_invariant, key)
+        lib.impl("aten::mean.dim", mean_batch_invariant, key)
+        # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
+        # (torch._native.ops.bmm_outer_product), and IPEX may register its own
+        # bmm for XPU; allow_override ensures we replace either at the dispatcher.
+        lib.impl("aten::bmm", bmm_batch_invariant, key, allow_override=True)
+
+
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
     global _original_fp16_reduction_precision, _original_bf16_reduction_precision
@@ -930,57 +943,39 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_device_capability_family(80):
-        # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
-        # triton persistent matmul overrides for mm/addmm/matmul/linear.
-        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
-    else:
-        # Hopper (SM90) and Blackwell (SM100): the only source of batch
-        # variance is split-k, which we disable via the cuBLAS workspace
-        # config.
-        _original_cublas_workspace_cfg = os.environ.get("CUBLAS_WORKSPACE_CONFIG", None)
-        _original_cublaslt_workspace_size = os.environ.get(
-            "CUBLASLT_WORKSPACE_SIZE", None
-        )
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+    if current_platform.is_cuda():
+        if current_platform.is_device_capability_family(80):
+            # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install
+            # the triton persistent matmul overrides for mm/addmm/matmul/linear.
+            _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
+            _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
+            _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
+            _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
+        else:
+            # Hopper (SM90) and Blackwell (SM100): the only source of batch
+            # variance is split-k, which we disable via the cuBLAS workspace
+            # config.
+            _original_cublas_workspace_cfg = os.environ.get(
+                "CUBLAS_WORKSPACE_CONFIG", None
+            )
+            _original_cublaslt_workspace_size = os.environ.get(
+                "CUBLASLT_WORKSPACE_SIZE", None
+            )
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+            os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
 
     # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
     # set unconditionally because bmm is overridden on all CUDA platforms.
     if current_platform.is_cuda():
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
 
-    _batch_invariant_LIB.impl(
-        "aten::_log_softmax", _log_softmax_batch_invariant, "CUDA"
-    )
-    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
+    dispatch_keys = ["CUDA"]
+    if current_platform.is_xpu():
+        dispatch_keys.append("XPU")
+    _register_common_overrides(_batch_invariant_LIB, dispatch_keys)
 
-    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
-    # (torch._native.ops.bmm_outer_product), so we need allow_override
-    # to replace it at the dispatcher level.
-    _batch_invariant_LIB.impl(
-        "aten::bmm", bmm_batch_invariant, "CUDA", allow_override=True
-    )
     _original_torch_bmm = torch.bmm
     torch.bmm = bmm_batch_invariant
-
-    # XPU: register batch-invariant overrides for ops verified to work on
-    # Intel GPUs.  matmul_kernel_persistent is broken on XPU due to
-    # tl.range(..., flatten=True), so mm/addmm/matmul/linear are NOT
-    # registered here.
-    if current_platform.is_xpu():
-        _batch_invariant_LIB.impl(
-            "aten::_log_softmax", _log_softmax_batch_invariant, "XPU"
-        )
-        _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "XPU")
-        _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "XPU")
-        _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "XPU")
-        _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "XPU")
 
     _original_bf16_reduction_precision = (
         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
