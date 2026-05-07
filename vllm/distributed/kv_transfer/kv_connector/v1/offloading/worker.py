@@ -99,7 +99,10 @@ class OffloadingConnectorWorker:
                     assert isinstance(layer_kv_cache, torch.Tensor)
                     assert layer_kv_cache.storage_offset() == 0
 
-                    # get the logical dimension for num_blocks
+                    # With HND layout guaranteed, num_blocks is either first
+                    # (most backends) or second after a K/V-pair dimension of 2
+                    # (Flash Attention). Determine which by checking the logical
+                    # shape directly instead of computing physical strides.
                     test_shape = attn_backends[layer_name].get_kv_cache_shape(
                         num_blocks=1234,
                         block_size=16,
@@ -108,20 +111,7 @@ class OffloadingConnectorWorker:
                     )
                     num_blocks_logical_dim = test_shape.index(1234)
 
-                    # sort the logical dimensions by stride (high to low)
-                    # to get a physical-to-logical mapping:
-                    # physical_to_logical[physical_pos] = logical_dim
-                    logical_strides = layer_kv_cache.stride()
-                    physical_to_logical = sorted(
-                        range(len(logical_strides)),
-                        key=lambda idx: logical_strides[idx],
-                        reverse=True,
-                    )
-
-                    num_blocks_physical_dim = physical_to_logical.index(
-                        num_blocks_logical_dim
-                    )
-                    if num_blocks_physical_dim == 0:
+                    if num_blocks_logical_dim == 0:
                         storage = layer_kv_cache.untyped_storage()
                         page = layer_kv_cache_spec.page_size_bytes
                         tensors_per_block[layer_name] = (
@@ -137,12 +127,10 @@ class OffloadingConnectorWorker:
                             layer_kv_cache_spec.page_size_bytes
                         )
                     else:
-                        # Flash Attention case: (2, num_blocks, ...)
+                        # Flash Attention: (2, num_blocks, ...) — split K and V.
                         assert test_shape[0] == 2
-                        assert physical_to_logical[0] == 0
-                        assert num_blocks_physical_dim == 1
+                        assert num_blocks_logical_dim == 1
 
-                        # unbind the tensor to separate K and V tensors
                         half_page_size = layer_kv_cache_spec.page_size_bytes // 2
                         storage = layer_kv_cache.untyped_storage()
                         raw = (

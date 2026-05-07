@@ -203,6 +203,15 @@ class CPUOffloadingManager(OffloadingManager):
                 )
             )
 
+    def reset_cache(self) -> None:
+        all_keys = self._policy.clear()
+        self._free_list.clear()
+        self._num_allocated_blocks = 0
+        if all_keys and self.events is not None:
+            self.events.append(
+                OffloadingEvent(keys=all_keys, medium=self.medium, removed=True)
+            )
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
             yield from self.events

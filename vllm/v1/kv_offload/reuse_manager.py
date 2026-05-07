@@ -121,5 +121,9 @@ class FilterReusedOffloadingManager(OffloadingManager):
     ) -> None:
         return self._backing.complete_store(keys, req_context, success)
 
+    def reset_cache(self) -> None:
+        self.counts.clear()
+        self._backing.reset_cache()
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         return self._backing.take_events()

@@ -74,3 +74,11 @@ class CachePolicy(ABC):
         For ARC: ghost list cleanup (trimming to cache_capacity) is performed
         at the end of a successful eviction.
         """
+
+    @abstractmethod
+    def clear(self) -> list[OffloadKey]:
+        """
+        Remove all blocks from the cache and return their keys.
+
+        Ghost lists (if any) and adaptive state are also reset.
+        """
