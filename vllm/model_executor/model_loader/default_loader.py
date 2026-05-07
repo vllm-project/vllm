@@ -424,8 +424,9 @@ class DefaultModelLoader(BaseModelLoader):
                     for param_name, _ in module.named_parameters():
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
-
+                        
         weights_not_loaded = weights_to_load - (loaded_weights or set())
+        
         if weights_not_loaded:
             if model_config.quantization is not None:
                 logger.warning(
