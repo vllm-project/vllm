@@ -1278,6 +1278,8 @@ class ModelConfig:
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
         # parallel size so each GPU has at least one KV head.
+        if self.model_arch_config.text_model_type == "zaya":
+            return total_num_kv_heads
         return max(1, total_num_kv_heads // parallel_config.tensor_parallel_size)
 
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
@@ -1348,6 +1350,10 @@ class ModelConfig:
                         return self.get_num_layers(parallel_config)
                 return sum(t == block_type for t in layers_block_type_value[start:end])
 
+            if hasattr(self.hf_text_config, "model_type") and (
+                self.hf_text_config.model_type == "zaya"
+            ):
+                return self.hf_text_config.num_layers
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
             if attn_type_list:
