@@ -1563,10 +1563,14 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
                     with open(tb_file) as fp:
                         tb = fp.read()
                 else:
-                    tb = result.stderr.decode()
+                    tb = result.stderr.decode(errors="replace")
+                stdout = result.stdout.decode(errors="replace")
+                stderr = result.stderr.decode(errors="replace")
                 raise RuntimeError(
                     f"Test subprocess '{f.__name__}' failed "
                     f"(exit code {result.returncode}):\n{tb}"
+                    f"\n=== child stdout ===\n{stdout}"
+                    f"\n=== child stderr ===\n{stderr}"
                 )
         finally:
             with contextlib.suppress(OSError):
