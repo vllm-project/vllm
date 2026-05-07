@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Literal, TypeAlias, TypedDict, final
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -158,6 +159,24 @@ class MultiModalConfig:
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
     `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
+    mm_encoder_attn_dtype: Literal["fp8"] | None = None
+    """Optional dtype override for ViT encoder attention. Set to `"fp8"` to
+    enable FP8 quantization via the FlashInfer cuDNN backend. When set to
+    `"fp8"` without a scale file, dynamic scaling is used automatically.
+    See docs/features/quantization/fp8_vit_attn.md for details."""
+    mm_encoder_fp8_scale_path: str | None = None
+    """Path to a JSON file containing per-layer FP8 Q/K/V scales for ViT
+    encoder attention. When provided (with `mm_encoder_attn_dtype="fp8"`),
+    static scaling is used. When omitted, dynamic scaling is used."""
+    mm_encoder_fp8_scale_save_path: str | None = None
+    """When set with dynamic FP8 scaling (`mm_encoder_attn_dtype="fp8"`
+    and no `mm_encoder_fp8_scale_path`), saves the calibrated scales to
+    this file after the amax history buffer is full. The saved file can
+    then be used as `mm_encoder_fp8_scale_path` in subsequent runs."""
+    mm_encoder_fp8_scale_save_margin: float = Field(default=1.5, gt=0.0)
+    """Safety margin multiplied onto scales when auto-saving. A value > 1
+    leaves headroom so that inputs with larger activations than the
+    calibration set do not overflow FP8 range. Default 1.5."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -233,6 +252,36 @@ class MultiModalConfig:
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
             )
+        # Validate FP8 scale path combinations.
+        if self.mm_encoder_attn_dtype != "fp8" and (
+            self.mm_encoder_fp8_scale_path is not None
+            or self.mm_encoder_fp8_scale_save_path is not None
+        ):
+            raise ValueError(
+                "'mm_encoder_fp8_scale_path' and "
+                "'mm_encoder_fp8_scale_save_path' require "
+                "'mm_encoder_attn_dtype' to be 'fp8'."
+            )
+        if (
+            self.mm_encoder_fp8_scale_path is not None
+            and self.mm_encoder_fp8_scale_save_path is not None
+        ):
+            raise ValueError(
+                "'mm_encoder_fp8_scale_save_path' cannot be used with "
+                "'mm_encoder_fp8_scale_path' (saving requires dynamic scaling)."
+            )
+
+        # Validate file paths exist.
+        if self.mm_encoder_fp8_scale_path is not None:
+            scale_path = Path(self.mm_encoder_fp8_scale_path)
+            if not scale_path.is_file():
+                raise FileNotFoundError(f"FP8 scale file not found: {scale_path}")
+        if self.mm_encoder_fp8_scale_save_path is not None:
+            save_parent = Path(self.mm_encoder_fp8_scale_save_path).parent
+            if not save_parent.is_dir():
+                raise FileNotFoundError(
+                    f"Parent directory for FP8 scale save path not found: {save_parent}"
+                )
         return self
 
     def compute_hash(self) -> str:
@@ -252,6 +301,8 @@ class MultiModalConfig:
             if self.mm_encoder_attn_backend is not None
             else None,
             self.mm_encoder_tp_mode,
+            self.mm_encoder_attn_dtype,
+            self.mm_encoder_fp8_scale_path,
         ]
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str

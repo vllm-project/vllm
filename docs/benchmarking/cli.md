@@ -108,6 +108,38 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
+#### Results Visualization
+
+The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.
+
+```bash
+vllm bench serve \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --endpoint /v1/completions \
+    --dataset-name sharegpt \
+    --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 100 \
+    --plot-timeline \
+    --timeline-itl-thresholds 2,5 \
+    --plot-dataset-stats \
+    --save-result
+```
+
+##### Interactive Timeline
+
+The generated timeline is an interactive visualization in the form of an HTML file that can be rendered in most browsers. To customize the ITL color thresholds, one can use `--timeline-itl-thresholds` flag (default: 25ms, 50ms)
+
+Example output:
+
+<iframe src="../../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
+
+##### Dataset statistics
+
+The generated figure shows the input prompt and output tokens distribution.
+
+Example output: ![Dataset Statistics](../assets/contributing/vllm_bench_serve_dataset_stats.png)
+
 #### Custom Dataset
 
 If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl

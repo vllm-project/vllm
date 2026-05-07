@@ -174,10 +174,13 @@ def _tq_fused_store_fp8(
     slot = tl.load(Slot_mapping_ptr + token_idx)
     if slot < 0:
         return
-    blk = slot // BLOCK_SIZE
-    off = slot % BLOCK_SIZE
+    blk = (slot // BLOCK_SIZE).to(tl.int64)
+    off = (slot % BLOCK_SIZE).to(tl.int64)
+    head_idx_i64 = tl.cast(head_idx, tl.int64)
     slot_base = (
-        blk * stride_cache_block + off * stride_cache_pos + head_idx * stride_cache_head
+        blk * stride_cache_block
+        + off * stride_cache_pos
+        + head_idx_i64 * stride_cache_head
     )
 
     base = pid * D
@@ -259,10 +262,13 @@ def _tq_fused_store_mse(
     slot = tl.load(Slot_mapping_ptr + token_idx)
     if slot < 0:
         return
-    blk = slot // BLOCK_SIZE
-    off = slot % BLOCK_SIZE
+    blk = (slot // BLOCK_SIZE).to(tl.int64)
+    off = (slot % BLOCK_SIZE).to(tl.int64)
+    head_idx_i64 = tl.cast(head_idx, tl.int64)
     slot_base = (
-        blk * stride_cache_block + off * stride_cache_pos + head_idx * stride_cache_head
+        blk * stride_cache_block
+        + off * stride_cache_pos
+        + head_idx_i64 * stride_cache_head
     )
 
     base = pid * D

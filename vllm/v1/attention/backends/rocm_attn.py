@@ -27,7 +27,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
@@ -68,6 +67,9 @@ class RocmAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
+
+    # DFlash drafting sets this to False via CommonAttentionMetadata.
+    causal: bool = True
 
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
@@ -154,6 +156,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            causal=common_attn_metadata.causal,
         )
         return attn_metadata
 
@@ -199,6 +202,10 @@ class RocmAttentionBackend(AttentionBackend):
         # Callink this backend with sinks will cause it to fall back to the Triton
         # kernel, which is less efficient than the proper triton backends.
         return False
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -301,7 +308,7 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         layer: torch.nn.Module,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
@@ -350,7 +357,7 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -438,6 +445,7 @@ class RocmAttentionImpl(AttentionImpl):
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
+            causal=attn_metadata.causal,
         )
 
         return output
