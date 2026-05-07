@@ -15,13 +15,13 @@ profiles:
       VLLM_USE_V1: "1"
       VLLM_WORKER_MULTIPROC_METHOD: spawn
   
-  # We use a flashinfer backend since we end up with a 
+  # We use a triton moe backend since we end up with a 
   # illegal memory access error which originates from
   # moe fp8 kernel
   - name: vllm-h100
     when: server.type == "vllm" && matches(gpu.name, "h100")
     args:
-      attention-backend: "FLASHINFER"
+      moe-backend: "triton"
 
   - name: vllm-b200
     when: server.type == "vllm" && matches(gpu.name, "b200")
@@ -46,3 +46,4 @@ profiles:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MHA: "1"
       VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: "1"

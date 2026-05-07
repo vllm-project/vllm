@@ -149,7 +149,7 @@ and CI routing.
   ```markdown
   1. Runs two sequential generations with `VLLM_USE_LOGITS_FP32_COMPUTATION=0`
      then `=1`.
-     - [`tests/cohere/unit/test_c5_fp32_logits.py`](...)
+     - [`tests/cohere/test_c5_fp32_logits.py`](...)
   ```
 
 - When CI entry/reporting behavior matters, consult the
@@ -486,10 +486,10 @@ Backfill-mode template (code exists):
 ## How it runs
 
 1. Description of execution step.
-   - [`tests/cohere/unit/test_example.py`](...)
+   - [`tests/cohere/test_example.py`](...)
    - [`vllm/module/path.py`](...)
 2. Description of another step.
-   - [`tests/cohere/unit/test_example.py`](...)
+   - [`tests/cohere/test_example.py`](...)
 
 ## Checks
 
@@ -517,7 +517,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 1. **Input**: Basic (compatible)
 2. **Cohere Feature**:
 3. **Model Architecture**: C5 Arch (compatible)
-   - [`tests/cohere/unit/test_example.py`](...)
+   - [`tests/cohere/test_example.py`](...)
 4. **Quantization**:
 5. **Hardware**: H100, B200 (compatible); MI300x (not compatible)
    - [`tests/cohere/configs/runner_map.json`](...)
@@ -526,7 +526,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 
 ## Implementation
 
-Primary test: [`tests/cohere/unit/test_example.py`](...)
+Primary test: [`tests/cohere/test_example.py`](...)
 Runtime path: [`vllm/module/path.py`](...)
 
 ### Setup

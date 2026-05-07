@@ -16,16 +16,11 @@ Required environment variables:
 import argparse
 import os
 import sys
-from pathlib import Path
 
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
-TESTS_DIR = Path(__file__).resolve().parents[1]
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
-
-from test_utils_c5 import (  # noqa: E402
+from .test_utils_c5 import (
     C5_SANITY_EXPECTED,
     C5_SANITY_PROMPTS,
     build_c5_llm,

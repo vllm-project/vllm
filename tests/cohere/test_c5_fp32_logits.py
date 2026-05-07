@@ -5,19 +5,12 @@
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 from typing import TypedDict, cast
 
 import vllm.envs as envs
 from vllm import SamplingParams
 
-# Allow shared test helpers from the tests root when pytest collects this file.
-TESTS_DIR = Path(__file__).resolve().parents[2]
-if str(TESTS_DIR) not in sys.path:
-    sys.path.insert(0, str(TESTS_DIR))
-
-from test_utils_c5 import (  # noqa: E402
+from .test_utils_c5 import (
     C5_SANITY_PROMPTS,
     build_c5_llm,
     shutdown_llm,
@@ -44,7 +37,7 @@ def _required_model_path() -> str:
     model_path = os.environ.get("C5_MODEL_DIR")
     if not model_path:
         raise ValueError(
-            "C5_MODEL_DIR is required for tests/cohere/unit/test_c5_fp32_logits.py."
+            "C5_MODEL_DIR is required for tests/cohere/test_c5_fp32_logits.py."
         )
     return validate_model_path(model_path)
 

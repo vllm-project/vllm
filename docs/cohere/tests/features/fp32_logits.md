@@ -5,7 +5,7 @@
 > **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section FP32 Logits
 
 Validates the fp32-logits path for C5 through dedicated pytest coverage files
-under `tests/cohere/unit/`.
+under `tests/cohere/`.
 
 <details>
 <summary>Test case 1: C5 fp32 logits consistency</summary>
@@ -15,14 +15,14 @@ under `tests/cohere/unit/`.
 1. `run_fp32_logits_consistency_test` runs two sequential generations in one
    process with `VLLM_USE_LOGITS_FP32_COMPUTATION=0` and then `=1`, resetting
    cached env reads with `envs.disable_envs_cache()` between runs.
-   - [`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py)
+   - [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 2. `_capture_generation_snapshot` generates with
    `SamplingParams(logprobs=1, prompt_logprobs=1)`, installs the logits dtype
    hook, and records token IDs, sampled logprobs, prompt token IDs, prompt
    logprobs, and fp32 debug info.
-   - [`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py)
+   - [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 3. The dedicated pytest entrypoint runs with
-   `C5_MODEL_DIR=<model_dir> pytest -v -s tests/cohere/unit/test_c5_fp32_logits.py`.
+   `C5_MODEL_DIR=<model_dir> pytest -v -s tests/cohere/test_c5_fp32_logits.py`.
    - [`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh)
 
 ## Checks
@@ -62,7 +62,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 ## Implementation
 
 Primary test:
-[`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py)
+[`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 Runtime path: [`vllm/model_executor/layers/logits_processor.py`](../../../../vllm/model_executor/layers/logits_processor.py)
 
 ### Setup
@@ -70,17 +70,17 @@ Runtime path: [`vllm/model_executor/layers/logits_processor.py`](../../../../vll
 1. Toggles `VLLM_USE_LOGITS_FP32_COMPUTATION` between `0` and `1`, resets
    cached env reads with `envs.disable_envs_cache()` so both modes run in one
    process:
-   [`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py)
+   [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 2. Enables `VLLM_ALLOW_INSECURE_SERIALIZATION=1` because `apply_model()` sends
    Python callables over RPC for the dtype hook and debug-info capture:
-   [`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py)
+   [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 3. Uses the C5 model path, `tensor_parallel_size`, and
    `SamplingParams(temperature=0.0, max_tokens=32, logprobs=1, prompt_logprobs=1)`
    over the fixed multilingual/code prompt set in `C5_SANITY_PROMPTS`. Engine
    kwargs are merged with hardware profile defaults via
    `get_engine_kwargs_with_overrides` (`VLLM_HARDWARE_PROFILE_ARGS` env var):
-   [`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py),
-   [`tests/test_utils_c5.py`](../../../../tests/test_utils_c5.py),
+   [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py),
+   [`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py),
    [`tests/cohere/test_utils_engine_args.py`](../../../../tests/cohere/test_utils_engine_args.py)
 4. Tuning env vars: `C5_FP32_LOGITS_MAX_ABS_DIFF` (sampled logprob tolerance,
    default 0.5), `C5_FP32_LOGITS_MAX_PROMPT_ABS_DIFF` (prompt logprob
@@ -97,15 +97,15 @@ Runtime path: [`vllm/model_executor/layers/logits_processor.py`](../../../../vll
 1. Builds a deterministic LM-head-only fixture with bf16 hidden states and a
    dense bf16 LM-head weight, then runs the projection twice with
    `VLLM_USE_LOGITS_FP32_COMPUTATION=0` and `=1`.
-   - [`tests/cohere/unit/test_logits_processor.py`](../../../../tests/cohere/unit/test_logits_processor.py)
+   - [`tests/cohere/test_logits_processor.py`](../../../../tests/cohere/test_logits_processor.py)
 2. Resets cached env reads between the two executions so
    `VLLM_USE_LOGITS_FP32_COMPUTATION` is re-evaluated before each call into
    `LogitsProcessor._get_logits`.
-   - [`tests/cohere/unit/test_logits_processor.py`](../../../../tests/cohere/unit/test_logits_processor.py)
+   - [`tests/cohere/test_logits_processor.py`](../../../../tests/cohere/test_logits_processor.py)
 3. Runs a microbenchmark for the no-bias projection path with explicit warmup
    iterations before measured iterations, and reports separate bf16-path and
    fp32-path timings from the same eager fixture.
-   - [`tests/cohere/unit/test_logits_processor.py`](../../../../tests/cohere/unit/test_logits_processor.py)
+   - [`tests/cohere/test_logits_processor.py`](../../../../tests/cohere/test_logits_processor.py)
 4. CI routes the correctness check through JUnit XML via the pytest conftest
    hook, and the nightly job routes through `quantization_32bit_logits`; see
    [Test Pipeline Integration](../../code_notes/ci-and-automation.md#7-test-pipeline-integration).
@@ -148,7 +148,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 ## Implementation
 
 Primary test:
-[`tests/cohere/unit/test_logits_processor.py`](../../../../tests/cohere/unit/test_logits_processor.py)
+[`tests/cohere/test_logits_processor.py`](../../../../tests/cohere/test_logits_processor.py)
 Runtime path:
 [`vllm/model_executor/layers/logits_processor.py`](../../../../vllm/model_executor/layers/logits_processor.py)
 CI routing:
@@ -159,13 +159,13 @@ eager so it matches the real v1 runtime boundary, where the model forward is
 the compiled/cudagraph-managed callable and logits are computed afterward on the
 raw model object. End-to-end `torch.compile` and CUDA-graph fp32-logits
 coverage remains on
-[`tests/cohere/unit/test_c5_fp32_logits.py`](../../../../tests/cohere/unit/test_c5_fp32_logits.py).
+[`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py).
 
 ### Setup
 
 1. The fixture uses deterministic bf16 hidden states and a dense bf16
    `lm_head.weight` so the test isolates `LogitsProcessor._get_logits` without a
-   full model load: [`tests/cohere/unit/test_logits_processor.py`](../../../../tests/cohere/unit/test_logits_processor.py)
+   full model load: [`tests/cohere/test_logits_processor.py`](../../../../tests/cohere/test_logits_processor.py)
 2. Toggles `VLLM_USE_LOGITS_FP32_COMPUTATION` between `0` and `1`,
    resets env caching between runs, and exercises the no-bias projection path so
    the benchmark targets the `torch.mm` branch in

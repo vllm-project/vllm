@@ -118,24 +118,6 @@ def compute_soft_accuracy(prediction: str, target: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-_THINKING_RE = re.compile(r"<\|START_THINKING\|>.*?<\|END_THINKING\|>", re.DOTALL)
-_TEXT_BLOCK_RE = re.compile(r"<\|START_TEXT\|>(.*?)(?:<\|END_TEXT\|>|$)", re.DOTALL)
-
-
-def strip_thinking(text: str) -> str:
-    """Extract the answer portion from a generation that may contain thinking tokens.
-
-    If the model wraps its answer in ``<|START_TEXT|>...<|END_TEXT|>``, return
-    only that content.  Otherwise fall back to stripping the thinking block and
-    returning whatever remains.
-    """
-    m = _TEXT_BLOCK_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    cleaned = _THINKING_RE.sub("", text)
-    return cleaned.strip()
-
-
 class BeeEvalTask(abc.ABC):
     """Abstract base for lightweight bee-eval tasks."""
 
@@ -215,7 +197,6 @@ class MMLUProAATask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         extracted = self._extract_answer(generation)
         accuracy = (
             float(extracted == sample.ground_truth) if extracted is not None else 0.0
@@ -262,7 +243,6 @@ class OCRBenchTask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         gt_str = (
             sample.ground_truth
             if isinstance(sample.ground_truth, str)
@@ -318,7 +298,6 @@ class InfoVQATask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         gt = sample.ground_truth
         if isinstance(gt, list):
             anls = max((calculate_anls(c, generation) for c in gt), default=0.0)
@@ -411,7 +390,6 @@ class MathVistaTask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         extracted = self._extract_answer(generation)
         pred = self._normalize(extracted)
         gt_raw = (
@@ -464,7 +442,6 @@ class AIMETask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         extracted = self._extract_numeric(generation)
         gt = (
             sample.ground_truth
@@ -518,7 +495,6 @@ class MGSMTask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         extracted = self._extract_numeric(generation)
         gt = (
             sample.ground_truth
@@ -588,7 +564,6 @@ class MBPPPlusTask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         code = self._extract_code_block(generation)
 
         try:
@@ -722,7 +697,6 @@ class NIAHTask(BeeEvalTask):
         return samples
 
     def check_response(self, sample: EvalSample, generation: str) -> EvalResult:
-        generation = strip_thinking(generation)
         gen_norm = self._normalize_answer(generation)
 
         refs = (

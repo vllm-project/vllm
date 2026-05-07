@@ -126,7 +126,7 @@ jobs:
             set -eo pipefail
             git clone git@github.com:cohere-ai/cohere-transformers.git
             cd cohere-transformers
-            git checkout v5.5.3.0
+            git checkout v5.5.3.1
 
       - name: gcp auth
         id: auth

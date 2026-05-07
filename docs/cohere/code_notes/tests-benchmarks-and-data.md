@@ -56,7 +56,7 @@ Consequence:
 `model_arch` GPU jobs now also emit
 `unit_results_summary.json`:
 
-- produced by the `tests/cohere/unit/test_logits_processor.py` portion of the
+- produced by the `tests/cohere/test_logits_processor.py` portion of the
   `model_arch` bucket,
 - copied to the runner temp output directory by the shared Docker mount,
 - appended to reporting branches through `test-pipeline.yaml` using a separate
@@ -70,7 +70,7 @@ Consequence:
 - the fp32 LM-head microbenchmark intentionally keeps the isolated
   `compute_logits()` projection eager; end-to-end `torch.compile` and CUDA graph
   behavior for fp32 logits is covered by
-  `tests/cohere/unit/test_c5_fp32_logits.py`, where `compute_logits()` runs
+  `tests/cohere/test_c5_fp32_logits.py`, where `compute_logits()` runs
   after the compiled/cudagraph-managed model forward.
 
 ## 4) Dataset Extensions for Multimodal Workloads

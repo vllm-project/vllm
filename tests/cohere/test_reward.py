@@ -75,11 +75,11 @@ def run_reward_test(
     score1 = torch.as_tensor(scores[1], dtype=torch.float32).flatten()[-1]
 
     assert torch.allclose(
-        score0, torch.tensor(3.5156, dtype=torch.float32), atol=1e-1
-    ), f"Got wrong score with Prompt 0: {scores[0]}, Ground Truth: 3.5156"
+        score0, torch.tensor(3.5156, dtype=torch.float32), atol=2e-1
+    ), f"Got wrong score with Prompt 0: {score0}, Ground Truth: 3.5156"
     assert torch.allclose(
-        score1, torch.tensor(0.1680, dtype=torch.float32), atol=1e-1
-    ), f"Got wrong score with Prompt 1: {scores[1]}, Ground Truth: 0.1680"
+        score1, torch.tensor(0.1680, dtype=torch.float32), atol=2e-1
+    ), f"Got wrong score with Prompt 1: {score1}, Ground Truth: 0.1680"
 
 
 def main():

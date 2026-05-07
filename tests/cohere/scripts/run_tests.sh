@@ -160,7 +160,7 @@ run_model_arch_logits_checks() {
     echo "Running model architecture logits checks..."
     cd "${VLLM_WORKSPACE}"
 
-    if ! pytest -v -s tests/cohere/unit/test_logits_processor.py; then
+    if ! pytest -v -s tests/cohere/test_logits_processor.py; then
         echo "Model architecture logits checks failed (test_logits_processor)."
         return 1
     fi
@@ -168,7 +168,7 @@ run_model_arch_logits_checks() {
     # FP32 logits consistency test: compare generation with and without fp32
     # logits projection. Requires the C5 model checkpoint.
     MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
-    if ! C5_MODEL_DIR=$MODEL_DIR pytest -v -s tests/cohere/unit/test_c5_fp32_logits.py; then
+    if ! C5_MODEL_DIR=$MODEL_DIR pytest -v -s tests/cohere/test_c5_fp32_logits.py; then
         echo "Model architecture logits checks failed (test_c5_fp32_logits)."
         return 1
     fi
@@ -327,6 +327,7 @@ run_bee_samples() {
         BEE_DATA_DIR=tests/cohere/bee_eval_data \
         BEE_OUTPUT_JSON=${OUTPUT_DIR}/bee_samples_${MODEL_NAME}.json \
         ENABLE_THINKING_BUDGET=${ENABLE_THINKING_BUDGET:-0} \
+        BEE_MIN_SCORE_OVERRIDES=${BEE_MIN_SCORE_OVERRIDES:-} \
         PYTHONUNBUFFERED=1 \
             pytest -v -s tests/cohere/test_bee_samples.py
         local test_result=$?

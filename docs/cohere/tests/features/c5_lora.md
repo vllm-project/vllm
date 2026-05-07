@@ -28,7 +28,7 @@ produce valid outputs both with and without the adapter active.
    `build_c5_llm`, then runs `_generate` twice over `C5_SANITY_PROMPTS` --
    first without a `LoRARequest`, then with the loaded adapter.
    - [`tests/cohere/test_c5_lora.py`](../../../../tests/cohere/test_c5_lora.py) -- `_build_lora_llm`, `_generate`, `run_c5_lora_sanity_check_test`
-   - [`tests/test_utils_c5.py`](../../../../tests/test_utils_c5.py) -- `build_c5_llm` and `C5_SANITY_PROMPTS`
+   - [`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py) -- `build_c5_llm` and `C5_SANITY_PROMPTS`
 4. CI shape: dispatched as the dedicated `model_arch_c5_lora` test group via
    the `model_arch` feature expansion; runs on H100, B200, and GB200 runners
    per [`runner_map.json`](../../../../tests/cohere/configs/runner_map.json).
@@ -66,7 +66,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 ([Compatibility Sources](../feature_matrix.md#compatibility-sources)):
 
 1. **Input**: Basic (compatible), Multilingual (compatible)
-   - [`tests/test_utils_c5.py`](../../../../tests/test_utils_c5.py) -- `C5_SANITY_PROMPTS` mixes English (capitals, NBA, Python `add`) with Chinese (`中国的首都是哪里?`)
+   - [`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py) -- `C5_SANITY_PROMPTS` mixes English (capitals, NBA, Python `add`) with Chinese (`中国的首都是哪里?`)
 2. **Cohere Feature**:
 3. **Model Architecture**: C5 Arch (compatible)
    - [`vllm/model_executor/models/commandr.py`](../../../../vllm/model_executor/models/commandr.py) -- `Cohere2MoeForCausalLM` declares `SupportsLoRA` and `packed_modules_mapping` for `qkv_proj` / `gate_up_proj`
@@ -82,7 +82,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 Primary test:
 [`tests/cohere/test_c5_lora.py`](../../../../tests/cohere/test_c5_lora.py)
 Shared helpers:
-[`tests/test_utils_c5.py`](../../../../tests/test_utils_c5.py),
+[`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py),
 [`tests/cohere/test_utils_engine_args.py`](../../../../tests/cohere/test_utils_engine_args.py)
 Dummy LoRA generator:
 [`tests/cohere/scripts/create_dummy_lora.py`](../../../../tests/cohere/scripts/create_dummy_lora.py)

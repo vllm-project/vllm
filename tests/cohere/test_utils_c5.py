@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import os
 
-from cohere.test_utils_engine_args import get_engine_kwargs_with_overrides
-
 from vllm import LLM
+
+from .test_utils_engine_args import get_engine_kwargs_with_overrides
 
 C5_SANITY_PROMPTS = [
     (

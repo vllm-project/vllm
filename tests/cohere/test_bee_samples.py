@@ -52,7 +52,10 @@ TASK_CONFIG: dict[str, TaskConfig] = {
     "infovqa": TaskConfig("infovqa_16samples.jsonl"),
     "mathvista": TaskConfig("mathvista_16samples.json"),
     "aime": TaskConfig(
-        "aime_2025_16samples.csv", thinking_budget=16384, max_tokens=32768
+        "aime_2025_16samples.csv",
+        thinking_budget=16384,
+        max_tokens=32768,
+        min_score=0.3,
     ),
     "mgsm": TaskConfig("mgsm_ja_16samples.csv"),
     "mbpp_plus": TaskConfig(
@@ -72,6 +75,7 @@ class SampleResult:
     elapsed: float
     generation: str = ""
     ground_truth: str = ""
+    reasoning: str = ""
     error: str | None = None
 
 
@@ -119,7 +123,9 @@ async def send_sample(
             temperature=0,
             extra_body=extra_body,
         )
-        generation = resp.choices[0].message.content or ""
+        msg = resp.choices[0].message
+        generation = msg.content or ""
+        reasoning = getattr(msg, "reasoning", None) or ""
         result = task.check_response(sample, generation)
         gt = sample.ground_truth
         return SampleResult(
@@ -129,6 +135,7 @@ async def send_sample(
             elapsed=time.monotonic() - t0,
             generation=generation,
             ground_truth=gt if isinstance(gt, str) else " | ".join(gt),
+            reasoning=reasoning,
         )
     except Exception as exc:
         return SampleResult(
@@ -361,6 +368,7 @@ def _write_results(
                     "elapsed_s": round(r.elapsed, 2),
                     "ground_truth": r.ground_truth,
                     "generation": r.generation,
+                    **({"reasoning": r.reasoning} if r.reasoning else {}),
                     **({"error": r.error} if r.error else {}),
                 }
                 for r in s.sample_results
@@ -429,6 +437,7 @@ def main() -> int:
 #   BEE_TASKS           comma-separated     (default: all TASK_CONFIG keys)
 #   ENABLE_THINKING_BUDGET  "1" to enable   (default: disabled)
 #   BEE_OUTPUT_JSON     path for summary JSON output
+#   BEE_MIN_SCORE_OVERRIDES  per-task min_score, e.g. "aime:0.3,mgsm:0.4"
 
 _BEE_DEFAULT_TASKS = list(TASK_CONFIG.keys())
 
@@ -450,6 +459,13 @@ try:
         max_samples = int(_os.environ.get("BEE_MAX_SAMPLES", "16"))
         enable_thinking = _os.environ.get("ENABLE_THINKING_BUDGET") == "1"
         output_json = _os.environ.get("BEE_OUTPUT_JSON")
+        for pair in _os.environ.get("BEE_MIN_SCORE_OVERRIDES", "").split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                k, v = pair.split(":", 1)
+                k = k.strip()
+                if k in TASK_CONFIG:
+                    TASK_CONFIG[k].min_score = float(v.strip())
         tasks = [
             t.strip()
             for t in _os.environ.get("BEE_TASKS", ",".join(_BEE_DEFAULT_TASKS)).split(
