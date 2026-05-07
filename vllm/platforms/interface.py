@@ -1013,10 +1013,13 @@ class Platform:
     ) -> None:
         """Copy blocks from src_cache to dst_cache on device."""
         selected = torch.index_select(
-            src_cache, block_dim, src_block_indices.to(src_cache.device))
+            src_cache, block_dim, src_block_indices.to(src_cache.device)
+        )
         dst_cache.index_copy_(
-            block_dim, dst_block_indices.to(dst_cache.device),
-            selected.to(dst_cache.device))
+            block_dim,
+            dst_block_indices.to(dst_cache.device),
+            selected.to(dst_cache.device),
+        )
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -1029,10 +1032,13 @@ class Platform:
     ) -> None:
         """Copy blocks from device to host (CPU)."""
         selected = torch.index_select(
-            src_cache, block_dim, src_block_indices.to(src_cache.device))
+            src_cache, block_dim, src_block_indices.to(src_cache.device)
+        )
         dst_cache.index_copy_(
-            block_dim, dst_block_indices.to(dst_cache.device),
-            selected.to(dst_cache.device))
+            block_dim,
+            dst_block_indices.to(dst_cache.device),
+            selected.to(dst_cache.device),
+        )
 
     @classmethod
     def get_default_ir_op_priority(

@@ -886,7 +886,6 @@ class RocmPlatform(Platform):
                     "`dtype` flag in CLI, for example: --dtype=half."
                 )
 
-
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True

@@ -640,12 +640,12 @@ class NixlConnectorWorker:
         block_dim = self.attn_backends[0].get_kv_cache_block_dim(
             block_size=self.block_size,
             num_kv_heads=self.model_config.get_num_kv_heads(
-                self.vllm_config.parallel_config),
+                self.vllm_config.parallel_config
+            ),
             head_size=self.model_config.get_head_size(),
             cache_dtype_str=self.vllm_config.cache_config.cache_dtype,
         )
-        self.copy_blocks = functools.partial(
-            copy_operation, block_dim=block_dim)
+        self.copy_blocks = functools.partial(copy_operation, block_dim=block_dim)
 
     def _log_failure(
         self,

@@ -22,15 +22,14 @@ NUM_BLOCKS = 32
 
 def _make_triton_kv_cache(num_blocks=NUM_BLOCKS, dtype=torch.float16):
     """Create a KV cache tensor in Triton blocks-first layout."""
-    return torch.randn(num_blocks, 2, BLOCK_SIZE,
-                       NUM_KV_HEADS, HEAD_DIM, dtype=dtype)
+    return torch.randn(num_blocks, 2, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM, dtype=dtype)
 
 
 def test_copy_kv_blocks_h2d_triton():
     """NIXL h2d copy works for Triton blocks-first layout."""
     block_dim = TritonAttentionBackend.get_kv_cache_block_dim(
-        block_size=BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_DIM)
+        block_size=BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS, head_size=HEAD_DIM
+    )
     assert block_dim == 0
 
     src = _make_triton_kv_cache()
@@ -40,8 +39,12 @@ def test_copy_kv_blocks_h2d_triton():
     dst_ids = [0, 1, 2]
 
     copy_kv_blocks(
-        {"layer": src}, {"layer": dst},
-        src_ids, dst_ids, "h2d", block_dim=block_dim,
+        {"layer": src},
+        {"layer": dst},
+        src_ids,
+        dst_ids,
+        "h2d",
+        block_dim=block_dim,
     )
 
     for s, d in zip(src_ids, dst_ids):
@@ -51,8 +54,8 @@ def test_copy_kv_blocks_h2d_triton():
 def test_copy_kv_blocks_d2h_triton():
     """NIXL d2h copy works for Triton blocks-first layout."""
     block_dim = TritonAttentionBackend.get_kv_cache_block_dim(
-        block_size=BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_DIM)
+        block_size=BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS, head_size=HEAD_DIM
+    )
     assert block_dim == 0
 
     src = _make_triton_kv_cache()
@@ -62,8 +65,12 @@ def test_copy_kv_blocks_d2h_triton():
     dst_ids = [0, 1, 2]
 
     copy_kv_blocks(
-        {"layer": src}, {"layer": dst},
-        src_ids, dst_ids, "d2h", block_dim=block_dim,
+        {"layer": src},
+        {"layer": dst},
+        src_ids,
+        dst_ids,
+        "d2h",
+        block_dim=block_dim,
     )
 
     for s, d in zip(src_ids, dst_ids):
