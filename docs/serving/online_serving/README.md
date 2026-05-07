@@ -45,8 +45,7 @@ We currently support the following OpenAI APIs:
     - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - [Openai-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
 - Scoring Usages
-    - [Score API](scoring.md#score-api)(`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](../../models/pooling_models/scoring.md#score-api)(/score)\n    - [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (/rerank, /v1/rerank, /v2/rerank)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
