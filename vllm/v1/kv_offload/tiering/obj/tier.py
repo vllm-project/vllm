@@ -4,11 +4,14 @@
 
 from collections.abc import Collection, Iterable
 
+from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, get_offload_block_hash
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
 from vllm.v1.kv_offload.tiering.obj.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.obj.nixl_engine import NixlEngine
 from vllm.v1.kv_offload.tiering.obj.nixl_lookup import NixlLookup
+
+logger = init_logger(__name__)
 
 
 class ObjSecondaryTier(SecondaryTierManager):
@@ -64,6 +67,26 @@ class ObjSecondaryTier(SecondaryTierManager):
         self._pending_stores: set[int] = set()
         # Load jobs: keys needed to clear _load_in_flight on completion
         self._pending_loads: dict[int, list[OffloadKey]] = {}
+
+        self._probe_connectivity()
+
+    def _probe_connectivity(self) -> None:
+        """Verify S3 connectivity at startup via a NIXL lookup probe.
+
+        Performs a single exists() check against a synthetic key that will
+        never exist. A True/False result confirms the bucket is reachable;
+        an exception indicates misconfigured S3 params and raises RuntimeError.
+        """
+        probe_key = "__nixl_probe__/connectivity_test"
+        try:
+            self._nixl_lookup.exists(probe_key)
+            logger.info("OBJ tier S3 connectivity probe succeeded")
+        except Exception as e:
+            raise RuntimeError(
+                f"OBJ tier S3 connectivity probe failed — check bucket, "
+                f"endpoint_override, access_key, secret_key, and scheme. "
+                f"Error: {e}"
+            ) from e
 
     def set_primary_view(self, view: memoryview) -> None:
         self._engine.set_primary_view(view)
