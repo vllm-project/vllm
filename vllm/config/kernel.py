@@ -31,6 +31,9 @@ class IrOpPriorityConfig:
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
 
+    fused_add_rms_norm: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
@@ -115,6 +118,8 @@ MoEBackend = Literal[
     "flashinfer_cutlass",
     "flashinfer_cutedsl",
     "marlin",
+    "humming",
+    "triton_unfused",
     "aiter",
     "emulation",
 ]
@@ -145,6 +150,8 @@ class KernelConfig:
     - "flashinfer_cutlass": Use FlashInfer with CUTLASS kernels
     - "flashinfer_cutedsl": Use FlashInfer with CuteDSL kernels (FP4 only)
     - "marlin": Use Marlin kernels (weight-only quantization)
+    - "humming": Use Humming Mixed Precision kernels
+    - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
