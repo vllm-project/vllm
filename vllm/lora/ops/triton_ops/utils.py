@@ -11,12 +11,11 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
-is_batch_invariant = vllm_is_batch_invariant()
+is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 _LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
@@ -322,3 +321,20 @@ def supports_pdl(device: torch.device | None = None) -> bool:
 def supports_tma(device: torch.device | None = None) -> bool:
     # TMA requires compute capability SM90 or above
     return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+
+def _normalize_lora_config_keys(
+    config: dict[str, int | None],
+) -> dict[str, int | None]:
+    """Normalize Triton config dict keys to uppercase BLOCK_SIZE_* format."""
+    out: dict[str, int | None] = {}
+    for key, val in config.items():
+        if key.islower():
+            if key.startswith("block_"):
+                nk = "BLOCK_SIZE_" + key.split("_")[-1].upper()
+            else:
+                nk = key.upper()
+        else:
+            nk = key
+        out[nk] = val
+    return out

@@ -65,36 +65,22 @@ def tl_rand64(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
-def _gumbel_sample_kernel(
-    local_argmax_ptr,
-    local_argmax_stride,
-    local_max_ptr,
-    local_max_stride,
-    processed_logits_ptr,
-    processed_logits_stride,
-    logits_ptr,
-    logits_stride,
+def gumbel_block_argmax(
+    logits,
+    block,
+    mask,
+    token_idx,
     expanded_idx_mapping_ptr,
+    temp_ptr,
     seeds_ptr,
     pos_ptr,
-    temp_ptr,
+    processed_logits_ptr,
+    processed_logits_stride,
+    processed_logits_col_ptr,
     vocab_size,
-    BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    logits = tl.load(
-        logits_ptr + token_idx * logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    )
-    logits = logits.to(tl.float32)
-
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
         # Apply temperature.
@@ -102,10 +88,17 @@ def _gumbel_sample_kernel(
         # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
         logits = logits / temp
 
-    # Store the temperature-applied logits.
     if processed_logits_ptr is not None:
+        # Store the temperature-applied logits.
+        if processed_logits_col_ptr is not None:
+            col = tl.load(processed_logits_col_ptr)
+        else:
+            col = 0
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + block,
+            processed_logits_ptr
+            + req_state_idx * processed_logits_stride
+            + col * vocab_size
+            + block,
             logits,
             mask=mask,
         )
@@ -126,6 +119,54 @@ def _gumbel_sample_kernel(
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
 
     value, idx = tl.max(logits, axis=0, return_indices=True)
+    return value, idx
+
+
+@triton.jit
+def _gumbel_sample_kernel(
+    local_argmax_ptr,
+    local_argmax_stride,
+    local_max_ptr,
+    local_max_stride,
+    processed_logits_ptr,
+    processed_logits_stride,
+    processed_logits_col_ptr,
+    logits_ptr,
+    logits_stride,
+    expanded_idx_mapping_ptr,
+    seeds_ptr,
+    pos_ptr,
+    temp_ptr,
+    vocab_size,
+    BLOCK_SIZE: tl.constexpr,
+    APPLY_TEMPERATURE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    block_idx = tl.program_id(1)
+    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = block < vocab_size
+    logits = tl.load(
+        logits_ptr + token_idx * logits_stride + block,
+        mask=mask,
+        other=float("-inf"),
+    )
+    logits = logits.to(tl.float32)
+
+    value, idx = gumbel_block_argmax(
+        logits,
+        block,
+        mask,
+        token_idx,
+        expanded_idx_mapping_ptr,
+        temp_ptr,
+        seeds_ptr,
+        pos_ptr,
+        processed_logits_ptr,
+        processed_logits_stride,
+        processed_logits_col_ptr,
+        vocab_size,
+        APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+    )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
@@ -138,7 +179,8 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
+    output_processed_logits: torch.Tensor | None = None,
+    output_processed_logits_col: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
@@ -150,8 +192,9 @@ def gumbel_sample(
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        processed_logits_out,
-        processed_logits_out.stride(0) if processed_logits_out is not None else 0,
+        output_processed_logits,
+        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
+        output_processed_logits_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
