@@ -33,8 +33,11 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         N, scale_K = layer.weight_scale.shape
         K = scale_K * _MXFP4_GROUP_SIZE
+
+        # swizzle pads N to the next multiple of 128 for CUTLASS tiling
+        padded_N = ((N + 127) // 128) * 128
         layer.weight_scale = Parameter(
-            swizzle_mxfp4_scales(layer.weight_scale.data, N, K).reshape(N, -1),
+            swizzle_mxfp4_scales(layer.weight_scale.data, N, K).reshape(padded_N, -1),
             requires_grad=False,
         )
 
