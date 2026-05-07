@@ -1788,6 +1788,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
+    # Enable reasoning-boundary validation inside accepted speculative tokens.
+    # This is opt-in to avoid unexpected regressions for parsers that are not
+    # yet adapted to the validation path.
+    "VLLM_SPEC_REASONING_BOUNDARY_VALIDATION": lambda: bool(
+        int(os.getenv("VLLM_SPEC_REASONING_BOUNDARY_VALIDATION", "0"))
+    ),
 }
 
 

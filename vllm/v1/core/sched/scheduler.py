@@ -58,7 +58,10 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.structured_output import (
+    StructuredOutputManager,
+    validate_spec_tokens_with_reasoning_boundary,
+)
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -259,6 +262,10 @@ class Scheduler(SchedulerInterface):
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
+
+        self.enable_spec_reasoning_boundary_validation = (
+            envs.VLLM_SPEC_REASONING_BOUNDARY_VALIDATION
+        )
 
         if self.vllm_config.model_config.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -1354,6 +1361,8 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            num_draft_tokens = 0
+            num_accepted = 0
             if scheduled_spec_token_ids and generated_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
@@ -1369,13 +1378,6 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
-                )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -1388,6 +1390,53 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # If reasoning ends inside accepted speculative tokens, tokens after
+            # the boundary belong to the answer phase and must be grammar-validated
+            # before they are appended to the request output.
+            structured_req = request.structured_output_request
+            validate_reasoning_boundary = (
+                new_token_ids
+                and scheduled_spec_token_ids
+                and request.use_structured_output
+                and structured_req is not None
+                and self.structured_output_manager.reasoner is not None
+                and not self.structured_output_manager.enable_in_reasoning
+                and structured_req.reasoning_ended is False
+                and self.enable_spec_reasoning_boundary_validation
+            )
+            advanced_with_reasoning_boundary = False
+            if validate_reasoning_boundary:
+                reasoner = self.structured_output_manager.reasoner
+                may_have_reasoning_end = reasoner.may_have_reasoning_end_in_delta(
+                    new_token_ids
+                )
+
+                if may_have_reasoning_end:
+                    num_new_token_ids = len(new_token_ids)
+                    new_token_ids = validate_spec_tokens_with_reasoning_boundary(
+                        request,
+                        new_token_ids,
+                        reasoner,
+                    )
+                    advanced_with_reasoning_boundary = (
+                        structured_req.reasoning_ended is True
+                    )
+                    num_rejected_by_grammar = num_new_token_ids - len(new_token_ids)
+                    if num_rejected_by_grammar:
+                        if request.num_computed_tokens > 0:
+                            request.num_computed_tokens -= num_rejected_by_grammar
+                        if request.num_output_placeholders > 0:
+                            request.num_output_placeholders -= num_rejected_by_grammar
+
+            if scheduled_spec_token_ids and generated_token_ids:
+                spec_decoding_stats = self.make_spec_decoding_stats(
+                    spec_decoding_stats,
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=min(len(new_token_ids), num_accepted),
+                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                    request_id=req_id,
+                )
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -1398,7 +1447,11 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(request):
+            if (
+                new_token_ids
+                and not advanced_with_reasoning_boundary
+                and self.structured_output_manager.should_advance(request)
+            ):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
