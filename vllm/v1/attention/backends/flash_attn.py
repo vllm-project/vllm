@@ -700,12 +700,7 @@ class FlashAttentionImpl(AttentionImpl):
                 reduce_scatter_head_dim=self.head_size,
                 cp_world_size=self.dcp_world_size,
                 dtype=self._dcp_dtype,
-                reserve_a2a=dcp_a2a,
-            )
-            current_workspace_manager().get_simultaneous(
-                ((max_tokens, total_heads, self.head_size), self._dcp_dtype),
-                ((max_tokens, self.num_heads, self.head_size), self._dcp_dtype),
-                *self.dcp_combine_workspace_shapes(
+                combine_workspace_shapes=self.dcp_combine_workspace_shapes(
                     num_tokens=max_tokens,
                     total_heads=total_heads,
                     head_dim=self.head_size,

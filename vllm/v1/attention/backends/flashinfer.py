@@ -68,9 +68,13 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import (
     cp_all_gather_heads,
     cp_lse_ag_out_rs,
+    cp_lse_ag_out_rs_workspace_shapes,
     reserve_cp_collective_workspace,
 )
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    dcp_a2a_lse_reduce_workspace_shapes,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1349,14 +1353,27 @@ class FlashInferImpl(AttentionImpl):
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
         if vllm_config is not None and self.dcp_world_size > 1:
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            total_heads = self.num_heads * self.dcp_world_size
+            ws_shapes_fn = (
+                dcp_a2a_lse_reduce_workspace_shapes
+                if dcp_a2a
+                else cp_lse_ag_out_rs_workspace_shapes
+            )
             reserve_cp_collective_workspace(
-                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
-                total_heads=self.num_heads * self.dcp_world_size,
+                max_num_tokens=max_tokens,
+                total_heads=total_heads,
                 gather_head_dim=self.head_size,
                 reduce_scatter_head_dim=self.head_size,
                 cp_world_size=self.dcp_world_size,
                 dtype=vllm_config.model_config.dtype,
-                reserve_a2a=dcp_a2a,
+                combine_workspace_shapes=ws_shapes_fn(
+                    num_tokens=max_tokens,
+                    total_heads=total_heads,
+                    head_dim=self.head_size,
+                    cp_world_size=self.dcp_world_size,
+                    dtype=vllm_config.model_config.dtype,
+                ),
             )
 
     def fused_output_quant_supported(self, quant_key: QuantKey):

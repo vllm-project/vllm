@@ -118,8 +118,7 @@ def reserve_cp_collective_workspace(
     reduce_scatter_head_dim: int,
     cp_world_size: int,
     dtype: torch.dtype,
-    lse_dtype: torch.dtype = torch.float32,
-    reserve_a2a: bool = False,
+    combine_workspace_shapes: (list[tuple[tuple[int, ...], torch.dtype]] | None) = None,
 ) -> None:
     if (
         cp_world_size <= 1
@@ -135,25 +134,10 @@ def reserve_cp_collective_workspace(
         ((max_num_tokens * cp_world_size, local_heads, gather_head_dim), dtype),
     )
     workspace_manager.get_simultaneous(
-        ((total_heads, max_num_tokens, reduce_scatter_head_dim), dtype),
-        ((local_heads, max_num_tokens, reduce_scatter_head_dim), dtype),
+        ((max_num_tokens, total_heads, gather_head_dim), dtype),
+        ((max_num_tokens, local_heads, reduce_scatter_head_dim), dtype),
+        *(combine_workspace_shapes or []),
     )
-    workspace_manager.get_simultaneous(
-        ((cp_world_size * max_num_tokens, total_heads), lse_dtype),
-    )
-    if reserve_a2a:
-        workspace_manager.get_simultaneous(
-            (
-                (cp_world_size, max_num_tokens, local_heads, reduce_scatter_head_dim),
-                dtype,
-            ),
-            (
-                (cp_world_size, max_num_tokens, local_heads, reduce_scatter_head_dim),
-                dtype,
-            ),
-            ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
-            ((cp_world_size, max_num_tokens, local_heads), lse_dtype),
-        )
 
 
 def cp_all_gather_heads(

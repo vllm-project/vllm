@@ -272,9 +272,13 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import (
     cp_all_gather_heads,
     cp_lse_ag_out_rs,
+    cp_lse_ag_out_rs_workspace_shapes,
     reserve_cp_collective_workspace,
 )
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    dcp_a2a_lse_reduce_workspace_shapes,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -486,14 +490,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 if speculative_config is not None
                 else 0
             )
+            max_tokens = scheduler_config.max_num_seqs * (1 + num_spec_tokens)
+            total_heads = self.num_heads * dcp_world_size
+            ws_shapes_fn = (
+                dcp_a2a_lse_reduce_workspace_shapes
+                if parallel_config.dcp_comm_backend == "a2a"
+                else cp_lse_ag_out_rs_workspace_shapes
+            )
             reserve_cp_collective_workspace(
-                max_num_tokens=scheduler_config.max_num_seqs * (1 + num_spec_tokens),
-                total_heads=self.num_heads * dcp_world_size,
+                max_num_tokens=max_tokens,
+                total_heads=total_heads,
                 gather_head_dim=self.kv_lora_rank + self.qk_rope_head_dim,
                 reduce_scatter_head_dim=self.kv_lora_rank,
                 cp_world_size=dcp_world_size,
                 dtype=model_config.dtype,
-                reserve_a2a=(parallel_config.dcp_comm_backend == "a2a"),
+                combine_workspace_shapes=ws_shapes_fn(
+                    num_tokens=max_tokens,
+                    total_heads=total_heads,
+                    head_dim=self.kv_lora_rank,
+                    cp_world_size=dcp_world_size,
+                    dtype=model_config.dtype,
+                ),
             )
         self.dcp_a2a = (
             dcp_world_size > 1
