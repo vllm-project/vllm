@@ -423,10 +423,8 @@ class DefaultModelLoader(BaseModelLoader):
                 if has_online_quant or has_postprocess_quant:
                     for param_name, _ in module.named_parameters():
                         full_name = f"{name}.{param_name}" if name else param_name
-                        loaded_weights.add(full_name)
-                        
+                        loaded_weights.add(full_name)           
         weights_not_loaded = weights_to_load - (loaded_weights or set())
-        
         if weights_not_loaded:
             raise ValueError(
                 "Following weights were not initialized from "
