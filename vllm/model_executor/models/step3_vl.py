@@ -884,12 +884,12 @@ class Step3VLForConditionalGeneration(
                 "pixel_values": (
                     pixel_values[:0]
                     if pixel_values is not None
-                    else torch.empty(0, dtype=torch.float32, device=self.device)
+                    else torch.empty(0, dtype=self.dtype, device=self.device)
                 ),
                 "patch_pixel_values": (
                     patch_pixel_values[:0]
                     if patch_pixel_values is not None
-                    else torch.empty(0, dtype=torch.float32, device=self.device)
+                    else torch.empty(0, dtype=self.dtype, device=self.device)
                 ),
                 "num_patches": [],
             }
@@ -898,9 +898,9 @@ class Step3VLForConditionalGeneration(
             cum_patches.append(cum_patches[-1] + np)
 
         selected_pv = (
-            torch.cat([pixel_values[i].unsqueeze(0) for i in indices])
+            pixel_values[indices]
             if pixel_values is not None
-            else torch.empty(0, dtype=torch.float32, device=self.device)
+            else torch.empty(0, dtype=self.dtype, device=self.device)
         )
 
         selected_patch_pv_list = []
@@ -918,7 +918,7 @@ class Step3VLForConditionalGeneration(
                 3,
                 patch_img_size,
                 patch_img_size,
-                dtype=torch.float32,
+                dtype=self.dtype,
                 device=self.device,
             )
 
