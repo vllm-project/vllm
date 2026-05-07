@@ -392,24 +392,21 @@ class DefaultModelLoader(BaseModelLoader):
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
-
-        # Check weight integrity for all models.
-        # Non-quantized models: raise error if weights not loaded.
-        # Quantized models: still perform check but only log warning.
-        if loaded_weights is not None:
-            # We only enable strict check for non-quantized models
-            # that have loaded weights tracking by default.
-            if self.enable_weights_track is None:
-                self.enable_weights_track = model_config.quantization is None
-
-            if self.enable_weights_track:
-                self.track_weights_loading(model, loaded_weights, model_config)
+        # We only enable strict check for non-quantized models
+        # that have loaded weights tracking by default.
+        default_enable_weights_track = (
+            model_config.quantization is None and loaded_weights is not None
+        )
+        enable_weights_track = (
+            self.enable_weights_track
+            if self.enable_weights_track is not None
+            else default_enable_weights_track
+        )
+        if enable_weights_track:
+            self.track_weights_loading(model, loaded_weights)
 
     def track_weights_loading(
-        self,
-        model: nn.Module,
-        loaded_weights: set[str] | None,
-        model_config: ModelConfig,
+        self, model: nn.Module, loaded_weights: set[str] | None
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
