@@ -222,6 +222,26 @@ class RoutedExpertsCapturer(ABC):
         raise NotImplementedError
 
 
+def _count_moe_layers(hf_config) -> int:
+    """Count the number of MoE layers in a model.
+
+    Resolves three known config shapes:
+    - Nemotron-style: an explicit ``layers_block_type`` list with "moe" entries.
+    - Qwen3MoE / DeepSeek-style sparse: ``decoder_sparse_step > 1`` with optional
+      ``mlp_only_layers`` exclusions.
+    - Default: every layer is MoE except those listed in ``mlp_only_layers``.
+    """
+    layers_block_type = getattr(hf_config, "layers_block_type", None)
+    if layers_block_type is not None:
+        return layers_block_type.count("moe")
+    n = hf_config.num_hidden_layers
+    mlp_only = getattr(hf_config, "mlp_only_layers", None) or []
+    step = getattr(hf_config, "decoder_sparse_step", 1) or 1
+    if step > 1:
+        return sum(1 for i in range(n) if (i + 1) % step == 0 and i not in mlp_only)
+    return n - sum(1 for i in mlp_only if 0 <= i < n)
+
+
 class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
     """Capturer with GPU device cache and CPU host cache.
 
@@ -248,9 +268,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         skip_host_cache: bool = False,
     ):
         self.num_fused_shared_experts = num_fused_shared_experts
-        self.num_hidden_layers = model_config.hf_text_config.layers_block_type.count(
-            "moe"
-        )
+        self.num_hidden_layers = _count_moe_layers(model_config.hf_text_config)
         self.num_experts_per_tok = model_config.hf_text_config.num_experts_per_tok
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_model_len = max_model_len
@@ -693,7 +711,7 @@ def create_shared_host_cache(
     max_model_len: int,
 ) -> _RoutedExpertsHostCache:
     global _shared_host_cache
-    num_hidden_layers = model_config.hf_text_config.layers_block_type.count("moe")
+    num_hidden_layers = _count_moe_layers(model_config.hf_text_config)
     num_experts_per_tok = model_config.hf_text_config.num_experts_per_tok
     _shared_host_cache = _RoutedExpertsHostCache(
         num_hidden_layers=num_hidden_layers,
