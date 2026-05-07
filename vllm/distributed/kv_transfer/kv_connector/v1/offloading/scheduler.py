@@ -879,9 +879,5 @@ class OffloadingConnectorScheduler:
                     lora_name=None,
                 )
 
-    def reset_cache(self) -> None:
-        """Reset the offloading manager cache, evicting all stored blocks."""
-        self.manager.reset_cache()
-
     def shutdown(self) -> None:
         self.manager.shutdown()
