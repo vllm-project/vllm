@@ -113,14 +113,17 @@ class RoutingMethodType(IntEnum):
     RenormalizeNaive = (4,)
     # TopK: TopK (no softmax)
     TopK = (5,)
-    # Custom
-    Custom = (6,)
-    # Simulated
-    Simulated = (7,)
-    # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
-    DeepseekV4 = (8,)
+    # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
+    SigmoidRenorm = (6,)
+    # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
+    MiniMax2 = (7,)
     # Unspecified
-    Unspecified = 9.0
+    Unspecified = (8,)
+    # other routing types (not passed to FlashInfer kernels)
+    # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
+    DeepseekV4 = (100,)
+    Custom = (101,)
+    Simulated = (102,)
 
 
 def get_routing_method_type(
@@ -141,12 +144,16 @@ def get_routing_method_type(
     if has_e_score_bias:
         if (num_expert_group or 0) > 0 and scoring_func == "sigmoid":
             return RoutingMethodType.DeepSeekV3
+        elif scoring_func == "sigmoid":
+            return RoutingMethodType.MiniMax2
         else:
             return RoutingMethodType.Unspecified
 
     if scoring_func == "sigmoid":
         if top_k == 1:
             return RoutingMethodType.Llama4
+        elif renormalize:
+            return RoutingMethodType.SigmoidRenorm
         else:
             return RoutingMethodType.Unspecified
 
@@ -246,6 +253,8 @@ class FusedMoEQuantConfig:
     gemm1_alpha: float | None = None
     gemm1_beta: float | None = None
     gemm1_clamp_limit: float | None = None
+
+    mx_alignment: int = 0
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -705,6 +714,7 @@ def mxfp4_mxfp8_moe_quant_config(
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
+    mx_alignment: int = 0,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and mxfp4 weights.
@@ -717,6 +727,7 @@ def mxfp4_mxfp8_moe_quant_config(
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        mx_alignment=mx_alignment,
     )
 
 

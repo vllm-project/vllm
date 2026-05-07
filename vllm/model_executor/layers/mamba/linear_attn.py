@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Callable
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -33,28 +34,46 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 
+@CustomOp.register("minimax_text01_rmsnorm_tp")
 class MiniMaxText01RMSNormTP(CustomOp):
-    name = "MiniMaxText01RMSNormTP"
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        *,
+        weight_shard_world_size: int | None = None,
+        weight_shard_rank: int | None = None,
+    ) -> None:
         super().__init__()
         self.tp_world = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size / self.tp_world)))
+        self.weight_shard_world = weight_shard_world_size or self.tp_world
+        self.weight_shard_rank = (
+            self.tp_rank if weight_shard_rank is None else weight_shard_rank
+        )
 
-        self.weight.weight_loader = self.weight_loader
+        self.weight = nn.Parameter(torch.ones(hidden_size // self.weight_shard_world))
+        self.weight.weight_loader = partial(
+            self.weight_loader,
+            shard_world_size=self.weight_shard_world,
+            shard_rank=self.weight_shard_rank,
+        )
         self.variance_epsilon = eps
 
     @staticmethod
     def weight_loader(
         param: nn.Parameter,
         loaded_weight: torch.Tensor,
+        shard_world_size: int | None = None,
+        shard_rank: int | None = None,
     ) -> None:
-        tp_world = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
+        if shard_world_size is None:
+            shard_world_size = get_tensor_model_parallel_world_size()
+        if shard_rank is None:
+            shard_rank = get_tensor_model_parallel_rank()
 
-        shard_size = loaded_weight.shape[0] // tp_world
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
+        shard_size = loaded_weight.shape[0] // shard_world_size
+        shard = slice(shard_rank * shard_size, (shard_rank + 1) * shard_size)
         param.data.copy_(loaded_weight[shard])
 
     def _forward(
