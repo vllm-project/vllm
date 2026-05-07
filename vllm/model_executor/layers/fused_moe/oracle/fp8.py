@@ -165,7 +165,7 @@ def backend_to_kernel_cls(
         return [BatchedTritonExperts]
 
     elif backend == Fp8MoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
