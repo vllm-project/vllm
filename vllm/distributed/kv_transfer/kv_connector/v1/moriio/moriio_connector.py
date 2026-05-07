@@ -1257,10 +1257,10 @@ class MoRIIOConnectorWorker:
         if self.is_producer:
             # pop_finished_req_ids returns transfer_ids (the ZMQ payload sent
             # by decode via send_notify); map back to req_ids for the scheduler.
-            raw_done_sending = self.moriio_wrapper.pop_finished_req_ids()
+            finished_transfer_ids = self.moriio_wrapper.pop_finished_req_ids()
             done_sending = {
                 self.transfer_id_to_request_id[xfer_id]
-                for xfer_id in raw_done_sending
+                for xfer_id in finished_transfer_ids
                 if xfer_id in self.transfer_id_to_request_id
             }
         else:
