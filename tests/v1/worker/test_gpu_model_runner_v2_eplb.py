@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from vllm.config.compilation import CompilationMode
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
 
@@ -56,6 +57,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.device = torch.device("cpu")
     runner.model_config = SimpleNamespace(model="test-model")
     runner.load_config = SimpleNamespace(load_format="hf")
+    runner.compilation_config = SimpleNamespace(mode=CompilationMode.NONE)
     runner.parallel_config = SimpleNamespace(
         enable_eplb=True,
         enable_elastic_ep=False,
@@ -64,6 +66,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.vllm_config = SimpleNamespace(
         load_config=runner.load_config,
         model_config=runner.model_config,
+        compilation_config=runner.compilation_config,
     )
     runner.lora_config = None
     runner.use_aux_hidden_state_outputs = False
