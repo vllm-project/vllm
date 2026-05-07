@@ -455,8 +455,6 @@ class FusedMoE(PluggableLayer):
             return None
 
         self.ensure_moe_quant_config_init()
-        # routing_tables only needed for round-robin expert placement with
-        # DeepEP all2all backend.
         prepare_finalize = self.base_quant_method.maybe_make_prepare_finalize(
             routing_tables=self._expert_routing_tables()
         )
