@@ -624,7 +624,10 @@ def rocm_aiter_sparse_attn_indexer_native(
             )
         else:
             workspace_manager.get_simultaneous(
-                ((q_fp8.shape[1], hidden_states.shape[0], max_model_len), torch.float32),
+                (
+                    (q_fp8.shape[1], hidden_states.shape[0], max_model_len),
+                    torch.float32,
+                ),
             )
         # Transient logits tensor peak memory, produced by
         # rocm_fp8_mqa_logits (prefill) and rocm_fp8_paged_mqa_logits
@@ -659,7 +662,6 @@ def rocm_aiter_sparse_attn_indexer_native(
     has_decode = layer_attn_metadata.num_decodes > 0
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
-    device = hidden_states.device if k is None else k.device
 
     # during speculative decoding, k may be padded to the CUDA graph batch
     # size while slot_mapping only covers actual tokens.
