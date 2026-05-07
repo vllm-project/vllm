@@ -14,14 +14,17 @@ from typing import ClassVar
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
     TritonAttentionImpl,
     TritonAttentionMetadata,
+    TritonAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -30,8 +33,41 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+
+class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
+    """Override the parent's softmax buffer last-dim to head_size_v.
+
+    The parent allocates ``softmax_segm_output`` with last-dim sized to
+    ``next_power_of_2(head_size)`` (== Q/K head size).  For DiffKV the
+    accumulator and per-segment partial outputs are V-shaped, so we
+    re-allocate with ``next_power_of_2(head_size_v)`` instead.
+    """
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+        head_size_v = TritonAttentionDiffKVBackend.head_size_v
+        head_size_v_padded = next_power_of_2(head_size_v)
+        self.softmax_segm_output = torch.empty(
+            (
+                self.seq_threshold_3D,
+                self.num_heads_q,
+                self.num_par_softmax_segments,
+                head_size_v_padded,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
 
 
 class TritonAttentionDiffKVBackend(TritonAttentionBackend):
@@ -55,6 +91,10 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionDiffKVImpl"]:
         return TritonAttentionDiffKVImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["TritonAttentionDiffKVMetadataBuilder"]:
+        return TritonAttentionDiffKVMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -210,5 +250,11 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             block_table=attn_metadata.block_table,
             softcap=self.logits_soft_cap,
             sinks=self.sinks,
+            max_seqlen_q=attn_metadata.max_query_len,
+            seq_threshold_3D=attn_metadata.seq_threshold_3D,
+            num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
+            softmax_segm_output=attn_metadata.softmax_segm_output,
+            softmax_segm_max=attn_metadata.softmax_segm_max,
+            softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
         )
         return output
