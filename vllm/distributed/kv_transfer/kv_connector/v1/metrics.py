@@ -51,6 +51,38 @@ class KVConnectorStats:
 
 
 class KVConnectorLogging:
+    """Manages the observe → aggregate → reduce → log pipeline for KV transfer metrics.
+
+    **Data flow**
+
+    1. **observe()**: Called periodically when the KV connector syncs with the
+       scheduler. Receives ``transfer_stats_data`` that has **already been
+       aggregated across all TP ranks** by the scheduler. Builds a
+       ``KVConnectorStats`` object and accumulates it into
+       ``transfer_stats_accumulator``.
+
+    2. **aggregate()**: Stats from consecutive ``observe()`` calls are merged
+       into the accumulator. This pools all individual
+       transfer observations across ranks and time intervals.
+
+    3. **reduce()**: Called by :meth:`log()` to compute summary statistics
+       (averages, percentiles, throughput) over the combined observation pool.
+       See :class:`~vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats.NixlKVConnectorStats`
+       for multi-rank aggregation semantics.
+
+    4. **log()**: Formats the reduced metrics into a single log line:
+
+       .. code-block:: text
+
+           KV Transfer metrics: Num successful transfers=4, Avg xfer time (ms)=1.381, ...
+
+       Then resets the accumulator for the next interval.
+
+    **Important**: The ``transfer_stats_data`` received by ``observe()`` is
+    pre-aggregated across workers by the scheduler. It only sees the combined pool of observations. This is a deliberate
+    fire-and-forget design to avoid coordination overhead.
+    """
+
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
         if kv_transfer_config and kv_transfer_config.kv_connector:
@@ -63,12 +95,19 @@ class KVConnectorLogging:
         self.transfer_stats_accumulator: KVConnectorStats | None = None
 
     def observe(self, transfer_stats_data: dict[str, Any]):
+        """Accumulate transfer stats from a connector sync cycle.
+
+        Args:
+            transfer_stats_data: Stats pre-aggregated across all TP ranks
+                by the scheduler. Contains lists of per-transfer
+                observations (transfer_duration, post_duration, bytes, etc.).
+        """
         # Should not be called when a KVConnector is not configured.
         assert self.connector_cls is not None
         # Called periodically when connector syncs with the scheduler.
         # Note that this is not the same as the logging interval.
-        # We expect transfer_stats_data to be aggregated across all workers and
-        # consist of observations from a single connector or a MultiConnector.
+        # transfer_stats_data is already aggregated across all TP ranks by the scheduler;
+        # we pool all observations together for later reduction.
         transfer_stats = self.connector_cls.build_kv_connector_stats(
             transfer_stats_data
         )

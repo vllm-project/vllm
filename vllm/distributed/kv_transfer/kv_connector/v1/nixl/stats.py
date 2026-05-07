@@ -21,7 +21,42 @@ from vllm.v1.metrics.utils import create_metric_per_engine
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics"""
+    """Container for NIXL KV cache transfer performance metrics.
+
+    **Multi-rank (TP > 1) aggregation semantics**
+
+    In tensor-parallel deployments (TP > 1), each TP rank independently records
+    per-transfer telemetry via :meth:`record_transfer`. Stats from all ranks are
+    then concatenated via :meth:`aggregate` (``list.extend()``), and summary
+    statistics are computed over the **combined pool** of observations in
+    :meth:`reduce`.
+
+    This means:
+
+    - **Num successful transfers**: total count across all TP ranks, not per-rank.
+    - **Avg MB per transfer**: average over all individual rank-level transfers,
+      not the total bytes moved for a single KV cache transfer operation.
+    - **Throughput (MB/s)**: ``total_MB_all_ranks / total_time_all_ranks``.
+      This is an average per-rank throughput, **not** the aggregate system
+      throughput. For example, with 2 ranks each transferring 100 MB/s, the
+      reported throughput will be ~100 MB/s (the average), not 200 MB/s.
+    - **P90 percentiles**: computed over the combined distribution of all ranks'
+      transfer times, not per-rank percentiles.
+
+    This design is deliberate: workers report stats fire-and-forget to the
+    scheduler, which then aggregates. Per-rank reporting would require
+    additional coordination.
+
+    Each metric field records:
+
+    - ``transfer_duration``: time spent on the actual data transfer (seconds).
+    - ``post_duration``: time spent posting the transfer request (seconds).
+    - ``bytes_transferred``: total bytes transferred per operation.
+    - ``num_descriptors``: number of NIXL descriptors per transfer.
+    - ``num_failed_transfers``: count of failed transfer operations.
+    - ``num_failed_notifications``: count of failed notification sends.
+    - ``num_kv_expired_reqs``: count of requests whose KV blocks expired.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -105,9 +140,16 @@ class NixlKVConnectorStats(KVConnectorStats):
         n = len(descs)
         assert n == self.num_successful_transfers
 
+        # total_mb is the sum of bytes across ALL ranks (not per-rank total).
         total_mb = mb.sum()
+        # avg_mb is the average bytes per individual transfer operation
+        # (each entry in the combined pool is one rank's transfer).
         avg_mb = total_mb / n
 
+        # total_time_seconds is the sum of all transfer durations across all ranks.
+        # throughput_mb_s = total_MB_all_ranks / total_time_all_ranks.
+        # This represents the average per-rank throughput, NOT aggregate system
+        # throughput. With N ranks each at X MB/s, the reported value is ~X MB/s.
         total_time_seconds = xfer_time.sum()
         throughput_mb_s = total_mb / total_time_seconds
 
