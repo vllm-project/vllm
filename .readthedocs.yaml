@@ -10,12 +10,12 @@ build:
   jobs:
     post_checkout:
       - git fetch origin main --unshallow --no-tags --filter=blob:none || true
-
-python:
-  install:
-    - method: uv
-      command: pip
-      requirements: requirements/docs.txt
+    pre_create_environment:
+      - pip install uv
+    create_environment:
+      - uv venv $READTHEDOCS_VIRTUALENV_PATH
+    install:
+      - uv pip install --python $READTHEDOCS_VIRTUALENV_PATH/bin/python --no-cache-dir -r requirements/docs.txt 
 
 mkdocs:
   configuration: mkdocs.yaml
