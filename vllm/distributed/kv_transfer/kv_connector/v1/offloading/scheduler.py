@@ -885,6 +885,13 @@ class OffloadingConnectorScheduler:
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored blocks."""
         self.manager.reset_cache()
+        for status in self._req_status.values():
+            for group_state in status.group_states:
+                group_state.next_stored_block_idx = 0
+        if self._blocks_being_loaded is not None:
+            self._blocks_being_loaded.clear()
+        self._current_batch_load_jobs.clear()
+        self._current_batch_jobs_to_flush.clear()
 
     def shutdown(self) -> None:
         self.manager.shutdown()
