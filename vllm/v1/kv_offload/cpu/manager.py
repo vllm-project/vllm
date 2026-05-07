@@ -38,6 +38,8 @@ class CPUOffloadingManager(OffloadingManager):
         num_blocks: int,
         cache_policy: Literal["lru", "arc"] = "lru",
         enable_events: bool = False,
+        store_threshold: int = 1,
+        max_tracker_size: int = 64_000,
     ):
         self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
@@ -51,6 +53,11 @@ class CPUOffloadingManager(OffloadingManager):
                 f"Supported: {list(_CACHE_POLICIES)}"
             )
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
+        self.store_threshold: int = store_threshold
+        self.max_tracker_size: int = max_tracker_size
+        self.counts: OrderedDict[OffloadKey, int] | None = (
+            OrderedDict() if store_threshold >= 2 else None
+        )
 
     # --- block pool ---
 
@@ -86,6 +93,14 @@ class CPUOffloadingManager(OffloadingManager):
     # --- OffloadingManager interface ---
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        if self.counts is not None:
+            if key in self.counts:
+                self.counts.move_to_end(key)
+                self.counts[key] += 1
+            else:
+                if len(self.counts) >= self.max_tracker_size:
+                    self.counts.popitem(last=False)
+                self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
             return False
@@ -124,6 +139,8 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
+        if self.counts is not None:
+            keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
         # filter out blocks that are already stored
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
@@ -208,109 +225,3 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
-
-
-class FilterReusedOffloadingManager(OffloadingManager):
-    """An :class:`OffloadingManager` decorator that skips storing blocks
-    whose reuse frequency is below *store_threshold*.
-
-    All methods are delegated to the *backing* manager.  Two methods are
-    intercepted:
-
-    * ``prepare_store`` — filters out keys that have not yet
-      crossed the threshold *before* calling the backing
-      ``prepare_store``.
-    * ``lookup`` — records the visited key in an internal LRU
-      counter, then delegates to the backing manager.
-
-    Args:
-        backing: The underlying ``OffloadingManager`` to delegate to.
-        store_threshold: A block must be seen at least this many times in
-            ``lookup()`` before it is eligible for offloading.  Must be >= 2
-            (a value of 1 would be equivalent to no filtering).
-        max_tracker_size: Maximum entries in the internal tracker's LRU table.
-    """
-
-    def __init__(
-        self,
-        backing: OffloadingManager,
-        store_threshold: int = 2,
-        max_tracker_size: int = 64_000,
-    ):
-        if store_threshold < 2:
-            raise ValueError(
-                "FilterReusedOffloadingManager store_threshold must be >= 2, "
-                f"got {store_threshold}"
-            )
-        if max_tracker_size < 1:
-            raise ValueError(
-                "FilterReusedOffloadingManager max_tracker_size must be >= 1, "
-                f"got {max_tracker_size}"
-            )
-        self._backing = backing
-        self.store_threshold = store_threshold
-        self.max_tracker_size = max_tracker_size
-        # Ordered so we can evict the LRU entry in O(1).
-        self.counts: OrderedDict[OffloadKey, int] = OrderedDict()
-
-    # ------------------------------------------------------------------
-    # Intercepted methods
-    # ------------------------------------------------------------------
-
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        """Record the key, then delegate lookup to backing manager."""
-        if key in self.counts:
-            self.counts.move_to_end(key)
-            self.counts[key] += 1
-        else:
-            if len(self.counts) >= self.max_tracker_size:
-                self.counts.popitem(last=False)  # evict LRU
-            self.counts[key] = 1
-        return self._backing.lookup(key, req_context)
-
-    def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> PrepareStoreOutput | None:
-        """Filter out blocks below threshold, then delegate to backing.
-
-        Filtering is evaluated *before* calling the backing manager's
-        ``prepare_store`` so that blocks that would be skipped do not
-        consume any CPU offload capacity.
-        """
-        eligible = [
-            key for key in keys if self.counts.get(key, 0) >= self.store_threshold
-        ]
-
-        # Passing an empty list is intentional and safe — CPUOffloadingManager
-        # handles it correctly, returning a PrepareStoreOutput with empty lists.
-        # Delegate to the backing manager with only the eligible keys.
-        return self._backing.prepare_store(eligible, req_context)
-
-    # ------------------------------------------------------------------
-    # Delegated methods
-    # ------------------------------------------------------------------
-
-    def prepare_load(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> LoadStoreSpec:
-        return self._backing.prepare_load(keys, req_context)
-
-    def touch(self, keys: Collection[OffloadKey]) -> None:
-        return self._backing.touch(keys)
-
-    def complete_load(self, keys: Collection[OffloadKey]) -> None:
-        return self._backing.complete_load(keys)
-
-    def complete_store(
-        self, keys: Collection[OffloadKey], success: bool = True
-    ) -> None:
-        return self._backing.complete_store(keys, success)
-
-    def take_events(self) -> Iterable[OffloadingEvent]:
-        return self._backing.take_events()
-
-    def request_finished(self, req_id: str) -> bool:
-        return self._backing.request_finished(req_id)
-
-    def shutdown(self) -> None:
-        return self._backing.shutdown()
