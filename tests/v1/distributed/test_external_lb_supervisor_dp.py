@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import asyncio
-from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -98,30 +96,40 @@ async def test_dp_supervisor_monitor_children_returns_failed_process(
 
     monkeypatch.setattr(dp_supervisor, "_probe_endpoint", fake_probe)
 
-    supervisor_server_task = asyncio.create_task(asyncio.Event().wait())
-    try:
-        assert (
-            await supervisor._monitor_children(supervisor_server_task) is failed_process
-        )
-    finally:
-        supervisor_server_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await supervisor_server_task
+    assert await supervisor._monitor_children() is failed_process
 
 
 @pytest.mark.asyncio
-async def test_dp_supervisor_monitor_children_raises_when_supervisor_task_fails():
+async def test_dp_supervisor_run_raises_when_supervisor_server_exits_before_startup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeLoop:
+        def add_signal_handler(self, *_args, **_kwargs):
+            pass
+
+        def remove_signal_handler(self, *_args, **_kwargs):
+            pass
+
+    class FakeServer:
+        def __init__(self, _config):
+            self.started = False
+            self.should_exit = False
+
+        async def serve(self):
+            raise ValueError("supervisor boom")
+
+    async def fake_shutdown_children(self):
+        return None
+
+    monkeypatch.setattr(dp_supervisor.asyncio, "get_running_loop", lambda: FakeLoop())
+    monkeypatch.setattr(dp_supervisor.uvicorn, "Server", FakeServer)
+    monkeypatch.setattr(DPSupervisor, "_shutdown_children", fake_shutdown_children)
+
     supervisor = DPSupervisor(_make_args())
 
-    async def boom():
-        raise ValueError("supervisor boom")
-
-    supervisor_server_task = asyncio.create_task(boom())
-    await asyncio.sleep(0)
-
     with pytest.raises(
-        RuntimeError, match="Multi-port external LB supervisor exited unexpectedly"
+        RuntimeError, match="Multi-port external LB supervisor exited before startup"
     ) as exc_info:
-        await supervisor._monitor_children(supervisor_server_task)
+        await supervisor.run()
 
     assert isinstance(exc_info.value.__cause__, ValueError)

@@ -224,14 +224,16 @@ class DPSupervisor:
         ]
         self.children_healthy = False
         self.processes: list[BaseProcess] = []
-        self._stop_requested = asyncio.Event()
+        self._shutdown_event = asyncio.Event()
         self._shutdown_signal = signal.SIGTERM
 
     def is_healthy(self) -> bool:
-        return not self._stop_requested.is_set() and self.children_healthy
+        return not self._shutdown_event.is_set() and self.children_healthy
 
     async def run(self) -> None:
         failed_process: BaseProcess | None = None
+        supervisor_server_exited = False
+        supervisor_server_failure: BaseException | None = None
         supervisor_server: uvicorn.Server | None = None
         supervisor_server_task: asyncio.Task[None] | None = None
         loop = asyncio.get_running_loop()
@@ -239,6 +241,18 @@ class DPSupervisor:
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
         try:
+
+            def on_server_exit(task: asyncio.Task[None]) -> None:
+                nonlocal supervisor_server_exited, supervisor_server_failure
+                if self._shutdown_event.is_set():
+                    return
+                supervisor_server_exited = True
+                try:
+                    supervisor_server_failure = task.exception()
+                except asyncio.CancelledError as exc:
+                    supervisor_server_failure = exc
+                self._shutdown_event.set()
+
             host = self.args.host or "0.0.0.0"
             app = _build_dp_supervisor_app(self)
             config = uvicorn.Config(
@@ -253,19 +267,17 @@ class DPSupervisor:
                 supervisor_server.serve(),
                 name="multi-port-external-lb-supervisor",
             )
+            supervisor_server_task.add_done_callback(on_server_exit)
             deadline = (
                 time.monotonic() + self.args.data_parallel_probe_startup_timeout_s
             )
             while not supervisor_server.started:
-                if supervisor_server_task.done():
-                    try:
-                        raise RuntimeError(
-                            "Multi-port external LB supervisor exited before startup"
-                        ) from supervisor_server_task.exception()
-                    except asyncio.CancelledError as exc:
-                        raise RuntimeError(
-                            "Multi-port external LB supervisor exited before startup"
-                        ) from exc
+                if supervisor_server_exited:
+                    raise RuntimeError(
+                        "Multi-port external LB supervisor exited before startup"
+                    ) from supervisor_server_failure
+                if self._shutdown_event.is_set():
+                    return
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
                         "Timed out starting multi-port external LB supervisor"
@@ -277,9 +289,9 @@ class DPSupervisor:
                 self.supervisor_port,
             )
             self._start_children()
-            failed_process = await self._monitor_children(supervisor_server_task)
+            failed_process = await self._monitor_children()
         finally:
-            self._stop_requested.set()
+            self._shutdown_event.set()
             await self._shutdown_children()
             if supervisor_server is not None:
                 supervisor_server.should_exit = True
@@ -295,9 +307,13 @@ class DPSupervisor:
                 f"{failed_process.name} "
                 f"exit code {failed_process.exitcode}"
             )
+        if supervisor_server_exited:
+            raise RuntimeError(
+                "Multi-port external LB supervisor exited unexpectedly"
+            ) from supervisor_server_failure
 
     def _handle_signal(self, signum: int) -> None:
-        if self._stop_requested.is_set():
+        if self._shutdown_event.is_set():
             return
         self._shutdown_signal = signal.Signals(signum)
         logger.info(
@@ -305,7 +321,7 @@ class DPSupervisor:
             "multi-port external LB child ranks",
             signum,
         )
-        self._stop_requested.set()
+        self._shutdown_event.set()
 
     def _start_children(self) -> None:
         context = multiprocessing.get_context("spawn")
@@ -320,22 +336,10 @@ class DPSupervisor:
             process.start()
             self.processes.append(process)
 
-    async def _monitor_children(
-        self,
-        supervisor_server_task: asyncio.Task[None],
-    ) -> BaseProcess | None:
+    async def _monitor_children(self) -> BaseProcess | None:
         timeout = aiohttp.ClientTimeout(total=self.args.data_parallel_probe_timeout_s)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            while not self._stop_requested.is_set():
-                if supervisor_server_task.done():
-                    try:
-                        raise RuntimeError(
-                            "Multi-port external LB supervisor exited unexpectedly"
-                        ) from supervisor_server_task.exception()
-                    except asyncio.CancelledError as exc:
-                        raise RuntimeError(
-                            "Multi-port external LB supervisor exited unexpectedly"
-                        ) from exc
+            while not self._shutdown_event.is_set():
                 child_health = await asyncio.gather(
                     *(
                         _probe_endpoint(session, self.args, port, "/health")
@@ -355,7 +359,7 @@ class DPSupervisor:
                     return failed_process
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(
-                        self._stop_requested.wait(),
+                        self._shutdown_event.wait(),
                         timeout=self.args.data_parallel_probe_interval_s,
                     )
         return None
