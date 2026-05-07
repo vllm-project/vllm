@@ -284,13 +284,16 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 k_cache_prefix=self.mla_attn.prefix,
             )
 
-        # TODO: For now, model requires fp8 quantization for attention
+        # For now, model requires fp8 quantization for attention
+        # assume that there exists a `wo` weight scale
         if hasattr(self.wo_a, "weight_scale_inv"):
             self.wo_scale_name = "weight_scale_inv"
         elif hasattr(self.wo_a, "weight_scale"):
             self.wo_scale_name = "weight_scale"
         else:
-            raise NotImplementedError("DeepSeekV4 requires FP8 attention quantization")
+            raise NotImplementedError(
+                "DeepSeekV4 requires FP8 quantization of `attn.wo_a.weight`"
+            )
 
     def forward(
         self,
@@ -378,7 +381,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
-                return compressor.fused_wkv_wgate(hidden_states)
+                return torch.mm(
+                    hidden_states,
+                    compressor.fused_wkv_wgate.weight.T,
+                    out_dtype=torch.float32,
+                )
 
             aux_fns[0] = compressor_kv_score
 
@@ -391,7 +398,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
-                return indexer.compressor.fused_wkv_wgate(hidden_states)
+                return torch.mm(
+                    hidden_states,
+                    indexer.compressor.fused_wkv_wgate.weight.T,
+                    out_dtype=torch.float32,
+                )
 
             aux_fns[1] = indexer_weights_proj
             aux_fns[2] = indexer_compressor_kv_score
