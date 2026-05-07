@@ -222,12 +222,13 @@ class ExampleSecondaryTier(SecondaryTierManager):
         # Return simplified JobResult (only job_id and success)
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def touch(self, keys: Collection[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used (move to end of LRU list).
 
         Args:
             keys: Blocks to mark as recently used.
+            req_context: Per-request context.
         """
         for key in reversed(list(keys)):
             if key in self.blocks:

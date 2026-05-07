@@ -101,7 +101,7 @@ class TestExampleSecondaryTier:
         assert tier.get_num_blocks() == 3
 
         # Touch first block (make it most recently used)
-        tier.touch([blocks[0]])
+        tier.touch([blocks[0]], _CTX)
 
         # Store new block should evict blocks[1] (least recently used)
         new_block = to_keys([3])[0]
@@ -191,7 +191,7 @@ class TestTieringOffloadingManager:
         assert len(result.keys_to_store) == 3
 
         # Complete store
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
 
         # Blocks should be in primary tier
         assert count_hits(self.primary_tier, blocks) == 3
@@ -205,7 +205,7 @@ class TestTieringOffloadingManager:
         assert result is not None
 
         # Complete store (triggers cascade)
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
 
         # Process finished jobs to complete cascade
         self.manager._process_finished_jobs()
@@ -225,7 +225,7 @@ class TestTieringOffloadingManager:
         # Store to primary
         result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
 
         # After complete_store, blocks should have ref_cnt > 0
         # (one for each secondary tier)
@@ -248,7 +248,7 @@ class TestTieringOffloadingManager:
 
         # Store blocks
         self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
 
         # Lookup should find all blocks in primary
         assert count_hits(self.manager, blocks) == 3
@@ -284,7 +284,7 @@ class TestTieringOffloadingManager:
 
         # Store first 3 blocks to primary
         self.manager.prepare_store(blocks[:3], _CTX)
-        self.manager.complete_store(blocks[:3], success=True)
+        self.manager.complete_store(blocks[:3], _CTX, success=True)
 
         # Lookup all 5 blocks should return 3 (first 3 found)
         assert count_hits(self.manager, blocks) == 3
@@ -297,7 +297,7 @@ class TestTieringOffloadingManager:
         result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 5
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
 
         # Process finished jobs to release ref_cnt from cascade
         self.manager._process_finished_jobs()
@@ -317,11 +317,11 @@ class TestTieringOffloadingManager:
 
         # Store blocks
         self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
         self.manager._process_finished_jobs()
 
         # Touch blocks
-        self.manager.touch(blocks)
+        self.manager.touch(blocks, _CTX)
 
         # Verify touch was called on primary tier (check LRU order)
         # In LRU, touched blocks should be at the end
@@ -344,7 +344,7 @@ class TestTieringOffloadingManager:
         assert result is not None
 
         # Complete store with failure
-        self.manager.complete_store(blocks, success=False)
+        self.manager.complete_store(blocks, _CTX, success=False)
 
         # Process finished jobs
         self.manager._process_finished_jobs()
@@ -374,7 +374,7 @@ class TestTieringOffloadingManager:
         blocks1 = to_keys(range(5))
         result = manager.prepare_store(blocks1, _CTX)
         assert result is not None
-        manager.complete_store(blocks1, success=True)
+        manager.complete_store(blocks1, _CTX, success=True)
         manager._process_finished_jobs()
 
         # Both tiers should have 5 blocks
@@ -385,7 +385,7 @@ class TestTieringOffloadingManager:
         blocks2 = to_keys(range(5, 8))
         result = manager.prepare_store(blocks2, _CTX)
         assert result is not None
-        manager.complete_store(blocks2, success=True)
+        manager.complete_store(blocks2, _CTX, success=True)
         manager._process_finished_jobs()
 
         # Small tier should still have 5 blocks (evicted 3, added 3)
@@ -400,7 +400,7 @@ class TestTieringOffloadingManager:
 
         # Store blocks
         self.manager.prepare_store(blocks, _CTX)
-        self.manager.complete_store(blocks, success=True)
+        self.manager.complete_store(blocks, _CTX, success=True)
 
         # Blocks should have ref_cnt = 2 (one for each secondary tier)
         for block_hash in blocks:
@@ -486,6 +486,23 @@ class TestTieringOffloadingManager:
         assert list(job_metadata.keys) == [shared_block]
         assert job_metadata.req_context is ctx_a
 
+    def test_complete_store_forwards_req_context_to_submit_store(self, manager_setup):
+        """complete_store cascades to secondary tiers with the correct req_context."""
+        blocks = to_keys(range(2))
+
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+
+        ctx = ReqContext(kv_transfer_params={"key": "value"})
+
+        self.manager.prepare_store(blocks, ctx)
+        self.manager.complete_store(blocks, ctx, success=True)
+
+        assert self.secondary_tier1.submit_store.call_count == 1
+        job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
+        assert job_metadata.req_context is ctx
+
 
 class TestTieringOffloadingWithoutSecondaryTiers:
     """Test TieringOffloadingManager with no secondary tiers (backward compat)."""
@@ -507,7 +524,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         # Should work like a regular OffloadingManager
         result = manager.prepare_store(blocks, _CTX)
         assert result is not None
-        manager.complete_store(blocks, success=True)
+        manager.complete_store(blocks, _CTX, success=True)
 
         assert count_hits(manager, blocks) == 3
 

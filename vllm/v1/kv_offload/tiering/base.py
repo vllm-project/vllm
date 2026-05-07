@@ -146,12 +146,13 @@ class SecondaryTierManager(ABC):
         """
         return
 
-    def touch(self, keys: Collection[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.
 
         Args:
             keys: Offload keys to mark as recently used.
+            req_context: Per-request context.
         """
         return
 
