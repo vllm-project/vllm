@@ -150,6 +150,12 @@ class ParallelConfig:
     fewest total tokens (waiting_tokens + running_remaining_tokens).
     This improves balance for prefill-heavy workloads where work is
     proportional to token count rather than request count."""
+    data_parallel_kv_lb: bool = False
+    """Whether to use KV-cache-aware DP load balancing. When enabled, the
+    internal load balancer dispatches requests to the DP rank with the
+    lowest KV cache usage, weighted against request counts. This improves
+    balance for decode-heavy workloads where ranks accumulate uneven
+    KV cache pressure over time."""
     is_moe_model: bool | None = None
     """Whether the deployed model is MoE (if known)."""
     enable_expert_parallel: bool = False

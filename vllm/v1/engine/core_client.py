@@ -1158,9 +1158,9 @@ class DPAsyncMPClient(AsyncMPClient):
             client_index,
         )
 
-        # List of [waiting, running, waiting_tokens, running_tokens] per engine.
+        # List of [waiting, running, waiting_tokens, running_tokens, kv_cache_usage] per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int]] = [[0, 0, 0, 0] for _ in self.core_engines]
+        self.lb_engines: list[list[int | float]] = [[0, 0, 0, 0, 0.0] for _ in self.core_engines]
 
         self.eep_scaling_cache: ElasticScalingCache | None = None
 
@@ -1238,7 +1238,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                             if len(self.lb_engines) < new_engine_count:
                                 self.lb_engines = self.lb_engines + [
-                                    [0, 0, 0, 0]
+                                    [0, 0, 0, 0, 0.0]
                                     for _ in range(
                                         new_engine_count - len(self.lb_engines)
                                     )
@@ -1360,6 +1360,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             min_score = sys.maxsize
             eng_index = 0
             use_token_lb = self.vllm_config.parallel_config.data_parallel_token_lb
+            use_kv_lb = self.vllm_config.parallel_config.data_parallel_kv_lb
             for i in range(num_engines):
                 # Start from client_index to help with balancing when engines
                 # are empty.
@@ -1367,7 +1368,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 counts = current_counts[idx]
                 waiting = counts[0]
                 running = counts[1]
-                if use_token_lb:
+                if use_kv_lb:
+                    score = counts[4]
+                elif use_token_lb:
                     waiting_tokens = counts[2]
                     running_tokens = counts[3]
                     score = waiting_tokens * 4 + running_tokens

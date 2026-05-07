@@ -1729,6 +1729,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 num_waiting_reqs=num_waiting,
                 num_running_tokens=num_running_tokens,
                 num_waiting_tokens=num_waiting_tokens,
+                kv_cache_usage=self.scheduler.kv_cache_manager.usage,
                 step_counter=self.step_counter,
                 current_wave=self.current_wave,
             )
