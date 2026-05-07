@@ -67,3 +67,13 @@ class MistralCommonPixtralProcessor(ProcessorMixin):
         self.image_break_id = image_special_ids.img_break
         self.image_token_id = image_special_ids.img
         self.image_end_id = image_special_ids.img_end
+
+        # String tokens match the canonical Pixtral vocabulary names used by
+        # HF PixtralProcessor, making this class a drop-in replacement.
+        self.image_token = "[IMG]"
+        self.image_break_token = "[IMG_BREAK]"
+        self.image_end_token = "[IMG_END]"
+
+        # HF PixtralProcessor-compatible aliases for the integer token IDs.
+        self.image_break_token_id = self.image_break_id
+        self.image_end_token_id = self.image_end_id
