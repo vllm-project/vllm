@@ -42,9 +42,22 @@ resources:
     # -- Number of gpus used
     nvidia.com/gpu: 1
 
-# -- Type of gpu used
-gpuModels:
-  - "TYPE_GPU_USED"
+# -- Pod affinity
+affinity: {}
+# affinity:
+#   nodeAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       nodeSelectorTerms:
+#         - matchExpressions:
+#             - key: nvidia.com/gpu.product
+#               operator: In
+#               values:
+#                 - "TYPE_GPU_USED"
+
+# -- Type of gpu used (backward compatibility; prefer affinity)
+gpuModels: []
+# gpuModels:
+#   - "TYPE_GPU_USED"
 
 # -- Autoscaling configuration
 autoscaling:
