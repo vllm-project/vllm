@@ -652,8 +652,42 @@ class NixlConnectorWorker:
         # Forwarding a real layer name rather than a synthetic key
         self.register_kv_caches({first_layer: kv_cache})
 
+    @staticmethod
+    def _parse_transformer_layer_idx(layer_name: str) -> int | None:
+        parts = layer_name.split(".")
+        try:
+            return int(parts[parts.index("layers") + 1])
+        except (ValueError, IndexError):
+            return None
+
+    def _filter_spec_decode_draft_kv_caches(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> dict[str, torch.Tensor]:
+        spec_cfg = self.vllm_config.speculative_config
+        if spec_cfg is None or spec_cfg.draft_model_config is None:
+            return kv_caches
+
+        num_target_layers = self.model_config.get_num_layers(
+            self.vllm_config.parallel_config
+        )
+        filtered = {}
+        for name, cache in kv_caches.items():
+            layer_idx = self._parse_transformer_layer_idx(name)
+            if layer_idx is not None and layer_idx >= num_target_layers:
+                logger.info(
+                    "Skipping draft model layer %s (idx=%d >= %d) "
+                    "from NIXL registration",
+                    name,
+                    layer_idx,
+                    num_target_layers,
+                )
+                continue
+            filtered[name] = cache
+        return filtered
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+        kv_caches = self._filter_spec_decode_draft_kv_caches(kv_caches)
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
