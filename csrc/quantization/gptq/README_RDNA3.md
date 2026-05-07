@@ -5,12 +5,13 @@ Native HIP W4A16 GPTQ kernels for AMD RDNA3 (RX 7900 XT/XTX, gfx1100/1101/
 `TritonW4A16LinearKernel` on the ROCm path; adds bf16 support that ExLlama
 lacks. Two compute paths share a single Python entry point:
 
-* a hand-tuned **scalar dot-product kernel** for decode and any M < 16, with
+* a hand-tuned **scalar dot-product kernel** for decode and small M, with
   fp16 using `v_dot2_f32_f16` (`__builtin_amdgcn_fdot2`) and bf16 widening to
   fp32 to sidestep the missing `v_pk_fma_bf16` on gfx11;
-* a **`v_wmma_f32_16x16x16` matrix-instruction kernel** for bf16 prefill and
-  M ≥ 16 batches, with K-split + packed-CAS atomic write-back to multiply
-  wave count.
+* a **`v_wmma_f32_16x16x16` matrix-instruction kernel** for prefill and
+  batched decode: bf16 at M ≥ 16, fp16 at M ≥ 64.  Multiple tile
+  generations (V3–V8) scale from 16M×16N to 128M×64N with K=32/iter,
+  8-wave dequant, and K-contiguous LDS layout.
 
 Registered as `RDNA3W4A16LinearKernel` in
 `vllm/model_executor/kernels/linear/mixed_precision/rdna3_w4a16.py` ahead of
@@ -23,7 +24,7 @@ ROCm devices via `can_implement()` gating on
 | File | Role |
 | --- | --- |
 | `q_gemm_rdna3.cu` | Scalar dot-product kernel + C++ dispatch entry `gptq_gemm_rdna3`. Templated on dtype and M_COUNT ∈ {1, 2, 4, 8}. |
-| `q_gemm_rdna3_wmma.cu` | WMMA prefill kernel (`gemm_q4_wmma_kernel`) + 3 diagnostic ops. Uses K-split (gridDim.z) with shfl_xor + packed CAS-32 atomic. |
+| `q_gemm_rdna3_wmma.cu` | WMMA prefill kernels V1–V8 + diagnostic ops. V8 (latest): 128M×64N, K=32/iter, 8-wave dequant, K-contiguous LDS with bank-conflict padding. Uses K-split with shfl_xor + packed CAS-32 atomic. |
 | `qdq_4_rdna3.cuh` | int4 dequant helpers shared between the two TUs. fp16 uses the exllama `0x6400` bit-trick; bf16 widens to fp32 (no `v_pk_fma_bf16` on gfx11). |
 
 ## Dispatch (decision tree)
@@ -34,11 +35,16 @@ branching happens in C++ to keep `apply_weights` torch.compile-friendly:
 ```text
 gptq_gemm_rdna3(a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format)
 │
-├── if dtype == bf16 and M >= 16 and N % 16 == 0 and K % 16 == 0
+├── if (bf16 && M >= 16) || (fp16 && M >= 64)
+│   and N % 16 == 0 and K % 16 == 0
 │       → gptq_gemm_rdna3_wmma()   ── WMMA path (see below)
-│             ├─ if M <  32 → v1 kernel (1 wave/block, 16M × 16N tile)
-│             └─ if M >= 32 → v2 kernel (2 waves/block, 32M × 16N tile,
-│                              double-buffered LDS B-tile)
+│             ├─ M >= 128 && N >= 64 && K%32==0 → V8 (128M×64N, K=32/iter, 8-wave dequant)
+│             ├─ M >= 128                       → V7 (128M×64N, K=16, scale/zero cache)
+│             ├─ M >= 64  && N >= 64            → V5 (64M×64N, 4 waves, 4 wmma/wave)
+│             ├─ M >= 64  && N >= 32            → V4 (64M×32N, 4 waves, 2 wmma/wave)
+│             ├─ M >= 64                        → V3 (64M×16N, 4 waves)
+│             ├─ M >= 32                        → V2 (32M×16N, 2 waves, double-buffer LDS)
+│             └─ M <  32                        → V1 (16M×16N, 1 wave)
 │
 └── else
         → scalar dot-product kernel
@@ -48,32 +54,19 @@ gptq_gemm_rdna3(a, b_q_weight, b_qzeros, b_scales, b_g_idx, use_v2_format)
               M = 8+  → M_COUNT=8
 ```
 
-The v1 → v2 split inside the WMMA path is purely a tile-size choice. v2
-amortises the dequant work over a 32-row tile and uses a second wave to
-fill the SIMD's WMMA pipeline; below M=32 the second wave would process
-out-of-range rows and waste SIMD cycles, so v1 stays as the fallback.
-See Lesson 12.
+### WMMA dispatch gating
 
-The bf16-only WMMA gating is set by both microbench and end-to-end
-serving:
+**bf16 M≥16**: scalar pays a tax for the missing `v_pk_fma_bf16`; WMMA
+bypasses per-element FMAs entirely and wins consistently.
 
-* **fp16 scalar already wins kernel-microbench** at every M tested. The
-  fp16 dequant bit-trick (`0x6400`) keeps the path memory-bound, and
-  `v_pk_fma_f16` is full rate on gfx11 — WMMA can't improve on that
-  without a structural rewrite (multi-wave-per-block, LDS-shared A
-  across waves).
-* **fp16 WMMA dispatch was tested end-to-end** and came out a wash with
-  fp16 scalar (`445.7` vs `440.7` tk/s at max-num-seqs=32, within
-  run-to-run variance) despite a 47% kernel microbench advantage. See
-  Lesson 10 — most kernel time in real serving is decode at M < 16
-  (which falls back to scalar regardless of the dispatch guard) so the
-  WMMA compute-density advantage doesn't translate to TPS. The
-  `gptq_gemm_rdna3_wmma` op stays callable for fp16 in case a future
-  workload makes it worthwhile.
-* **bf16 scalar pays a tax** for the missing `v_pk_fma_bf16` (the bf16
-  scalar overload of `dot22_8_f` widens to fp32 and uses `v_fma_f32`),
-  and WMMA bypasses per-element FMAs entirely. WMMA wins consistently
-  at M ≥ 16.
+**fp16 M≥64**: with V7/V8's large tiles (128M×64N), fp16 WMMA beats
+scalar by 1.2–2.2× at M≥64 across Qwen-class shapes. Below M=64, the
+scalar fp16 dequant bit-trick keeps the scalar path faster. This gating
+was added after V7 changed the picture — the original V1/V2 kernels
+could not beat fp16 scalar at any M, but V7's tile geometry and
+scale/zero caching reversed that.
+
+**Decode (M=1–8)**: always scalar for both dtypes.
 
 ## Kernel architecture
 
@@ -304,8 +297,12 @@ serving benches refer to this steady-state.
 | bf16 M_COUNT=4   | 192 (cap)   | 82         | 38 VGPR / 156 B  | **0**       |
 | bf16 M_COUNT=8   | 192 (cap)   | 130        | 144 VGPR / 580 B | **0**       |
 | fp16 M_COUNT=*   | unchanged   | unchanged  | 0                | 0           |
-| bf16 WMMA        | 43          | 44         | 0                | 0           |
-| fp16 WMMA        | 35          | 43         | 0                | 0           |
+| bf16 WMMA V1/V2  | 43          | 44         | 0                | 0           |
+| fp16 WMMA V1/V2  | 35          | 43         | 0                | 0           |
+| bf16 WMMA V7     | —           | 86         | —                | 0           |
+| fp16 WMMA V7     | —           | 86         | —                | 0           |
+| bf16 WMMA V8     | —           | 103        | —                | 0           |
+| fp16 WMMA V8     | —           | 103        | —                | 0           |
 
 The scalar bf16 M_COUNT=8 template (decode batched at max-num-seqs ≥ 8
 and the M < 16 portion of max-num-seqs ≥ 32) went from the 192-VGPR
@@ -515,6 +512,65 @@ Final TPS vs the previously-best fp16 baseline (ExLlama):
 | ---            | ---             | ---          | ---      |
 | fp16 seqs=8    | 270.2 tk/s      | 255.0 tk/s   | +5.96 %  |
 | fp16 seqs=32   | 445.7 tk/s      | 382.5 tk/s   | +16.52 % |
+
+### Round 7 — fp16 WMMA dispatch (M≥64)
+
+The V1/V2 WMMA kernels could not beat fp16 scalar at any M (scalar's
+`v_pk_fma_f16` bit-trick kept it memory-bound). With V7's 128M×64N tile,
+the picture reversed: fp16 WMMA beats scalar by 1.2–2.2× at M≥64.
+
+One-line gate change in `q_gemm_rdna3.cu`: add `(fp16 && M>=64)` to
+the existing `(bf16 && M>=16)` WMMA dispatch condition.
+
+E2E latency bench (Qwen3.6-27B, RX 7900 XTX, kv-cache=auto):
+
+| Config              | fp16 scalar | fp16 WMMA V7 | Δ        |
+| ---                 | ---:        | ---:         | ---:     |
+| 128/128 b=1         | 3.24 s      | 2.97 s       | −8 %     |
+| 1920/128 b=1        | 6.97 s      | 4.65 s       | −33 %    |
+| 8192/128 b=1        | 20.84 s     | 11.31 s      | **−46 %**|
+
+### Round 8 — V8 kernel: K=32/iter, 8-wave dequant
+
+Doubles K-tile from 16→32, uses all 8 waves for dequant (V7 used only
+waves 0-3, leaving 4-7 idle during dequant). Halves iteration count and
+`__syncthreads()` calls.
+
+Kernel microbench (27B qkv M=8192 K=5120 N=8192):
+  V7 fp16: 11.54 ms → V8 fp16: 9.42 ms (−18%)
+
+E2E Qwen3.6-27B, RX 7900 XTX:
+
+| Config              | V7 fp16  | V8 fp16  | Δ     |
+| ---                 | ---:     | ---:     | ---:  |
+| 8192/128 b=1        | 11.31 s  | 10.04 s  | −11 % |
+| 1920/128 b=1        | 4.65 s   | 4.34 s   | −7 %  |
+
+### Round 8b — zero-init fix
+
+The WMMA entry point used the K-only heuristic (`compute_wmma_k_split`)
+to decide whether to pre-zero the output tensor. For large grids
+(gate_up 34816×8192 = 34K blocks) the actual k_split is 1 (no atomics),
+but the K-only heuristic returned 4, triggering `torch::zeros` on 570 MB.
+Fix: mirror the launcher's M/N-aware k_split. Profile confirms fill_
+calls dropped from 687 to 244 (−65%).
+
+### Roofline analysis (V8 state)
+
+At V8 the kernel is **bandwidth-bound** at 74% of the BW ceiling:
+
+| Metric                    | Value           |
+| ---                       | ---:            |
+| Arithmetic Intensity      | 56.7 FLOPs/byte |
+| BW ceiling (VRAM only)    | 54.4 TFLOP/s    |
+| BW ceiling (+ InfCache)   | ~98 TFLOP/s     |
+| Measured throughput       | 72.9 TFLOP/s    |
+| Utilization vs BW ceiling | 74 %            |
+
+A-matrix loads dominate traffic (89%). Weight loads are only 11%.
+Persistent kernel and N=128 tile variants were tested and regressed
+(−35% and −15% respectively) because the GPU scheduler already caches
+A efficiently with large grids.
 
 ## Lessons learned
 
