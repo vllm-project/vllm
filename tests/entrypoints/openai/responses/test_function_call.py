@@ -323,7 +323,7 @@ async def test_function_calling_with_streaming_expected_arguments(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "tool_choice",
-    ["auto", "required"],
+    ["auto", "required", {"type": "function", "name": "get_current_weather"}],
 )
 async def test_function_calling_with_streaming_types(
     client: openai.AsyncOpenAI, model_name: str, tool_choice
@@ -462,7 +462,7 @@ async def test_function_calling_with_streaming_types(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "tool_choice",
-    ["required", "auto"],
+    ["required", "auto", {"type": "function", "name": "get_weather"}],
 )
 async def test_function_calling_with_streaming_forced_tool_choice(
     client: openai.AsyncOpenAI, model_name: str, tool_choice: str

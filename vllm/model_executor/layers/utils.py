@@ -159,6 +159,7 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 
@@ -174,17 +175,21 @@ def rocm_unquantized_gemm_impl(
         and k % 8 == 0
     )
 
-    if not use_skinny:
-        return torch.nn.functional.linear(x, weight, bias)
+    if use_skinny:
+        x_view = x.reshape(-1, x.size(-1))
+        if m > 8 and 0 < n <= 4:
+            cu_count = num_compute_units()
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
 
-    x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
-        cu_count = num_compute_units()
-        out = ops.wvSplitK(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
-        out = ops.LLMM1(weight, x_view, 4)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+    if rocm_aiter_ops.is_tgemm_enabled():
+        from aiter.tuned_gemm import tgemm
+
+        return tgemm.mm(x, weight, bias)
+
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -297,22 +302,6 @@ def cpu_unquantized_gemm(
     bias: torch.Tensor | None = None,
 ):
     return layer.cpu_linear(x, weight, bias)
-
-
-def cublas_gemm_bf16_bf16_fp32(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-):
-    # The fused C++ op (csrc/moe/router_gemm.cu, registered via
-    # torch_bindings.cpp's `router_gemm_bf16_fp32`) is gated behind
-    # `#ifndef USE_ROCM` and is only compiled into _moe_C.so on CUDA builds.
-    # On other backends (e.g. ROCm) we fall back to a torch GEMM with the
-    # same bf16-in / fp32-out contract. rocBLAS already does fp32 accumulation
-    # internally for bf16 GEMMs on MI300X, so casting the bf16 output to fp32
-    # matches the cuBLAS bf16 x bf16 -> fp32 path numerically.
-    if current_platform.is_cuda():
-        return ops.router_gemm_bf16_fp32(x, weight)
-    return torch.nn.functional.linear(x, weight).to(torch.float32)
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:

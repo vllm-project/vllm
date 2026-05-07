@@ -39,6 +39,11 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    hidden_size: int = 768
+    dtype: torch.dtype = torch.float32
+
+    def get_hidden_size(self) -> int:
+        return self.hidden_size
 
 
 @dataclass
@@ -384,12 +389,13 @@ class TestRenderEmbedPrompt:
         assert torch.equal(results[0]["prompt_embeds"], tensor_input)
 
     def test_multiple_prompt_embeds(self):
-        renderer = _build_renderer(MockModelConfig())
+        hidden_size = 512
+        renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
 
         # Create multiple test tensors
         tensor_inputs = [
-            torch.randn(8, 512, dtype=torch.float32),
-            torch.randn(12, 512, dtype=torch.float32),
+            torch.randn(8, hidden_size, dtype=torch.float32),
+            torch.randn(12, hidden_size, dtype=torch.float32),
         ]
 
         prompts = renderer.render_prompts(
@@ -432,13 +438,15 @@ class TestRenderEmbedPrompt:
         assert torch.equal(results[0]["prompt_embeds"], expected)
 
     def test_prompt_embed_different_dtypes(self):
-        renderer = _build_renderer(MockModelConfig())
-
+        hidden_size = 256
         # Test different supported dtypes
         dtypes = [torch.float32, torch.float16, torch.bfloat16]
 
         for dtype in dtypes:
-            tensor_input = torch.randn(5, 256, dtype=dtype)
+            renderer = _build_renderer(
+                MockModelConfig(hidden_size=hidden_size, dtype=dtype)
+            )
+            tensor_input = torch.randn(5, hidden_size, dtype=dtype)
 
             prompts = renderer.render_prompts(
                 _preprocess_prompt(
@@ -474,10 +482,11 @@ class TestRenderEmbedPrompt:
         assert results[0]["prompt_embeds"].shape == (10, 768)
 
     def test_both_prompts_and_embeds(self):
-        renderer = _build_renderer(MockModelConfig())
+        hidden_size = 256
+        renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
 
         text_input = "Hello world"
-        tensor_input = torch.randn(5, 256, dtype=torch.float32)
+        tensor_input = torch.randn(5, hidden_size, dtype=torch.float32)
 
         prompts = renderer.render_prompts(
             _preprocess_prompt(
