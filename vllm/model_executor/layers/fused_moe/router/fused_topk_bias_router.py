@@ -57,87 +57,6 @@ def vllm_topk_sigmoid(
     return topk_weights, topk_indices
 
 
-def _topk_softplus_sqrt_torch(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-    routed_scaling_factor: float,
-    e_score_correction_bias: torch.Tensor | None,
-    input_tokens: torch.Tensor | None,
-    hash_indices_table: torch.Tensor | None,
-) -> None:
-    # Reference implementation of csrc/moe/topk_softplus_sqrt_kernels.cu used
-    # on platforms where the fused kernel is unavailable (e.g. ROCm). Math
-    # mirrors the kernel exactly: weight_base = sqrt(softplus(x)) per expert,
-    # bias is added only for ranking (subtracted back from output), then
-    # optional renormalize + routed_scaling_factor.
-    num_tokens, num_experts = gating_output.shape
-    topk = topk_weights.shape[-1]
-
-    # softplus(x) with beta=1 and the same numerical-stability cutoff used by
-    # the kernel ((val_b > 20) ? val : log1p(exp(val_b)) / beta).
-    x_f32 = gating_output.to(torch.float32)
-    softplus_x = torch.nn.functional.softplus(x_f32, beta=1.0, threshold=20.0)
-    weights_base = torch.sqrt(softplus_x)  # (T, E)
-
-    use_hash = (
-        input_tokens is not None and hash_indices_table is not None
-    )
-
-    if use_hash:
-        # tid2eid: (V, k); input_tokens: (T,) -> selected_experts: (T, k)
-        tid2eid = hash_indices_table
-        selected_experts = tid2eid[input_tokens.to(torch.long)]
-        selected_weights = torch.gather(
-            weights_base, -1, selected_experts.to(torch.long)
-        )
-        if renormalize:
-            denom = selected_weights.sum(dim=-1, keepdim=True)
-            denom = torch.where(
-                denom > 0, denom, torch.ones_like(denom)
-            )
-            selected_weights = selected_weights / denom
-        selected_weights = selected_weights * routed_scaling_factor
-
-        topk_weights.copy_(selected_weights.to(topk_weights.dtype))
-        topk_indices.copy_(selected_experts.to(topk_indices.dtype))
-        # The CUDA kernel leaves token_expert_indices untouched in the hash
-        # path, so we mirror that (caller treats it as scratch in this case).
-        return
-
-    if e_score_correction_bias is not None:
-        ranking = weights_base + e_score_correction_bias.to(torch.float32)
-    else:
-        ranking = weights_base
-
-    _, topk_ids = torch.topk(ranking, topk, dim=-1)
-    out_weights = torch.gather(weights_base, -1, topk_ids)
-    if renormalize:
-        denom = out_weights.sum(dim=-1, keepdim=True)
-        denom = torch.where(denom > 0, denom, torch.ones_like(denom))
-        out_weights = out_weights / denom
-    out_weights = out_weights * routed_scaling_factor
-
-    topk_weights.copy_(out_weights.to(topk_weights.dtype))
-    topk_indices.copy_(topk_ids.to(topk_indices.dtype))
-
-    # token_expert_indices[t, k_idx] = k_idx * T + t (matches kernel's
-    # source_rows write at line 388 of topk_softplus_sqrt_kernels.cu).
-    arange_t = torch.arange(
-        num_tokens,
-        device=gating_output.device,
-        dtype=token_expert_indices.dtype,
-    ).unsqueeze(-1)
-    arange_k = torch.arange(
-        topk,
-        device=gating_output.device,
-        dtype=token_expert_indices.dtype,
-    ).unsqueeze(0)
-    token_expert_indices.copy_(arange_k * num_tokens + arange_t)
-
-
 def vllm_topk_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -149,36 +68,17 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
-    # The fused topk_softplus_sqrt CUDA kernel is gated behind #ifndef USE_ROCM
-    # in csrc/moe/torch_bindings.cpp and the .cu source isn't added to
-    # VLLM_MOE_EXT_SRC for ROCm builds (CMakeLists.txt). Fall back to a torch
-    # reference on platforms that don't ship the symbol.
-    from vllm.platforms import current_platform
-
-    if current_platform.is_cuda():
-        ops.topk_hash_softplus_sqrt(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-        )
-    else:
-        _topk_softplus_sqrt_torch(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-        )
+    ops.topk_hash_softplus_sqrt(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        input_tokens,
+        hash_indices_table,
+    )
 
     return topk_weights, topk_indices
 

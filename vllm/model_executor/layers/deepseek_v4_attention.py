@@ -695,99 +695,6 @@ direct_register_custom_op(
 )
 
 
-def _fp8_einsum_torch_fallback(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    out: torch.Tensor,
-    equation: str,
-    recipe: tuple[int, int, int],
-) -> None:
-    """Pure-torch reference for DeepseekV4's block-scaled FP8 einsum.
-
-    Used when DeepGEMM's ``fp8_einsum`` is unavailable (e.g. ROCm). Slow
-    but correct: dequantizes both operands to bf16 using the per-block
-    scales implied by ``recipe`` and runs the einsum natively.
-
-    Only the einsum/recipe combinations actually emitted by
-    ``DeepseekV4MLAAttention.forward`` are supported; anything else
-    raises ``NotImplementedError`` so we fail loudly rather than
-    silently produce wrong results.
-    """
-    if equation != "bhr,hdr->bhd":
-        raise NotImplementedError(
-            f"FP8 einsum torch fallback only supports 'bhr,hdr->bhd' "
-            f"(DeepseekV4 wo_a projection); got '{equation}'."
-        )
-
-    m_block, n_block, k_block = recipe
-
-    # Recover the logical (H, D, R) layout for ``b``. ``wo_a`` is a
-    # ColumnParallelLinear with ``out_features = n_groups * o_lora_rank``
-    # marked ``is_bmm=True``: the weight is stored 2-D as ``(H*D, R)`` with
-    # H = n_local_groups (the leading group dim) and D = o_lora_rank, and
-    # the FP8 GEMM treats the leading H slices as batched. Same trick for
-    # the per-block weight scale ``(H*D/n_block, R/k_block)``.
-    h_groups = a.shape[-2]
-    d_out = out.shape[-1]
-    r_contract = a.shape[-1]
-
-    b_3d = b
-    if b.dim() == 2:
-        if b.shape[0] != h_groups * d_out or b.shape[1] != r_contract:
-            raise RuntimeError(
-                f"Unexpected wo_a weight shape {tuple(b.shape)}; "
-                f"expected ({h_groups * d_out}, {r_contract}) for "
-                f"H={h_groups}, D={d_out}, R={r_contract}."
-            )
-        b_3d = b.view(h_groups, d_out, r_contract)
-    elif b.dim() != 3:
-        raise RuntimeError(
-            f"Expected wo_a weight to be 2-D or 3-D, got {b.dim()}-D"
-        )
-
-    n_d_scale = (d_out + n_block - 1) // n_block if n_block > 1 else d_out
-    n_r_scale = (
-        (r_contract + k_block - 1) // k_block if k_block > 1 else r_contract
-    )
-
-    b_scale_3d = b_scale
-    if b_scale.dim() == 2:
-        if b_scale.shape != (h_groups * n_d_scale, n_r_scale):
-            raise RuntimeError(
-                f"Unexpected wo_a scale shape {tuple(b_scale.shape)}; "
-                f"expected ({h_groups * n_d_scale}, {n_r_scale})."
-            )
-        b_scale_3d = b_scale.view(h_groups, n_d_scale, n_r_scale)
-
-    a_f32 = a.to(torch.float32)
-    b_f32 = b_3d.to(torch.float32)
-    a_scale_f32 = a_scale.to(torch.float32).contiguous()
-    b_scale_f32 = b_scale_3d.to(torch.float32).contiguous()
-
-    # a: (B, H, R)  a_scale: (B, H, R // k_block)
-    a_scale_r = a_scale_f32
-    if k_block > 1:
-        a_scale_r = a_scale_r.repeat_interleave(k_block, dim=-1)
-    a_scale_r = a_scale_r[..., :r_contract]
-    if m_block > 1:
-        a_scale_r = a_scale_r.repeat_interleave(m_block, dim=0)[: a_f32.shape[0]]
-    a_bf16 = (a_f32 * a_scale_r).to(torch.bfloat16)
-
-    # b: (H, D, R)  b_scale: (H, D // n_block, R // k_block)
-    b_scale_dr = b_scale_f32
-    if k_block > 1:
-        b_scale_dr = b_scale_dr.repeat_interleave(k_block, dim=-1)
-    if n_block > 1:
-        b_scale_dr = b_scale_dr.repeat_interleave(n_block, dim=-2)
-    b_scale_dr = b_scale_dr[..., :d_out, :r_contract]
-    b_bf16 = (b_f32 * b_scale_dr).to(torch.bfloat16)
-
-    result = torch.einsum(equation, a_bf16, b_bf16)
-    out.copy_(result.to(out.dtype))
-
-
 def deepseek_v4_fp8_einsum(
     a: torch.Tensor,
     a_scale: torch.Tensor,
@@ -797,19 +704,7 @@ def deepseek_v4_fp8_einsum(
     equation: str,
     recipe: list[int],
 ) -> None:
-    # DeepGEMM's fp8_einsum is the canonical fast path on NVIDIA. On
-    # platforms without it (e.g. ROCm), fall back to a torch dequant +
-    # einsum reference. The choice is made at call time (not import) so
-    # this op stays usable in unit tests that mock current_platform.
-    from vllm.platforms import current_platform
-
-    if current_platform.is_cuda():
-        fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
-        return
-
-    _fp8_einsum_torch_fallback(
-        a, a_scale, b, b_scale, out, equation, tuple(recipe)
-    )
+    fp8_einsum(equation, (a, a_scale), (b, b_scale), out, recipe=tuple(recipe))
 
 
 def deepseek_v4_fp8_einsum_fake(
