@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from bisect import bisect_right
 
 import tokenizers
 from packaging import version
@@ -30,6 +31,7 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 class IncrementalDetokenizer:
     def __init__(self):
         self.token_ids: list[int] = []
+        self._last_output_token_offset: int = 0
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -44,6 +46,16 @@ class IncrementalDetokenizer:
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         return ""
+
+    def get_next_output_token_ids(self, finished: bool, delta: bool) -> list[int]:
+        if not delta:
+            return self.token_ids
+        last = self._last_output_token_offset
+        current = len(self.token_ids)
+        if last < current:
+            self._last_output_token_offset = current
+            return self.token_ids[last:current]
+        return []
 
     @classmethod
     def from_new_request(
@@ -89,6 +101,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
 
+        # Cumulative text length after decoding each token, used to
+        # synchronize token_ids output with the text stop-buffer.
+        self._token_text_offsets: list[int] = []
+
         # Generation data
         self.output_text = ""
 
@@ -117,6 +133,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
+            self._token_text_offsets.append(len(self.output_text))
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
                 stop_check_offset = len(self.output_text)
@@ -124,6 +141,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
             self.token_ids.append(skipped_stop_token_id)
+            self._token_text_offsets.append(len(self.output_text))
 
         # 2) Evaluate stop strings.
         stop_string = None
@@ -145,6 +163,23 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
     def decode_next(self, next_token_id: int) -> str:
         raise NotImplementedError
 
+    @property
+    def _output_token_id_start(self) -> int:
+        """Index into self.token_ids where output tokens begin.
+        Overridden by SlowIncrementalDetokenizer to skip prompt tokens."""
+        return 0
+
+    def _released_token_count(self, finished: bool) -> int:
+        """Return the number of tokens whose decoded text has been
+        fully released past the stop-string buffer."""
+        buffer_length = 0 if finished else self.stop_buffer_length
+        if not buffer_length:
+            return len(self._token_text_offsets)
+
+        text_length = len(self.output_text) - buffer_length
+        # _token_text_offsets is monotonically non-decreasing.
+        return bisect_right(self._token_text_offsets, text_length)
+
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
         this method is returned"""
@@ -162,6 +197,23 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self._last_output_text_offset = length
             return self.output_text[last_offset:length]
         return ""
+
+    def get_next_output_token_ids(self, finished: bool, delta: bool) -> list[int]:
+        """Return token IDs synchronized with the text stop-buffer.
+
+        When stop strings cause text to be held back, the corresponding
+        token IDs are also held back so that delta_text and
+        delta_token_ids stay in sync."""
+        released = self._released_token_count(finished)
+        start = self._output_token_id_start
+        if not delta:
+            return self.token_ids[start : start + released]
+
+        last_offset = self._last_output_token_offset
+        if last_offset < released:
+            self._last_output_token_offset = released
+            return self.token_ids[start + last_offset : start + released]
+        return []
 
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
@@ -273,6 +325,10 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.skip_special_tokens = params.skip_special_tokens
         self.spaces_between_special_tokens = params.spaces_between_special_tokens
+
+    @property
+    def _output_token_id_start(self) -> int:
+        return self.prompt_len
 
     @property
     def output_token_ids(self) -> list[int]:
