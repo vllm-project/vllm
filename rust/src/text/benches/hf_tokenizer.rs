@@ -1,7 +1,6 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
-use fastokens::Tokenizer as FastokensTokenizer;
 use hf_hub::api::sync::ApiBuilder;
-use tokenizers::Tokenizer as HfTokenizer;
+use vllm_text::tokenizer::{HuggingFaceTokenizer, Tokenizer};
 
 const MODEL_ID: &str = "Qwen/Qwen3.5-0.8B";
 const SAMPLE_TEXT: &str = "\
@@ -17,8 +16,8 @@ Input: 4 concurrent requests, 10240 prompt tokens, 16 generated tokens.
 ";
 
 struct BenchFixture {
-    fastokens: FastokensTokenizer,
-    hf: HfTokenizer,
+    fastokens: HuggingFaceTokenizer,
+    hf: HuggingFaceTokenizer,
     text: String,
     token_ids: Vec<u32>,
 }
@@ -26,17 +25,15 @@ struct BenchFixture {
 impl BenchFixture {
     fn load() -> Self {
         let path = tokenizer_json();
-        let fastokens = FastokensTokenizer::from_file(&path).expect("load fastokens tokenizer");
-        let hf = HfTokenizer::from_file(&path).expect("load huggingface tokenizer");
+        let fastokens =
+            HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens tokenizer");
+        let hf = HuggingFaceTokenizer::new_hf(&path).expect("load huggingface tokenizer");
 
         let text = SAMPLE_TEXT.repeat(32);
-        let hf_token_ids = hf
-            .encode(text.as_str(), false)
-            .expect("encode sample text with hf tokenizer")
-            .get_ids()
-            .to_vec();
+        let hf_token_ids =
+            hf.encode(text.as_str(), false).expect("encode sample text with hf tokenizer");
         let fastokens_token_ids = fastokens
-            .encode_with_special_tokens(text.as_str(), false)
+            .encode(text.as_str(), false)
             .expect("encode sample text with fastokens");
         assert_eq!(fastokens_token_ids, hf_token_ids);
 
@@ -76,7 +73,7 @@ fn bench_encode(c: &mut Criterion) {
         b.iter(|| {
             fixture
                 .fastokens
-                .encode_with_special_tokens(black_box(fixture.text.as_str()), black_box(false))
+                .encode(black_box(fixture.text.as_str()), black_box(false))
                 .expect("encode sample text with fastokens")
         })
     });

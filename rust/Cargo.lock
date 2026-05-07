@@ -3728,6 +3728,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "riptoken"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "196b37c4dd48f99b51e8aeaa3d0c343df62c7bb5b66cd6735aa072524fbe8665"
+dependencies = [
+ "fancy-regex 0.17.0",
+ "rayon",
+ "regex",
+ "regex-automata",
+ "rustc-hash 2.1.1",
+]
+
+[[package]]
 name = "rmp"
 version = "0.8.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5667,6 +5680,7 @@ dependencies = [
  "futures",
  "hf-hub 0.5.0",
  "itertools 0.14.0",
+ "riptoken",
  "rustc-hash 1.1.0",
  "serde",
  "serde_json",
