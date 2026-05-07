@@ -20,6 +20,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -531,10 +532,13 @@ if has_flashinfer():
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        m, n = a.shape
+        m, k = a.shape
+        sf_vec_size = 32
+        padded_m = cdiv(m, 128) * 128
+        sf_cols = cdiv(k // sf_vec_size, 4) * 4
         return (
-            torch.empty(m, n // 2, dtype=torch.uint8, device=a.device),
-            torch.empty(m, n // 32, dtype=torch.uint8, device=a.device),
+            torch.empty(m, k // 2, dtype=torch.uint8, device=a.device),
+            torch.empty(padded_m, sf_cols, dtype=torch.uint8, device=a.device),
         )
 
     @torch.library.custom_op(
