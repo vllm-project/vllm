@@ -246,6 +246,9 @@ class FusedMoE(PluggableLayer):
                                       not supported by the router (or the experts).
     """
 
+    # Auto-incrementing layer ID for routing replay buffer binding.
+    _next_moe_layer_id: int = 0
+
     # --8<-- [end:fused_moe]
 
     def __init__(
@@ -289,6 +292,10 @@ class FusedMoE(PluggableLayer):
         hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
+
+        # Assign unique layer ID for routing replay buffer binding.
+        self.moe_layer_id = FusedMoE._next_moe_layer_id
+        FusedMoE._next_moe_layer_id += 1
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -538,9 +545,11 @@ class FusedMoE(PluggableLayer):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
+        if not self.moe_config.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
@@ -1103,9 +1112,6 @@ class FusedMoE(PluggableLayer):
         return_success: bool = False,
     ) -> bool | None:
         quant_config_name = self.quant_config and self.quant_config.get_name()
-        if quant_config_name == "humming":
-            assert hasattr(self.quant_method, "weight_schema")
-            quant_config_name = self.quant_method.weight_schema.quant_method
         if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
