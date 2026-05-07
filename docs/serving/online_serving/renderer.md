@@ -8,7 +8,7 @@ The vLLM render API is designed to disaggregate the render phase(preprocessing) 
 
 ## API Reference
 
-- Completions render API (`/v1/completions/render`)
+- Completions Render API (`/v1/completions/render`)
     - Render completion requests
-- Chat Completions render API (`/v1/chat/completions/render`)
+- Chat Completions Render API (`/v1/chat/completions/render`)
     - Render Chat Completions

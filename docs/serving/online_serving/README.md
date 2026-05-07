@@ -70,9 +70,9 @@ For further details on Pooling Models, please refer to [this page](../../models/
 
 ### vLLM render APIs
 
-- [Completions render API](renderer.md) (`/v1/completions/render`)
+- [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
-- [Chat Completions render API](renderer.md) (`/v1/chat/completions/render`)
+- [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render Chat Completions
 
 ## Custom APIs
