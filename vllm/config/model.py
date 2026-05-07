@@ -466,6 +466,7 @@ class ModelConfig:
         )
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
+        tokenizer_was_default = self.tokenizer is None
         if self.tokenizer is None:
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
@@ -516,6 +517,14 @@ class ModelConfig:
             self.model,
             hf_config,
         )
+        gguf_base_model_id = getattr(hf_config, "_vllm_gguf_base_model_id", None)
+        if (
+            tokenizer_was_default
+            and language_model_only
+            and isinstance(gguf_base_model_id, str)
+            and is_gguf(self.tokenizer)
+        ):
+            self.tokenizer = maybe_model_redirect(gguf_base_model_id)
 
         self.hf_config = hf_config
         if dict_overrides:

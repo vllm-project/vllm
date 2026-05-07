@@ -105,6 +105,53 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _load_gguf_tuple_shard(
+    param: torch.nn.Parameter,
+    loaded_weight: torch.Tensor,
+    shard_id: tuple[int, ...],
+    weight_loader: Callable[..., None],
+) -> bool:
+    is_gguf_weight = getattr(param, "is_gguf_weight", False)
+    is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+    if not (is_gguf_weight or is_gguf_weight_type):
+        return False
+
+    if is_gguf_weight_type:
+        for shard in shard_id:
+            weight_loader(param, loaded_weight, shard)
+        return True
+
+    output_dim = getattr(param, "output_dim", None)
+    output_sizes = weight_loader.__self__.output_sizes
+    offset = 0
+    for shard in shard_id:
+        shard_size = output_sizes[shard]
+        shard_weight = loaded_weight.narrow(output_dim, offset, shard_size)
+        weight_loader(param, shard_weight, shard)
+        offset += shard_size
+    return True
+
+
+def _maybe_unsqueeze_single_output_weight(
+    param: torch.nn.Parameter, loaded_weight: torch.Tensor
+) -> torch.Tensor:
+    if (
+        param.ndim == 2
+        and param.shape[0] == 1
+        and loaded_weight.ndim == 1
+        and loaded_weight.shape[0] == param.shape[1]
+    ):
+        return loaded_weight.unsqueeze(0)
+    if (
+        param.ndim == 3
+        and param.shape[1] == 1
+        and loaded_weight.ndim == 2
+        and loaded_weight.shape == (param.shape[0], param.shape[2])
+    ):
+        return loaded_weight.unsqueeze(1)
+    return loaded_weight
+
+
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3_5Config)
@@ -212,6 +259,7 @@ class Qwen3_5Model(Qwen3NextModel):
             vllm_config.model_config.hf_text_config
         )
         parallel_config = vllm_config.parallel_config
+        quant_config = vllm_config.quant_config
 
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
@@ -224,6 +272,8 @@ class Qwen3_5Model(Qwen3NextModel):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         def get_layer(prefix: str):
@@ -354,6 +404,10 @@ class Qwen3_5Model(Qwen3NextModel):
                 weight_loader = param.weight_loader
                 if param_name == "in_proj_z" and self.enable_lora:
                     weight_loader(param, loaded_weight)
+                elif isinstance(shard_id, tuple) and _load_gguf_tuple_shard(
+                    param, loaded_weight, shard_id, weight_loader
+                ):
+                    pass
                 else:
                     weight_loader(param, loaded_weight, shard_id)
                 break
@@ -440,6 +494,9 @@ class Qwen3_5Model(Qwen3NextModel):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    loaded_weight = _maybe_unsqueeze_single_output_weight(
+                        param, loaded_weight
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -501,6 +558,7 @@ class Qwen3_5ForCausalLMBase(
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
         else:

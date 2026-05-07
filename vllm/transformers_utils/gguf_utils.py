@@ -38,6 +38,44 @@ def check_gguf_file(model: str | PathLike) -> bool:
         return False
 
 
+def _read_gguf_string_field(reader: gguf.GGUFReader, key: str) -> str | None:
+    field = reader.fields.get(key)
+    if field is None:
+        return None
+    try:
+        value = field.parts[field.data[0]]
+        return bytes(value).decode("utf-8")
+    except Exception:
+        logger.debug("Failed to read GGUF string field %s", key, exc_info=True)
+        return None
+
+
+@cache
+def get_gguf_base_model_id(gguf_file: str | PathLike) -> str | None:
+    """Return the HF-style base model id embedded in GGUF metadata, if present."""
+    try:
+        reader = gguf.GGUFReader(gguf_file)
+    except Exception:
+        logger.debug("Failed to read GGUF file %s", gguf_file, exc_info=True)
+        return None
+
+    repo_url = _read_gguf_string_field(reader, "general.base_model.0.repo_url")
+    if repo_url is not None:
+        prefix = "https://huggingface.co/"
+        if repo_url.startswith(prefix):
+            return repo_url.removeprefix(prefix).strip("/")
+
+    organization = _read_gguf_string_field(
+        reader,
+        "general.base_model.0.organization",
+    )
+    name = _read_gguf_string_field(reader, "general.base_model.0.name")
+    if organization is not None and name is not None:
+        return f"{organization}/{name.replace(' ', '-')}"
+
+    return None
+
+
 @cache
 def is_remote_gguf(model: str | Path) -> bool:
     """Check if the model is a remote GGUF model.
