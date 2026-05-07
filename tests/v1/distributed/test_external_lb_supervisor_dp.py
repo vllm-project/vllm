@@ -22,7 +22,6 @@ def _make_args(**overrides) -> argparse.Namespace:
         "data_parallel_supervisor_port": 9256,
         "data_parallel_probe_interval_s": 5.0,
         "data_parallel_probe_timeout_s": 5.0,
-        "data_parallel_probe_startup_timeout_s": 60.0,
         "data_parallel_size": 8,
         "data_parallel_size_local": 4,
         "data_parallel_start_rank": None,

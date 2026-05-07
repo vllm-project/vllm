@@ -266,21 +266,14 @@ class DPSupervisor:
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
         try:
-            deadline = (
-                time.monotonic() + self.args.data_parallel_probe_startup_timeout_s
-            )
-            while not supervisor_server.started:
-                if supervisor_server_exited:
-                    raise RuntimeError(
-                        "Multi-port external LB supervisor exited before startup"
-                    ) from supervisor_server_failure
-                if self._shutdown_event.is_set():
-                    return
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        "Timed out starting multi-port external LB supervisor"
-                    )
-                await asyncio.sleep(0.05)
+            while not supervisor_server.started and not self._shutdown_event.is_set():
+                await asyncio.sleep(0)
+            if supervisor_server_exited:
+                raise RuntimeError(
+                    "Multi-port external LB supervisor exited before startup"
+                ) from supervisor_server_failure
+            if self._shutdown_event.is_set():
+                return
             logger.info(
                 "Started multi-port external LB supervisor on %s:%d",
                 host,
