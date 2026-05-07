@@ -101,7 +101,7 @@ def compute_nixl_compatibility_hash(
     Returns:
         SHA-256 hex digest
     """
-    from vllm import __version__ as vllm_version
+    from vllm._version import __version__ as vllm_version
     from vllm.config.utils import hash_factors
 
     model_config = vllm_config.model_config

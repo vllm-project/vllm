@@ -2,10 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 
-# The version.py should be independent library, and we always import the
-# version library first.  Such assumption is critical for some customization.
-from .version import __version__, __version_tuple__  # isort:skip
-
 import typing
 
 # The environment variables override should be imported before any other
@@ -14,6 +10,8 @@ import typing
 import vllm.env_override  # noqa: F401
 
 MODULE_ATTRS = {
+    "__version__": "._version:__version__",
+    "__version_tuple__": "._version:__version_tuple__",
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
     "EngineArgs": ".engine.arg_utils:EngineArgs",
     "AsyncLLMEngine": ".engine.async_llm_engine:AsyncLLMEngine",
@@ -60,6 +58,8 @@ if typing.TYPE_CHECKING:
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.v1.executor.ray_utils import initialize_ray_cluster
+
+    from ._version import __version__, __version_tuple__
 else:
 
     def __getattr__(name: str) -> typing.Any:

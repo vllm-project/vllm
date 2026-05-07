@@ -405,7 +405,7 @@ class VllmConfig:
 
         # summarize vllm config
         vllm_factors: list[Any] = []
-        from vllm import __version__
+        from vllm._version import __version__
 
         vllm_factors.append(__version__)
         if self.model_config:
