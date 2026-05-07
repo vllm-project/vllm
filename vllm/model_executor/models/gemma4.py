@@ -438,6 +438,28 @@ class Gemma4Attention(nn.Module):
         self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
+        # Gemma4 has hybrid attention with global (512) and local (256) layers.
+        # With per-token-head KV quantization, each head stores quantized data
+        # plus per-token scale metadata carved from the same raw KV allocation,
+        # so per-block page-size contributions differ between local/global
+        # layers.
+        #  - Local: (256*1)*2 + 8 = 520 bytes
+        #  - Global: (512*1)*2 + 8 = 1032 bytes
+        # We pad global to 1040 so hybrid page-size unification can use an
+        # integer ratio. Keep this constant to preserve current Gemma4 behavior.
+        kv_cache_page_size_padded = None
+        if (
+            cache_config is not None
+            and cache_config.cache_dtype
+            in ("int8_per_token_head", "fp8_per_token_head")
+            and self.head_dim == 512
+        ):
+            tp_size = get_tensor_model_parallel_world_size()
+            num_kv_heads_per_gpu = max(1, num_kv_heads // tp_size)
+            kv_cache_page_size_padded = (
+                cache_config.block_size * num_kv_heads_per_gpu * 1040
+            )
+
         # Initialize RoPE based on layer type.
         # Gemma4 uses different RoPE parameters for sliding vs full attention.
         if layer_type in config.rope_parameters:
@@ -501,6 +523,7 @@ class Gemma4Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            kv_cache_page_size_padded=kv_cache_page_size_padded,
             prefix=f"{prefix}.attn",
         )
 

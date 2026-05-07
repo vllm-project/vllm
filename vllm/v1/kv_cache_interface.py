@@ -134,6 +134,23 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        """
+        Create a new KVCacheSpec from self but replacing the block size.
+        """
+        if self.page_size_padded is not None:
+            scaled_padded = self.page_size_padded * block_size
+            if scaled_padded % self.block_size != 0:
+                raise ValueError(
+                    "page_size_padded scaling must be divisible by original "
+                    f"block_size: page_size_padded={self.page_size_padded}, "
+                    f"old_block_size={self.block_size}, "
+                    f"new_block_size={block_size}"
+                )
+            new_padded = scaled_padded // self.block_size
+            return replace(self, block_size=block_size, page_size_padded=new_padded)
+        return super().copy_with_new_block_size(block_size)
+
     @property
     def page_size_bytes(self) -> int:
         real_page_size = self.real_page_size_bytes
