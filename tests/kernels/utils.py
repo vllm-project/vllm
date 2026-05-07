@@ -1085,36 +1085,3 @@ def baseline_scaled_mm(
         output = output + bias
 
     return output
-
-
-def assert_pluggable_layer_calls_ir_op(
-    layer: torch.nn.Module,
-    ir_op,
-    x: torch.Tensor,
-) -> None:
-    """Assert that a PluggableLayer calls the corresponding ir.ops function.
-
-    This is a test utility for verifying that PluggableLayer instances
-    (like GELU, GeluAndMul, etc.) correctly dispatch to their corresponding
-    ir.ops functions.
-
-    The mock is applied to the underlying ir_op._inner_call which is the
-    Python entry point for eager execution.
-
-    Args:
-        layer: PluggableLayer instance to test
-        ir_op: The corresponding ir.ops function (e.g., ir.ops.gelu)
-        x: Input tensor
-    """
-    # Disable torch wrapping to directly test ir_op._inner_call
-    from vllm.ir.op import enable_torch_wrap
-
-    with enable_torch_wrap(False):
-        with patch.object(ir_op, "_inner_call", wraps=ir_op._inner_call) as mock_op:
-            _ = layer(x)
-            mock_op.assert_called_once()
-            # Verify the call was made with the input tensor
-            call_args = mock_op.call_args
-            assert call_args[0][0].shape == x.shape, (
-                f"Expected input shape {x.shape}, got {call_args[0][0].shape}"
-            )

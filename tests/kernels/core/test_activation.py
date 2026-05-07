@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol
-from tests.kernels.utils import assert_pluggable_layer_calls_ir_op, opcheck
+from tests.kernels.utils import opcheck
 from vllm import ir
 from vllm.model_executor.layers.activation import (
     GELU,
