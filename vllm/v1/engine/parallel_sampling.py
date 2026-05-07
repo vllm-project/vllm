@@ -66,15 +66,24 @@ class ParentRequest:
           Child `sampling_params` instance.
         """
         seed = self.sampling_params.seed
+
         if self.cached_child_sampling_params:
             # Reuse child sampling_params data structure
             return self.cached_child_sampling_params
         # Build child sampling_params
         child_sampling_params = copy(self.sampling_params)
         child_sampling_params.n = 1
+        extra_args = child_sampling_params.extra_args or {}
+        kv_transfer = extra_args.get("kv_transfer_params")
+        if kv_transfer and isinstance(kv_transfer, list):
+            child_sampling_params.extra_args = {
+                **extra_args,
+                "kv_transfer_params": kv_transfer[index],
+            }
         if seed is None:
-            # Cache child sampling_params for later reuse
-            self.cached_child_sampling_params = child_sampling_params
+            if not (kv_transfer and isinstance(kv_transfer, list)):
+                # Cache child sampling_params for later reuse
+                self.cached_child_sampling_params = child_sampling_params
         else:
             # Each child gets a clone with a unique seed
             child_sampling_params.seed = seed + index

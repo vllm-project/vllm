@@ -103,7 +103,7 @@ class GenerateRequest(BaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    kv_transfer_params: dict[str, Any] | None = Field(
+    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
@@ -156,7 +156,7 @@ class GenerateResponse(BaseModel):
 
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
 
-    kv_transfer_params: dict[str, Any] | None = Field(
+    kv_transfer_params: dict[str, Any] | list[dict[str, Any]] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
