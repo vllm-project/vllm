@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -252,7 +253,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
+        # mxfp4 i.e. w4a4, w4a16 uses BLOCK_1X32
+        # mxfp6 and mxfp8 are unsupported in AITER currently and use emulation instead
         if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
@@ -437,4 +439,16 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
         )
-        output.copy_(result)
+        # avoid redundant copy when output is a view of the result
+        if (
+            output.shape == result.shape
+            and output.dtype == result.dtype
+            and output.device == result.device
+            and output.is_contiguous()
+            and result.is_contiguous()
+            and output._base is None
+            and disable_inplace()
+        ):
+            output.set_(result)
+        else:
+            output.copy_(result)

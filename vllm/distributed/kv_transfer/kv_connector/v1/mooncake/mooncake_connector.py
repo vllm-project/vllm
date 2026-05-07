@@ -31,9 +31,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
+    MooncakeKVConnectorStats,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -457,6 +461,25 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_save(self):
         pass
 
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return worker-local transfer stats since the last call.
+
+        Note the P/D asymmetry: because Mooncake is P-push (P calls
+        batch_transfer_sync_write), P records successful transfer latency,
+        bytes, and descriptor counts, while D only records failures
+        (recv/ZMQ errors). Aggregated NIXL-style dashboards will find
+        successful-transfer metrics on the P worker, not D.
+        """
+        if self.connector_worker is None:
+            return None
+        return self.connector_worker.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return MooncakeKVConnectorStats(data=data or {})
+
 
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -815,6 +838,8 @@ class MooncakeConnectorWorker:
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
+
+        self.xfer_stats = MooncakeKVConnectorStats()
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -1340,11 +1365,23 @@ class MooncakeConnectorWorker:
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
         )
+        duration = time.perf_counter() - start_time
         if ret_value == 0:
-            logger.debug(
-                "Sending to %s done, took %s",
+            self.xfer_stats.record_transfer(
+                duration_s=duration,
+                total_bytes=sum(lengths),
+                num_descs=len(src_ptrs),
+            )
+            logger.debug("Sending to %s done, took %s", remote_session, duration)
+        else:
+            self.xfer_stats.record_failed_transfer()
+            logger.warning(
+                "Sending to %s failed (ret=%s) after %s (%d descriptors, %d bytes)",
                 remote_session,
-                time.perf_counter() - start_time,
+                ret_value,
+                duration,
+                len(src_ptrs),
+                sum(lengths),
             )
         return ret_value
 
@@ -1445,6 +1482,7 @@ class MooncakeConnectorWorker:
                     send_meta.p_req_id,
                     envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT,
                 )
+                self.xfer_stats.record_kv_expired_req()
                 finished_sending_reqs.add(send_meta.p_req_id)
                 expired_transfer_id.append(transfer_id)
 
@@ -1484,6 +1522,13 @@ class MooncakeConnectorWorker:
             )
 
         return finished_sending_reqs or None, finished_recving_reqs or None
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return transfer stats collected since the last call, or None
+        if nothing has been recorded in this interval."""
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
 
     async def receive_kv_from_single_worker(
         self,
@@ -1531,6 +1576,7 @@ class MooncakeConnectorWorker:
                             req_ids,
                             response.err_msg,
                         )
+                        self.xfer_stats.record_failed_recv()
                         return
                     self.process_pulling_result(response, pull_metas)
                     if response.status == MooncakeXferResponseStatus.FINISH:
@@ -1539,6 +1585,7 @@ class MooncakeConnectorWorker:
             logger.debug("ZMQ context terminated, exiting Mooncake receiver thread.")
         except Exception as e:
             logger.error("MooncakeXferMetadata transfer failed for %s: %s", req_ids, e)
+            self.xfer_stats.record_failed_recv()
             return
 
     def process_pulling_result(

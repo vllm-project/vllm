@@ -403,6 +403,11 @@ class CoreEngineActorManager:
             range(dp_size), local_dp_ranks, placement_groups
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
+            if dp_size > 1:
+                # Append the DP rank to instance_id so that per-engine
+                # identifiers (e.g. Ray actor names in RayExecutorV2) are
+                # unique across DP replicas.
+                dp_vllm_config.instance_id = f"{dp_vllm_config.instance_id}_dp{index}"
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
 

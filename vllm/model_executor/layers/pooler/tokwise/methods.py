@@ -47,13 +47,12 @@ class AllPool(TokenPoolingMethod):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooling_cursor = pooling_metadata.get_pooling_cursor()
-        hidden_states_lst = [
-            hidden_states[first : last + 1]
-            for first, last in zip(
-                pooling_cursor.first_token_indices_gpu.tolist(),
-                pooling_cursor.last_token_indices_gpu.tolist(),
-            )
-        ]
+        # Use the already-CPU num_scheduled_tokens tensor so `.tolist()`
+        # doesn't trigger a GPU->CPU sync. torch.split produces the same
+        # consecutive slices as indexing with first/last per-sequence indices.
+        hidden_states_lst = list(
+            torch.split(hidden_states, pooling_cursor.num_scheduled_tokens_cpu.tolist())
+        )
 
         if not self.enable_chunked_prefill:
             return hidden_states_lst
@@ -91,12 +90,14 @@ class StepPool(AllPool):
         pooling_metadata: PoolingMetadata,
     ) -> list[TokenPoolingMethodOutputItem]:
         pooled_data_lst = super().forward(hidden_states, pooling_metadata)
-        prompt_token_ids = pooling_metadata.get_prompt_token_ids()
+        # Use the CPU copy of prompt_token_ids so the step_tag_id mask can be
+        # resolved to indices without a d2h sync from boolean indexing.
+        prompt_token_ids_cpu = pooling_metadata.get_prompt_token_ids_cpu()
         pooling_params = pooling_metadata.pooling_params
 
         pooled_data = list[torch.Tensor | None]()
-        for data, token_id, pooling_param in zip(
-            pooled_data_lst, prompt_token_ids, pooling_params
+        for data, token_id_cpu, pooling_param in zip(
+            pooled_data_lst, prompt_token_ids_cpu, pooling_params
         ):
             # for unfinished chunked prefill
             if data is None:
@@ -109,7 +110,9 @@ class StepPool(AllPool):
                     data = data[:, returned_token_ids]
 
                 if step_tag_id is not None:
-                    data = data[token_id == step_tag_id]
+                    idx_cpu = (token_id_cpu == step_tag_id).nonzero(as_tuple=True)[0]
+                    idx = idx_cpu.to(data.device, non_blocking=True)
+                    data = data[idx]
 
                 pooled_data.append(data)
 
