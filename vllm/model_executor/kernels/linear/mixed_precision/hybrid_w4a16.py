@@ -195,6 +195,11 @@ def triton_w4a16_skinny_fmt_gemm(
 
     c = torch.empty((M, N), dtype=a.dtype, device=a.device)
 
+    # AMD-specific scheduling hint; only consumed by the HIP backend below
+    # (see compiler.py amdgpu-waves-per-eu attribute). Set to 0 by default
+    # (no constraint); per-shape branches may override.
+    waves_per_eu = 0
+
     cap = current_platform.get_device_capability()
     if cap is not None and cap.major >= 12:
         # Tuned on gfx1201 (Radeon AI PRO R9700, 32 CUs, 32-wide wavefronts)
@@ -232,16 +237,39 @@ def triton_w4a16_skinny_fmt_gemm(
     elif on_gfx1x():
         # Tuned on gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts)
         # using Qwen3-4B weight shapes with group_size=128.
+        # waves_per_eu=0 means no constraint; specific values pin LLVM
+        # to a target VGPR budget per occupancy.md (gfx1151 has 1536
+        # VGPRs/SIMD; waves_per_eu=N sets max VGPRs to ~1536/N).
         if M <= 32:
             BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 32, 32, 128, 4
         elif M <= 64:
             BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 32, 4
         elif M <= 128:
-            if K >= 2 * N:  # tall K (e.g. down_proj)
+            # For K >= 4096 AND N >= 4096, a single config (BN=32, BK=128,
+            # NW=4) wins on every projection shape across Qwen3-8B and
+            # Llama-3.1-8B (down/qkv/gate_up/o_proj all gain +23%..+35% vs
+            # prior shape-specific configs). The wider K-tile escapes WMMA
+            # latency-bound regime (wmma.md: >= 2 waves/SIMD), and BN=32
+            # keeps the workgroup grid large enough to saturate 40 CUs even
+            # at N up to ~28k.
+            #
+            # Small-N or small-K shapes (Qwen3-VL-4B / Qwen3-4B) need the
+            # legacy shape-specific configs — at N=2560 the BN=32 grid drops
+            # below the saturation point.
+            if K >= 4096 and N >= 4096:
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 128, 4
+                # waves_per_eu=6 matches the natural VGPR-bound occupancy
+                # but explicitly pinning the target gives LLVM a single
+                # register count to optimize against (compiler.py: "forces
+                # LLVM to focus on a single register count, simplifies some
+                # heuristics and may improve scheduling"). +5-8% across all
+                # 4 K=N=4096 projection shapes.
+                waves_per_eu = 6
+            elif K >= 2 * N:  # tall K, small-N down (e.g. Qwen3-VL-4B down)
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 16, 64, 1
-            elif N > K:  # wide N (e.g. qkv_proj, gate_up_proj)
+            elif N > K:  # wide N, small K (e.g. Qwen3-VL-4B qkv/gate_up)
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 64, 4
-            else:  # N ~= K (e.g. o_proj)
+            else:  # N ~= K, small K (e.g. Qwen3-VL-4B o_proj)
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 64, 4
         elif M <= 1024:
             if K >= 2 * N:  # tall K (e.g. down_proj)
@@ -289,6 +317,7 @@ def triton_w4a16_skinny_fmt_gemm(
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
         num_warps=num_warps,
+        **({"waves_per_eu": waves_per_eu} if waves_per_eu else {}),
     )
     return c
 
