@@ -197,4 +197,10 @@ class Qwen3_5Config(PretrainedConfig):
         self.tie_word_embeddings = tie_word_embeddings
 
 
-__all__ = ["Qwen3_5Config", "Qwen3_5TextConfig"]
+class DamorkConfig(Qwen3_5Config):
+    """Damork-branded config alias for Qwen3.5-compatible checkpoints."""
+
+    model_type = "damork"
+
+
+__all__ = ["DamorkConfig", "Qwen3_5Config", "Qwen3_5TextConfig"]

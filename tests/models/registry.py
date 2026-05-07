@@ -1298,6 +1298,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         min_transformers_version="4.57",
     ),
+    "DamorkForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-0.8B",
+        hf_overrides={
+            "architectures": ["DamorkForConditionalGeneration"],
+            "model_type": "damork",
+        },
+        max_model_len=4096,
+    ),
     "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-0.8B",
         max_model_len=4096,

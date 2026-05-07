@@ -136,3 +136,10 @@ def test_hf_registry_coverage():
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
     )
+
+
+def test_damork_architecture_aliases_qwen3_5():
+    assert _MULTIMODAL_MODELS["DamorkForConditionalGeneration"] == (
+        "qwen3_5",
+        "Qwen3_5ForConditionalGeneration",
+    )
