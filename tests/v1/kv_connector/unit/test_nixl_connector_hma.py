@@ -593,7 +593,7 @@ def test_derive_mamba_conv_split_gdn_layout():
     assert split.remote_conv_offsets(local_rank_offset=1, tp_ratio=2) == [
         (288, 288),
         (864, 288),
-        (1440, 96),
+        (1248, 96),
     ]
 
 
