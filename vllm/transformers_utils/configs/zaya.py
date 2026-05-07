@@ -50,6 +50,8 @@ class ZayaConfig(PretrainedConfig):
         clamp_temp=False,
         cca_time0=2,
         cca_time1=2,
+        swa_layers=None,
+        swa_rotary_base=None,
         _attn_implementation="eager",
         **kwargs,
     ):
@@ -93,8 +95,10 @@ class ZayaConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.num_key_value_heads = num_key_value_heads
         self.clamp_temp = clamp_temp
-        self.cca_time0=cca_time0
-        self.cca_time1=cca_time1
+        self.cca_time0 = cca_time0
+        self.cca_time1 = cca_time1
+        self.swa_layers = swa_layers
+        self.swa_rotary_base = swa_rotary_base
         self._attn_implementation = _attn_implementation
 
         super().__init__(

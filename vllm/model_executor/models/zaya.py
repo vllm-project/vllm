@@ -141,23 +141,35 @@ class ZayaAttention(nn.Module):
                                        bias=self.config.attention_bias,
                                        quant_config=quant_config,
                                        return_bias=False,
-                                       prefix=f"{prefix_name}.o_proj")            
+                                       prefix=f"{prefix_name}.o_proj") 
+
+        swa_layers = getattr(config, "swa_layers", None)
+        swa_window = swa_layers[layer_n] if swa_layers is not None else None
+        is_swa = swa_window is not None and swa_window != 0
+
+        if is_swa:
+            swa_window = swa_window + 1
 
         self.attn = Attention(
             self.cca_num_q_heads,
             self.head_dim,
             self.scale,
             self.cca_num_k_heads,
+            per_layer_sliding_window=swa_window if is_swa else None,
             cache_config=cache_config,
             prefix=f"{prefix_name}.attn",
         )
+
+        rope_theta = (getattr(config, "swa_rotary_base", config.rope_theta)
+                      if is_swa else config.rope_theta)
+
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
             max_position=config.max_position_embeddings,
             is_neox_style=True,
             rope_parameters={
-                "rope_theta": config.rope_theta,
+                "rope_theta": rope_theta,
                 "rope_type": "default",
                 "partial_rotary_factor": 0.5,
             },
