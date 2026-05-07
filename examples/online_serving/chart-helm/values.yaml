@@ -42,6 +42,15 @@ resources:
     # -- Number of gpus used
     nvidia.com/gpu: 1
 
+# -- Shared memory configuration
+shm:
+  # If true, mount a memory-backed emptyDir at /dev/shm.
+  # If false, do not override /dev/shm and use the container runtime default.
+  enabled: false
+  # Optional sizeLimit for the memory-backed emptyDir mounted at /dev/shm.
+  # If empty or unset, the emptyDir is created without sizeLimit.
+  size: "16Gi"
+
 # -- Type of gpu used
 gpuModels:
   - "TYPE_GPU_USED"
