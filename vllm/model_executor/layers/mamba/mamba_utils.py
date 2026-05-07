@@ -105,6 +105,15 @@ class MambaStateDtypeCalculator:
         return (conv_state_dtype,)
 
     @classmethod
+    def cca_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
+        return (state_dtype, state_dtype)
+
+    @classmethod
     def gated_delta_net_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -196,6 +205,24 @@ class MambaStateShapeCalculator:
         conv_dim = divide(intermediate_size, tp_world_size)
         conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
         return (conv_state_shape,)
+
+    @classmethod
+    def cca_state_shape(
+        cls,
+        tp_world_size: int,
+        conv_kernel_size: int,
+        num_k_heads: int,
+        num_q_heads: int,
+        head_dim: int,
+        hidden_size: int,
+    ) -> tuple[tuple[int, int], tuple[int]]:
+        latent_k_dim = num_k_heads * head_dim
+        latent_q_dim = num_q_heads * head_dim
+        in_out_ch = latent_k_dim + latent_q_dim
+        conv_states_shape = (in_out_ch, conv_kernel_size)
+
+        prev_hs_shape = (hidden_size,)
+        return (conv_states_shape, prev_hs_shape)
 
     @classmethod
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):
@@ -328,6 +355,20 @@ def get_conv_copy_spec(
     )
 
 
+def get_cca_conv_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    """Return a MambaCopySpec for copying a CCA convolutional state slice."""
+    src_block_id = block_ids[cur_block_idx]
+    src_state = state[src_block_id, :, num_accepted_tokens - 1 :]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
 def get_temporal_copy_spec(
     state: torch.Tensor,
     block_ids: list[int],
@@ -358,6 +399,10 @@ class MambaStateCopyFuncCalculator:
     @classmethod
     def short_conv_state_copy_func(cls):
         return (get_conv_copy_spec,)
+
+    @classmethod
+    def cca_state_copy_func(cls):
+        return (get_cca_conv_copy_spec, get_temporal_copy_spec)
 
     @classmethod
     def gated_delta_net_state_copy_func(cls):
