@@ -16,98 +16,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-@config
-class IrOpPriorityConfig:
-    """
-    Configuration for vLLM IR op priority for dispatching/lowering during the
-    forward pass. Each member is a list of strings, which will be passed to
-    vllm.ir.ops.<op_name>.set_priority() for the duration of the forward pass.
-    A single comma-separated string is accepted as well,
-
-    If specified manually, platform defaults will be appended to the lists.
-    See KernelConfig.set_platform_defaults().
-    """
-
-    rms_norm: list[str] = Field(default_factory=list)
-    """Priority list for vllm.ir.ops.rms_norm"""
-
-    fused_add_rms_norm: list[str] = Field(default_factory=list)
-    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
-
-    def compute_hash(self) -> str:
-        """
-        Produces a hash unique to the pass configuration.
-        Any new fields that affect compilation should be added to the hash.
-        Any future fields that don't affect compilation should be excluded.
-
-        Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
-        """
-        factors = get_hash_factors(self, set())
-
-        # Implementations are hidden from Dynamo,
-        # so they don't show up in the traced files list.
-        from vllm.ir.op import IrOp
-
-        assert "_impls" not in factors
-        factors["_impls"] = {
-            name: {
-                provider: IrOp.registry[name].impls[provider].uuid() for provider in p
-            }
-            for name, p in asdict(self).items()  # type: ignore[call-overload]
-        }
-
-        return hash_factors(factors)
-
-    @field_validator("*", mode="before")
-    @classmethod
-    def _to_list_str(cls, value: str | list[str]):
-        if isinstance(value, str):
-            value = value.replace(" ", "").split(",")
-
-        assert all(isinstance(v, str) for v in value)
-        return value
-
-    @contextlib.contextmanager
-    def set_priority(self):
-        """
-        Context manager to set the IR op priority for all op members.
-        It also imports IR kernel implementations for the current platform
-        to ensure all implementations are made available.
-        """
-        from vllm.ir.op import IrOp
-        from vllm.platforms import current_platform
-
-        current_platform.import_ir_kernels()
-
-        with contextlib.ExitStack() as stack:
-            for field in fields(self):  # type: ignore[arg-type]
-                op_priority = getattr(self, field.name)
-                assert op_priority is not None, (
-                    f"IR op priority for {field.name} must be set"
-                )
-                logger.debug(
-                    "Setting IR op priority for %s to %s", field.name, op_priority
-                )
-                ir_op = IrOp.registry[field.name]
-                stack.enter_context(ir_op.set_priority(op_priority))
-
-            yield
-
-    @classmethod
-    def with_default(
-        cls, default: list[str], /, **kwargs: list[str]
-    ) -> "IrOpPriorityConfig":
-        """
-        A helper to create an IrOpPriorityConfig where fields not specified in kwargs
-        use the given default list.
-        """
-        for field in fields(cls):  # type: ignore[arg-type]
-            if field.name not in kwargs:
-                kwargs[field.name] = list(default)
-
-        return cls(**kwargs)
-
-
 MoEBackend = Literal[
     "auto",
     "triton",
@@ -121,6 +29,116 @@ MoEBackend = Literal[
     "aiter",
     "emulation",
 ]
+
+
+@config
+class IrOpPriorityConfig:
+    """
+    Configuration for vLLM IR op priority for dispatching/lowering during the
+    forward pass. Uses a dict to store priorities, automatically synced with
+    IrOp.registry.
+
+    Each key is an op_name (matching IrOp.registry keys), and each value is a
+    list of strings passed to vllm.ir.ops.<op_name>.set_priority().
+    A single comma-separated string is accepted as well.
+
+    If specified manually, platform defaults will be appended to the lists.
+    See KernelConfig.set_platform_defaults().
+    """
+
+    priorities: dict[str, list[str]] = Field(default_factory=dict)
+    """Priority list for each IR op, keyed by op_name."""
+
+    def compute_hash(self) -> str:
+        """
+        Produces a hash unique to the pass configuration.
+        Any new fields that affect compilation should be added to the hash.
+        Any future fields that don't affect compilation should be excluded.
+
+        Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
+        """
+        from vllm.ir.op import IrOp
+
+        factors: dict[str, object] = {"priorities": dict(self.priorities)}
+        factors["_impls"] = {
+            name: {
+                provider: IrOp.registry[name].impls[provider].uuid()
+                for provider in priority
+                if provider in IrOp.registry[name].impls
+            }
+            for name, priority in self.priorities.items()
+            if name in IrOp.registry
+        }
+
+        return hash_factors(factors)
+
+    @field_validator("priorities", mode="before")
+    @classmethod
+    def _to_list_str(cls, value: dict[str, str | list[str]]):
+        result = {}
+        for k, v in value.items():
+            if isinstance(v, str):
+                v = v.replace(" ", "").split(",")
+            assert all(isinstance(item, str) for item in v)
+            result[k] = v
+        return result
+
+    @contextlib.contextmanager
+    def set_priority(self):
+        """
+        Context manager to set the IR op priority for all ops.
+        It also imports IR kernel implementations for the current platform
+        to ensure all implementations are made available.
+        """
+        from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
+
+        with contextlib.ExitStack() as stack:
+            for op_name, op_priority in self.priorities.items():
+                assert op_priority is not None, (
+                    f"IR op priority for {op_name} must be set"
+                )
+                logger.debug(
+                    "Setting IR op priority for %s to %s", op_name, op_priority
+                )
+                if op_name in IrOp.registry:
+                    ir_op = IrOp.registry[op_name]
+                    stack.enter_context(ir_op.set_priority(op_priority))
+
+            yield
+
+    @classmethod
+    def with_default(
+        cls, default: list[str], /, **overrides: list[str]
+    ) -> "IrOpPriorityConfig":
+        """
+        A helper to create an IrOpPriorityConfig where all ops use the given
+        default list, with specified overrides.
+
+        Args:
+            default: Default priority list for all ops.
+            **overrides: Keyword arguments mapping op_name to its priority list.
+
+        Raises:
+            KeyError: If an override key is not a registered IR op.
+        """
+        from vllm.ir.op import IrOp
+
+        # Validate overrides
+        for op_name in overrides:
+            if op_name not in IrOp.registry:
+                raise KeyError(
+                    f"Unknown IR op '{op_name}'. "
+                    f"Available ops: {list(IrOp.registry.keys())}"
+                )
+
+        priorities = {}
+        for op_name in IrOp.registry:
+            priorities[op_name] = list(overrides.get(op_name, default))
+
+        return cls(priorities=priorities)
 
 
 @config
@@ -184,6 +202,7 @@ class KernelConfig:
 
     def set_platform_defaults(self, vllm_config: "VllmConfig") -> None:
         """Set platform-specific defaults for the kernel config."""
+        from vllm.ir.op import IrOp
         from vllm.platforms import current_platform
 
         platform_op_priority = current_platform.get_default_ir_op_priority(vllm_config)
@@ -192,14 +211,29 @@ class KernelConfig:
             platform_op_priority,
             self.ir_op_priority,
         )
-        for op_name, op_priority in asdict(platform_op_priority).items():
-            current_op_priority: list[str] = getattr(self.ir_op_priority, op_name)
-            if current_op_priority is None:
-                setattr(self.ir_op_priority, op_name, op_priority)
+
+        # Check for missing ops that will get platform defaults
+        all_known_ops = set(IrOp.registry.keys())
+        configured_ops = set(self.ir_op_priority.priorities.keys())
+        platform_ops = set(platform_op_priority.priorities.keys())
+
+        # After merging, these ops will have priorities set
+        will_have_priorities = configured_ops | platform_ops
+        missing_ops = all_known_ops - will_have_priorities
+        if missing_ops:
+            logger.warning(
+                "IR ops without explicit priority config (will use platform defaults): %s",
+                list(missing_ops),
+            )
+
+        for op_name, op_priority in platform_op_priority.priorities.items():
+            if op_name not in self.ir_op_priority.priorities:
+                self.ir_op_priority.priorities[op_name] = list(op_priority)
             else:
                 # Append platform-specific priorities
                 # Must be idempotent because vllm_config.set_platform_defaults() may be
                 # called multiple times (due to VllmConfig.__post_init__ manual call).
+                current_op_priority = self.ir_op_priority.priorities[op_name]
                 unique_op_priority = [
                     op for op in op_priority if op not in current_op_priority
                 ]

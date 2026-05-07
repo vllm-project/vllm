@@ -96,10 +96,11 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
 
+    rms_priority = cfg.kernel_config.ir_op_priority.priorities.get("rms_norm", ["native"])
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
-        or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+        or rms_priority[0] != "native"
     )
 
 
@@ -158,8 +159,11 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
 
+    fused_priority = cfg.kernel_config.ir_op_priority.priorities.get(
+        "fused_add_rms_norm", ["native"]
+    )
     return (
-        cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
+        fused_priority[0] == "aiter"
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
