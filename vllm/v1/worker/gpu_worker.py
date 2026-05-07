@@ -398,7 +398,7 @@ class Worker(WorkerBase):
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if (
-                not current_platform.is_rocm()
+                current_platform.is_cuda()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
@@ -710,6 +710,14 @@ class Worker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+        # All warmup is done — start monitoring for unexpected JIT
+        # compilations that would cause latency spikes during inference.
+        from vllm.triton_utils.jit_monitor import (
+            activate as activate_triton_jit_monitor,
+        )
+
+        activate_triton_jit_monitor()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
