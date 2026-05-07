@@ -137,7 +137,7 @@ repos:
       args: [
         requirements/docs.in,
         -o, requirements/docs.txt,
-        --python-platform, x86_64-manylinux_2_39,
+        --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
       files: ^requirements/docs\.(in|txt)$
