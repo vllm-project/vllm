@@ -63,6 +63,70 @@ except ImportError:
     _BROTLI_AVAILABLE = False
 
 
+# ── Pre-trained ZSTD dictionary registry ─────────────────────────────────────
+#
+# Per the Codec protocol (spec/PROTOCOL.md "Pre-trained ZSTD dictionaries"),
+# **the dict is the precondition for using zstd at all**, not an optimization
+# layered on top. Without a matching pre-trained dict, no-dict zstd's wire-byte
+# advantage over gzip is essentially zero on Codec streams (RESULTS.md §1f:
+# 3.4 B/token vs 3.4 B/token within noise) but its TTFB cost on the shipped
+# buffered middleware is catastrophic (§1d: 334× at 2K tokens). So no-dict
+# zstd is the *worst of both worlds* — same bytes as gzip, much worse TTFB.
+#
+# The dict registry is keyed by ``stream_format`` because zstd dictionaries
+# are not interchangeable across formats — a dict trained on msgpack Codec
+# frames captures a different byte distribution than one trained on protobuf.
+# Operators load the appropriate dict at server start (e.g. fetched from the
+# tokenizer map's ``zstd_dictionaries[]`` entry whose ``format`` matches), and
+# the negotiator then unlocks zstd for that format only.
+#
+# Default state: empty registry → zstd never selected → server falls through
+# to gzip on every request that advertises zstd. This is the correct default:
+# gzip works on every middleware stack, ships in stdlib, and matches the wire
+# performance of no-dict zstd.
+
+_ZSTD_DICTS: dict[str, bytes] = {}
+
+
+def set_zstd_dict(stream_format: str, dict_bytes: bytes) -> None:
+    """Register a pre-trained zstd dictionary for ``stream_format``.
+
+    ``stream_format`` is one of ``"msgpack"`` or ``"protobuf"`` (matches the
+    Codec request's ``stream_format`` field). ``dict_bytes`` is the raw
+    bytes of a zstd dictionary as produced by ``zstd --train`` or
+    ``packages/bench/scripts/train-zstd-dict.py``.
+
+    Replaces any previously-registered dict for that format. Call once at
+    server startup, e.g.::
+
+        with open("qwen2.5-msgpack-v1.dict", "rb") as f:
+            set_zstd_dict("msgpack", f.read())
+        with open("qwen2.5-protobuf-v1.dict", "rb") as f:
+            set_zstd_dict("protobuf", f.read())
+
+    No-op if the ``zstandard`` package isn't installed — the negotiator
+    won't pick zstd in that case anyway.
+    """
+    if not _ZSTD_AVAILABLE:
+        return
+    _ZSTD_DICTS[stream_format] = dict_bytes
+
+
+def clear_zstd_dicts() -> None:
+    """Drop all registered dictionaries. Mostly for tests."""
+    _ZSTD_DICTS.clear()
+
+
+def has_zstd_dict(stream_format: Optional[str]) -> bool:
+    """Is there a registered dict for ``stream_format``?
+
+    Returns False when ``stream_format`` is None — callers that don't know
+    the response format (e.g. legacy code paths) can't safely use a
+    format-keyed dict, so we drop them off the zstd path.
+    """
+    return bool(stream_format) and stream_format in _ZSTD_DICTS
+
+
 def _parse_accept_encoding(header: str) -> list[str]:
     """Return the encodings the client lists, in the order they appear.
 
@@ -81,19 +145,34 @@ def _parse_accept_encoding(header: str) -> list[str]:
     return parts
 
 
-def negotiate_encoding(accept_encoding: str) -> Optional[str]:
+def negotiate_encoding(
+    accept_encoding: str,
+    *,
+    stream_format: Optional[str] = None,
+) -> Optional[str]:
     """Pick the best encoding both sides can speak.
 
     Returns one of ``"zstd"``, ``"br"``, ``"gzip"``, or ``None`` (identity).
     Order of preference: zstd > br > gzip > identity. ``"*"`` in
     Accept-Encoding is treated as accepting any encoding the server has.
+
+    **zstd is gated on a pre-trained dict being registered for the request's
+    ``stream_format``.** Without a dict, this falls through to gzip even
+    when the client advertises zstd — see the dict registry comment above
+    and spec/PROTOCOL.md "Pre-trained ZSTD dictionaries" for the rationale.
+    ``stream_format`` defaults to None, which always disables zstd — keeps
+    legacy callers safe.
     """
     encs = _parse_accept_encoding(accept_encoding)
     if not encs:
         return None
     has_wildcard = "*" in encs
 
-    if _ZSTD_AVAILABLE and ("zstd" in encs or has_wildcard):
+    if (
+        _ZSTD_AVAILABLE
+        and has_zstd_dict(stream_format)
+        and ("zstd" in encs or has_wildcard)
+    ):
         return "zstd"
     if _BROTLI_AVAILABLE and ("br" in encs or has_wildcard):
         return "br"
@@ -102,11 +181,20 @@ def negotiate_encoding(accept_encoding: str) -> Optional[str]:
     return None
 
 
-async def _compress_zstd(stream: AsyncIterable[bytes]) -> AsyncIterable[bytes]:
-    """Stream-compress with Zstandard, yielding compressed bytes as they
-    become available. Reuses one compression context for the whole stream
-    so dictionary-style cross-frame patterns compress effectively."""
-    cctx = zstd.ZstdCompressor(level=3)  # level 3 = good speed/ratio balance
+async def _compress_zstd(
+    stream: AsyncIterable[bytes],
+    *,
+    dict_bytes: bytes,
+) -> AsyncIterable[bytes]:
+    """Stream-compress with Zstandard, using a pre-trained dict.
+
+    Per the Codec protocol the encoder MUST load the dict; ``negotiate_encoding``
+    only selects zstd when a dict is registered, so we pass the bytes through
+    here rather than re-looking it up from the registry (avoids a TOCTOU
+    where the dict gets cleared mid-request).
+    """
+    zdict = zstd.ZstdCompressionDict(dict_bytes)
+    cctx = zstd.ZstdCompressor(level=3, dict_data=zdict)
     chunker = cctx.chunker(chunk_size=16384)
     async for chunk in stream:
         for out in chunker.compress(chunk):
@@ -155,6 +243,7 @@ def wrap_streaming_response(
     media_type: str,
     background: Optional[BackgroundTasks] = None,
     extra_headers: Optional[dict[str, str]] = None,
+    stream_format: Optional[str] = None,
 ) -> StreamingResponse:
     """Build a StreamingResponse with the right compression based on the
     client's Accept-Encoding header.
@@ -162,15 +251,28 @@ def wrap_streaming_response(
     The Codec frame format is unchanged — compression is purely transport.
     Clients that don't include zstd/gzip in Accept-Encoding receive an
     uncompressed (identity-encoded) stream, which is the previous behavior.
+
+    ``stream_format`` is the request's ``stream_format`` field
+    (``"msgpack"`` / ``"protobuf"`` / ``"json"``) and gates the zstd path
+    via the dict registry — see ``negotiate_encoding``.
     """
-    encoding = negotiate_encoding(accept_encoding)
+    encoding = negotiate_encoding(accept_encoding, stream_format=stream_format)
     headers: dict[str, str] = {"Vary": "Accept-Encoding"}
     if extra_headers:
         headers.update(extra_headers)
 
     if encoding == "zstd":
-        body = _compress_zstd(body_stream)
-        headers["Content-Encoding"] = "zstd"
+        # has_zstd_dict() was checked inside negotiate_encoding, so the
+        # lookup here always hits — but assert defensively in case of a
+        # registry mutation between negotiation and use.
+        dict_bytes = _ZSTD_DICTS.get(stream_format or "")
+        if dict_bytes is None:
+            # Registry was cleared mid-request — fall through to gzip.
+            body = _compress_gzip(body_stream)
+            headers["Content-Encoding"] = "gzip"
+        else:
+            body = _compress_zstd(body_stream, dict_bytes=dict_bytes)
+            headers["Content-Encoding"] = "zstd"
     elif encoding == "br":
         body = _compress_brotli(body_stream)
         headers["Content-Encoding"] = "br"

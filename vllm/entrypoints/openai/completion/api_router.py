@@ -79,6 +79,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             raw_request.headers.get("accept-encoding", ""),
             generator,
             media_type=media_type,
+            stream_format=request.stream_format,
         )
     return StreamingResponse(content=generator, media_type=media_type)
 
@@ -146,6 +147,7 @@ async def create_completion_codec(raw_request: Request):
         raw_request.headers.get("accept-encoding", ""),
         generator,
         media_type=media_type,
+        stream_format=stream_format,
     )
 
 

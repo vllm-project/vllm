@@ -81,6 +81,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             raw_request.headers.get("accept-encoding", ""),
             generator,
             media_type=media_type,
+            stream_format=request.stream_format,
         )
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
