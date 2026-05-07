@@ -221,6 +221,9 @@ class RoutedExpertsCapturer(ABC):
     def get_device_cache(self):
         raise NotImplementedError
 
+    def map_layer_id(self, layer_id: int) -> int:
+        raise NotImplementedError
+
 
 def _count_moe_layers(hf_config) -> int:
     """Count the number of MoE layers in a model.
@@ -292,6 +295,8 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             num_experts_per_tok=self.num_experts_per_tok,
             device=device,
         )
+
+        self._id_map: dict[int, int] = {}
 
         # ---- Async D2H pipeline (rank-0 only) ----
         # Non-rank-0 workers only need the device buffer for symmetric
@@ -476,6 +481,13 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
     def get_device_cache(self):
         return self.device_cache
 
+    def map_layer_id(self, layer_id: int) -> int:
+        if layer_id not in self._id_map:
+            next_id = len(self._id_map)
+            self._id_map[layer_id] = next_id
+            return next_id
+        return self._id_map[layer_id]
+
 
 class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
     def __init__(self):
@@ -498,6 +510,9 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
 
     def get_device_cache(self):
         pass
+
+    def map_layer_id(self, layer_id: int) -> int:
+        return 0
 
 
 # Global capturer instance (per-process)
@@ -794,7 +809,7 @@ def bind_routing_capture_to_model(model) -> None:
 
     bound = 0
     for module in model.modules():
-        if isinstance(module, FusedMoE) and hasattr(module, "moe_layer_id"):
+        if isinstance(module, FusedMoE):
             # Per-FusedMoE configurations not yet validated for routing
             # capture. These signals are only set after model init, so a
             # config-level guard cannot see them.
@@ -815,9 +830,9 @@ def bind_routing_capture_to_model(model) -> None:
                     f"dp_size={module.moe_config.dp_size})."
                 )
 
-            layer_id = module.moe_layer_id
+            layer_id = capturer.map_layer_id(module.layer_id)
             layer_buf = buffer[layer_id]  # (N_max, K)
-            module._routing_replay_out = layer_buf
+            module.router._routing_replay_out = layer_buf
             # Mark each per-layer view as static so CUDA graphs don't
             # snapshot/restore or relocate the buffer during replay.
             if hasattr(torch.compiler, "cudagraph_mark_tensor_static"):
