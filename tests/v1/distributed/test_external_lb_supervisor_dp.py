@@ -105,7 +105,7 @@ async def test_dp_supervisor_monitor_children_raises_when_child_exits(
 
 
 @pytest.mark.asyncio
-async def test_dp_supervisor_run_raises_when_supervisor_server_exits_before_startup(
+async def test_dp_supervisor_run_propagates_supervisor_server_error_before_startup(
     monkeypatch: pytest.MonkeyPatch,
 ):
     class FakeLoop:
@@ -132,9 +132,5 @@ async def test_dp_supervisor_run_raises_when_supervisor_server_exits_before_star
 
     supervisor = DPSupervisor(_make_args())
 
-    with pytest.raises(
-        RuntimeError, match="Multi-port external LB supervisor exited before startup"
-    ) as exc_info:
+    with pytest.raises(ValueError, match="supervisor boom"):
         await supervisor.run()
-
-    assert isinstance(exc_info.value.__cause__, ValueError)

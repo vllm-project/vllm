@@ -231,19 +231,9 @@ class DPSupervisor:
         return not self._shutdown_event.is_set() and self.children_healthy
 
     async def run(self) -> None:
-        supervisor_server_exited = False
-        supervisor_server_failure: BaseException | None = None
         loop = asyncio.get_running_loop()
 
-        def on_server_exit(task: asyncio.Task[None]) -> None:
-            nonlocal supervisor_server_exited, supervisor_server_failure
-            if self._shutdown_event.is_set():
-                return
-            supervisor_server_exited = True
-            try:
-                supervisor_server_failure = task.exception()
-            except asyncio.CancelledError as exc:
-                supervisor_server_failure = exc
+        def on_server_exit(_task: asyncio.Task[None]) -> None:
             self._shutdown_event.set()
 
         host = self.args.host or "0.0.0.0"
@@ -265,12 +255,15 @@ class DPSupervisor:
             loop.add_signal_handler(sig, partial(self._handle_signal, sig))
 
         try:
-            while not supervisor_server.started and not self._shutdown_event.is_set():
+            while (
+                not supervisor_server.started
+                and not supervisor_server_task.done()
+                and not self._shutdown_event.is_set()
+            ):
                 await asyncio.sleep(0)
-            if supervisor_server_exited:
-                raise RuntimeError(
-                    "Multi-port external LB supervisor exited before startup"
-                ) from supervisor_server_failure
+            if supervisor_server_task.done():
+                await supervisor_server_task
+                return
             if self._shutdown_event.is_set():
                 return
             logger.info(
@@ -284,11 +277,7 @@ class DPSupervisor:
             self._shutdown_event.set()
             await self._shutdown_children()
             supervisor_server.should_exit = True
-
-        if supervisor_server_exited:
-            raise RuntimeError(
-                "Multi-port external LB supervisor exited unexpectedly"
-            ) from supervisor_server_failure
+            await supervisor_server_task
 
     def _handle_signal(self, signum: int) -> None:
         if self._shutdown_event.is_set():
