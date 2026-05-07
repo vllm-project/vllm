@@ -80,7 +80,6 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # CPU FP8 W8A16: block-quantized weights, dynamic activation
         SUPPORTED_W_A = [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
         ]
