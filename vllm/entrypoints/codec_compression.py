@@ -41,6 +41,7 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import zlib
 from typing import AsyncIterable, Optional
 
@@ -86,6 +87,19 @@ except ImportError:
 # performance of no-dict zstd.
 
 _ZSTD_DICTS: dict[str, bytes] = {}
+# Parallel registry of hashes — sha256(dict_bytes) computed once at
+# registration so emit-time is a constant-time map lookup. Goes onto every
+# zstd response as the Codec-Zstd-Dict header so clients can validate (or
+# fetch) the right dict before decompressing. See spec/PROTOCOL.md
+# "Codec-Zstd-Dict response header".
+_ZSTD_DICT_HASHES: dict[str, str] = {}
+
+
+def _hash_dict(dict_bytes: bytes) -> str:
+    """sha256 hex digest of the dict, prefixed `sha256:` so the value is
+    self-describing and matches the `hash` shape in tokenizer-map
+    `zstd_dictionaries[]` entries."""
+    return "sha256:" + hashlib.sha256(dict_bytes).hexdigest()
 
 
 def set_zstd_dict(stream_format: str, dict_bytes: bytes) -> None:
@@ -110,11 +124,13 @@ def set_zstd_dict(stream_format: str, dict_bytes: bytes) -> None:
     if not _ZSTD_AVAILABLE:
         return
     _ZSTD_DICTS[stream_format] = dict_bytes
+    _ZSTD_DICT_HASHES[stream_format] = _hash_dict(dict_bytes)
 
 
 def clear_zstd_dicts() -> None:
     """Drop all registered dictionaries. Mostly for tests."""
     _ZSTD_DICTS.clear()
+    _ZSTD_DICT_HASHES.clear()
 
 
 def has_zstd_dict(stream_format: Optional[str]) -> bool:
@@ -125,6 +141,15 @@ def has_zstd_dict(stream_format: Optional[str]) -> bool:
     format-keyed dict, so we drop them off the zstd path.
     """
     return bool(stream_format) and stream_format in _ZSTD_DICTS
+
+
+def get_zstd_dict_hash(stream_format: Optional[str]) -> Optional[str]:
+    """sha256 hex digest of the registered dict for ``stream_format``,
+    formatted as ``sha256:<hex>`` for the ``Codec-Zstd-Dict`` response
+    header. Returns None when no dict is registered."""
+    if not stream_format:
+        return None
+    return _ZSTD_DICT_HASHES.get(stream_format)
 
 
 def _parse_accept_encoding(header: str) -> list[str]:
@@ -266,13 +291,18 @@ def wrap_streaming_response(
         # lookup here always hits — but assert defensively in case of a
         # registry mutation between negotiation and use.
         dict_bytes = _ZSTD_DICTS.get(stream_format or "")
-        if dict_bytes is None:
+        dict_hash = _ZSTD_DICT_HASHES.get(stream_format or "")
+        if dict_bytes is None or dict_hash is None:
             # Registry was cleared mid-request — fall through to gzip.
             body = _compress_gzip(body_stream)
             headers["Content-Encoding"] = "gzip"
         else:
             body = _compress_zstd(body_stream, dict_bytes=dict_bytes)
             headers["Content-Encoding"] = "zstd"
+            # Tell the client which dict we used so it can pick the
+            # matching one before decompressing. See spec/PROTOCOL.md
+            # "Codec-Zstd-Dict response header".
+            headers["Codec-Zstd-Dict"] = dict_hash
     elif encoding == "br":
         body = _compress_brotli(body_stream)
         headers["Content-Encoding"] = "br"
