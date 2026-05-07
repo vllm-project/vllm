@@ -1000,7 +1000,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Verify all tokens match our expectations
     assert torch.equal(result, expected_tokens)
 
-def test_propose_stores_gumbel_draft_probs(monkeypatch):
+def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -1012,7 +1012,7 @@ def test_propose_stores_gumbel_draft_probs(monkeypatch):
         "draft_model",
         num_speculative_tokens,
         rejection_sample_method="standard",
-        draft_sample_method="gumbel",
+        draft_sample_method="probabilistic",
     )
     hidden_size = proposer.hidden_size
 

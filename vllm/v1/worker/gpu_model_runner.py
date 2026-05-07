@@ -5852,7 +5852,7 @@ class GPUModelRunner(
             draft_probs = None
             if (
                 self.speculative_config.rejection_sample_method == "standard"
-                and self.speculative_config.draft_sample_method == "gumbel"
+                and self.speculative_config.draft_sample_method == "probabilistic"
             ):
                 draft_probs = torch.rand(
                     num_tokens,
