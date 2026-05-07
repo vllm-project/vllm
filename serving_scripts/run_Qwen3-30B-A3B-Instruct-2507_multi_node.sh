@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-ipv4-direct-driver-2026-05-07-v3"
+SCRIPT_VERSION="arc-ray-ipv4-netif-driver-2026-05-08-v4"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
@@ -21,7 +21,6 @@ slurm_debug() {
   fi
 }
 
-export GLOO_SOCKET_IFNAME=eth0 # for InfiniBand communication
 export HEAD_NODE=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
 export WORKER_NODES=$(scontrol show hostnames $SLURM_NODELIST | tail -n+2)
 
@@ -69,6 +68,66 @@ resolve_host_ip() {
   printf '%s' "${ip}"
 }
 
+interface_for_ip() {
+  local target_ip="$1"
+  ip -o -4 addr show 2>/dev/null | awk -v target="${target_ip}" '
+    {
+      split($4, addr, "/")
+      if (addr[1] == target) {
+        print $2
+        exit
+      }
+    }'
+}
+
+interface_has_ip() {
+  local iface="$1"
+  local target_ip="$2"
+  ip -o -4 addr show dev "${iface}" 2>/dev/null | awk -v target="${target_ip}" '
+    {
+      split($4, addr, "/")
+      if (addr[1] == target) {
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }'
+}
+
+configure_socket_ifnames() {
+  local target_ip="$1"
+  local set_nccl="${2:-1}"
+  local iface="${GLOO_SOCKET_IFNAME:-}"
+
+  if [ -n "${iface}" ] && ! interface_has_ip "${iface}" "${target_ip}"; then
+    echo "Ignoring GLOO_SOCKET_IFNAME=${iface}; it does not own ${target_ip} on $(hostname)." >&2
+    iface=""
+  fi
+  if [ -z "${iface}" ]; then
+    iface="$(interface_for_ip "${target_ip}")"
+  fi
+  if [ -z "${iface}" ]; then
+    echo "Error: could not find a network interface for ${target_ip} on $(hostname)." >&2
+    ip -o -4 addr show >&2 || true
+    exit 1
+  fi
+
+  export GLOO_SOCKET_IFNAME="${iface}"
+  if [ "${set_nccl}" = "1" ]; then
+    local nccl_iface="${NCCL_SOCKET_IFNAME:-}"
+    if [ -n "${nccl_iface}" ] && ! interface_has_ip "${nccl_iface}" "${target_ip}"; then
+      echo "Ignoring NCCL_SOCKET_IFNAME=${nccl_iface}; it does not own ${target_ip} on $(hostname)." >&2
+      nccl_iface=""
+    fi
+    export NCCL_SOCKET_IFNAME="${nccl_iface:-${iface}}"
+  elif [ -n "${NCCL_SOCKET_IFNAME:-}" ] && ! interface_has_ip "${NCCL_SOCKET_IFNAME}" "${target_ip}"; then
+    echo "Unsetting NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}; it does not own ${target_ip} on $(hostname)." >&2
+    unset NCCL_SOCKET_IFNAME
+  fi
+
+  echo "Socket interface for ${target_ip} on $(hostname): GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-<unset>}"
+}
+
 export HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
 if [ -z "${HEAD_NODE_IP}" ]; then
   echo "Error: could not resolve an IPv4 address for head node ${HEAD_NODE}." >&2
@@ -78,6 +137,7 @@ fi
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
 export VLLM_HOST_IP="${HEAD_NODE_IP}"
 echo "VLLM_HOST_IP=${VLLM_HOST_IP}"
+configure_socket_ifnames "${HEAD_NODE_IP}" 0
 
 export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
@@ -184,6 +244,15 @@ trap cleanup EXIT
 
 echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE} (HEAD_RAY_PID will be set)..."
+RAY_HEAD_CMD="$(
+  declare -f interface_for_ip
+  declare -f interface_has_ip
+  declare -f configure_socket_ifnames
+)
+source \"${VENV_DIR}/bin/activate\"
+export VLLM_HOST_IP=${HEAD_NODE_IP}
+configure_socket_ifnames \"${HEAD_NODE_IP}\"
+\"${RAY_BIN}\" start --block --head --node-ip-address=${HEAD_NODE_IP} --port=${RAY_PORT}"
 srun \
   --nodelist "${HEAD_NODE}" \
   --nodes=1 \
@@ -191,7 +260,7 @@ srun \
   --ntasks-per-node=1 \
   --gpus-per-task="${GPUS_PER_NODE}" \
   --cpus-per-task="${CPUS_PER_TASK}" \
-  bash -lc "source \"${VENV_DIR}/bin/activate\" && export VLLM_HOST_IP=${HEAD_NODE_IP} && \"${RAY_BIN}\" start --block --head --node-ip-address=${HEAD_NODE_IP} --port=${RAY_PORT}" &
+  bash -lc "${RAY_HEAD_CMD}" &
 HEAD_RAY_PID=$!
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
 sleep 20
@@ -206,6 +275,15 @@ if [ -n "${WORKER_NODES}" ]; then
       exit 1
     fi
     echo "Starting worker node: ${WORKER} with IP ${WORKER_IP}"
+    RAY_WORKER_CMD="$(
+      declare -f interface_for_ip
+      declare -f interface_has_ip
+      declare -f configure_socket_ifnames
+    )
+source \"${VENV_DIR}/bin/activate\"
+export VLLM_HOST_IP=${WORKER_IP}
+configure_socket_ifnames \"${WORKER_IP}\"
+\"${RAY_BIN}\" start --block --address=${HEAD_NODE_IP}:${RAY_PORT} --node-ip-address=${WORKER_IP}"
     srun \
       --nodelist "${WORKER}" \
       --nodes=1 \
@@ -213,7 +291,7 @@ if [ -n "${WORKER_NODES}" ]; then
       --ntasks-per-node=1 \
       --gpus-per-task="${GPUS_PER_NODE}" \
       --cpus-per-task="${CPUS_PER_TASK}" \
-      bash -lc "source \"${VENV_DIR}/bin/activate\" && export VLLM_HOST_IP=${WORKER_IP} && \"${RAY_BIN}\" start --block --address=${HEAD_NODE_IP}:${RAY_PORT} --node-ip-address=${WORKER_IP}" &
+      bash -lc "${RAY_WORKER_CMD}" &
     WORKER_RAY_PIDS="${WORKER_RAY_PIDS} $!"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done

@@ -8,8 +8,7 @@
 #SBATCH --error=results/%x-%j.err
 
 set -euo pipefail
-export GLOO_SOCKET_IFNAME=eth0 # for InfiniBand communication
-SCRIPT_VERSION="arc-bench-ipv4-direct-2026-05-07"
+SCRIPT_VERSION="arc-bench-ipv4-netif-direct-2026-05-08-v2"
 
 resolve_host_ipv4() {
   local nodename="$1"
@@ -31,6 +30,48 @@ resolve_host_ipv4() {
     )
   fi
   printf '%s' "${ip}"
+}
+
+interface_for_ip() {
+  local target_ip="$1"
+  ip -o -4 addr show 2>/dev/null | awk -v target="${target_ip}" '
+    {
+      split($4, addr, "/")
+      if (addr[1] == target) {
+        print $2
+        exit
+      }
+    }'
+}
+
+interface_has_ip() {
+  local iface="$1"
+  local target_ip="$2"
+  ip -o -4 addr show dev "${iface}" 2>/dev/null | awk -v target="${target_ip}" '
+    {
+      split($4, addr, "/")
+      if (addr[1] == target) {
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }'
+}
+
+configure_gloo_ifname() {
+  local target_ip="$1"
+  local iface="${GLOO_SOCKET_IFNAME:-}"
+
+  if [ -n "${iface}" ] && ! interface_has_ip "${iface}" "${target_ip}"; then
+    echo "Ignoring GLOO_SOCKET_IFNAME=${iface}; it does not own ${target_ip} on $(hostname)." >&2
+    iface=""
+  fi
+  if [ -z "${iface}" ]; then
+    iface="$(interface_for_ip "${target_ip}")"
+  fi
+  if [ -n "${iface}" ]; then
+    export GLOO_SOCKET_IFNAME="${iface}"
+  fi
 }
 
 module purge
@@ -108,6 +149,7 @@ if [ -z "${HEAD_NODE_IP}" ]; then
   echo "Failed to resolve an IPv4 HEAD_NODE_IP for ${HEAD_NODE}" >&2
   exit 1
 fi
+configure_gloo_ifname "${HEAD_NODE_IP}"
 RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 
 echo "STARTING VLLM BENCH SERVE ON RAY CLUSTER"
@@ -116,6 +158,7 @@ echo "RAY_JOBID=${RAY_JOBID}"
 echo "HEAD_NODE=${HEAD_NODE}"
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
 echo "RAY_ADDRESS=${RAY_ADDRESS}"
+echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-<unset>}"
 
 if [ ! -f "${DATASET_PATH}" ]; then
   echo "Dataset file not found: ${DATASET_PATH}" >&2
