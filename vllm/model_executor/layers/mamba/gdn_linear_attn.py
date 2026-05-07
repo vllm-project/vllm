@@ -124,6 +124,7 @@ class ChunkGatedDeltaRule(CustomOp):
         assert isinstance(additional_config, dict)
         backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
         backend = str(backend_cfg).strip().lower()
+        tp_size = get_tensor_model_parallel_world_size()
 
         supports_flashinfer = (
             current_platform.is_cuda() and current_platform.is_device_capability(90)
@@ -140,7 +141,14 @@ class ChunkGatedDeltaRule(CustomOp):
         elif backend == "triton":
             use_flashinfer = False
         else:
-            use_flashinfer = supports_flashinfer
+            use_flashinfer = supports_flashinfer and tp_size == 1
+            if supports_flashinfer and tp_size > 1:
+                logger.warning_once(
+                    "GDN prefill backend 'auto' is falling back to Triton/FLA "
+                    "when tensor parallel size is %d. Set "
+                    "`--gdn-prefill-backend flashinfer` to force FlashInfer.",
+                    tp_size,
+                )
 
         if use_flashinfer:
             logger.info_once("Using FlashInfer GDN prefill kernel")
