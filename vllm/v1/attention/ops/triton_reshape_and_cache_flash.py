@@ -102,7 +102,7 @@ def reshape_and_cache_kernel_flash(
         elif IS_CUDA:
             k_rounded = tl.extra.cuda.libdevice.rint(k_scaled)
         else:
-            k_rounded = tl.floor(k_scaled + 0.5)
+            k_rounded = tl.math.rint(k_scaled)
         key_tile = tl.clamp(k_rounded, -128.0, 127.0).to(tl.int8)
     elif FP8_KV_CACHE:
         key_tile = key_load if key_load.dtype.is_fp8() else key_load / tl.load(k_scale)
@@ -121,7 +121,7 @@ def reshape_and_cache_kernel_flash(
         elif IS_CUDA:
             v_rounded = tl.extra.cuda.libdevice.rint(v_scaled)
         else:
-            v_rounded = tl.floor(v_scaled + 0.5)
+            v_rounded = tl.math.rint(v_scaled)
         value_tile = tl.clamp(v_rounded, -128.0, 127.0).to(tl.int8)
     elif FP8_KV_CACHE:
         if value_load.dtype.is_fp8():

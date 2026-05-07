@@ -578,10 +578,7 @@ class TritonAttentionImpl(AttentionImpl):
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
-            if (
-                is_quantized_kv_cache(self.kv_cache_dtype)
-                and self.kv_cache_dtype != "int8_per_tensor"
-            ):
+            if self.kv_cache_dtype.startswith("fp8"):
                 if key_cache.dtype != self.fp8_dtype:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
@@ -723,10 +720,7 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and self.kv_cache_dtype != "int8_per_tensor"
-        ):
+        if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(

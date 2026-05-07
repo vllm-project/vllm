@@ -29,6 +29,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_kv_cache_scheme_dtype,
     kv_cache_dtype_str_to_dtype,
 )
 from vllm.v1.attention.backend import (
@@ -228,12 +229,10 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
-        # llm-compressor mdls need to set cache_dtype manually based on
-        # the kv_cache_scheme type (float → fp8, int → int8_per_tensor).
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None:
-            scheme_type = kv_cache_scheme.get("type", "float")
-            kv_cache_dtype = "int8_per_tensor" if scheme_type == "int" else "fp8"
+        scheme_dtype = get_kv_cache_scheme_dtype(kv_cache_scheme)
+        if scheme_dtype is not None:
+            kv_cache_dtype = scheme_dtype
             calculate_kv_scales = False
             if cache_config is not None:
                 cache_config.cache_dtype = kv_cache_dtype
