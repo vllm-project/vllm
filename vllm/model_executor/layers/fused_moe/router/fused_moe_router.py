@@ -14,6 +14,9 @@ class FusedMoERouter(ABC):
     method that is used for routing hidden states based on router logits.
     """
 
+    def __init__(self):
+        self._routing_replay_out: torch.Tensor | None = None
+
     @abstractmethod
     def set_capture_fn(
         self,
@@ -36,7 +39,6 @@ class FusedMoERouter(ABC):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
-    @abstractmethod
     def select_experts(
         self,
         hidden_states: torch.Tensor,
