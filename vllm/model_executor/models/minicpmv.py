@@ -132,6 +132,11 @@ class MiniCPMVImagePixelInputs(TensorSchema):
         TensorShape("bn"),
     ]
 
+    # Handled as batched input but shape check via TensorShape
+    # isn't strictly necessary since it defaults to None
+    # and has a non-tensor type.
+    temporal_ids: list[list[int]] | None = None
+
 
 class MiniCPMVImageEmbeddingInputs(TensorSchema):
     """
@@ -210,25 +215,31 @@ class Resampler2_5(BaseResampler):
 
         patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
 
-        self._adjust_pos_cache(tgt_sizes, device=device)
+        # Only adjust the pos cache in eager mode; during CUDA graph capture
+        # the cache was already expanded by the preceding warmup run
+        if not torch.cuda.is_current_stream_capturing():
+            self._adjust_pos_cache(tgt_sizes, device=device)
 
-        max_patch_len = patch_len.max().item()
-        assert isinstance(max_patch_len, int)
+        max_patch_len = x.shape[1]
 
-        key_padding_mask = torch.zeros(
-            (bs, max_patch_len), dtype=torch.bool, device=device
-        )
+        seq_idx = torch.arange(max_patch_len, device=device).unsqueeze(0)
 
-        pos_embed = []
-        for i in range(bs):
-            tgt_h, tgt_w = tgt_sizes[i].tolist()
-            pos_embed.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
-            )  # patches * D
-            key_padding_mask[i, patch_len[i] :] = True
-        pos_embed = torch.nn.utils.rnn.pad_sequence(
-            pos_embed, batch_first=True, padding_value=0.0
+        tgt_w = tgt_sizes[:, 1].unsqueeze(1)
+        tgt_w = torch.clamp(tgt_w, min=1)
+
+        h_idx = seq_idx // tgt_w
+        w_idx = seq_idx % tgt_w
+
+        h_idx = torch.clamp(h_idx, max=self.pos_embed.shape[0] - 1)
+        w_idx = torch.clamp(w_idx, max=self.pos_embed.shape[1] - 1)
+
+        key_padding_mask = seq_idx >= patch_len.unsqueeze(1)
+
+        pos_embed = self.pos_embed[h_idx, w_idx].to(dtype)
+        pos_embed = torch.where(
+            key_padding_mask.unsqueeze(-1), torch.zeros_like(pos_embed), pos_embed
         ).permute(1, 0, 2)  # BLD => L * B * D
+
         x, _ = self.kv_proj(x)  # B * L * D
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
 
@@ -345,88 +356,110 @@ class Resampler4_5(Resampler2_5):
 
         patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
 
-        self._adjust_pos_cache(tgt_sizes, device=device)
+        # Only adjust the pos cache in eager mode; during CUDA graph capture
+        # the cache was already expanded by the preceding warmup run
+        if not torch.cuda.is_current_stream_capturing():
+            self._adjust_pos_cache(tgt_sizes, device=device)
+
+        max_patch_len = x.shape[1]
 
         temporal_pos_emb = False
         temporal_ids_flatten = None
         if temporal_ids is not None:
-            # example: [[-1], [-1], [2, 6, 9]]
-            temporal_ids_flatten = list(chain.from_iterable(temporal_ids))
-            max_temporal_size = max(temporal_ids_flatten, default=0)
-            if max_temporal_size > -1:
-                temporal_pos_emb = True
-            if max_temporal_size > self.max_temporal_size:
-                self._adjust_temporal_pos_cache(max_temporal_size, device)
+            if isinstance(temporal_ids, torch.Tensor):
+                temporal_ids_flatten = temporal_ids
+                if not torch.cuda.is_current_stream_capturing():
+                    max_temporal_size = temporal_ids_flatten.max().item()
+                    if max_temporal_size > -1:
+                        temporal_pos_emb = True
+                    if max_temporal_size > self.max_temporal_size:
+                        self._adjust_temporal_pos_cache(max_temporal_size, device)
+                else:
+                    temporal_pos_emb = True
+            else:
+                temporal_ids_flatten = list(chain.from_iterable(temporal_ids))
+                max_temporal_size = max(temporal_ids_flatten, default=0)
+                temporal_ids_flatten = torch.tensor(
+                    temporal_ids_flatten, dtype=torch.long, device=device
+                )
+                if max_temporal_size > -1:
+                    temporal_pos_emb = True
+                if max_temporal_size > self.max_temporal_size:
+                    self._adjust_temporal_pos_cache(max_temporal_size, device)
 
-        max_patch_len = patch_len.max().item()
-        assert isinstance(max_patch_len, int)
+        seq_idx = torch.arange(max_patch_len, device=device).unsqueeze(0)
 
-        key_padding_mask = torch.zeros(
-            (bs, max_patch_len), dtype=torch.bool, device=device
-        )
+        tgt_w = tgt_sizes[:, 1].unsqueeze(1)
+        tgt_w = torch.clamp(tgt_w, min=1)
+
+        h_idx = seq_idx // tgt_w
+        w_idx = seq_idx % tgt_w
+
+        h_idx = torch.clamp(h_idx, max=self.pos_embed.shape[0] - 1)
+        w_idx = torch.clamp(w_idx, max=self.pos_embed.shape[1] - 1)
+
+        pos_embed_2d = self.pos_embed[h_idx, w_idx].to(dtype)
+
+        key_padding_mask = seq_idx >= patch_len.unsqueeze(1)
+
+        pos_embed_2d = torch.where(
+            key_padding_mask.unsqueeze(-1), torch.zeros_like(pos_embed_2d), pos_embed_2d
+        ).permute(1, 0, 2)  # (L, bs, D)
 
         x, _ = self.kv_proj(x)  # B * L * D
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
         q = self.ln_q(self.query)  # Q * D
 
-        pos_embed_2d = []
-        pos_embed_temporal = []
-        for i in range(bs):
-            tgt_h, tgt_w = tgt_sizes[i]
-            if temporal_pos_emb:
-                if temporal_ids_flatten[i] == -1:
-                    pos_embed_temporal.append(
-                        torch.zeros(self.embed_dim, dtype=dtype, device=device)
-                    )
-                else:
-                    pos_embed_temporal.append(
-                        self.temporal_pos_embed[temporal_ids_flatten[i]].to(dtype)
-                    )  # D
-
-            pos_embed_2d.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
-            )  # patches * D
-            key_padding_mask[i, patch_len[i] :] = True
-
-        pos_embed_2d = torch.nn.utils.rnn.pad_sequence(
-            pos_embed_2d, batch_first=True, padding_value=0.0
-        ).permute(1, 0, 2)  # BLD => L * B * D
-
         k = x + pos_embed_2d
         v = x
-        if pos_embed_temporal:
-            k += torch.stack(pos_embed_temporal, dim=0)
-            bs = len(temporal_ids)
-            merge_k = []
-            merge_v = []
-            merge_key_padding_mask = []
 
-            start = 0
-            for tp in temporal_ids:
-                end = start + len(tp)
-                # L * (end-start) * D -> (end-start) * L * D
-                # -> 1 * L*(end-start) * D
-                merge_k.append(
-                    k[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
-                )
-                merge_v.append(
-                    v[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
-                )
-                merge_key_padding_mask.append(
-                    key_padding_mask[start:end, :].reshape(-1, 1)
-                )
+        if temporal_pos_emb:
+            # temporal_ids_flatten is 1D tensor of shape (bs,)
+            pos_embed_temporal = torch.where(
+                (temporal_ids_flatten == -1).unsqueeze(-1),
+                torch.zeros(self.embed_dim, dtype=dtype, device=device),
+                self.temporal_pos_embed[torch.clamp(temporal_ids_flatten, min=0)].to(
+                    dtype
+                ),
+            )  # (bs, D)
 
-                start = end
+            k += pos_embed_temporal.unsqueeze(0)  # (L, bs, D) + (1, bs, D)
 
-            k = torch.nn.utils.rnn.pad_sequence(
-                merge_k, batch_first=True, padding_value=0.0
-            ).permute(1, 0, 2)  # L*(end-start)
-            v = torch.nn.utils.rnn.pad_sequence(
-                merge_v, batch_first=True, padding_value=0.0
-            ).permute(1, 0, 2)  # L*(end-start)
-            key_padding_mask = torch.nn.utils.rnn.pad_sequence(
-                merge_key_padding_mask, batch_first=True, padding_value=True
-            ).squeeze(-1)
+            # skip the cross-frame merge loop when compiling into a CUDA graph
+            # (which occurs when temporal_ids is passed as a flat Tensor) because
+            # dynamic sequence lengths and batch sizes cannot be captured.
+            if not isinstance(temporal_ids, torch.Tensor):
+                bs = len(temporal_ids)
+                merge_k = []
+                merge_v = []
+                merge_key_padding_mask = []
+
+                start = 0
+                for tp in temporal_ids:
+                    end = start + len(tp)
+                    # L * (end-start) * D -> (end-start) * L * D
+                    # -> 1 * L*(end-start) * D
+                    merge_k.append(
+                        k[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
+                    )
+                    merge_v.append(
+                        v[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
+                    )
+                    merge_key_padding_mask.append(
+                        key_padding_mask[start:end, :].reshape(-1, 1)
+                    )
+
+                    start = end
+
+                k = torch.nn.utils.rnn.pad_sequence(
+                    merge_k, batch_first=True, padding_value=0.0
+                ).permute(1, 0, 2)  # L*(end-start)
+                v = torch.nn.utils.rnn.pad_sequence(
+                    merge_v, batch_first=True, padding_value=0.0
+                ).permute(1, 0, 2)  # L*(end-start)
+                key_padding_mask = torch.nn.utils.rnn.pad_sequence(
+                    merge_key_padding_mask, batch_first=True, padding_value=True
+                ).squeeze(-1)
 
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D
@@ -465,6 +498,7 @@ def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         video_image_sizes=MultiModalFieldConfig.batched("video"),
         video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
+        temporal_ids=MultiModalFieldConfig.batched("video"),
     )
 
 
@@ -1031,6 +1065,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         # and config class
         self.config = config
         self.multimodal_config = multimodal_config
+        self.vllm_config = vllm_config
 
         self.version = get_version_by_config(self.config)
 
@@ -1074,6 +1109,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> MiniCPMVImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
+        temporal_ids = kwargs.pop("temporal_ids", None)
 
         if pixel_values is None and image_embeds is None:
             return None
@@ -1095,6 +1131,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             pixel_values=pixel_values_flat,
             tgt_sizes=tgt_sizes_flat,
             num_slices=num_slices_flat,
+            temporal_ids=temporal_ids,
         )
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -1229,16 +1266,38 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 # Buffer keys
 _MINICPMV_CUDAGRAPH_BUF_KEY_TGT_SIZES = "minicpmv_tgt_sizes"
 _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK = "minicpmv_patch_attn_mask"
-_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS = "minicpmv_temporal_ids"  # v4.5 only
+_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS = "minicpmv_temporal_ids"
 
 # mm_kwargs keys for the flat pixel-value tensor
 _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE = "minicpmv_encoder_input_flat"
 _MINICPMV_CUDAGRAPH_FLAT_KEY_VIDEO = "minicpmv_video_encoder_input_flat"
 
 
-def _mcpmv_tgt_sizes_tensor(mm_kwargs: dict[str, Any], *, video: bool) -> torch.Tensor:
+def _mcpmv_tgt_sizes_tensor(
+    mm_kwargs: dict[str, Any], *, video: bool
+) -> torch.Tensor | list[torch.Tensor]:
     key = "video_tgt_sizes" if video else "tgt_sizes"
     return mm_kwargs[key]
+
+
+def _mcpmv_normalize_tgt_sizes(
+    tgt_sizes: torch.Tensor,
+    slice_counts: list[int],
+) -> torch.Tensor:
+    """Normalize tgt_sizes to shape ``(total_slices, 2)``."""
+    total_slices = sum(slice_counts)
+    if tgt_sizes.dim() == 2 and tgt_sizes.shape[0] == total_slices:
+        return tgt_sizes
+    if tgt_sizes.dim() == 3:
+        return torch.cat(
+            [tgt_sizes[i, : slice_counts[i], :] for i in range(len(slice_counts))],
+            dim=0,
+        )
+    return torch.repeat_interleave(
+        tgt_sizes,
+        torch.tensor(slice_counts, device=tgt_sizes.device),
+        dim=0,
+    )
 
 
 def _mcpmv_pack_flat_pixels(
@@ -1249,17 +1308,48 @@ def _mcpmv_pack_flat_pixels(
     max_num_slices: int,
     device: torch.device,
     dtype: torch.dtype,
+    patch_size: int,
+    tgt_sizes: torch.Tensor,
 ) -> torch.Tensor:
-    """Pack slice tensors into a fixed ``(max_num_slices, 3*H*W)`` buffer.
+    """Pack slice tensors into a fixed ``(max_num_slices, 3*H*W)`` buffer."""
+    import torch.nn.functional as F
 
-    Every slice is ``image_size × image_size`` (see ``_mcpmv_slice_pixel_size``),
-    so all rows in the buffer are fully occupied.
-    """
     flat_dim = 3 * pixel_height * pixel_width
+    grid_h = pixel_height // patch_size
+    grid_w = pixel_width // patch_size
+    max_grid_patches = grid_h * grid_w
+
     packed = torch.zeros((max_num_slices, flat_dim), device=device, dtype=dtype)
     n = min(len(slices), max_num_slices)
-    if n > 0:
-        packed[:n] = torch.stack(slices[:n]).reshape(n, -1).to(dtype=dtype)
+    tgt_list = tgt_sizes.tolist()
+    for i, slc in enumerate(slices[:n]):
+        slc = slc.to(dtype=dtype, device=device)
+        C, h, w = slc.shape
+        if h == patch_size:
+            nb_h, nb_w = int(tgt_list[i][0]), int(tgt_list[i][1])
+            num_patches = nb_h * nb_w
+
+            patches = (
+                slc.view(C, patch_size, nb_h, nb_w, patch_size)
+                .permute(0, 2, 3, 1, 4)
+                .reshape(C, num_patches, patch_size, patch_size)
+            )
+
+            col = patches.permute(0, 2, 3, 1).reshape(
+                1, C * patch_size * patch_size, num_patches
+            )
+            col_padded = col.new_zeros(1, C * patch_size * patch_size, max_grid_patches)
+            col_padded[..., :num_patches] = col
+
+            folded = F.fold(
+                col_padded,
+                output_size=(pixel_height, pixel_width),
+                kernel_size=patch_size,
+                stride=patch_size,
+            )
+            packed[i] = folded.reshape(-1)
+        else:
+            packed[i].view(3, pixel_height, pixel_width)[:, :h, :w] = slc
     return packed
 
 
@@ -1269,21 +1359,10 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     supports_encoder_cudagraph: ClassVar[Literal[True]] = True
 
     def _mcpmv_slice_pixel_size(self) -> tuple[int, int]:
-        """Return (pixel_height, pixel_width) for each slice fed into vpm.
-
-        Every slice is resized to image_size x image_size pixels before being
-        passed to the vision encoder, so this is always (image_size, image_size)
-        regardless of max_slice_num.
-        """
         image_size = int(self.vpm.embeddings.image_size)
         return image_size, image_size
 
     def _mcpmv_max_patches_per_slice(self) -> int:
-        """Return max patch count per slice for patch_attention_mask sizing.
-
-        The vision encoder divides each (image_size x image_size) slice into
-        (image_size // patch_size)^2 patches, so this equals that value.
-        """
         image_size = int(self.vpm.embeddings.image_size)
         patch_size = int(self.vpm.embeddings.patch_size)
         return (image_size // patch_size) ** 2
@@ -1296,12 +1375,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     ) -> int:
         max_slice_num = int(getattr(self.config, "max_slice_num", 9))
         query_num = max(1, int(self.config.query_num))
-        # Each slice produces query_num output tokens, so token_budget caps slices.
         max_slices_by_token_budget = max(1, token_budget // query_num)
-        # Buffer must fit the largest possible input from either modality.
-        # Image batch:  max_batch_size images × (max_slice_num + 1) slices each.
-        # Video batch:  max_frames_per_batch frames × (max_slice_num + 1) slices each.
-        # Both modalities share the same captured graph, so take the larger of the two.
         max_slices_by_content = max_batch_size * (max_slice_num + 1)
         if self.version in {(2, 6), (4, 0), (4, 5)} and max_frames_per_batch > 0:
             max_slices_by_content = max(
@@ -1383,6 +1457,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             "video_pixel_values" if video else "pixel_values"
         ]
         slice_counts = [len(img) for img in pixel_values]
+        tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
         patch_sums = tgt_sizes.prod(-1)
         return [
             int(group.sum().item()) for group in torch.split(patch_sums, slice_counts)
@@ -1403,11 +1478,9 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         )
         device = next(self.vpm.parameters()).device
         pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
-
         pixel_values: list[list[torch.Tensor]] = mm_kwargs[pixel_values_key]
         tgt_sizes = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
 
-        # Base dict without the stale flat buffer (recomputed at the end).
         subset = {k: v for k, v in mm_kwargs.items() if k != flat_key}
 
         if not indices:
@@ -1426,11 +1499,13 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
 
         # Select per-item nested slices and matching tgt_sizes rows.
         slice_counts = [len(item_slices) for item_slices in pixel_values]
+
+        tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
         tgt_groups = torch.split(tgt_sizes, slice_counts)
         selected_pixel_values = [pixel_values[i] for i in indices]
-        selected_tgt_sizes = torch.cat([tgt_groups[i] for i in indices], dim=0)
+        selected_tgt_sizes_list = [tgt_groups[i] for i in indices]
+        selected_tgt_sizes = torch.cat(selected_tgt_sizes_list, dim=0)
 
-        # Pack ragged [3, H, W_i] slices into fixed [num_slices, 3*H*W] buffer.
         selected_slices = flatten_2d_lists(selected_pixel_values)
         packed_flat_pixels = _mcpmv_pack_flat_pixels(
             selected_slices,
@@ -1439,12 +1514,14 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             max_num_slices=len(selected_slices),
             device=selected_slices[0].device,
             dtype=selected_slices[0].dtype,
+            patch_size=int(self.vpm.embeddings.patch_size),
+            tgt_sizes=selected_tgt_sizes,
         )
 
         subset.update(
             {
                 pixel_values_key: selected_pixel_values,
-                tgt_key: selected_tgt_sizes,
+                tgt_key: selected_tgt_sizes_list,
                 flat_key: packed_flat_pixels,
             }
         )
@@ -1473,21 +1550,20 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         flat_pixel_buffer = torch.zeros(
             (max_num_slices, flat_dim), device=device, dtype=dtype
         )
-        dummy_tgt_sizes = torch.ones(
-            (max_num_slices, 2), dtype=torch.long, device=device
+        patch_hw = pixel_h // int(self.vpm.embeddings.patch_size)
+        dummy_tgt_sizes = torch.full(
+            (max_num_slices, 2), patch_hw, dtype=torch.long, device=device
         )
-        # Keep capture mask aligned with tgt_sizes semantics: each 1x1 tgt_size
-        # contributes exactly one valid patch.
-        dummy_patches_per_slice = dummy_tgt_sizes.prod(-1).clamp(max=max_patches)
-        col_idx = torch.arange(max_patches, device=device)
-        dummy_patch_mask = col_idx.unsqueeze(0) < dummy_patches_per_slice.unsqueeze(1)
+        dummy_patch_mask = torch.ones(
+            (max_num_slices, max_patches), dtype=torch.bool, device=device
+        )
         buffers: dict[str, torch.Tensor] = {
             _MINICPMV_CUDAGRAPH_BUF_KEY_TGT_SIZES: dummy_tgt_sizes,
             _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK: dummy_patch_mask,
         }
         if self.version == (4, 5):
-            buffers[_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS] = torch.zeros(
-                max_num_slices, dtype=torch.long, device=device
+            buffers[_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS] = torch.full(
+                (max_num_slices,), -1, dtype=torch.long, device=device
             )
         mm_kwargs: dict[str, Any] = {
             _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE: flat_pixel_buffer,
@@ -1505,11 +1581,13 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         video = self.get_input_modality(mm_kwargs) == "video"
         max_patches = self._mcpmv_max_patches_per_slice()
         device = next(self.vpm.parameters()).device
-        # After select_encoder_cudagraph_items, tgt_sizes contains exactly one
-        # row per selected slice, so its length equals the total slice count.
-        tgt_sizes = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video).to(
-            device=device, dtype=torch.long
-        )
+        tgt_sizes_raw = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
+        if isinstance(tgt_sizes_raw, list):
+            tgt_sizes = torch.cat(tgt_sizes_raw, dim=0).to(
+                device=device, dtype=torch.long
+            )
+        else:
+            tgt_sizes = tgt_sizes_raw.to(device=device, dtype=torch.long)
 
         patches_per_slice = tgt_sizes.prod(-1).clamp(max=max_patches)
         col_idx = torch.arange(max_patches, device=device)
@@ -1522,14 +1600,13 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         if self.version == (4, 5):
             temporal_ids = mm_kwargs.get("temporal_ids")
             if temporal_ids is not None:
-                # temporal_ids is list[list[int]] (per-image, per-slice).
-                # After select_encoder_cudagraph_items it already holds only the
-                # selected items, so flatten directly to a 1-D tensor.
                 flat_ids = torch.tensor(
                     flatten_2d_lists(temporal_ids), dtype=torch.long, device=device
                 )
             else:
-                flat_ids = torch.zeros(len(tgt_sizes), dtype=torch.long, device=device)
+                flat_ids = torch.full(
+                    (len(tgt_sizes),), -1, dtype=torch.long, device=device
+                )
             buffers[_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS] = flat_ids
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 
@@ -1575,12 +1652,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
     def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
         """Eager encoder path; returns ``(total_tokens, embed_dim)`` like
         ``encoder_cudagraph_forward``.
-
-        Called by the manager only for images/videos that exceed all token
-        budgets (single-item batches), so ``segments`` always has exactly one
-        element in practice.  Version-specific logic (e.g. temporal embeddings
-        for v4.5) is handled transparently by the polymorphic dispatch inside
-        ``get_vision_hidden_states``.
         """
         mm_kwargs_no_flat = {
             k: v
@@ -2060,9 +2131,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA, _MiniCPMVEncoderCudaGraphMixi
         dtype = pixel_values[0].dtype
 
         all_pixel_values = torch.zeros((B, 3, P, L), dtype=dtype, device=device)
-        all_temporal_ids = (
-            None if temporal_ids is None else flatten_2d_lists(temporal_ids)
-        )
         for i, pixel_values_item in enumerate(pixel_values):
             L_item = pixel_values_item.shape[-1]
             all_pixel_values[i, ..., :L_item] = pixel_values_item
@@ -2081,7 +2149,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA, _MiniCPMVEncoderCudaGraphMixi
             tgt_sizes=tgt_sizes,
         )
 
-        return self.resampler(vision_embedding, tgt_sizes, all_temporal_ids)
+        return self.resampler(vision_embedding, tgt_sizes, temporal_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
