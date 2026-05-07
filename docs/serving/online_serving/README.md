@@ -82,7 +82,7 @@ For further details on Pooling Models, please refer to [this page](../../models/
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
-- [Generative Scoring API](./generative_scoring_api.md#generative-scoring-api) (`/generative_scoring`)
+- [Generative Scoring API](generative_scoring.md#generative-scoring-api) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
 

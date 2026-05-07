@@ -1,4 +1,4 @@
-# Speech to Text APIs
+# Speech to Text
 
 ## Transcriptions API
 
