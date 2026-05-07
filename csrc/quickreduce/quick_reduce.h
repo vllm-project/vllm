@@ -126,16 +126,20 @@ struct DeviceComms {
 
   void destroy() {
     if (initialized) {
+      // Mark uninitialized first to prevent double-free if an exception is
+      // thrown by HIP_CHECK in an error handling or destructor call path.
+      initialized = false;
+
       for (int i = 0; i < world_size; i++) {
         if (i != rank) {
-          HIP_CHECK(hipIpcCloseMemHandle(dbuffer_list[i]));
+          HIP_CHECK(hipIpcCloseMemHandle(buffer_list[i]));
         }
       }
 
       HIP_CHECK(hipFree(dbuffer));
+      dbuffer = nullptr;       // Null pointer after free to eliminate dangling pointer.
       HIP_CHECK(hipFree(dbuffer_list));
-
-      initialized = false;
+      dbuffer_list = nullptr;  // Null pointer after free to eliminate dangling pointer.
     }
   }
 
