@@ -1170,7 +1170,7 @@ def test_thinking_budget_enforced_without_penalties():
     assert h.has_tracked_requests()
 
     # Simulate the buggy behavior: update_state receives empty list.
-    # _update_think_state is skipped → in_end stays False → no forcing.
+    # _update_think_state is skipped → in_end stays False → no budget enforcement.
     h.update_state([], None, None)
     assert not h._state[0].get("in_end", False), (
         "With empty output_token_ids, in_end should stay False (budget not yet tracked)"
