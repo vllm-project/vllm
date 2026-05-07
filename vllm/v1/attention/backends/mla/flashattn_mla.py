@@ -37,8 +37,6 @@ from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     get_scheduler_metadata,
 )
 
-from vllm.v1.attention.backends.mla.common import MLACommonPrefillMetadata
-
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 logger = init_logger(__name__)
 

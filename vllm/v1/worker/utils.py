@@ -520,8 +520,7 @@ def bind_kv_cache(
             if indexer is not None:
                 indexer.kv_cache = [indexer_cache]
             continue
-        # NOTE: Use list because of v0 PP virtual engine.
-        forward_context[layer_name].kv_cache = [kv_cache]
+        forward_context[layer_name].kv_cache = kv_cache
 
 
 def is_residual_scattered_for_sp(

@@ -243,7 +243,7 @@ class MomeAttention(MambaBase, CustomOp):
         if forward_context.attn_metadata is None:
             return hidden_states
         mome_metadata = forward_context.attn_metadata[self.prefix]
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache
 
         def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
             # MOME only needs one persistent state slot per request.
@@ -276,7 +276,7 @@ class MomeAttention(MambaBase, CustomOp):
                 (num_decode_tokens, hidden_size))
             decode_hidden_states = hidden_states[:num_decodes]
             decode_state_indices = _get_request_state_indices(
-                mome_metadata.state_indices_tensor[:num_decodes])
+                mome_metadata.state_indices_tensor_d)
             if num_decodes > 0:
                 prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
                     hidden_states.dtype)
@@ -299,8 +299,7 @@ class MomeAttention(MambaBase, CustomOp):
             prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
                                                   mome_metadata.num_prefill_tokens]
             prefill_state_indices = _get_request_state_indices(
-                mome_metadata.state_indices_tensor[
-                    num_decode_tokens:num_decode_tokens + mome_metadata.num_prefills])
+                mome_metadata.state_indices_tensor_p)
             conv_output_list = []
             for i in range(mome_metadata.num_prefills):
                 s = query_start_loc[i]
@@ -439,7 +438,7 @@ class PanguIndexer(nn.Module):
         
         if kv_cache is None:
             forward_context = get_forward_context()
-            kv_cache = self.kv_cache[forward_context.virtual_engine]
+            kv_cache = self.kv_cache
 
         if isinstance(kv_cache, (list, tuple)):
             assert len(kv_cache) >= 2, (

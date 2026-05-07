@@ -4,6 +4,7 @@ import functools
 from typing import cast
 
 import torch
+from torch import nn
 from vllm import _custom_ops as ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -19,6 +20,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
+    get_dtype_size,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -26,7 +28,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MLAAttentionImpl,
-    subclass_attention_backend,
+    subclass_attention_backend_with_overrides
 )
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
@@ -459,7 +461,7 @@ class StaticSinkMLAAttention(MLAAttention):
             "sink_k_pe and sink_compressed_kv have not been prepared"
         )
         forward_context: ForwardContext = get_forward_context()
-        self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+        self_kv_cache = self.kv_cache
         impl_kv_cache = (
             self_kv_cache[0]
             if isinstance(self_kv_cache, (list, tuple))

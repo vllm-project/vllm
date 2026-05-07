@@ -1238,11 +1238,10 @@ class SinkFullAttentionManager(FullAttentionManager):
 
 class SinkSlidingWindowManager(SlidingWindowManager):
     def __init__(
-        self, kv_cache_spec: SlidingWindowSpec, block_pool: BlockPool, **kwargs
+        self, kv_cache_spec: SlidingWindowSpec, **kwargs
     ) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
+        super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
-        self._null_block = block_pool.null_block
 
         sink_len = kv_cache_spec.sink_len
         assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
