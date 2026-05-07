@@ -1,3 +1,0 @@
-# Configs for the typo check
-[files]
-extend-exclude = ["csrc/cpu/sgl-kernels/*"]
