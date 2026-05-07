@@ -1,0 +1,17 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m poolside/Laguna-XS.2-FP8 -b auto -l 1319 -f 5 -t 4
+model_name: "poolside/Laguna-XS.2-FP8"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.0  # TODO: replace with measured baseline before merge
+  - name: "exact_match,flexible-extract"
+    value: 0.0  # TODO: replace with measured baseline before merge
+limit: 1319
+num_fewshot: 5
+max_model_len: 131072
+kv_cache_dtype: fp8
+enforce_eager: false
+apply_chat_template: true
+fewshot_as_multiturn: true
+trust_remote_code: true
