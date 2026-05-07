@@ -358,17 +358,19 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         }
 
         def _quant_key(node: fx.Node) -> tuple:
-            return (str(node.target), tuple(
-                (a.name if isinstance(a, fx.Node) else a)
-                for a in node.args
-            ))
+            return (
+                str(node.target),
+                tuple((a.name if isinstance(a, fx.Node) else a) for a in node.args),
+            )
 
         def _find_getitems(quant_node: fx.Node) -> dict[int, fx.Node]:
             gi: dict[int, fx.Node] = {}
             for u in quant_node.users:
-                if (u.op == "call_function"
-                        and u.target is operator.getitem
-                        and isinstance(u.args[1], int)):
+                if (
+                    u.op == "call_function"
+                    and u.target is operator.getitem
+                    and isinstance(u.args[1], int)
+                ):
                     gi[u.args[1]] = u
             return gi
 
@@ -380,9 +382,9 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 continue
 
             fusable = [
-                u for u in node.users
-                if u.op == "call_function"
-                and str(u.target) in _FUSABLE_QUANT
+                u
+                for u in node.users
+                if u.op == "call_function" and str(u.target) in _FUSABLE_QUANT
             ]
             if len(fusable) <= 1:
                 continue
@@ -400,8 +402,16 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 for redundant in quants[1:]:
                     red_gi = _find_getitems(redundant)
                     for idx, red_getitem in red_gi.items():
-                        if idx in keep_gi:
-                            red_getitem.replace_all_uses_with(keep_gi[idx])
+                        if idx not in keep_gi:
+                            # keep node lacks a getitem for this index —
+                            # create one so red_getitem's users can be
+                            # redirected before the node is erased.
+                            with graph.inserting_after(keep):
+                                new_gi = graph.call_function(
+                                    operator.getitem, (keep, idx)
+                                )
+                            keep_gi[idx] = new_gi
+                        red_getitem.replace_all_uses_with(keep_gi[idx])
                     for idx in sorted(red_gi.keys(), reverse=True):
                         graph.erase_node(red_gi[idx])
                     graph.erase_node(redundant)
@@ -414,9 +424,9 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 continue
 
             fusable = [
-                u for u in node.users
-                if u.op == "call_function"
-                and str(u.target) in _FUSABLE_QUANT
+                u
+                for u in node.users
+                if u.op == "call_function" and str(u.target) in _FUSABLE_QUANT
             ]
             if not fusable:
                 continue
@@ -425,9 +435,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             to_clone = fusable if other else fusable[1:]
             for qu in to_clone:
                 with graph.inserting_before(qu):
-                    c = graph.call_function(
-                        node.target, node.args, node.kwargs
-                    )
+                    c = graph.call_function(node.target, node.args, node.kwargs)
                     c.meta = node.meta.copy()
                     qu.replace_input_with(node, c)
                     duplicated += 1
@@ -436,6 +444,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             from torch._inductor.fx_passes.post_grad import (
                 stable_topological_sort,
             )
+
             stable_topological_sort(graph)
             graph.lint()
         return deduped, duplicated
@@ -445,13 +454,13 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         deduped, duplicated = self._dedup_and_duplicate_for_fusion(graph)
         if deduped > 0 or duplicated > 0:
             logger.info(
-                "Pre-fusion: deduped %d redundant quants, "
-                "duplicated %d norms", deduped, duplicated
+                "Pre-fusion: deduped %d redundant quants, duplicated %d norms",
+                deduped,
+                duplicated,
             )
         self.matched_count = self.patterns.apply(graph)
         logger.info(
-            "%s Replaced %s patterns",
-            self.__class__.__name__, self.matched_count
+            "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
         )
 
     def uuid(self) -> str:
