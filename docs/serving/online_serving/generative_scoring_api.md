@@ -62,4 +62,3 @@ Here, each item is appended to the query to form prompts like `"Is this city the
       "usage": {"prompt_tokens": 45, "total_tokens": 48, "completion_tokens": 3}
     }
     ```
-

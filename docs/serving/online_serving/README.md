@@ -2,7 +2,7 @@
 
 vLLM provides an HTTP server that is compatible with many interfaces!
 
-### OpenAI-Compatible Server
+## OpenAI-Compatible Server
 
 We currently support the following OpenAI APIs:
 
@@ -24,11 +24,11 @@ We currently support the following OpenAI APIs:
 - [Realtime API](./speech_to_text.md#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#realtime-transcription).
 
-### Anthropic-compatible messages API
+## Anthropic-compatible messages API
 
-- [Anthropic messages API]() (`/v1/messages`)
+- Anthropic messages API (`/v1/messages`)
 
-### Cohere-Compatible Server
+## Cohere-Compatible Server
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
@@ -37,7 +37,8 @@ We currently support the following OpenAI APIs:
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
 
-### Pooling models APIs
+## Pooling models APIs
+
 - Classification Usages
     - [Classification API](../../models/pooling_models/classify.md#online-serving)(`/classify`)
     - Applicable to [classification models](../../models/pooling_models/classify.md).
@@ -50,7 +51,7 @@ We currently support the following OpenAI APIs:
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
 
-### Speech to Text APIs
+## Speech to Text APIs
 
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
@@ -59,16 +60,17 @@ We currently support the following OpenAI APIs:
 - [Realtime API](./speech_to_text.md#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#realtime-transcription).
 
-### vLLM render API
+## vLLM render API
 
 - [Completions render API](render.md) (`/v1/completions/render`)
-   - Render completion requests
+    - Render completion requests
 - [Chat Completions render API](render.md) (`/v1/chat/completions/render`)
-   - Render Chat Completions
+    - Render Chat Completions
 - [Tokenizer API](render.md#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
 
-### Custom APIs
+## Custom APIs
+
 - [Classification API](../../models/pooling_models/classify.md#classification-api) (`/classify`)
     - Applicable to [classification models](../../models/pooling_models/classify.md).
 - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
