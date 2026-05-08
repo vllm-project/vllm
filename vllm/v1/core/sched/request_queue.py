@@ -141,7 +141,6 @@ class PriorityRequestQueue(RequestQueue):
     def __init__(self) -> None:
         self._heap: list[Request] = []
         self._active_requests: set[Request] = set()
-        self._removed_requests: set[Request] = set()
 
     def _rebuild_if_needed(self, min_invalid: int = 32) -> bool:
         """Rebuild the heap when invalid entries accumulate.
@@ -150,27 +149,24 @@ class PriorityRequestQueue(RequestQueue):
         1) large enough in absolute number, and
         2) at least half of heap entries.
         """
-        invalid_count = len(self._removed_requests)
+        invalid_count = len(self._heap) - len(self._active_requests)
         if invalid_count < min_invalid:
             return False
         if invalid_count * 2 < len(self._heap):
             return False
 
-        self._heap = [req for req in self._heap if req not in self._removed_requests]
+        self._heap = list(self._active_requests)
         heapq.heapify(self._heap)
-        self._removed_requests.clear()
         return True
 
     def _clean_heap_top(self) -> None:
         """Discard logically removed requests from the heap top."""
         self._rebuild_if_needed()
-        while self._heap and self._heap[0] in self._removed_requests:
-            request = heapq.heappop(self._heap)
-            self._removed_requests.remove(request)
+        while self._heap and self._heap[0] not in self._active_requests:
+            heapq.heappop(self._heap)
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
-        self._removed_requests.discard(request)
         heapq.heappush(self._heap, request)
         self._active_requests.add(request)
 
@@ -207,9 +203,7 @@ class PriorityRequestQueue(RequestQueue):
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
-        if request in self._active_requests:
-            self._active_requests.remove(request)
-            self._removed_requests.add(request)
+        self._active_requests.discard(request)
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
@@ -226,8 +220,8 @@ class PriorityRequestQueue(RequestQueue):
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        self._rebuild_if_needed(min_invalid=0)
-        heap_copy = self._heap[:]
+        heap_copy = list(self._active_requests)
+        heapq.heapify(heap_copy)
         while heap_copy:
             yield heapq.heappop(heap_copy)
 

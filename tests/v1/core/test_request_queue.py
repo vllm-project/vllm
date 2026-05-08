@@ -48,7 +48,6 @@ def test_priority_queue_rebuild_clears_tombstones():
     top = queue.peek_request()
     assert top.request_id == "req-33"
     assert len(queue) == 7
-    assert len(queue._removed_requests) == 0
     assert len(queue._heap) == 7
 
 
@@ -66,3 +65,18 @@ def test_priority_queue_iter_excludes_deleted_requests():
     queue.remove_requests([requests[1], requests[4]])
     ordered_ids = [req.request_id for req in queue]
     assert ordered_ids == ["req-0", "req-2", "req-3", "req-5"]
+
+
+def test_priority_queue_remove_then_readd_same_request():
+    queue = PriorityRequestQueue()
+    req_a, req_b = create_requests(num_requests=2, req_ids=["a", "b"])
+    req_a.priority = 1
+    req_b.priority = 0
+
+    queue.add_request(req_a)
+    queue.remove_request(req_a)
+    queue.add_request(req_a)
+    queue.add_request(req_b)
+
+    assert [queue.pop_request().request_id for _ in range(2)] == ["b", "a"]
+    assert not queue
