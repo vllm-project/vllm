@@ -78,9 +78,10 @@ class StoreOnComputePolicy(OffloadPolicy):
         num_offloadable_tokens: int,
     ) -> tuple[list[OffloadKey], list[int]]:
         req_id = req_kv_state.req.request_id
-        stored = self._stored_idx.setdefault(
-            req_id, [0] * len(self._config.kv_group_configs)
-        )
+        stored = self._stored_idx.get(req_id)
+        if stored is None:
+            stored = [0] * len(self._config.kv_group_configs)
+            self._stored_idx[req_id] = stored
         new_offload_keys: list[OffloadKey] = []
         per_group_start: list[int] = []
         for group_idx, group_config in enumerate(self._config.kv_group_configs):
