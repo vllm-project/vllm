@@ -9,8 +9,7 @@ import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
-from cutlass._mlir import ir
-from cutlass._mlir.dialects import llvm, vector
+from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
@@ -145,104 +144,6 @@ def _fp32x8_to_fp4x8(
     return Uint32(out)
 
 
-# Custom vectorized load to support cache modifiers. For some reason,
-# cute.autovec_copy() does not currently emit the requested modifiers.
-# tensor and coord is only used to select the base pointer. actual load
-# is done using out_dtype
-@dsl_user_op
-def _ldg_vec(
-    tensor: cute.Tensor,
-    coord: cute.Coord,
-    vec_size: cutlass.Constexpr[int],
-    modifier: cutlass.Constexpr[str] = "",
-    ld_type: cutlass.Constexpr[type[cutlass.Numeric] | None] = None,
-    *,
-    loc=None,
-    ip=None,
-) -> cute.TensorSSA:
-    if ld_type is None:
-        ld_type = tensor.element_type
-    if const_expr(ld_type is Float32):
-        ptx_ty = "f32"
-        constraint = "=f"
-    elif const_expr(ld_type is Uint32):
-        ptx_ty = "u32"
-        constraint = "=r"
-    else:
-        raise TypeError(f"_ldg_vec only supports Uint32 and Float32, got {ld_type}")
-
-    # compute base pointer
-    base_ptr = (
-        tensor.iterator + cute.crd2idx(coord, tensor.layout, loc=loc, ip=ip)
-    ).toint()
-
-    # build PTX string
-    ptx_str = f"ld.global{modifier}.v{vec_size}.{ptx_ty}"
-    ptx_str += "{" + ", ".join(f"${i}" for i in range(vec_size)) + "}"
-    ptx_str += f", [${vec_size}];"
-
-    out = llvm.inline_asm(
-        llvm.StructType.get_literal([ld_type.mlir_type] * vec_size),
-        [Int64(base_ptr).ir_value(loc=loc, ip=ip)],
-        ptx_str,
-        ",".join([constraint] * vec_size + ["l"]),
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    vec = vector.from_elements(
-        ir.VectorType.get([vec_size], ld_type.mlir_type, loc=loc),
-        [
-            llvm.extractvalue(ld_type.mlir_type, out, [i], loc=loc, ip=ip)
-            for i in range(vec_size)
-        ],
-        loc=loc,
-        ip=ip,
-    )
-    return cute.TensorSSA(vec, vec_size, ld_type)
-
-
-@dsl_user_op
-def _stg_vec(
-    tensor: cute.Tensor,
-    coord: cute.Coord,
-    values: cute.Tensor,
-    vec_size: cutlass.Constexpr[int],
-    modifier: cutlass.Constexpr[str] = "",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    # NOTE: st_type is derived from values tensor
-    st_type = values.element_type
-    if const_expr(st_type is Float32):
-        ptx_ty = "f32"
-        constraint = "f"
-    elif const_expr(st_type is Uint32):
-        ptx_ty = "u32"
-        constraint = "r"
-    else:
-        raise TypeError(f"_stg_vec only supports Uint32 and Float32, got {st_type}")
-
-    # compute base pointer
-    base_ptr = (
-        tensor.iterator + cute.crd2idx(coord, tensor.layout, loc=loc, ip=ip)
-    ).toint()
-
-    # build PTX string
-    ptx_str = f"st.global{modifier}.v{vec_size}.{ptx_ty} [$0], "
-    ptx_str += "{" + ", ".join(f"${i + 1}" for i in range(vec_size)) + "};"
-
-    llvm.inline_asm(
-        None,
-        [Int64(base_ptr).ir_value(loc=loc, ip=ip)]
-        + [values[i].ir_value(loc=loc, ip=ip) for i in range(vec_size)],
-        ptx_str,
-        ",".join(["l"] + [constraint] * vec_size),
-        has_side_effects=True,
-        is_align_stack=False,
-    )
-
-
 class IndexerQMxFp4Kernel:
     """Eight-thread subwarps process one ``(token, head)`` row."""
 
@@ -252,7 +153,7 @@ class IndexerQMxFp4Kernel:
         rope_dim: int = 64,
         num_heads: int = 64,
         cos_sin_dtype: type[cutlass.Numeric] = Float32,
-        tile_head: int = 4,
+        coarsen: int = 4,
     ):
         self.head_dim = head_dim
         self.rope_dim = rope_dim
@@ -261,15 +162,15 @@ class IndexerQMxFp4Kernel:
         self.cos_sin_dtype = cos_sin_dtype
 
         # process multiple heads at the same time to armotize RoPE load costs
-        assert num_heads % tile_head == 0
-        self.tile_head = tile_head
+        assert num_heads % coarsen == 0
+        self.coarsen = coarsen
 
         # later we will use 32B load = 16 BF16 elems
         # thus, head_dim=128 requires 8 threads to handle.
         # let's call subwarp = 8 threads.
         self.subwarp_size = head_dim // 16
         self.tb_size = 128
-        self.threads_per_token = (self.num_heads // self.tile_head) * self.subwarp_size
+        self.threads_per_token = (self.num_heads // self.coarsen) * self.subwarp_size
 
     @cute.jit
     def __call__(
@@ -318,10 +219,9 @@ class IndexerQMxFp4Kernel:
         global_subwarp_id = global_tid // self.subwarp_size
         sublane = tid % self.subwarp_size
 
-        token_id = global_subwarp_id // (self.num_heads // self.tile_head)
-        head_start = (
-            global_subwarp_id % (self.num_heads // self.tile_head)
-        ) * self.tile_head
+        token_id = global_subwarp_id // (self.num_heads // self.coarsen)
+        head_tile_id = global_subwarp_id % (self.num_heads // self.coarsen)
+        head_start = head_tile_id * self.coarsen
 
         # NOTE: token_id may exceed bounds, hence we need to add load/store guards
         # we can't do early exit because CuteDSL doesn't support it. and we also need
@@ -331,55 +231,60 @@ class IndexerQMxFp4Kernel:
         must_in_bounds = cutlass.const_expr(self.tb_size % self.threads_per_token == 0)
         in_bounds = must_in_bounds or (token_id < q.shape[0])
 
-        # each thread loads 16 BF16 elems
-        elem_base = sublane * 16
+        cp_op = cute.nvgpu.CopyUniversalOp()
+        cp_u32x2 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=64)
+        cp_u32x4 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
+        cp_u32x8 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=256)
+        cp_f32x8 = cute.make_copy_atom(cp_op, Float32, num_bits_per_copy=256)
 
-        q_bf16x2 = cute.make_rmem_tensor((self.tile_head, 8), Uint32)
+        _layout = cute.make_layout((self.coarsen, 8), stride=(8, 1))
+        q_bf16x2 = cute.make_rmem_tensor(_layout, Uint32)
+
         if in_bounds:
-            for i in cutlass.range_constexpr(self.tile_head):
-                # q layout: [num_tokens, num_heads, head_dim]
-                coord = (token_id, head_start + i, elem_base)
-                cache_mod = ".relaxed.cta.L1::no_allocate"
-                _q_bf16x2 = _ldg_vec(q, coord, 8, cache_mod, ld_type=Uint32)
-                q_bf16x2[i, None].store(_q_bf16x2)  # copy to make it mutable
+            src = cute.local_tile(
+                q[token_id, None, None],
+                tiler=(self.coarsen, 16),
+                coord=(head_tile_id, sublane),
+            )
+            cute.copy(cp_u32x8, cute.recast_tensor(src, Uint32), q_bf16x2)
 
         # RoPE applies only to the trailing rope_dim values. We keep the rounded
         # BF16 result in q_bits so the later amax and quantization see BF16.
         # cos_sin_cache layout: [max_pos, rope_dim]
-        if in_bounds and elem_base >= self.nope_dim:
-            pos = positions[token_id]
-            rope_idx = (elem_base - self.nope_dim) // 2
-            if const_expr(self.cos_sin_dtype is Float32):
-                # fp32x8 loads
-                cos_vals = _ldg_vec(cos_sin_cache, (pos, rope_idx), 8)
-                sin_vals = _ldg_vec(
-                    cos_sin_cache, (pos, self.rope_dim // 2 + rope_idx), 8
-                )
-            else:
-                # bf16x2x4 loads
-                cos_bf16x2 = _ldg_vec(
-                    cos_sin_cache,
-                    (pos, rope_idx),
-                    4,
-                    ld_type=Uint32,
-                )
-                sin_bf16x2 = _ldg_vec(
-                    cos_sin_cache,
-                    (pos, self.rope_dim // 2 + rope_idx),
-                    4,
-                    ld_type=Uint32,
-                )
-                cos_vals = cute.make_rmem_tensor(8, Float32)
-                sin_vals = cute.make_rmem_tensor(8, Float32)
-                for i in cutlass.range_constexpr(4):
-                    cos_vals[i * 2], cos_vals[i * 2 + 1] = _bf16x2_to_fp32(
-                        cos_bf16x2[i]
-                    )
-                    sin_vals[i * 2], sin_vals[i * 2 + 1] = _bf16x2_to_fp32(
-                        sin_bf16x2[i]
-                    )
+        if in_bounds and sublane * 16 >= self.nope_dim:
+            cos_vals = cute.make_rmem_tensor((8,), Float32)
+            sin_vals = cute.make_rmem_tensor((8,), Float32)
 
-            for i in cutlass.range_constexpr(self.tile_head):
+            pos = positions[token_id]
+
+            # select 8 elems from cos and sin
+            cos_id = sublane - self.nope_dim // 16
+            sin_id = cos_id + self.rope_dim // 16
+            cos_src = cute.local_tile(
+                cos_sin_cache[pos, None], tiler=(8,), coord=(cos_id,)
+            )
+            sin_src = cute.local_tile(
+                cos_sin_cache[pos, None], tiler=(8,), coord=(sin_id,)
+            )
+
+            if const_expr(self.cos_sin_dtype is Float32):
+                cute.copy(cp_f32x8, cos_src, cos_vals)
+                cute.copy(cp_f32x8, sin_src, sin_vals)
+            else:
+                cos_bf16x2 = cute.make_rmem_tensor((4,), Uint32)
+                sin_bf16x2 = cute.make_rmem_tensor((4,), Uint32)
+                cute.copy(cp_u32x4, cute.recast_tensor(cos_src, Uint32), cos_bf16x2)
+                cute.copy(cp_u32x4, cute.recast_tensor(sin_src, Uint32), sin_bf16x2)
+
+                for i in cutlass.range_constexpr(4):
+                    tmp_cos = _bf16x2_to_fp32(cos_bf16x2[i])
+                    tmp_sin = _bf16x2_to_fp32(sin_bf16x2[i])
+                    cos_vals[i * 2] = tmp_cos[0]
+                    cos_vals[i * 2 + 1] = tmp_cos[1]
+                    sin_vals[i * 2] = tmp_sin[0]
+                    sin_vals[i * 2 + 1] = tmp_sin[1]
+
+            for i in cutlass.range_constexpr(self.coarsen):
                 for j in cutlass.range_constexpr(8):
                     q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
                     rot0 = q0 * cos_vals[j] - q1 * sin_vals[j]
@@ -387,7 +292,14 @@ class IndexerQMxFp4Kernel:
                     # convert back to BF16 to match numerics
                     q_bf16x2[i, j] = _fp32x2_to_bf16x2(rot0, rot1)
 
-        for i in cutlass.range_constexpr(self.tile_head):
+        # layout: [coarsen, 8]
+        q_fp4_tile = cute.local_tile(
+            q_fp4[token_id, None, None],
+            tiler=(self.coarsen, 8),
+            coord=(head_tile_id, sublane),
+        )
+
+        for i in cutlass.range_constexpr(self.coarsen):
             # compute amax in packed bf16x2 to save instructions
             # Each thread holds 16 elems. Two adjacent threads form one 32-elem
             # MXFP4 block, so a width-2 shuffle gives the block amax.
@@ -426,16 +338,17 @@ class IndexerQMxFp4Kernel:
 
                 vals = cute.make_rmem_tensor(16, Float32)
                 for j in cutlass.range_constexpr(8):
-                    vals[j * 2], vals[j * 2 + 1] = _bf16x2_to_fp32(q_bf16x2[i, j])
-                    vals[j * 2] = vals[j * 2] * inv_fp4_scale
-                    vals[j * 2 + 1] = vals[j * 2 + 1] * inv_fp4_scale
+                    tmp = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    vals[j * 2] = tmp[0] * inv_fp4_scale
+                    vals[j * 2 + 1] = tmp[1] * inv_fp4_scale
 
                 # pack to FP4
-                packed = cute.make_rmem_tensor(2, Uint32)
+                packed = cute.make_rmem_tensor((2,), Uint32)
                 packed[0] = _fp32x8_to_fp4x8(vals, 0)
                 packed[1] = _fp32x8_to_fp4x8(vals, 8)
-                coord = (token_id, head_start + i, elem_base // 2)
-                _stg_vec(q_fp4, coord, packed, 2, modifier=".cs")
+
+                dst = q_fp4_tile[i, None]
+                cute.copy(cp_u32x2, packed, cute.recast_tensor(dst, Uint32))
 
         # Weight scaling is independent of the Q subwarp work. The first
         # num_tokens * num_heads logical threads cover one weight each.
@@ -459,7 +372,7 @@ class IndexerQMxFp4Kernel:
         max_pos = cute.sym_int()
 
         q = make_fake_tensor(
-            BFloat16, (num_tokens, num_heads, head_dim), divisibility=8
+            BFloat16, (num_tokens, num_heads, head_dim), divisibility=16
         )
         positions = make_fake_tensor(Int64, (num_tokens,), divisibility=1)
         cos_sin_cache = make_fake_tensor(
