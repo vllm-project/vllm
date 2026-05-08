@@ -320,8 +320,8 @@ def test_models_distributed(
         num_logprobs=num_logprobs,
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
-        enforce_eager=True,
-        gpu_memory_utilization=0.7,
+        enforce_eager=False,
+        gpu_memory_utilization=0.65,
     )
 
 
