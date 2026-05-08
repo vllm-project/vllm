@@ -19,6 +19,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import os
 import random
 
 import torch
@@ -325,6 +326,17 @@ MODEL_PRESETS: dict[str, dict] = {
         num_slices=2,
         block_size_m=64,
     ),
+    # GLM-5.1 (zai-org/GLM-5.1-FP8): E=256, top_k=8, hidden=6144,
+    # moe_intermediate=2048
+    "glm5_1": dict(
+        K=6144,
+        N_per_slice=2048,
+        num_experts=256,
+        top_k=8,
+        max_loras=4,
+        num_slices=2,
+        block_size_m=64,
+    ),
 }
 
 
@@ -332,8 +344,10 @@ M_RANGE = [16, 64, 256, 1024, 4096, 16384]
 RANK_RANGE = [8, 16, 32, 64]
 
 
-def get_benchmark(model: str):
-    preset = MODEL_PRESETS[model]
+def get_benchmark(model: str, max_loras: int | None = None):
+    preset = dict(MODEL_PRESETS[model])
+    if max_loras is not None:
+        preset["max_loras"] = max_loras
 
     @triton.testing.perf_report(
         triton.testing.Benchmark(
@@ -344,7 +358,7 @@ def get_benchmark(model: str):
             line_names=["one_shot (fused)", "two_kernel (legacy)"],
             styles=[("red", "-"), ("blue", "-")],
             ylabel="ms",
-            plot_name=f"fused_moe_lora-{model}",
+            plot_name=f"fused_moe_lora-{model}-loras{preset['max_loras']}",
             args={"preset": preset},
         )
     )
@@ -373,8 +387,10 @@ def get_benchmark(model: str):
 # ----- correctness sanity ---------------------------------------------------
 
 
-def calculate_diff(model: str, M: int, rank: int):
-    preset = MODEL_PRESETS[model]
+def calculate_diff(model: str, M: int, rank: int, max_loras: int | None = None):
+    preset = dict(MODEL_PRESETS[model])
+    if max_loras is not None:
+        preset["max_loras"] = max_loras
     inp = _make_inputs(
         M=M,
         K=preset["K"],
@@ -423,14 +439,27 @@ if __name__ == "__main__":
         action="store_true",
         help="Run correctness sanity check only, no perf sweep",
     )
+    parser.add_argument(
+        "--max-loras",
+        type=int,
+        default=None,
+        help="Override max_loras in the model preset (number of LoRA adapters "
+        "active in the batch). Defaults to the preset's value.",
+    )
     args = parser.parse_args()
 
     print(f"Correctness check ({args.model}):")
-    calculate_diff(args.model, M=256, rank=32)
+    calculate_diff(args.model, M=256, rank=32, max_loras=args.max_loras)
     if args.check_only:
         raise SystemExit(0)
 
+    effective_max_loras = (
+        args.max_loras
+        if args.max_loras is not None
+        else MODEL_PRESETS[args.model]["max_loras"]
+    )
     print(f"\nGPU: {torch.cuda.get_device_name()}")
-    print(f"Model preset: {args.model}\n")
-    benchmark = get_benchmark(args.model)
+    print(f"Model preset: {args.model}  max_loras={effective_max_loras}\n")
+    benchmark = get_benchmark(args.model, max_loras=args.max_loras)
+    os.makedirs(args.save_path, exist_ok=True)
     benchmark.run(print_data=True, save_path=args.save_path)
