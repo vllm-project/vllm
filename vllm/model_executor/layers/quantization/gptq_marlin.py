@@ -92,6 +92,38 @@ def get_moe_quant_method(
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
 
+        # MarlinExperts does not support INT8 MoE weights (only INT4/FP8).
+        # Route INT8 MoE layers to MoeWNA16 which handles them via Triton
+        # fused_experts kernels. See: github.com/vllm-project/vllm/issues/41955
+        if cloned_config.weight_bits == 8:
+            from vllm.model_executor.layers.quantization.moe_wna16 import (
+                MoeWNA16Config,
+            )
+
+            if cloned_config.desc_act:
+                raise ValueError(
+                    f"Layer '{prefix}' uses 8-bit MoE weights with "
+                    "desc_act=True, which is not supported. INT8 MoE "
+                    "requires desc_act=False."
+                )
+
+            logger.warning_once(
+                f"Layer '{prefix}' uses 8-bit MoE weights which are not "
+                "supported by Marlin MoE kernels. Falling back to "
+                "MoeWNA16 kernels."
+            )
+            # Sync all dynamically overridden fields into the fallback
+            # config dict, since override_config() only updates the
+            # cloned GPTQMarlinConfig object, not its full_config dict.
+            fallback_config = deepcopy(cloned_config.full_config)
+            fallback_config["bits"] = cloned_config.weight_bits
+            fallback_config["group_size"] = cloned_config.group_size
+            fallback_config["sym"] = cloned_config.is_sym
+            fallback_config["desc_act"] = cloned_config.desc_act
+            return MoeWNA16Config.from_config(
+                fallback_config
+            ).get_quant_method(layer, prefix)
+
         return moe_method_cls(cloned_config, layer.moe_config)
     return None
 
