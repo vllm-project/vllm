@@ -2085,6 +2085,7 @@ class NixlConnectorWorker:
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
+                remote_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
             )
 
         if self.use_mla and tp_ratio < 0 and read_specs:
@@ -2104,6 +2105,7 @@ class NixlConnectorWorker:
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
+        remote_physical_per_logical: int,
     ):
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -2186,11 +2188,46 @@ class NixlConnectorWorker:
         # Skip mamba groups — their blocks represent full state (conv+ssm),
         # not per-token data, so trimming would corrupt the transfer.
         remote_block_ids = list(remote_block_ids)
-        for i, remote_group in enumerate(remote_block_ids):
-            num_local_blocks = len(local_block_ids[i])
-            assert num_local_blocks <= len(remote_group)
-            if num_local_blocks < len(remote_group):
-                remote_block_ids[i] = remote_group[-num_local_blocks:]
+        if not self._has_mamba:
+            for i, remote_group in enumerate(remote_block_ids):
+                num_local_blocks = len(local_block_ids[i])
+                assert num_local_blocks <= len(remote_group)
+                if num_local_blocks < len(remote_group):
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+        else:
+            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support
+            # so far. Heterogeneous TP can cause
+            # different kernel block counts due to logical block rounding.
+            # Example: 640 prompt tokens, kernel_block_size=64
+            #   remote physical_per_logical=10, local physical_per_logical=6
+            #   remote logical ids from kv_transfer_params = [0]
+            #   local logical ids allocated = [0, 1]
+            #   remote kernel blocks: [0..9]  (1*10=10)
+            #   local kernel blocks:  [0..11] (2*6=12)
+            #   actual data blocks = ceil(640/64) = 10, trim both to 10
+            # Vice versa (remote physical_per_logical=6, local=10):
+            #   remote logical ids = [0, 1], local logical ids = [0]
+            #   remote kernel blocks: [0..11] (2*6=12)
+            #   local kernel blocks:  [0..9]  (1*10=10)
+            #   actual data blocks = ceil(640/64) = 10, trim both to 10
+            local_block_ids = list(local_block_ids)
+            for i, remote_group in enumerate(remote_block_ids):
+                num_local_blocks = len(local_block_ids[i])
+                num_remote_blocks = len(remote_group)
+                if _is_ssm_spec(self._group_spec_types[i]):
+                    assert num_local_blocks == num_remote_blocks
+                else:
+                    max_padding = max(
+                        self._physical_blocks_per_logical_kv_block,
+                        remote_physical_per_logical,
+                    )
+                    assert abs(num_local_blocks - num_remote_blocks) < max_padding, (
+                        f"Group {i}: |{num_local_blocks} - "
+                        f"{num_remote_blocks}| >= {max_padding}"
+                    )
+                    num_blocks = min(num_local_blocks, num_remote_blocks)
+                    local_block_ids[i] = local_block_ids[i][:num_blocks]
+                    remote_block_ids[i] = remote_group[:num_blocks]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
@@ -2299,24 +2336,25 @@ class NixlConnectorWorker:
 
         Returns:
             Same structure with FA groups expanded (each logical block L
-            becomes kernel blocks [L*ratio .. L*ratio + local_ratio - 1]).
+            becomes kernel blocks [L*remote_physical_per_logical, ..
+            L*remote_physical_per_logical +
+            remote_physical_per_logical - 1]).
             Mamba groups are passed through unchanged.
         """
-        local_ratio = self._physical_blocks_per_logical_kv_block
         if remote_physical_per_logical == 1:
             return block_ids
-        local_arange = np.arange(local_ratio).reshape(1, -1)
+        remote_arange = np.arange(remote_physical_per_logical).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
-        result: list[list[int]] = []
-        for i, group in enumerate(block_ids):
-            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec):
-                arr = np.array(group).reshape(-1, 1)
-                expanded = (arr * remote_physical_per_logical + local_arange).flatten()
-                result.append(expanded.tolist())
-            else:
-                # Mamba blocks are 1:1 logical-to-physical (no expansion).
-                result.append(group)
-        return result
+        return [
+            BlockTable.map_to_kernel_blocks(
+                np.array(group),
+                remote_physical_per_logical,
+                remote_arange,
+            ).tolist()
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            else group
+            for i, group in enumerate(block_ids)
+        ]
 
     def get_backend_aware_kv_block_len(
         self, layer_idx: int, first_split: bool = True, mamba_view: bool = False

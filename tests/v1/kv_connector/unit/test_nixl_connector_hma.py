@@ -564,3 +564,119 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
     )
 
     assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "mamba_enabled,swa_enabled,"
+    "local_physical_per_logical,remote_physical_per_logical,"
+    "logical_block_ids,expected_kernel_block_ids",
+    [
+        # Qwen3.5-0.8B 4P2D (kernel_block_size=64):
+        #   prefill TP=4: logical_block_size=384 → physical_per_logical=6
+        #   decode  TP=2: logical_block_size=640 → physical_per_logical=10
+        # FA logical [0] → remote kernel [0..9] (1 * 10)
+        # SSM logical [10] → unchanged [10]
+        pytest.param(
+            True,
+            False,
+            6,
+            10,
+            ([0], [10]),
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10]],
+            id="qwen35_4p2d",
+        ),
+        # Qwen3.5-0.8B 2P4D (kernel_block_size=64):
+        #   prefill TP=2: logical_block_size=640 → physical_per_logical=10
+        #   decode  TP=4: logical_block_size=384 → physical_per_logical=6
+        # FA logical [0, 1] → remote kernel [0..5, 6..11] (2 * 6)
+        # SSM logical [10] → unchanged [10]
+        pytest.param(
+            True,
+            False,
+            10,
+            6,
+            ([0, 1], [10]),
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [10]],
+            id="qwen35_2p4d",
+        ),
+        # Homogeneous TP (kernel_block_size=64):
+        #   both sides: logical_block_size=640 → physical_per_logical=10
+        # FA logical [0] → kernel [0..9], SSM unchanged
+        pytest.param(
+            True,
+            False,
+            10,
+            10,
+            ([0], [10]),
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10]],
+            id="homo_tp",
+        ),
+        # remote physical_per_logical=1: early return, no expansion
+        pytest.param(
+            True,
+            False,
+            10,
+            1,
+            ([0, 1, 2], [5]),
+            [[0, 1, 2], [5]],
+            id="mamba_remote_physical_per_logical_1",
+        ),
+        # Pure FA (no mamba): single group expanded with remote stride
+        pytest.param(
+            False,
+            False,
+            2,
+            4,
+            ([0, 1],),
+            [[0, 1, 2, 3, 4, 5, 6, 7]],
+            id="pure_fa",
+        ),
+        # FA + SWA (no mamba): both groups expanded
+        pytest.param(
+            False,
+            True,
+            2,
+            3,
+            ([0, 1], [2, 3]),
+            [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11]],
+            id="fa_swa",
+        ),
+    ],
+)
+def test_logical_to_remote_kernel_block_ids(
+    mamba_enabled,
+    swa_enabled,
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    logical_block_ids,
+    expected_kernel_block_ids,
+):
+    """Verify _logical_to_remote_kernel_block_ids uses the remote
+    physical_per_logical for FA expansion, not the local one.
+
+    This was the root cause of silent accuracy corruption in Qwen3.5
+    heterogeneous TP (e.g. 4P2D): the old code used local physical_per_logical
+    for the expansion arange, producing wrong kernel block indices.
+
+    Qwen3.5-0.8B values verified by verify_conv_split.py (issue #13).
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=mamba_enabled,
+        swa_enabled=swa_enabled,
+    )
+
+    result = worker._logical_to_remote_kernel_block_ids(
+        logical_block_ids,
+        remote_physical_per_logical,
+    )
+    assert list(result) == expected_kernel_block_ids, (
+        f"Expected {expected_kernel_block_ids}, got {result}"
+    )
