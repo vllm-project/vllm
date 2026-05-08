@@ -291,7 +291,6 @@ def test_attention_quant_pattern(
     use_fresh_inductor_cache,
 ):
     """Test AttentionStaticQuantPattern fusion pass"""
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
 
     if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
@@ -323,6 +322,7 @@ def test_attention_quant_pattern(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops_list,
+            enable_vllm_compile_cache=False,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
         attention_config=AttentionConfig(backend=backend),

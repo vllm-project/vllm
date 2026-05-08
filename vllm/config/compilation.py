@@ -545,6 +545,12 @@ class CompilationConfig:
     If we limit the video count per prompt to `0`, it will also be set to `0`
     (i.e., fall back to image-only mode)."""
 
+    enable_vllm_compile_cache: bool = True
+    """Enable compile cache. When enabled, vLLM caches compiled graphs to
+    speed up subsequent runs. Set to False to disable caching for debugging
+    compilation issues or suspected cache corruption. Defaults to True.
+    Can be overridden by VLLM_DISABLE_COMPILE_CACHE environment variable."""
+
     # Inductor capture
     compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
@@ -859,6 +865,16 @@ class CompilationConfig:
                 f"compile_cache_save_format must be 'binary' or 'unpacked', "
                 f"got: {value}"
             )
+        return value
+
+    @field_validator("enable_vllm_compile_cache", mode="after")
+    @classmethod
+    def handle_env_var_override(cls, value: Any, info: Any) -> Any:
+        """Allow VLLM_DISABLE_COMPILE_CACHE env var to override config."""
+        import vllm.envs as envs
+
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            return False
         return value
 
     @field_validator(
