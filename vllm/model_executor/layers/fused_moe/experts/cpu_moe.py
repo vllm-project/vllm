@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._custom_ops import CPUQuantMethod, fused_experts_cpu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -157,19 +158,18 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             )
         )
 
-        return torch.ops._C.fused_experts_cpu(
+        return fused_experts_cpu(
             hidden_states,
             w1,
             w2,
             topk_weights,
             topk_ids,
             False,  # inplace
-            False,  # use_int8_w8a8
-            True,  # use_fp8_w8a16
+            CPUQuantMethod.FP8_W8A16,  # moe_comp_method
             self.w1_scale,  # w1_scale
             self.w2_scale,  # w2_scale
+            None,  # w1_zero
+            None,  # w2_zero
             block_shape,  # block_size
-            None,  # a1_scale (W8A16: no activation quantization)
-            None,  # a2_scale
             True,  # is_vnni
         )
