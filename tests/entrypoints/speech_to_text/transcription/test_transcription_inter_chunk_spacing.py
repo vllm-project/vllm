@@ -94,10 +94,6 @@ class _StubTranscriptionModel:
     def post_process_streaming_output(cls, text: str) -> str:
         return text
 
-    @classmethod
-    def get_transcription_stop_token_ids(cls, model_config: ModelConfig) -> list[int]:
-        return []
-
 
 class _StreamingCleanupTranscriptionModel(_StubTranscriptionModel):
     @classmethod

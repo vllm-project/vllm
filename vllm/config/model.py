@@ -211,6 +211,12 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    uses_request_ids_for_generation: bool = field(default=False, init=False)
+    """Whether the generation forward pass needs stable request IDs.
+
+    This is set by model-specific config verification for request-stateful
+    models that need to map batched decoder tokens back to request-local state.
+    """
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
     max_logprobs: int = 20
@@ -386,6 +392,7 @@ class ModelConfig:
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
+            "uses_request_ids_for_generation",
             "pooler_config",
             "multimodal_config",
             "limit_mm_per_prompt",

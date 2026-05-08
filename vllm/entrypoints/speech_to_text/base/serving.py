@@ -707,22 +707,20 @@ class OpenAISpeechToText(OpenAIServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
-                    text = self.model_cls.post_process_streaming_output(output.text)
 
                     # dont add separator to the first chunk
                     if (
                         result_generator is not list_result_generator[0]
                         and beginning_of_chunk
-                        and text
                     ):
-                        text = separator + text
+                        output.text = separator + output.text
                         beginning_of_chunk = False
 
                     # TODO: For models that output structured formats (e.g.,
                     # Qwen3-ASR with "language X<asr_text>" prefix), streaming
                     # would need buffering to strip the prefix properly since
                     # deltas may split the tag across chunks.
-                    delta_message = DeltaMessage(content=text)
+                    delta_message = DeltaMessage(content=output.text)
                     completion_tokens += len(output.token_ids)
 
                     if output.finish_reason is None:

@@ -1063,7 +1063,7 @@ class GPUModelRunner(
         return model_kwargs
 
     def _uses_request_ids_for_generation(self) -> bool:
-        return bool(getattr(self.get_model(), "uses_request_ids_for_generation", False))
+        return self.model_config.uses_request_ids_for_generation
 
     def _get_encoder_request_ids(
         self,

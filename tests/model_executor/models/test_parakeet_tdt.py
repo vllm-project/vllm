@@ -92,17 +92,22 @@ def test_parakeet_tdt_forward_uses_request_ids_for_forced_tokens():
     assert logits.argmax(dim=-1).tolist() == [21, 11]
 
 
-def test_parakeet_tdt_uses_request_id_generation_path():
-    assert ParakeetForTDT.uses_request_ids_for_generation is True
-
-
-def test_parakeet_tdt_config_enforces_eager_execution():
-    vllm_config = SimpleNamespace(model_config=SimpleNamespace(enforce_eager=False))
+def test_parakeet_tdt_config_updates_runtime_metadata():
+    model_config = SimpleNamespace(
+        enforce_eager=False,
+        uses_request_ids_for_generation=False,
+        hf_config=SimpleNamespace(eos_token_id=None),
+        hf_text_config=SimpleNamespace(eos_token_id=None),
+    )
+    vllm_config = SimpleNamespace(model_config=model_config)
 
     assert MODELS_CONFIG_MAP["ParakeetForTDT"] is ParakeetForTDTConfig
     ParakeetForTDTConfig.verify_and_update_config(vllm_config)
 
-    assert vllm_config.model_config.enforce_eager is True
+    assert model_config.enforce_eager is True
+    assert model_config.uses_request_ids_for_generation is True
+    assert model_config.hf_config.eos_token_id == 3
+    assert model_config.hf_text_config.eos_token_id == 3
 
 
 def test_parakeet_tdt_pads_variable_length_audio_features():

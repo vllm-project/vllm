@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+PARAKEET_TDT_EOS_TOKEN_ID = 3
+
+
 class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -559,13 +562,24 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 class ParakeetForTDTConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        if not vllm_config.model_config.enforce_eager:
+        model_config = vllm_config.model_config
+        model_config.uses_request_ids_for_generation = True
+        hf_configs = (model_config.hf_config, model_config.hf_text_config)
+        seen_config_ids: set[int] = set()
+        for hf_config in hf_configs:
+            if id(hf_config) in seen_config_ids:
+                continue
+            seen_config_ids.add(id(hf_config))
+            if not isinstance(getattr(hf_config, "eos_token_id", None), int):
+                hf_config.eos_token_id = PARAKEET_TDT_EOS_TOKEN_ID
+
+        if not model_config.enforce_eager:
             logger.warning_once(
                 "Parakeet TDT uses request-keyed decoder state; enforcing "
                 "eager execution to avoid CUDA graph replaying stale forced "
                 "tokens."
             )
-        vllm_config.model_config.enforce_eager = True
+        model_config.enforce_eager = True
 
 
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
