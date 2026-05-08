@@ -208,9 +208,18 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             mm_1: torch.Tensor,
             rms_norm_weights: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            # pattern matcher replaces from top-to-bottom,
-            # so residual is still the full size here.
-            # once the seqpar pattern with the previous rmsnorm is replaced
+            # The pattern matcher replaces from the end of the graph
+            # (last layer first). At the time each match is replaced,
+            # the preceding layer has NOT been replaced yet, so
+            # `residual` is still full-size and the slice below is
+            # correct. Once the preceding layer IS replaced, its
+            # residual output shrinks to [local_len, H], and this
+            # slice becomes semantically incorrect (e.g. for rank > 0,
+            # the indices would be out of bounds). However, since the
+            # symbolic output shape equals the input shape,
+            # NoOpEliminationPass (called at the end of
+            # SequenceParallelismPass.__call__) removes these slices
+            # before the graph is ever executed or compiled.
             reduce_scatter = self._reduce_scatter(mm_1)
             local_len = reduce_scatter.size(0)
             # when the preceding VocabParallelEmbedding is excluded
@@ -225,8 +234,9 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
                 reduce_scatter, residual, rms_norm_weights, self.epsilon
             )
             all_gather = self._all_gather(rmsnorm[0])
-            # shape of residual changes but that's fine,
-            # next node is already slicing it, now becomes a noop
+            # residual output is now [local_len, H]; the next layer's
+            # slice on it is semantically incorrect until
+            # NoOpEliminationPass removes it.
             return all_gather, rmsnorm[1]
 
         pm.register_replacement(
@@ -316,10 +326,11 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             rms_norm_weights: torch.Tensor,
             scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            # pattern matcher replaces from top-to-bottom,
-            # so residual is still the full size here.
-            # add a temporary slice which will become a noop
-            # once the seqpar pattern with the previous rmsnorm is replaced
+            # See MiddleAllReduceRMSNormPattern.replacement for a
+            # detailed explanation of the temporary slice below:
+            # it is correct when first inserted, becomes semantically
+            # incorrect after the preceding layer is replaced, and is
+            # removed by NoOpEliminationPass before the graph is compiled.
             reduce_scatter = self._reduce_scatter(mm_1)
             local_len = reduce_scatter.size(0)
             # when the preceding VocabParallelEmbedding is excluded
@@ -335,8 +346,9 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             )
             quant, _ = self.quant_matcher(rms, scale)
             all_gather = self._all_gather(quant)
-            # shape of residual changes but that's fine,
-            # next node is already slicing it, now becomes a noop
+            # residual output is now [local_len, H]; the next layer's
+            # slice on it is semantically incorrect until
+            # NoOpEliminationPass removes it.
             return all_gather, residual_out
 
         pm.register_replacement(
@@ -377,21 +389,15 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     gets split across TP ranks, causing size mismatches at subgraph
     boundaries.
 
-    This pass splits up the residual tensor across TP ranks and hence divides its size.
-    Because the pattern matcher starts at the end of the graph, the replacement
-    contains a slice that temporarily conforms the input residual to the correct size.
-    After all patterns have been matched, we use a NoOpEliminationPass to clean up
-    what have now become no-op slices.
-
-    Note that an older version of the pass did not need this as it operated only on
-    custom rms_norm and fused_add_rms_norm custom ops which did not complain about
-    mismatched shapes during replacement. So this approach has the same assumption that
-    correctness is only maintained if all rms_norm operations are split across ranks.
-
-    Correctness-wise, this is approach strictly better than before - before,
-    the graph was incorrect semantically and shape-wise during the pass.
-    With this approach the graph remains correct in both aspects during the pass.
-    Both approaches restore a correct graph once all patterns are matched.
+    This pass splits up the residual tensor across TP ranks and hence divides
+    its size. The pattern matcher starts at the end of the graph (last layer
+    first), so when each replacement inserts a residual slice, the preceding
+    layer has not been replaced yet and the slice is correct. Once the
+    preceding layer IS replaced, its residual output shrinks and the slice
+    becomes semantically incorrect (out-of-bounds indices for rank > 0).
+    The graph is never executed in this intermediate state —
+    NoOpEliminationPass removes these slices based on symbolic shape equality
+    (input shape == output shape) before the graph is compiled.
     """
 
     @enable_fake_mode
