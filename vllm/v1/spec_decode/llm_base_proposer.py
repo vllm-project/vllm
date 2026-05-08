@@ -1537,18 +1537,18 @@ class SpecDecodeBaseProposer:
                             "Shared target model lm_head with MTP shared_head.head."
                         )
 
-        if hasattr(target_language_model.model, "topk_indices_buffer"):
-            if (
-                hasattr(self.model.model, "topk_indices_buffer")
-                and self.model.model.topk_indices_buffer is not None
-            ):
-                self.model.model.topk_indices_buffer.set_(
-                    target_language_model.model.topk_indices_buffer
-                )
-                logger.info(
-                    "Detected MTP model with topk_indices_buffer. "
-                    "Sharing target model topk_indices_buffer with the draft model."
-                )
+        if (
+            hasattr(target_language_model.model, "topk_indices_buffer")
+            and hasattr(self.model.model, "topk_indices_buffer")
+            and self.model.model.topk_indices_buffer is not None
+        ):
+            self.model.model.topk_indices_buffer.set_(
+                target_language_model.model.topk_indices_buffer
+            )
+            logger.info(
+                "Detected MTP model with topk_indices_buffer. "
+                "Sharing target model topk_indices_buffer with the draft model."
+            )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
