@@ -502,8 +502,8 @@ class AiterFlashAttentionMetadataBuilder(
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        # Only copy seq_lens to CPU when prefill or extend is present to avoid a blocking
-        # device→host transfer.
+        # Only copy seq_lens to CPU when prefill or extend is present to avoid a
+        # blocking device→host transfer.
         seq_lens = (
             common_attn_metadata.seq_lens.cpu()
             if num_prefills > 0 or num_extends > 0
@@ -520,6 +520,7 @@ class AiterFlashAttentionMetadataBuilder(
 
         prefill_metadata = None
         if num_prefills > 0:
+            assert seq_lens is not None
             query_lens_for_prefill = query_lens_cpu[num_decodes + num_extends :]
             query_start_loc_device = common_attn_metadata.query_start_loc[
                 num_decodes + num_extends :
@@ -532,6 +533,7 @@ class AiterFlashAttentionMetadataBuilder(
 
         extend_metadata = None
         if num_extends > 0:
+            assert seq_lens is not None
             num_extends_slice = slice(num_decodes, num_decodes + num_extends)
             query_lens_for_extend = query_lens_cpu[num_extends_slice]
             seq_lens_for_extend = seq_lens[num_extends_slice]
