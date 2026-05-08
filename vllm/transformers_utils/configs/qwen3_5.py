@@ -159,6 +159,18 @@ class Qwen3_5VisionConfig(PretrainedConfig):
         self.initializer_range = initializer_range
 
 
+class DamorkTextConfig(Qwen3_5TextConfig):
+    """Damork-branded text config alias for Qwen3.5 text checkpoints."""
+
+    model_type = "damork_text"
+
+
+class DamorkVisionConfig(Qwen3_5VisionConfig):
+    """Damork-branded vision config alias for Qwen3.5 vision checkpoints."""
+
+    model_type = "damork"
+
+
 class Qwen3_5Config(PretrainedConfig):
     model_type = "qwen3_5"
     sub_configs = {
@@ -201,6 +213,19 @@ class DamorkConfig(Qwen3_5Config):
     """Damork-branded config alias for Qwen3.5-compatible checkpoints."""
 
     model_type = "damork"
+    sub_configs = {
+        "vision_config": DamorkVisionConfig,
+        "text_config": DamorkTextConfig,
+    }
+
+    def get_text_config(self, decoder: bool = False):
+        return self.text_config
 
 
-__all__ = ["DamorkConfig", "Qwen3_5Config", "Qwen3_5TextConfig"]
+__all__ = [
+    "DamorkConfig",
+    "DamorkTextConfig",
+    "DamorkVisionConfig",
+    "Qwen3_5Config",
+    "Qwen3_5TextConfig",
+]

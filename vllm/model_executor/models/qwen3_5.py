@@ -158,7 +158,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.mlp",
             )
-        elif config.model_type == "qwen3_5_text":
+        elif config.model_type in ("qwen3_5_text", "damork_text"):
             self.mlp = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
