@@ -458,13 +458,13 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             if on_gfx950():
                 deduped, duplicated = self._dedup_and_duplicate_for_fusion(graph)
         if deduped > 0 or duplicated > 0:
-            logger.info(
+            logger.debug(
                 "Pre-fusion: deduped %d redundant quants, duplicated %d norms",
                 deduped,
                 duplicated,
             )
         self.matched_count = self.patterns.apply(graph)
-        logger.info(
+        logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
         )
 

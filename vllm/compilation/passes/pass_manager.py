@@ -205,6 +205,12 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
+        passes.append(self.clone_elimination.uuid())
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
+                passes.pop()
         passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
