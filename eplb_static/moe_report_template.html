@@ -160,7 +160,6 @@ const SELECTED_STEP = /*SELECTED_STEP*/null;
 // these markers existed render with the legacy info-panel only.
 const SESSION_META = /*SESSION_META*/null;
 const BENCH_RUNS = /*BENCH_RUNS*/[];
-const SCHEDULE_META = /*SCHEDULE_META*/null;
 // Wall-clock timezone for rendering "Started" / "Generated" timestamps.
 // Snapshotted from $TZ at HTML-generation time by moe_report.py. null
 // means "browser default" (which is also the user's local TZ in most
@@ -887,84 +886,6 @@ function renderInfoPanel() {
       + `</div>`;
   }
 
-  // Row "Schedule": only when --schedule was passed AND the schedule
-  // JSONL included generation metadata. Older schedules (pre-traceability)
-  // collapse to "n/a" cells rather than a missing row, so it's still
-  // visible that a schedule was loaded.
-  let scheduleRow = '';
-  if (SCHEDULE_META) {
-    // ----- Schedule structure (always present, from eplb_initial_mapping)
-    const structureExtras = [];
-    if (SCHEDULE_META.schedule_path) {
-      structureExtras.push(['Path', SCHEDULE_META.schedule_path]);
-    }
-    if (SCHEDULE_META.num_redundant_experts !== undefined
-        && SCHEDULE_META.num_redundant_experts !== null) {
-      structureExtras.push(['Redundant', SCHEDULE_META.num_redundant_experts]);
-    }
-    if (SCHEDULE_META.num_slots !== undefined
-        && SCHEDULE_META.num_slots !== null) {
-      structureExtras.push(['Slots', SCHEDULE_META.num_slots]);
-    }
-    scheduleRow =
-      `<div class="info-row"><span class="info-row-label">Schedule</span>`
-      + structureExtras.map(e => tag(e[0], e[1])).join(' ')
-      + `</div>`;
-
-    // ----- Generation metadata (only when self-describing schedule:
-    //       vanilla generate_static_mapping.py output won't carry these,
-    //       so the row is skipped entirely if no generated_* field exists)
-    const hasGenMeta = (
-      SCHEDULE_META.generated_at
-      || SCHEDULE_META.generated_by_cmdline
-      || SCHEDULE_META.generated_by_argv
-    );
-    if (hasGenMeta) {
-      const extras = [];
-      if (SCHEDULE_META.generated_at) {
-        extras.push(['Generated', formatTimestamp(SCHEDULE_META.generated_at)]);
-      }
-      if (SCHEDULE_META.generated_by_cwd) {
-        extras.push(['cwd', SCHEDULE_META.generated_by_cwd]);
-      }
-      scheduleRow +=
-        `<div class="info-row"><span class="info-row-label">— built</span>`
-        + cmdRow(
-            'generate_static_mapping.py',
-            SCHEDULE_META.generated_by_argv,
-            [])
-        + ' '
-        + extras.map(e => tag(e[0], e[1])).join(' ')
-        + `</div>`;
-    }
-
-    // ----- Usage metadata (written by nvtx.sh when the schedule is
-    //       applied to a run). Skipped if absent — i.e. when the user
-    //       loaded the schedule directly without going through nvtx.sh.
-    const hasUsageMeta = (
-      SCHEDULE_META.used_at
-      || SCHEDULE_META.used_by_cmdline
-      || SCHEDULE_META.used_by_argv
-      || SCHEDULE_META.host
-    );
-    if (hasUsageMeta) {
-      const extras = [];
-      if (SCHEDULE_META.used_at) {
-        extras.push(['Used', formatTimestamp(SCHEDULE_META.used_at)]);
-      }
-      if (SCHEDULE_META.host) extras.push(['Host', SCHEDULE_META.host]);
-      if (SCHEDULE_META.vllm_version) {
-        extras.push(['vLLM', SCHEDULE_META.vllm_version]);
-      }
-      scheduleRow +=
-        `<div class="info-row"><span class="info-row-label">— used by</span>`
-        + cmdRow('nvtx.sh', SCHEDULE_META.used_by_argv, [])
-        + ' '
-        + extras.map(e => tag(e[0], e[1])).join(' ')
-        + `</div>`;
-    }
-  }
-
   // --perf-data row: aligned multi-run benchmark table folded inside a
   // <details> tag so the panel stays compact by default and the user
   // expands it on demand. HTML-escaped first; then \x01 / \x02 sentinel
@@ -997,7 +918,6 @@ function renderInfoPanel() {
     ${perfRow}
     ${launchRow}
     ${benchRowsHtml}
-    ${scheduleRow}
   `;
 }
 

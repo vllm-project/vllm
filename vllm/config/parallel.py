@@ -51,36 +51,6 @@ All2AllBackend = Literal[
 ]
 
 
-def _read_schedule_num_redundant(path: str) -> int | None:
-    """Return `num_redundant_experts` from an `eplb_initial_mapping` JSONL.
-
-    The schedule file is the source of truth for redundant-expert count
-    (the offline tool writes it, the online loader cross-checks it).
-    Returning None means the file does not exist yet, is unreadable, or
-    contains no `eplb_initial_mapping` record — in those cases we leave
-    `num_redundant_experts` as-is and let the regular load path surface
-    the real error at startup with a useful message.
-    """
-    import json
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("record_type") == "eplb_initial_mapping":
-                    val = rec.get("num_redundant_experts")
-                    if isinstance(val, int):
-                        return val
-    except OSError:
-        return None
-    return None
-
-
 @config
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
@@ -107,22 +77,24 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
-    expert_load_stats_path: str | None = None
+    write_stats_path: str | None = None
     """
     When set to a file path, EPLB logs expert-load statistics as JSONL.
     These records can be used to generate an offline static EPLB mapping.
     """
-    expert_load_stats_interval: int = Field(default=16, gt=0)
+    write_stats_interval: int = Field(default=16, gt=0)
     """
     Interval (in EPLB steps) for writing expert-load statistics when
-    `expert_load_stats_path` is set. Each write triggers a CPU sync and
+    `write_stats_path` is set. Each write triggers a CPU sync and
     disk I/O, so a small value (e.g. 1) materially impacts throughput.
     """
-    initial_mapping_path: str | None = None
+    read_stats_path: str | None = None
     """
-    Path to a JSONL file with an eplb_initial_mapping record containing
-    per-layer physical-to-logical expert mapping. When set, the offline
-    mapping is applied at startup.
+    Path to a JSONL file with EPLB expert-load statistics (the format
+    written when `write_stats_path` is set). When provided, vLLM
+    aggregates the recorded loads at startup, runs the EPLB policy once
+    against the live deploy topology, and applies the resulting
+    physical-to-logical mapping before warmup.
     """
     enable_online: bool = False
     """
@@ -153,23 +125,6 @@ class EPLBConfig:
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
-        # When `initial_mapping_path` is set, the schedule file already encodes
-        # `num_redundant_experts`. Auto-populate from the file so the user
-        # doesn't have to pass it twice; if the user explicitly passed a
-        # non-zero value that disagrees, fail loudly so a stale CLI flag never
-        # silently overrides a fresh schedule.
-        if self.initial_mapping_path is not None:
-            file_redundant = _read_schedule_num_redundant(self.initial_mapping_path)
-            if file_redundant is not None:
-                if self.num_redundant_experts == 0:
-                    self.num_redundant_experts = file_redundant
-                elif self.num_redundant_experts != file_redundant:
-                    raise ValueError(
-                        f"num_redundant_experts={self.num_redundant_experts} "
-                        f"does not match the value in "
-                        f"{self.initial_mapping_path} ({file_redundant}). "
-                        f"Drop the CLI value to inherit it from the schedule."
-                    )
         return self
 
 

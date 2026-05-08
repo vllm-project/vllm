@@ -61,7 +61,7 @@ async def show_version():
 async def get_eplb_step_count(request: Request):
     # Returns the monotonic count of EPLB steps observed since server
     # start (excluding `is_profile` passes). Intended for sizing
-    # `eplb_config.expert_load_stats_interval`: curl before and after a
+    # `eplb_config.write_stats_interval`: curl before and after a
     # benchmark and use the delta. All TP/DP ranks step in lockstep, so
     # rank 0's value is reported.
     client = engine_client(request)

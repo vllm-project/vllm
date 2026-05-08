@@ -139,7 +139,7 @@ While MoE models are typically trained so that each expert receives a similar nu
 
 Enable EPLB with the `--enable-eplb` flag.
 
-`--enable-eplb` only turns on the EPLB subsystem; expert rearrangement is opt-in. Set `enable_online=true` in `--eplb-config` to periodically rebalance during inference, set `initial_mapping_path` to apply a static offline mapping at startup, or both. With `--enable-eplb` alone, EPLB only collects stats (and writes them to `expert_load_stats_path` if set).
+`--enable-eplb` only turns on the EPLB subsystem; expert rearrangement is opt-in. Set `enable_online=true` in `--eplb-config` to periodically rebalance during inference, set `read_stats_path` to compute an initial mapping from previously collected stats and apply it at startup, or both. With `--enable-eplb` alone, EPLB only collects stats (and writes them to `write_stats_path` if set).
 
 ### EPLB Parameters
 
@@ -150,9 +150,9 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `expert_load_stats_path` | Path to write expert-load statistics as JSONL for offline mapping generation | `null` |
-| `expert_load_stats_interval` | Interval (in EPLB steps) for writing stats when `expert_load_stats_path` is set; smaller values cost throughput | `16` |
-| `initial_mapping_path` | Path to a JSONL file containing an `eplb_initial_mapping` record. When set, the offline mapping is applied at startup | `null` |
+| `write_stats_path` | Path to write expert-load statistics as JSONL for offline mapping generation | `null` |
+| `write_stats_interval` | Interval (in EPLB steps) for writing stats when `write_stats_path` is set; smaller values cost throughput | `16` |
+| `read_stats_path` | Path to a JSONL file with EPLB expert-load statistics. When set, vLLM aggregates the recorded loads at startup, runs the EPLB policy once against the live deploy topology, and applies the resulting mapping before warmup | `null` |
 | `enable_online` | Enable online (during-inference) EPLB rearrangement based on observed expert load | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
@@ -209,48 +209,33 @@ For multi-node deployment, add these EPLB flags to each node's command. We recom
 
 ### Offline EPLB Mapping
 
-For stable workloads, you can collect expert-load statistics once and use them to generate an offline EPLB mapping. This avoids online expert rearrangement during serving while still using redundant expert slots.
+For stable workloads, you can collect expert-load statistics once and reuse them to derive an EPLB mapping at startup. This avoids online expert rearrangement during serving while still using redundant expert slots.
 
 First collect stats (no rearrangement, just stats):
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
-  --eplb-config '{"expert_load_stats_path":"eplb_stats.jsonl"}'
+  --eplb-config '{"write_stats_path":"eplb_stats.jsonl"}'
 ```
 
-Then generate an offline mapping:
-
-```bash
-python tools/eplb/generate_static_mapping.py \
-  --stats-path eplb_stats.jsonl \
-  --output eplb_offline_mapping.jsonl \
-  --num-redundant-experts 32
-```
-
-The generated mapping file is JSONL with an `eplb_initial_mapping` record:
-
-```json
-{"record_type":"eplb_initial_mapping","version":1,"num_redundant_experts":32,"num_slots":288,"initial_global_assignments":{"0":[...]}}
-```
-
-Use the mapping as the static offline EPLB placement (no online rearrangement). `num_redundant_experts` is read from the schedule file, so you only need to point at it:
+Then start the server with `read_stats_path` pointing at the collected JSONL. vLLM aggregates the recorded loads, runs the EPLB policy once against the live deploy topology, and applies the resulting mapping before warmup. The stats file is topology-agnostic, so the same JSONL can be reused for deploys with different EP sizes.
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
-  --eplb-config '{"initial_mapping_path":"eplb_offline_mapping.jsonl"}'
+  --eplb-config '{"read_stats_path":"eplb_stats.jsonl","num_redundant_experts":32}'
 ```
 
-To apply the offline mapping at startup *and* keep online EPLB running on top, additionally set `enable_online`:
+To apply the startup mapping *and* keep online EPLB running on top, additionally set `enable_online`:
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
-  --eplb-config '{"enable_online":true,"initial_mapping_path":"eplb_offline_mapping.jsonl"}'
+  --eplb-config '{"enable_online":true,"read_stats_path":"eplb_stats.jsonl","num_redundant_experts":32}'
 ```
 
-`initial_mapping_path` and `enable_online` are independent: with `--enable-eplb` alone (no path, `enable_online=false`), EPLB runs as a stats-only subsystem and never rearranges experts.
+`read_stats_path` and `enable_online` are independent: with `--enable-eplb` alone (no path, `enable_online=false`), EPLB runs as a stats-only subsystem and never rearranges experts.
 
 ## Advanced Configuration
 

@@ -59,6 +59,7 @@ from .rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
+from .stats_loader import aggregate_logical_load, parse_stats_jsonl
 
 logger = init_logger(__name__)
 
@@ -213,10 +214,10 @@ class EplbModelState:
     pending_initial_mapping_rearrange: bool = False
     """
     True iff this model's physical expert weights still need to be moved to
-    match `physical_to_logical_map` (set when an `initial_mapping_path` was
-    loaded). Cleared by `apply_pending_initial_mapping_rearrange`, which the
-    runner invokes once at startup, after `profile_run` and before warmup
-    / cudagraph capture.
+    match `physical_to_logical_map` (set when `read_stats_path` produced
+    a startup mapping). Cleared by `apply_pending_initial_mapping_rearrange`,
+    which the runner invokes once at startup, after `profile_run` and
+    before warmup / cudagraph capture.
     """
 
 
@@ -302,7 +303,7 @@ class EplbState:
         rearrangement, and counts both real and dummy forward passes
         (``is_profile`` passes are excluded). Exposed via the
         ``/eplb_step_count`` HTTP endpoint to help size
-        ``expert_load_stats_interval`` for a target benchmark.
+        ``write_stats_interval`` for a target benchmark.
         """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
@@ -365,8 +366,8 @@ class EplbState:
                     )
                 )
 
-    def _assert_initial_mapping_file_consistent_across_ranks(
-        self, mapping_path: str, raw_bytes: bytes
+    def _assert_stats_file_consistent_across_ranks(
+        self, stats_path: str, raw_bytes: bytes
     ) -> None:
         # Hash the raw file bytes (not parsed fields) so any future schema
         # additions are covered automatically; \r\n vs \n divergence is a
@@ -382,148 +383,109 @@ class EplbState:
         bad = [r for r, g in enumerate(gathered) if not torch.equal(g, ref)]
         if bad:
             raise RuntimeError(
-                f"initial_mapping_path {mapping_path!r}: file contents differ "
+                f"read_stats_path {stats_path!r}: file contents differ "
                 f"across ranks (rank 0 vs ranks {bad}). The file must be "
                 f"byte-identical on every host."
             )
 
-    def _load_initial_mapping_record(self, mapping_path: str) -> dict:
-        """Load the last eplb_initial_mapping record from a JSONL file."""
-        raw_bytes = Path(mapping_path).read_bytes()
-        self._assert_initial_mapping_file_consistent_across_ranks(
-            mapping_path, raw_bytes
-        )
-        selected_record: dict | None = None
-        for line_no, line in enumerate(raw_bytes.decode().splitlines(), start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"{mapping_path}:{line_no}: invalid JSON: {exc}"
-                ) from exc
-            if record.get("record_type") == "eplb_initial_mapping":
-                selected_record = record
-
-        if selected_record is None:
-            raise ValueError(
-                f"{mapping_path} does not contain an eplb_initial_mapping record."
-            )
-        return selected_record
-
-    def _load_initial_mapping(
+    def _load_initial_mapping_from_stats(
         self,
-        mapping_path: str,
-        num_moe_layers: int,
-        num_physical_experts: int,
-        num_logical_experts: int,
-        num_redundant_experts: int,
+        stats_path: str,
+        model: MixtureOfExperts,
         max_slots_per_logical: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Load per-layer physical-to-logical mapping from a JSONL file."""
-        cfg = self._load_initial_mapping_record(mapping_path)
-        if cfg.get("version") != 1:
+        """Read EPLB stats JSONL, aggregate logical load, and run the EPLB
+        policy once to produce the initial physical-to-logical mapping for
+        this deploy. Topology (ep size, num_groups, num_nodes) is taken from
+        the live process group / model, not from the stats file's meta
+        record — so a single stats file works across topologies."""
+        raw_bytes = Path(stats_path).read_bytes()
+        self._assert_stats_file_consistent_across_ranks(stats_path, raw_bytes)
+        meta, records = parse_stats_jsonl(raw_bytes.decode())
+        if meta.get("version") != 1:
             raise ValueError(
-                f"{mapping_path}: expected eplb_initial_mapping version 1, "
-                f"got {cfg.get('version')!r}."
+                f"{stats_path}: expected eplb_load_meta version 1, "
+                f"got {meta.get('version')!r}."
             )
-        if cfg.get("num_redundant_experts") != num_redundant_experts:
+        file_layers = meta.get("num_layers")
+        if file_layers != model.num_moe_layers:
             raise ValueError(
-                f"{mapping_path}: num_redundant_experts "
-                f"{cfg.get('num_redundant_experts')!r} does not match "
-                f"eplb_config.num_redundant_experts={num_redundant_experts}."
-            )
-        if cfg.get("num_slots") != num_physical_experts:
-            raise ValueError(
-                f"{mapping_path}: num_slots {cfg.get('num_slots')!r} does not "
-                f"match expected physical experts {num_physical_experts}."
-            )
-        if num_physical_experts != num_logical_experts + num_redundant_experts:
-            raise ValueError(
-                "num_physical_experts must equal num_logical_experts + "
-                "num_redundant_experts for initial EPLB mapping, got "
-                f"{num_physical_experts} != {num_logical_experts} + "
-                f"{num_redundant_experts}."
+                f"{stats_path}: stats num_layers={file_layers} does not match "
+                f"model num_moe_layers={model.num_moe_layers}."
             )
 
-        assignments = cfg.get("initial_global_assignments")
-        if not isinstance(assignments, dict):
+        logical_load = aggregate_logical_load(records)
+        if logical_load.shape != (model.num_moe_layers, model.num_logical_experts):
             raise ValueError(
-                f"{mapping_path}: initial_global_assignments must be an object."
+                f"{stats_path}: aggregated logical load shape "
+                f"{tuple(logical_load.shape)} does not match "
+                f"(num_moe_layers={model.num_moe_layers}, "
+                f"num_logical_experts={model.num_logical_experts})."
             )
 
-        rows: list[list[int]] = []
-        for layer in range(num_moe_layers):
-            layer_key = str(layer)
-            if layer_key not in assignments:
-                raise ValueError(
-                    f"{mapping_path}: missing initial_global_assignments "
-                    f"for layer {layer}."
-                )
-            row = assignments[layer_key]
-            if not isinstance(row, list) or len(row) != num_physical_experts:
-                raise ValueError(
-                    f"{mapping_path}: layer {layer} must contain exactly "
-                    f"{num_physical_experts} assignments."
-                )
-            int_row = []
-            for phy, logical_idx in enumerate(row):
-                if not isinstance(logical_idx, int):
-                    raise ValueError(
-                        f"{mapping_path}: layer {layer}, physical slot {phy} "
-                        "must be an integer logical expert id."
-                    )
-                if not 0 <= logical_idx < num_logical_experts:
-                    raise ValueError(
-                        f"{mapping_path}: layer {layer}, physical slot {phy} "
-                        f"has logical expert id {logical_idx}, expected range "
-                        f"[0, {num_logical_experts})."
-                    )
-                int_row.append(logical_idx)
-            if len(set(int_row)) != num_logical_experts:
-                raise ValueError(
-                    f"{mapping_path}: every logical expert must appear at "
-                    f"least once in layer {layer}."
-                )
-            rows.append(int_row)
+        ep_group = get_ep_group().device_group
+        num_replicas = model.num_physical_experts
+        num_groups = model.num_expert_groups
+        num_nodes = get_node_count()
+        num_gpus = ep_group.size()
+        if num_gpus % num_nodes != 0:
+            num_nodes = 1
+            logger.warning_once(
+                "num_gpus %% num_nodes != 0, "
+                "not using hierarchical rearrangement algorithm.\n"
+                f"{num_gpus=}, {num_nodes=}"
+            )
 
-        physical_to_logical_map = torch.tensor(
-            rows, dtype=torch.long, device=self.device
+        physical_to_logical_map = (
+            self.policy.rebalance_experts(
+                logical_load,
+                num_replicas,
+                num_groups,
+                num_nodes,
+                num_gpus,
+            )
+            .long()
+            .to(self.device)
         )
         assert physical_to_logical_map.shape == (
-            num_moe_layers,
-            num_physical_experts,
+            model.num_moe_layers,
+            model.num_physical_experts,
         ), (
-            f"JSONL mapping shape {physical_to_logical_map.shape} != "
-            f"expected ({num_moe_layers}, {num_physical_experts})"
+            f"policy returned shape {physical_to_logical_map.shape} != "
+            f"({model.num_moe_layers}, {model.num_physical_experts})"
         )
 
         logical_to_physical_map = torch.full(
-            (num_moe_layers, num_logical_experts, max_slots_per_logical),
+            (
+                model.num_moe_layers,
+                model.num_logical_experts,
+                max_slots_per_logical,
+            ),
             -1,
             device=self.device,
         )
         logical_replica_count = torch.zeros(
-            (num_moe_layers, num_logical_experts),
+            (model.num_moe_layers, model.num_logical_experts),
             device=self.device,
             dtype=torch.long,
         )
-
-        for layer in range(num_moe_layers):
-            for phy in range(num_physical_experts):
+        for layer in range(model.num_moe_layers):
+            for phy in range(model.num_physical_experts):
                 log_idx = int(physical_to_logical_map[layer, phy])
                 cnt = int(logical_replica_count[layer, log_idx])
                 if cnt >= max_slots_per_logical:
                     raise ValueError(
-                        f"{mapping_path}: logical expert {log_idx} in layer "
+                        f"{stats_path}: logical expert {log_idx} in layer "
                         f"{layer} has more than {max_slots_per_logical} replicas."
                     )
                 logical_to_physical_map[layer, log_idx, cnt] = phy
                 logical_replica_count[layer, log_idx] = cnt + 1
 
-        logger.info("Loaded initial EPLB mapping from %s", mapping_path)
+        logger.info(
+            "Computed initial EPLB mapping from %s (aggregated %d stats record(s))",
+            stats_path,
+            len(records),
+        )
         return (
             physical_to_logical_map,
             logical_to_physical_map,
@@ -551,27 +513,24 @@ class EplbState:
         )
         max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
 
-        mapping_path = self.parallel_config.eplb_config.initial_mapping_path
-        pending_initial_mapping_rearrange = mapping_path is not None
-        if mapping_path is not None:
+        stats_path = self.parallel_config.eplb_config.read_stats_path
+        pending_initial_mapping_rearrange = stats_path is not None
+        if stats_path is not None:
             (
                 physical_to_logical_map,
                 logical_to_physical_map,
                 logical_replica_count,
-            ) = self._load_initial_mapping(
-                mapping_path,
-                model.num_moe_layers,
-                model.num_physical_experts,
-                model.num_logical_experts,
-                model.num_redundant_experts,
+            ) = self._load_initial_mapping_from_stats(
+                stats_path,
+                model,
                 max_slots_per_logical_expert,
             )
             # CORRECTNESS: the model has just been loaded with weights in
             # identity order (phys slot i holds logical expert i, plus
-            # redundant copies of the first few experts). The JSONL mapping
-            # above swapped the maps but did NOT move the physical weights,
-            # so the router would dispatch tokens for logical X to the slot
-            # of some other logical Y. The runner calls
+            # redundant copies of the first few experts). The mapping
+            # computed above swapped the maps but did NOT move the physical
+            # weights, so the router would dispatch tokens for logical X to
+            # the slot of some other logical Y. The runner calls
             # `apply_pending_initial_mapping_rearrange` once at startup,
             # AFTER profile_run completes, so this all_gather doesn't bloat
             # the peak-memory measurement and shrink the KV cache budget.
@@ -691,8 +650,9 @@ class EplbState:
         self.num_valid_physical_experts = model.num_physical_experts
 
     def apply_pending_initial_mapping_rearrange(self, ep_group: ProcessGroup) -> None:
-        """Move startup weights for any model whose initial_mapping_path was
-        loaded but not yet applied. Per-model flag is cleared on completion.
+        """Move startup weights for any model whose read_stats_path produced
+        an initial mapping that has not yet been applied. Per-model flag is
+        cleared on completion.
 
         Must be called once after `profile_run` and before warmup /
         cudagraph capture, so the all_gather buffer doesn't inflate the
@@ -716,9 +676,9 @@ class EplbState:
             local_start = ep_rank * num_local
 
             logger.info(
-                "EPLB: applying initial_mapping_path rearrangement "
-                "(model %s): moving weights from identity layout to "
-                "the JSONL-specified mapping",
+                "EPLB: applying initial mapping rearrangement (model %s): "
+                "moving weights from identity layout to the mapping "
+                "computed from read_stats_path",
                 state.model_name,
             )
 
@@ -760,7 +720,7 @@ class EplbState:
             return
 
         if self._expert_load_stats_file is None:
-            stats_path = self.parallel_config.eplb_config.expert_load_stats_path
+            stats_path = self.parallel_config.eplb_config.write_stats_path
             assert stats_path is not None
             path = Path(stats_path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -905,8 +865,8 @@ class EplbState:
 
         cfg = self.parallel_config.eplb_config
         should_write_load_stats = (
-            cfg.expert_load_stats_path is not None
-            and self.expert_rearrangement_step % cfg.expert_load_stats_interval == 0
+            cfg.write_stats_path is not None
+            and self.expert_rearrangement_step % cfg.write_stats_interval == 0
         )
         if should_write_load_stats:
             expert_load_pass_list = self._sync_load_pass()
@@ -963,9 +923,7 @@ class EplbState:
                         ep_rank=ep_group.rank(),
                     )
 
-        online_rebalancing_enabled = (
-            self.parallel_config.eplb_config.enable_online
-        )
+        online_rebalancing_enabled = self.parallel_config.eplb_config.enable_online
         if (
             online_rebalancing_enabled
             and self.expert_rearrangement_step
@@ -995,7 +953,7 @@ class EplbState:
         if not self.parallel_config.eplb_config.enable_online:
             return (
                 log_stats
-                or self.parallel_config.eplb_config.expert_load_stats_path is not None
+                or self.parallel_config.eplb_config.write_stats_path is not None
             )
 
         steps_remaining = (
@@ -1004,8 +962,7 @@ class EplbState:
         should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
 
         stats_enabled = (
-            log_stats
-            or self.parallel_config.eplb_config.expert_load_stats_path is not None
+            log_stats or self.parallel_config.eplb_config.write_stats_path is not None
         )
         if not stats_enabled:
             return should_record_for_rearrange

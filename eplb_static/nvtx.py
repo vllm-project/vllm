@@ -11,7 +11,7 @@ the manual offline-EPLB tuning loop:
     2. count_steps      ─ run server (+ --enable-eplb) and the bench once;
                           curl /eplb_step_count to learn how many EPLB
                           steps the bench produces, then derive
-                          expert_load_stats_interval = ceil(steps / 50)
+                          write_stats_interval = ceil(steps / 50)
                           so a follow-up stats run captures ~50 records.
     3. baseline_stats   ─ rerun bench with stats writing on; produces
                           baseline.jsonl.
@@ -19,10 +19,12 @@ the manual offline-EPLB tuning loop:
                           appends the stdouts into baseline_perf.txt.
     5. baseline_html    ─ moe_report.py baseline.jsonl + baseline_perf.txt
                           → baseline.html.
-    6. schedules        ─ tools/eplb/generate_static_mapping.py for X
-                          ∈ {0,32,64} → <X>replicas_schedule.jsonl.
-    7. per-replica runs ─ for each X: collect stats with the schedule
-                          loaded, run perf 5x, generate HTML.
+    6. per-replica runs ─ for each X ∈ {0,32,64}: relaunch the server with
+                          read_stats_path=baseline.jsonl and
+                          num_redundant_experts=X so vLLM aggregates the
+                          baseline stats and applies the resulting mapping
+                          at startup; collect stats, run perf 5x, generate
+                          HTML.
 
 Between every server start the script invokes `killvllm` so leftover DP
 workers from previous stages cannot collide with the new launch.
@@ -51,11 +53,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
 
 SCRIPT_NAME = "nvtx"
 
@@ -101,10 +103,7 @@ def _emit(prefix_color: str, label: str, msg: str) -> None:
     """Write one log line to terminal (colored) and log file (plain)."""
     t = _ts()
     plain = f"[{t} {CURRENT_STAGE}] {label}{msg}"
-    colored = (
-        f"{prefix_color}[{SCRIPT_NAME} {t} {CURRENT_STAGE}]{NC} "
-        f"{label}{msg}"
-    )
+    colored = f"{prefix_color}[{SCRIPT_NAME} {t} {CURRENT_STAGE}]{NC} {label}{msg}"
     print(colored, flush=True)
     if LOG_FP is not None:
         LOG_FP.write(plain + "\n")
@@ -159,6 +158,7 @@ def stage_timer(name: str):
 
 # ------------------------------ preflight ------------------------------
 
+
 def check_gpus() -> tuple[bool, str]:
     """Return (ok, message). Hard fails when nvidia-smi missing — there is
     no way to verify GPU availability without it.
@@ -168,7 +168,9 @@ def check_gpus() -> tuple[bool, str]:
     try:
         gpu_out = subprocess.run(
             ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         ).stdout
     except subprocess.CalledProcessError as e:
         return False, f"nvidia-smi failed: {e.stderr.strip() or e}"
@@ -179,20 +181,25 @@ def check_gpus() -> tuple[bool, str]:
     # Any compute app on any GPU = "busy". This catches lingering vllm
     # workers from a previous run that killvllm somehow missed.
     apps_out = subprocess.run(
-        ["nvidia-smi",
-         "--query-compute-apps=pid,process_name,used_memory",
-         "--format=csv,noheader"],
-        capture_output=True, text=True, check=True,
+        [
+            "nvidia-smi",
+            "--query-compute-apps=pid,process_name,used_memory",
+            "--format=csv,noheader",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     active = [r.strip() for r in apps_out.strip().splitlines() if r.strip()]
     if active:
         sample = "; ".join(active[:5])
-        more = f" (+{len(active)-5} more)" if len(active) > 5 else ""
+        more = f" (+{len(active) - 5} more)" if len(active) > 5 else ""
         return False, f"GPUs not idle, {len(active)} compute proc(s): {sample}{more}"
     return True, "8 GPUs present and idle"
 
 
 # ------------------------------ killvllm ------------------------------
+
 
 def killvllm() -> None:
     """Run the user's `killvllm` shell function/alias. Wrapped via `bash -lc`
@@ -202,8 +209,10 @@ def killvllm() -> None:
     try:
         subprocess.run(
             ["bash", "-lc", "killvllm"],
-            check=False, timeout=60,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=60,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         warn("killvllm timed out after 60s")
@@ -213,6 +222,7 @@ def killvllm() -> None:
 
 
 # ------------------------------ server ------------------------------
+
 
 def _tee_server_output(stream, log_fp) -> None:
     """Drain the server's combined stdout/stderr, writing each chunk to BOTH
@@ -244,8 +254,11 @@ def start_server(cmd: str, log_path: Path) -> None:
     SERVER_LOG_FP = open(log_path, "ab", buffering=0)
     env = {**os.environ, "HF_HUB_OFFLINE": "0"}
     SERVER_PROC = subprocess.Popen(
-        cmd, shell=True, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        cmd,
+        shell=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
         bufsize=0,
     )
@@ -272,7 +285,8 @@ def wait_for_ready(port: int = 8000, timeout_s: int = SERVER_READY_TIMEOUT_S) ->
             return False
         try:
             with urllib.request.urlopen(
-                f"http://localhost:{port}/health", timeout=5,
+                f"http://localhost:{port}/health",
+                timeout=5,
             ) as resp:
                 if resp.status == 200:
                     ok(f"server ready in {int(time.time() - started)}s")
@@ -332,17 +346,20 @@ def restart_server(cmd: str, log_path: Path) -> None:
 
 # ------------------------------ HTTP helpers ------------------------------
 
+
 def get_eplb_step_count(port: int = 8000) -> int:
     """GET /eplb_step_count → integer step count. Endpoint is the one we
     added in this PR; if the server is missing it (older build), this will
     raise HTTPError 404, which is then surfaced verbatim in the summary."""
     with urllib.request.urlopen(
-        f"http://localhost:{port}/eplb_step_count", timeout=10,
+        f"http://localhost:{port}/eplb_step_count",
+        timeout=10,
     ) as resp:
         return int(json.loads(resp.read())["step_count"])
 
 
 # ------------------------------ command rewriting ------------------------------
+
 
 def with_enable_eplb(cmd: str) -> str:
     """Append --enable-eplb if not already there. Idempotent so the user is
@@ -362,6 +379,7 @@ def with_eplb_config(cmd: str, config: dict) -> str:
 
 # ------------------------------ benchmark ------------------------------
 
+
 def run_benchmark(cmd: str, perf_file: Path | None = None) -> tuple[bool, bytes]:
     """Run the user's bench command, mirroring its stdout to our terminal
     LIVE (via a pty so tqdm refreshes work) AND capturing it. Optionally
@@ -376,8 +394,12 @@ def run_benchmark(cmd: str, perf_file: Path | None = None) -> tuple[bool, bytes]
     # finished — useless for monitoring a 15s run.
     master, slave = pty.openpty()
     proc = subprocess.Popen(
-        cmd, shell=True, env=env,
-        stdin=slave, stdout=slave, stderr=slave,
+        cmd,
+        shell=True,
+        env=env,
+        stdin=slave,
+        stdout=slave,
+        stderr=slave,
         close_fds=True,
     )
     os.close(slave)
@@ -408,6 +430,7 @@ def run_benchmark(cmd: str, perf_file: Path | None = None) -> tuple[bool, bytes]
 
 
 # ------------------------------ stages ------------------------------
+
 
 def compute_interval(steps: int) -> int:
     """Round up so that the resulting JSONL has at most TARGET_STATS_RECORDS
@@ -441,21 +464,29 @@ def stage_count_steps(server_cmd: str, bench_cmd: str, dir_path: Path) -> int:
 
 
 def stage_collect_stats(
-    server_cmd: str, bench_cmd: str, dir_path: Path,
-    name: str, interval: int,
+    server_cmd: str,
+    bench_cmd: str,
+    dir_path: Path,
+    name: str,
+    interval: int,
 ) -> None:
     """Run a single bench with stats writing on. ``name`` controls both the
-    output JSONL filename and whether an offline mapping is loaded:
+    output JSONL filename and whether the baseline stats drive a startup
+    mapping:
       - "baseline"        → no initial mapping (default identity).
-      - "<X>replicas"     → loads <X>replicas_schedule.jsonl.
+      - "<X>replicas"     → reads baseline.jsonl via read_stats_path with
+                            num_redundant_experts=X so vLLM derives the
+                            mapping at startup.
     """
     with stage_timer(f"collect_stats:{name}"):
         config: dict = {
-            "expert_load_stats_path": str(dir_path / f"{name}.jsonl"),
-            "expert_load_stats_interval": interval,
+            "write_stats_path": str(dir_path / f"{name}.jsonl"),
+            "write_stats_interval": interval,
         }
         if name != "baseline":
-            config["initial_mapping_path"] = str(dir_path / f"{name}_schedule.jsonl")
+            num_redundant = int(name.removesuffix("replicas"))
+            config["read_stats_path"] = str(dir_path / "baseline.jsonl")
+            config["num_redundant_experts"] = num_redundant
         cmd = with_eplb_config(server_cmd, config)
         restart_server(cmd, dir_path / f"server_collect_{name}.log")
         try:
@@ -466,7 +497,10 @@ def stage_collect_stats(
 
 
 def stage_perf(
-    server_cmd: str, bench_cmd: str, dir_path: Path, name: str,
+    server_cmd: str,
+    bench_cmd: str,
+    dir_path: Path,
+    name: str,
 ) -> Path:
     """Run the bench WARMUP_RUNS+MEASURED_RUNS times against a fresh
     server and append every stdout to ``<name>_perf.txt``. Returns the
@@ -479,34 +513,38 @@ def stage_perf(
                             on this branch — `eplb_config.enable_online`
                             defaults to False), no initial mapping.
       - "<X>replicas"     → also passes
-                            `--eplb-config '{"initial_mapping_path": ".../<X>replicas_schedule.jsonl"}'`
-                            so the offline mapping is loaded. Without
-                            this the X-replicas perf is indistinguishable
-                            from the baseline perf — same server config.
-                            (`num_redundant_experts` is auto-read from
-                            the schedule file by `parallel.py`.)
+                            ``--eplb-config '{"read_stats_path":
+                            ".../baseline.jsonl",
+                            "num_redundant_experts": X}'`` so vLLM
+                            aggregates the baseline stats and applies the
+                            resulting mapping at startup. Without this the
+                            X-replicas perf is indistinguishable from the
+                            baseline perf — same server config.
     """
     with stage_timer(f"perf:{name}"):
         if name == "baseline":
             cmd = with_enable_eplb(server_cmd)
         else:
-            cmd = with_eplb_config(server_cmd, {
-                "initial_mapping_path": str(
-                    dir_path / f"{name}_schedule.jsonl"
-                ),
-            })
+            num_redundant = int(name.removesuffix("replicas"))
+            cmd = with_eplb_config(
+                server_cmd,
+                {
+                    "read_stats_path": str(dir_path / "baseline.jsonl"),
+                    "num_redundant_experts": num_redundant,
+                },
+            )
         restart_server(cmd, dir_path / f"server_perf_{name}.log")
         perf_file = dir_path / f"{name}_perf.txt"
         try:
             total = WARMUP_RUNS + MEASURED_RUNS
             for i in range(total):
                 tag = " (warmup)" if i < WARMUP_RUNS else ""
-                log(f"perf bench {i+1}/{total}{tag}")
+                log(f"perf bench {i + 1}/{total}{tag}")
                 t_iter = time.time()
                 if not run_benchmark(bench_cmd, perf_file)[0]:
-                    raise RuntimeError(f"perf bench iteration {i+1} failed")
+                    raise RuntimeError(f"perf bench iteration {i + 1} failed")
                 log(
-                    f"perf bench {i+1}/{total}{tag} done in "
+                    f"perf bench {i + 1}/{total}{tag} done in "
                     f"{_fmt_elapsed(time.time() - t_iter)}"
                 )
         finally:
@@ -515,32 +553,21 @@ def stage_perf(
 
 
 def stage_html_report(
-    jsonl: Path, perf_file: Path | None, output: Path,
+    jsonl: Path,
+    perf_file: Path | None,
+    output: Path,
 ) -> None:
     """Invoke moe_report.py with `.venv/bin/python` (= sys.executable)."""
     with stage_timer(f"html_report:{output.name}"):
         cmd = [
             sys.executable,
             str(Path(__file__).resolve().parent / "moe_report.py"),
-            str(jsonl), "-o", str(output),
+            str(jsonl),
+            "-o",
+            str(output),
         ]
         if perf_file is not None:
             cmd.extend(["--perf-data", str(perf_file)])
-        log("running: " + " ".join(cmd))
-        subprocess.run(cmd, check=True)
-
-
-def stage_generate_schedule(
-    jsonl: Path, output: Path, num_redundant: int, repo_root: Path,
-) -> None:
-    with stage_timer(f"schedule:{num_redundant}replicas"):
-        cmd = [
-            sys.executable,
-            str(repo_root / "tools" / "eplb" / "generate_static_mapping.py"),
-            "--stats-path", str(jsonl),
-            "--output", str(output),
-            "--num-redundant-experts", str(num_redundant),
-        ]
         log("running: " + " ".join(cmd))
         subprocess.run(cmd, check=True)
 
@@ -612,30 +639,6 @@ def _validate_stats_jsonl(path: Path) -> bool:
     return has_meta and has_stats
 
 
-def _validate_schedule_jsonl(path: Path) -> bool:
-    """A complete offline mapping JSONL has ≥1 ``eplb_initial_mapping``
-    record. ``generate_static_mapping.py`` writes the record in a single
-    ``open(..., 'w')`` block, so it's effectively atomic on local
-    filesystems — no partial-line concern."""
-    if not path.exists() or path.stat().st_size == 0:
-        return False
-    try:
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    return False
-                if rec.get("record_type") == "eplb_initial_mapping":
-                    return True
-    except OSError:
-        return False
-    return False
-
-
 def _validate_perf_txt(path: Path) -> bool:
     """A complete perf file ends with the ``=`` × 50 closing bar of the
     final ``Serving Benchmark Result`` block. If the bench was killed
@@ -684,16 +687,17 @@ class Stage:
     structurally valid (catches partial files from a killed server). The
     default checks just existence — supply the real validator at
     construction time when there's a known shape to verify."""
+
     name: str
     outputs: list[Path]
     run: Callable[[], None | int]
-    is_complete: Callable[[], bool] = field(
-        default_factory=lambda: (lambda: True)
-    )
+    is_complete: Callable[[], bool] = field(default_factory=lambda: (lambda: True))
 
 
 def _build_plan(
-    server_cmd: str, bench_cmd: str, dir_path: Path, repo_root: Path,
+    server_cmd: str,
+    bench_cmd: str,
+    dir_path: Path,
     get_interval: Callable[[], int],
 ) -> list[Stage]:
     """Construct the linear list of stages. ``get_interval`` is a closure
@@ -717,7 +721,11 @@ def _build_plan(
             name="collect_stats:baseline",
             outputs=[baseline_jsonl],
             run=lambda: stage_collect_stats(
-                server_cmd, bench_cmd, dir_path, "baseline", get_interval(),
+                server_cmd,
+                bench_cmd,
+                dir_path,
+                "baseline",
+                get_interval(),
             ),
             is_complete=lambda p=baseline_jsonl: _validate_stats_jsonl(p),
         ),
@@ -731,51 +739,57 @@ def _build_plan(
             name="html_report:baseline.html",
             outputs=[baseline_html],
             run=lambda: stage_html_report(
-                baseline_jsonl, baseline_perf, baseline_html,
+                baseline_jsonl,
+                baseline_perf,
+                baseline_html,
             ),
             is_complete=lambda p=baseline_html: _validate_html(p),
         ),
     ]
-    # Schedules are independent of each other and only depend on baseline.jsonl.
-    for x in REPLICA_VARIANTS:
-        sched = dir_path / f"{x}replicas_schedule.jsonl"
-        plan.append(Stage(
-            name=f"schedule:{x}replicas",
-            outputs=[sched],
-            run=lambda x=x, sched=sched: stage_generate_schedule(
-                baseline_jsonl, sched, x, repo_root,
-            ),
-            is_complete=lambda p=sched: _validate_schedule_jsonl(p),
-        ))
-    # Per-replica trio: collect (stats with schedule loaded) → perf → html.
+    # Per-replica trio: collect (stats with read_stats_path loaded) → perf → html.
     for x in REPLICA_VARIANTS:
         name = f"{x}replicas"
         repl_jsonl = dir_path / f"{name}.jsonl"
         repl_perf = dir_path / f"{name}_perf.txt"
         repl_html = dir_path / f"{name}.html"
-        plan.append(Stage(
-            name=f"collect_stats:{name}",
-            outputs=[repl_jsonl],
-            run=lambda name=name: stage_collect_stats(
-                server_cmd, bench_cmd, dir_path, name, get_interval(),
-            ),
-            is_complete=lambda p=repl_jsonl: _validate_stats_jsonl(p),
-        ))
-        plan.append(Stage(
-            name=f"perf:{name}",
-            outputs=[repl_perf],
-            run=lambda name=name: stage_perf(
-                server_cmd, bench_cmd, dir_path, name,
-            ),
-            is_complete=lambda p=repl_perf: _validate_perf_txt(p),
-        ))
-        plan.append(Stage(
-            name=f"html_report:{name}.html",
-            outputs=[repl_html],
-            run=lambda name=name, j=repl_jsonl, p=repl_perf, h=repl_html:
-                stage_html_report(j, p, h),
-            is_complete=lambda p=repl_html: _validate_html(p),
-        ))
+        plan.append(
+            Stage(
+                name=f"collect_stats:{name}",
+                outputs=[repl_jsonl],
+                run=lambda name=name: stage_collect_stats(
+                    server_cmd,
+                    bench_cmd,
+                    dir_path,
+                    name,
+                    get_interval(),
+                ),
+                is_complete=lambda p=repl_jsonl: _validate_stats_jsonl(p),
+            )
+        )
+        plan.append(
+            Stage(
+                name=f"perf:{name}",
+                outputs=[repl_perf],
+                run=lambda name=name: stage_perf(
+                    server_cmd,
+                    bench_cmd,
+                    dir_path,
+                    name,
+                ),
+                is_complete=lambda p=repl_perf: _validate_perf_txt(p),
+            )
+        )
+        plan.append(
+            Stage(
+                name=f"html_report:{name}.html",
+                outputs=[repl_html],
+                run=lambda name=name,
+                j=repl_jsonl,
+                p=repl_perf,
+                h=repl_html: stage_html_report(j, p, h),
+                is_complete=lambda p=repl_html: _validate_html(p),
+            )
+        )
     return plan
 
 
@@ -801,7 +815,7 @@ def _write_state(state_path: Path, state: dict) -> None:
 
 
 def _infer_interval_from_jsonl(path: Path) -> int | None:
-    """Recover ``expert_load_stats_interval`` from a stats JSONL by reading
+    """Recover ``write_stats_interval`` from a stats JSONL by reading
     the first two ``eplb_load_stats`` records and taking the difference of
     their ``step`` fields. vLLM writes records at expert_rearrangement_step
     values 0, interval, 2*interval, … so the first delta IS the interval.
@@ -835,7 +849,9 @@ def _expected_filenames(dir_path: Path) -> set[str]:
     one of ours (vs random user content) before touching anything."""
     names = {"nvtx_log.txt", STATE_FILENAME}
     for n in (
-        "baseline.jsonl", "baseline_perf.txt", "baseline.html",
+        "baseline.jsonl",
+        "baseline_perf.txt",
+        "baseline.html",
         "server_count_steps.log",
         "server_collect_baseline.log",
         "server_perf_baseline.log",
@@ -843,8 +859,9 @@ def _expected_filenames(dir_path: Path) -> set[str]:
         names.add(n)
     for x in REPLICA_VARIANTS:
         for n in (
-            f"{x}replicas.jsonl", f"{x}replicas_schedule.jsonl",
-            f"{x}replicas_perf.txt", f"{x}replicas.html",
+            f"{x}replicas.jsonl",
+            f"{x}replicas_perf.txt",
+            f"{x}replicas.html",
             f"server_collect_{x}replicas.log",
             f"server_perf_{x}replicas.log",
         ):
@@ -886,6 +903,7 @@ def _detect_completed_from_files(plan: list[Stage], interval: int | None) -> int
 
 # ------------------------------ summary ------------------------------
 
+
 def session_summary(start_time: float, dir_path: Path | None, status: str) -> None:
     """Cyan-banded summary block printed both to terminal and log file.
     Always called once on exit (success or failure)."""
@@ -914,9 +932,11 @@ def session_summary(start_time: float, dir_path: Path | None, status: str) -> No
 
 # ------------------------------ main ------------------------------
 
+
 class _Parser(argparse.ArgumentParser):
     """Print full help on any usage error (mirrors script-conventions.mdc
     pattern)."""
+
     def error(self, message: str) -> None:
         self.print_help(sys.stderr)
         self.exit(2, f"\nerror: {message}\n")
@@ -962,9 +982,7 @@ def _ask(prompt: str) -> str:
         if not raw.strip():
             if parts:
                 break
-            print(
-                f"{RED}[{SCRIPT_NAME}] empty input; please type a command:{NC}"
-            )
+            print(f"{RED}[{SCRIPT_NAME}] empty input; please type a command:{NC}")
             continue
         # Trailing `\` is the shell continuation marker — drop it. Any
         # whitespace that immediately preceded it survives, so a
@@ -994,7 +1012,7 @@ def main() -> None:
         description=(
             "Automate the end-to-end offline-EPLB tuning loop "
             "(count steps → baseline stats → baseline perf → "
-            "schedules for {0,32,64} → per-replica stats+perf → HTML).\n"
+            "per-replica stats+perf for {0,32,64} → HTML).\n"
             "\n"
             "Resume: if --dir already exists and looks like a previous "
             "nvtx.py run, the script reads/derives state, prints a plan, "
@@ -1002,7 +1020,8 @@ def main() -> None:
             "confirmation."
         ),
         formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(
-            prog, width=80,
+            prog,
+            width=80,
         ),
     )
     parser.add_argument(
@@ -1089,10 +1108,6 @@ def main() -> None:
         sys.exit(1)
     ok(gpu_msg)
 
-    # tools/eplb/generate_static_mapping.py lives at <repo>/tools/eplb/.
-    # nvtx.py lives at <repo>/eplb_static/. Walk one level up.
-    repo_root = Path(__file__).resolve().parent.parent
-
     # ---- resolve cmds + interval according to mode ---------------------
     server_cmd: str
     bench_cmd: str
@@ -1123,7 +1138,7 @@ def main() -> None:
             interval = _infer_interval_from_jsonl(baseline_jsonl)
             if interval is not None:
                 log(
-                    f"inferred expert_load_stats_interval={interval} from "
+                    f"inferred write_stats_interval={interval} from "
                     f"step deltas in {baseline_jsonl.name}"
                 )
             else:
@@ -1169,12 +1184,10 @@ def main() -> None:
     def get_interval() -> int:
         v = interval_ref["value"]
         if v is None:
-            raise RuntimeError(
-                "internal: interval requested before count_steps ran"
-            )
+            raise RuntimeError("internal: interval requested before count_steps ran")
         return v
 
-    plan = _build_plan(server_cmd, bench_cmd, dir_path, repo_root, get_interval)
+    plan = _build_plan(server_cmd, bench_cmd, dir_path, get_interval)
 
     if mode == "resume":
         # Trust-but-verify: a stage marked done in the state file must
@@ -1191,8 +1204,7 @@ def main() -> None:
             if s.name == "count_steps":
                 if interval_ref["value"] is None:
                     warn(
-                        "state says count_steps done but interval missing; "
-                        "will re-run"
+                        "state says count_steps done but interval missing; will re-run"
                     )
                     first_incomplete = i
                     break
@@ -1216,18 +1228,21 @@ def main() -> None:
     if first_incomplete >= len(plan):
         ok("all stages already completed; nothing to do")
         # Still write the state file so future runs see a clean record.
-        _write_state(state_path, {
-            "version": 1,
-            "started_at": (saved_state or {}).get(
-                "started_at",
-                datetime.now().isoformat(timespec="seconds"),
-            ),
-            "server_cmd": server_cmd,
-            "bench_cmd": bench_cmd,
-            "step_count": step_count,
-            "interval": interval_ref["value"],
-            "completed_stages": [s.name for s in plan],
-        })
+        _write_state(
+            state_path,
+            {
+                "version": 1,
+                "started_at": (saved_state or {}).get(
+                    "started_at",
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+                "server_cmd": server_cmd,
+                "bench_cmd": bench_cmd,
+                "step_count": step_count,
+                "interval": interval_ref["value"],
+                "completed_stages": [s.name for s in plan],
+            },
+        )
         session_summary(start_time, dir_path, "OK (already completed)")
         return
 
@@ -1238,15 +1253,17 @@ def main() -> None:
         elif i == first_incomplete:
             tag = f"{YELLOW}[resume] {NC}"
         else:
-            tag = f"        "
+            tag = "        "
         # Plan lines go straight to terminal (with color) and to the log
         # file (plain). We bypass log() because we want the index column
         # uncolored even on the log-file side.
-        line = f"  {i+1:2d}. {s.name}"
+        line = f"  {i + 1:2d}. {s.name}"
         print(f"{tag}{line}")
         if LOG_FP is not None:
-            done = "done" if i < first_incomplete else (
-                "resume" if i == first_incomplete else "todo"
+            done = (
+                "done"
+                if i < first_incomplete
+                else ("resume" if i == first_incomplete else "todo")
             )
             LOG_FP.write(f"  {done:>6}  {line}\n")
     if LOG_FP is not None:
@@ -1269,19 +1286,23 @@ def main() -> None:
 
     # ---- persist state and run remaining stages ------------------------
     started_at = (saved_state or {}).get(
-        "started_at", datetime.now().isoformat(timespec="seconds"),
+        "started_at",
+        datetime.now().isoformat(timespec="seconds"),
     )
 
     def save_state() -> None:
-        _write_state(state_path, {
-            "version": 1,
-            "started_at": started_at,
-            "server_cmd": server_cmd,
-            "bench_cmd": bench_cmd,
-            "step_count": step_count,
-            "interval": interval_ref["value"],
-            "completed_stages": completed_stages,
-        })
+        _write_state(
+            state_path,
+            {
+                "version": 1,
+                "started_at": started_at,
+                "server_cmd": server_cmd,
+                "bench_cmd": bench_cmd,
+                "step_count": step_count,
+                "interval": interval_ref["value"],
+                "completed_stages": completed_stages,
+            },
+        )
 
     save_state()
 
@@ -1302,7 +1323,8 @@ def main() -> None:
                 assert isinstance(result, int)
                 if result < 10:
                     session_summary(
-                        start_time, dir_path,
+                        start_time,
+                        dir_path,
                         f"FAILED: bench produced only {result} EPLB step(s); "
                         "need ≥10. Increase bench workload "
                         "(e.g. --num-prompts) or use a slower model.",
@@ -1312,7 +1334,7 @@ def main() -> None:
                 interval_ref["value"] = compute_interval(result)
                 ok(
                     f"steps={step_count} → "
-                    f"expert_load_stats_interval={interval_ref['value']} "
+                    f"write_stats_interval={interval_ref['value']} "
                     f"(targeting ≤{TARGET_STATS_RECORDS} stats records)"
                 )
             completed_stages.append(stage.name)

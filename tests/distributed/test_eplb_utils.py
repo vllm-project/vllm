@@ -1,10 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,11 +9,14 @@ import pytest
 import torch
 
 import vllm.distributed.eplb.eplb_state as eplb_state_module
-from vllm.config.parallel import EPLBConfig
 from vllm.distributed.eplb.eplb_state import (
     EplbState,
     _commit_eplb_maps,
     _commit_eplb_maps_for_layer,
+)
+from vllm.distributed.eplb.stats_loader import (
+    aggregate_logical_load,
+    parse_stats_jsonl,
 )
 
 
@@ -162,73 +162,6 @@ def test_commit_eplb_maps_for_layer():
     assert torch.equal(model_state.physical_to_logical_map[1], original_phy2log[1])
 
 
-def _make_eplb_state_for_mapping(tmp_path: Path, record: dict) -> EplbState:
-    mapping_path = tmp_path / "mapping.jsonl"
-    mapping_path.write_text(json.dumps(record) + "\n")
-    state = object.__new__(EplbState)
-    state.device = torch.device("cpu")
-    state.parallel_config = SimpleNamespace(
-        eplb_config=SimpleNamespace(initial_mapping_path=str(mapping_path))
-    )
-    return state
-
-
-def test_load_initial_mapping_jsonl(tmp_path):
-    record = {
-        "record_type": "eplb_initial_mapping",
-        "version": 1,
-        "num_redundant_experts": 1,
-        "num_slots": 4,
-        "initial_global_assignments": {
-            "0": [0, 1, 2, 0],
-            "1": [1, 2, 0, 1],
-        },
-    }
-    state = _make_eplb_state_for_mapping(tmp_path, record)
-
-    p2l, l2p, logcnt = state._load_initial_mapping(
-        str(tmp_path / "mapping.jsonl"),
-        num_moe_layers=2,
-        num_physical_experts=4,
-        num_logical_experts=3,
-        num_redundant_experts=1,
-        max_slots_per_logical=4,
-    )
-
-    assert torch.equal(p2l.cpu(), torch.tensor([[0, 1, 2, 0], [1, 2, 0, 1]]))
-    assert torch.equal(logcnt.cpu(), torch.tensor([[2, 1, 1], [1, 2, 1]]))
-    assert torch.equal(
-        l2p.cpu(),
-        torch.tensor(
-            [
-                [[0, 3, -1, -1], [1, -1, -1, -1], [2, -1, -1, -1]],
-                [[2, -1, -1, -1], [0, 3, -1, -1], [1, -1, -1, -1]],
-            ]
-        ),
-    )
-
-
-def test_load_initial_mapping_rejects_redundant_mismatch(tmp_path):
-    record = {
-        "record_type": "eplb_initial_mapping",
-        "version": 1,
-        "num_redundant_experts": 2,
-        "num_slots": 4,
-        "initial_global_assignments": {"0": [0, 1, 2, 0]},
-    }
-    state = _make_eplb_state_for_mapping(tmp_path, record)
-
-    with pytest.raises(ValueError, match="num_redundant_experts"):
-        state._load_initial_mapping(
-            str(tmp_path / "mapping.jsonl"),
-            num_moe_layers=1,
-            num_physical_experts=4,
-            num_logical_experts=3,
-            num_redundant_experts=1,
-            max_slots_per_logical=4,
-        )
-
-
 def test_static_eplb_step_skips_runtime_rearrange(monkeypatch):
     class FakeGroup:
         def rank(self):
@@ -238,7 +171,7 @@ def test_static_eplb_step_skips_runtime_rearrange(monkeypatch):
     state.parallel_config = SimpleNamespace(
         eplb_config=SimpleNamespace(
             enable_online=False,
-            expert_load_stats_path=None,
+            write_stats_path=None,
             log_balancedness_interval=1,
         )
     )
@@ -249,6 +182,7 @@ def test_static_eplb_step_skips_runtime_rearrange(monkeypatch):
     state.expert_load_window_size = 1
     state.is_async = False
     state.should_record_tensor = None
+    state.total_steps = 0
     state.rearrange = MagicMock()
     monkeypatch.setattr(
         eplb_state_module,
@@ -261,52 +195,109 @@ def test_static_eplb_step_skips_runtime_rearrange(monkeypatch):
     state.rearrange.assert_not_called()
 
 
-def test_generate_static_mapping_from_stats(tmp_path, monkeypatch):
-    script_path = (
-        Path(__file__).parents[2] / "tools" / "eplb" / "generate_static_mapping.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "generate_static_mapping", script_path
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+def _meta_record(num_layers: int = 2) -> dict:
+    return {
+        "record_type": "eplb_load_meta",
+        "version": 1,
+        "model": "test-model",
+        "num_ranks": 2,
+        "num_groups": 1,
+        "num_nodes": 1,
+        "num_layers": num_layers,
+        "num_redundant_experts": 0,
+    }
 
-    stats_path = tmp_path / "stats.jsonl"
-    output_path = tmp_path / "mapping.jsonl"
-    stats_path.write_text(
-        json.dumps(
-            {
-                "record_type": "eplb_load_stats",
-                "version": 1,
-                "step": 7,
-                "num_ranks": 2,
-                "expert_load": [[10, 1, 5, 2], [2, 8, 1, 3]],
-                "p2l_map": [[0, 1, 2, 3], [0, 1, 2, 3]],
-            }
-        )
-        + "\n"
-    )
-    monkeypatch.setattr(
-        sys,
-        "argv",
+
+def test_parse_stats_jsonl_happy_path():
+    text = "\n".join(
         [
-            "generate_static_mapping.py",
-            "--stats-path",
-            str(stats_path),
-            "--output",
-            str(output_path),
-            "--num-redundant-experts",
-            "2",
-        ],
+            json.dumps(_meta_record()),
+            json.dumps(
+                {
+                    "record_type": "eplb_load_stats",
+                    "version": 1,
+                    "step": 1,
+                    "expert_load": [[10, 1, 5, 2], [2, 8, 1, 3]],
+                    "p2l_map": [[0, 1, 2, 3], [0, 1, 2, 3]],
+                }
+            ),
+            json.dumps(
+                {
+                    "record_type": "eplb_load_stats",
+                    "version": 1,
+                    "step": 2,
+                    "expert_load": [[1, 1, 1, 1], [2, 2, 2, 2]],
+                    "p2l_map": [[0, 1, 2, 3], [0, 1, 2, 3]],
+                }
+            ),
+        ]
+    )
+    meta, stats = parse_stats_jsonl(text)
+    assert meta["num_layers"] == 2
+    assert len(stats) == 2
+    assert stats[0]["step"] == 1
+    assert stats[1]["step"] == 2
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("", "no eplb_load_meta record found"),
+        (json.dumps(_meta_record()), "no eplb_load_stats records found"),
+        (
+            json.dumps(
+                {
+                    "record_type": "eplb_load_stats",
+                    "version": 1,
+                    "expert_load": [[1]],
+                    "p2l_map": [[0]],
+                }
+            ),
+            "before eplb_load_meta",
+        ),
+        (
+            "\n".join([json.dumps(_meta_record()), json.dumps(_meta_record())]),
+            "second eplb_load_meta",
+        ),
+        (
+            json.dumps({"record_type": "garbage"}),
+            "unexpected record_type",
+        ),
+    ],
+)
+def test_parse_stats_jsonl_rejects_corrupt_input(text, message):
+    with pytest.raises(ValueError, match=message):
+        parse_stats_jsonl(text)
+
+
+def test_aggregate_logical_load_sums_across_records():
+    records = [
+        {
+            "step": 1,
+            # 2 layers, 4 physical slots, p2l identity (so logical == physical)
+            "expert_load": [[10, 1, 5, 2], [2, 8, 1, 3]],
+            "p2l_map": [[0, 1, 2, 3], [0, 1, 2, 3]],
+        },
+        {
+            "step": 2,
+            "expert_load": [[1, 1, 1, 1], [2, 2, 2, 2]],
+            "p2l_map": [[0, 1, 2, 3], [0, 1, 2, 3]],
+        },
+    ]
+    logical = aggregate_logical_load(records)
+    assert torch.equal(
+        logical, torch.tensor([[11.0, 2.0, 6.0, 3.0], [4.0, 10.0, 3.0, 5.0]])
     )
 
-    module.main()
 
-    record = json.loads(output_path.read_text())
-    assert record["record_type"] == "eplb_initial_mapping"
-    assert record["version"] == 1
-    assert record["num_redundant_experts"] == 2
-    assert record["num_slots"] == 6
-    assert set(record["initial_global_assignments"]) == {"0", "1"}
+def test_aggregate_logical_load_collapses_replicas():
+    # 2 physical slots both pointing at logical 0 -> their loads merge.
+    records = [
+        {
+            "step": 1,
+            "expert_load": [[3, 7]],
+            "p2l_map": [[0, 0]],
+        }
+    ]
+    logical = aggregate_logical_load(records)
+    assert torch.equal(logical, torch.tensor([[10.0]]))

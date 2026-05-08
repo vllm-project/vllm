@@ -23,7 +23,6 @@ import sys
 import time
 from pathlib import Path
 
-
 SCRIPT_NAME = "moe_report"
 
 
@@ -33,9 +32,7 @@ def _log(msg: str) -> None:
 
 
 def _err(msg: str) -> None:
-    sys.stderr.write(
-        f"\033[0;31m[{SCRIPT_NAME}] ERROR:\033[0m {msg}\n"
-    )
+    sys.stderr.write(f"\033[0;31m[{SCRIPT_NAME}] ERROR:\033[0m {msg}\n")
     sys.stderr.flush()
 
 
@@ -97,7 +94,9 @@ def _is_non_empty_step(rec: dict) -> bool:
     return any(any(v > 0 for v in row) for row in el)
 
 
-def _parse_stats_jsonl(jsonl_path: Path) -> tuple[
+def _parse_stats_jsonl(
+    jsonl_path: Path,
+) -> tuple[
     list[dict],
     dict | None,
     list[dict],
@@ -135,9 +134,7 @@ def _parse_stats_jsonl(jsonl_path: Path) -> tuple[
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"{jsonl_path}:{i}: invalid JSON: {exc}"
-                ) from exc
+                raise ValueError(f"{jsonl_path}:{i}: invalid JSON: {exc}") from exc
             rt = rec.get("record_type")
             if rt == "session_metadata":
                 # First marker wins: in case the same JSONL was somehow
@@ -192,8 +189,7 @@ def _parse_perf_data(path: Path) -> list[list[dict]]:
         stripped = line.strip()
         is_eq_bar = stripped.startswith("=") and set(stripped) <= set("= ")
         is_title_bar = (
-            stripped.startswith("=")
-            and "Serving Benchmark Result" in stripped
+            stripped.startswith("=") and "Serving Benchmark Result" in stripped
         )
         if is_title_bar:
             current = [{"kind": "header", "text": line}]
@@ -214,12 +210,14 @@ def _parse_perf_data(path: Path) -> list[list[dict]]:
             continue
         if ":" in line:
             label, _, val = line.partition(":")
-            current.append({
-                "kind": "metric",
-                "label": label,
-                "value": val.strip(),
-                "raw": line,
-            })
+            current.append(
+                {
+                    "kind": "metric",
+                    "label": label,
+                    "value": val.strip(),
+                    "raw": line,
+                }
+            )
             continue
         # Anything else inside a block is rare (blank line) — skip silently.
     return blocks
@@ -327,9 +325,7 @@ def _format_perf_table(blocks: list[list[dict]]) -> str:
         cols = [v.ljust(col_widths[i]) for i, v in enumerate(vals)]
         if highlight and best_idx >= 0:
             cols[best_idx] = _HL_OPEN + cols[best_idx] + _HL_CLOSE
-        prefix_label = (
-            _HL_OPEN + label + ":" + _HL_CLOSE if highlight else label + ":"
-        )
+        prefix_label = _HL_OPEN + label + ":" + _HL_CLOSE if highlight else label + ":"
         prefix = prefix_label + " " * n_spaces
         out_lines.append(prefix + " -> ".join(cols).rstrip())
     return "\n".join(out_lines)
@@ -351,25 +347,33 @@ def _parse_vllm_argv(vllm_argv: list[str] | None) -> dict:
     # Map every variant of a flag to a canonical output field.
     aliases = {
         "tp": [
-            "-tp", "--tp",
-            "--tensor-parallel-size", "--tensor_parallel_size",
+            "-tp",
+            "--tp",
+            "--tensor-parallel-size",
+            "--tensor_parallel_size",
         ],
         "pp": [
-            "-pp", "--pp",
-            "--pipeline-parallel-size", "--pipeline_parallel_size",
+            "-pp",
+            "--pp",
+            "--pipeline-parallel-size",
+            "--pipeline_parallel_size",
         ],
         "dp": [
-            "-dp", "--dp",
-            "--data-parallel-size", "--data_parallel_size",
+            "-dp",
+            "--dp",
+            "--data-parallel-size",
+            "--data_parallel_size",
         ],
         "model": [
             "--model",
         ],
         "port": [
-            "--port", "-p",
+            "--port",
+            "-p",
         ],
         "stream_interval": [
-            "--stream-interval", "--stream_interval",
+            "--stream-interval",
+            "--stream_interval",
         ],
     }
 
@@ -441,33 +445,24 @@ def _parse_vllm_argv(vllm_argv: list[str] | None) -> dict:
 def main() -> None:
     t0 = time.time()
     parser = _Parser(
-        description=(
-            "Generate an interactive MoE analysis report from EPLB JSONL."
-        ),
-        epilog=(
-            "example:\n"
-            "  %(prog)s data.jsonl -o report.html"
-        ),
+        description=("Generate an interactive MoE analysis report from EPLB JSONL."),
+        epilog=("example:\n  %(prog)s data.jsonl -o report.html"),
         formatter_class=lambda prog: argparse.RawDescriptionHelpFormatter(
-            prog, width=80,
+            prog,
+            width=80,
         ),
     )
     parser.add_argument(
         "jsonl",
         type=Path,
-        help=(
-            "Path to eplb_data.jsonl produced by vLLM with "
-            "expert_load_stats_path=<path>."
-        ),
+        help=("Path to eplb_data.jsonl produced by vLLM with write_stats_path=<path>."),
     )
     parser.add_argument(
         "-o",
         "--output",
         type=Path,
         default=None,
-        help=(
-            "Output HTML file (default: moe_report.html next to the JSONL)."
-        ),
+        help=("Output HTML file (default: moe_report.html next to the JSONL)."),
     )
     parser.add_argument(
         "--perf-data",
@@ -488,9 +483,7 @@ def main() -> None:
     if not jsonl_path.exists():
         parser.error(f"File not found: {jsonl_path}")
     if args.output is not None and args.output.suffix.lower() != ".html":
-        parser.error(
-            f"-o/--output must be a .html file, got: {args.output.name}"
-        )
+        parser.error(f"-o/--output must be a .html file, got: {args.output.name}")
     if args.perf_data is not None and not args.perf_data.is_file():
         parser.error(f"--perf-data: file not found: {args.perf_data}")
 
@@ -504,10 +497,7 @@ def main() -> None:
             )
         else:
             perf_data_text = _format_perf_table(perf_blocks)
-            _log(
-                f"Parsed {len(perf_blocks)} benchmark block(s) from "
-                f"{args.perf_data}"
-            )
+            _log(f"Parsed {len(perf_blocks)} benchmark block(s) from {args.perf_data}")
 
     try:
         steps, session_meta, bench_runs, skipped = _parse_stats_jsonl(jsonl_path)
@@ -557,11 +547,10 @@ def main() -> None:
     steps_json = json.dumps(steps, separators=(",", ":"))
     html = template.replace("/*STEPS_DATA*/[]", steps_json)
 
-    # NSYS_DATA / SCHEDULE_META placeholders are kept renderable for the
-    # template — the viewer treats null as "no nsys timing / no offline
-    # schedule metadata" and silently hides the corresponding rows.
+    # NSYS_DATA placeholder is kept renderable for the template — the
+    # viewer treats null as "no nsys timing" and silently hides the
+    # corresponding rows.
     html = html.replace("/*NSYS_DATA*/null", "null")
-    html = html.replace("/*SCHEDULE_META*/null", "null")
 
     selected_json = json.dumps(None)
     html = html.replace("/*SELECTED_STEP*/null", selected_json)
@@ -603,7 +592,7 @@ def main() -> None:
 
     # Honour $TZ from the user's environment so generated_at / started_at
     # render in their wall-clock timezone (e.g. Europe/Helsinki) instead of
-    # the raw UTC ISO timestamp written by nvtx.sh / generate_static_mapping.
+    # the raw UTC ISO timestamp written by nvtx.py.
     # Empty / unset → JS falls back to the browser default (which is also
     # the user's local TZ in practice, but explicit is better).
     report_tz = os.environ.get("TZ", "").strip() or None
@@ -620,10 +609,7 @@ def main() -> None:
 
     elapsed = time.time() - t0
     size_kb = output_path.stat().st_size / 1024
-    _ok(
-        f"Report written to {output_path} "
-        f"({size_kb:.0f} KB, {elapsed:.1f}s)"
-    )
+    _ok(f"Report written to {output_path} ({size_kb:.0f} KB, {elapsed:.1f}s)")
 
     # Per-step imbalance table + the explicit aggregation formula. Printed
     # last so the user can eyeball whether the HTML header value matches
@@ -648,4 +634,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         _err("Interrupted.")
         sys.exit(130)
-
