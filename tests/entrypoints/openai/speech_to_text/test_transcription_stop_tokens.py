@@ -3,27 +3,50 @@
 
 from types import SimpleNamespace
 
-from vllm.entrypoints.openai.speech_to_text.speech_to_text import OpenAISpeechToText
-from vllm.model_executor.models.parakeet_tdt import ParakeetForTDT
+from vllm.entrypoints.openai.speech_to_text import speech_to_text as stt_module
+from vllm.entrypoints.openai.speech_to_text.speech_to_text import (
+    OpenAISpeechToText,
+)
 from vllm.sampling_params import SamplingParams
 
 
-class _FakeTranscriptionModel:
-    @classmethod
-    def get_transcription_stop_token_ids(cls, model_config):
-        return [3]
-
-
-def test_parakeet_transcription_stop_token_ids():
-    model_config = SimpleNamespace(hf_config=SimpleNamespace(eos_token_id=3))
-
-    assert ParakeetForTDT.get_transcription_stop_token_ids(model_config) == [3]
-
-
-def test_openai_transcription_merges_model_stop_token_ids():
+def _make_handler(config_eos_token_id: int | None) -> OpenAISpeechToText:
     handler = OpenAISpeechToText.__new__(OpenAISpeechToText)
-    handler.model_cls = _FakeTranscriptionModel
-    handler.model_config = SimpleNamespace()
+    handler.model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(eos_token_id=config_eos_token_id)
+    )
+    return handler
+
+
+def test_openai_transcription_uses_config_eos_when_tokenizer_missing(monkeypatch):
+    handler = _make_handler(3)
+    monkeypatch.setattr(
+        stt_module,
+        "cached_tokenizer_from_config",
+        lambda model_config: SimpleNamespace(eos_token_id=None),
+    )
+
+    assert handler._get_transcription_stop_token_ids() == [3]
+
+
+def test_openai_transcription_ignores_config_eos_when_tokenizer_matches(monkeypatch):
+    handler = _make_handler(3)
+    monkeypatch.setattr(
+        stt_module,
+        "cached_tokenizer_from_config",
+        lambda model_config: SimpleNamespace(eos_token_id=3),
+    )
+
+    assert handler._get_transcription_stop_token_ids() == []
+
+
+def test_openai_transcription_merges_config_eos_stop_token(monkeypatch):
+    handler = _make_handler(3)
+    monkeypatch.setattr(
+        stt_module,
+        "cached_tokenizer_from_config",
+        lambda model_config: SimpleNamespace(eos_token_id=None),
+    )
 
     sampling_params = SamplingParams(max_tokens=8, stop_token_ids=[9])
     stop_token_ids = handler._get_transcription_stop_token_ids()

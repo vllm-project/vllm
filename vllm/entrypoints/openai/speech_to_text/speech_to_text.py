@@ -49,6 +49,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -134,11 +135,18 @@ class OpenAISpeechToText(OpenAIServing):
         return cast(type[SupportsTranscription], model_cls)
 
     def _get_transcription_stop_token_ids(self) -> list[int]:
-        return list(
-            dict.fromkeys(
-                self.model_cls.get_transcription_stop_token_ids(self.model_config)
-            )
+        config_eos_token_id = getattr(self.model_config.hf_config, "eos_token_id", None)
+        if not isinstance(config_eos_token_id, int):
+            return []
+
+        tokenizer = cached_tokenizer_from_config(self.model_config)
+        tokenizer_eos_token_id = (
+            None if tokenizer is None else getattr(tokenizer, "eos_token_id", None)
         )
+        if tokenizer_eos_token_id == config_eos_token_id:
+            return []
+
+        return [config_eos_token_id]
 
     @staticmethod
     def _apply_transcription_stop_token_ids(

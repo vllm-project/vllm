@@ -433,12 +433,10 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     supports_transcription_only = True
     supported_languages = PARAKEET_SUPPORTED_LANGUAGES
     no_space_languages: set[str] = set()
-    # The V1 runner uses this marker to pass request IDs to forward.
-    # Parakeet's config hook enforces eager execution for this request-stateful
-    # decoder. Future V2 support should move this into a ParakeetModelState
+    # The config hook marks this as a request-stateful decoder and enforces
+    # eager execution. Future V2 support should move this into a ParakeetModelState
     # using ModelState.prepare_inputs() and prepare_dummy_inputs(), matching the
     # Whisper model-state pattern.
-    uses_request_ids_for_generation = True
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "encoder.": "model.encoder.",
@@ -603,11 +601,6 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
             ),
             decoder_prompt=TokensPrompt(prompt_token_ids=[blank_token_id]),
         )
-
-    @classmethod
-    def get_transcription_stop_token_ids(cls, model_config: ModelConfig) -> list[int]:
-        eos_token_id = model_config.hf_config.eos_token_id
-        return [eos_token_id] if isinstance(eos_token_id, int) else []
 
     @classmethod
     def get_num_audio_tokens(
