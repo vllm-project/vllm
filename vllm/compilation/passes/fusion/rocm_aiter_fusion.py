@@ -451,7 +451,12 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        deduped, duplicated = self._dedup_and_duplicate_for_fusion(graph)
+        deduped, duplicated = 0, 0
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            if on_gfx950():
+                deduped, duplicated = self._dedup_and_duplicate_for_fusion(graph)
         if deduped > 0 or duplicated > 0:
             logger.info(
                 "Pre-fusion: deduped %d redundant quants, duplicated %d norms",
