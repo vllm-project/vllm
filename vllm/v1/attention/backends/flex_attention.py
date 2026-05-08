@@ -48,12 +48,16 @@ create_block_mask_compiled = torch.compile(
 flex_attention_compiled = torch.compile(flex_attention, fullgraph=True)
 
 
-def _offsets_to_doc_ids_tensor(offsets: torch.Tensor) -> torch.Tensor:
-    device = offsets.device
-    counts = offsets[1:] - offsets[:-1]
-    return torch.repeat_interleave(
-        torch.arange(len(counts), device=device, dtype=torch.int32), counts
+def _offsets_to_doc_ids_tensor(
+    offsets_cpu: torch.Tensor, device: torch.device
+) -> torch.Tensor:
+    # Build on CPU (so `repeat_interleave` doesn't force a GPU->CPU sync to
+    # learn the data-dependent output length) and upload non-blocking.
+    counts = offsets_cpu[1:] - offsets_cpu[:-1]
+    doc_ids = torch.repeat_interleave(
+        torch.arange(len(counts), dtype=torch.int32), counts
     )
+    return doc_ids.to(device, non_blocking=True)
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
@@ -290,11 +294,13 @@ def unique_static_unsorted(
     keep = (x_flat != ignored_val) & (idx == first_idx.gather(1, x_flat))  # [B, N]
 
     # ── left-pack uniques into a fresh tensor ───────────────────────────
+    # Route non-kept entries to a garbage slot at column N so we can do a
+    # single scatter rather than using torch.nonzero (which would force a
+    # GPU->CPU sync to enumerate kept positions).
     dest_pos = torch.cumsum(keep.to(torch.long), dim=1) - 1  # where to go
-    packed_flat = torch.full_like(x_flat, pad_val)
-
-    rows, src_cols = torch.nonzero(keep, as_tuple=True)
-    packed_flat[rows, dest_pos[rows, src_cols]] = x_flat[rows, src_cols]
+    dest_pos = torch.where(keep, dest_pos, N)
+    packed_extended = torch.full((B, N + 1), pad_val, device=device, dtype=x_flat.dtype)
+    packed_flat = packed_extended.scatter_(1, dest_pos, x_flat)[:, :N]
 
     # ── restore original layout ─────────────────────────────────────────
     packed = packed_flat.reshape(x_perm.shape).movedim(-1, dim)
@@ -346,6 +352,9 @@ class FlexAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
+    # CPU-resident copy of query_start_loc used to derive doc_ids without a
+    # GPU->CPU sync from repeat_interleave's data-dependent output size.
+    query_start_loc_cpu: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
@@ -452,12 +461,7 @@ class FlexAttentionMetadata:
             (is_valid, logical_q_idx, logical_kv_idx) = (
                 self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
             )
-            # Apply mask modification only for valid indices
-            return torch.where(
-                is_valid,
-                self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx),
-                False,
-            )
+            return is_valid & self.logical_mask_mod(b, h, logical_q_idx, logical_kv_idx)
 
         return final_mask_mod
 
@@ -469,7 +473,9 @@ class FlexAttentionMetadata:
         packed query sequences.
         """
         # Create a lookup mapping from query indices -> request number
-        request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        request_lookup = _offsets_to_doc_ids_tensor(
+            self.query_start_loc_cpu, self.query_start_loc.device
+        )
 
         def final_mask_mod(
             b: torch.Tensor,
@@ -581,7 +587,9 @@ class FlexAttentionMetadata:
             return None
 
         # Create a lookup mapping from query indices -> request number
-        request_lookup = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        request_lookup = _offsets_to_doc_ids_tensor(
+            self.query_start_loc_cpu, self.query_start_loc.device
+        )
         user_score_mod = self.score_mod
 
         def transformed_score_mod(
@@ -726,7 +734,9 @@ class FlexAttentionMetadata:
         assert self.prefix_kv_lens is None, "Not implemented yet."
         assert self.suffix_kv_lens is None, "Not implemented yet."
         # Create a lookup mapping from query indices -> request number
-        self.doc_ids = _offsets_to_doc_ids_tensor(self.query_start_loc)
+        self.doc_ids = _offsets_to_doc_ids_tensor(
+            self.query_start_loc_cpu, self.query_start_loc.device
+        )
         self.doc_ids = copy_to_persistent(self.persistent_doc_ids, self.doc_ids)
         self.num_blocks = self.total_cache_tokens // self.block_size
 
@@ -807,6 +817,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
@@ -871,6 +882,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=block_table_tensor,
