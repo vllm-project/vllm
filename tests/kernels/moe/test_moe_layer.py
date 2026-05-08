@@ -83,7 +83,9 @@ PARALLEL_COMBOS = [
     [1, 4, False],
     [2, 1, True],
     [4, 1, True],
-    [2, 2, True],  # sequence parallel
+    # This combination indicates sequence parallel.
+    # See ParallelConfig.use_sequence_parallel.
+    [2, 2, True],
 ]
 
 # TODO: should this even be set manually?  let oracles handle this
@@ -126,13 +128,13 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
 
 # Map from backend -> (DP/EP support, DP support, TP support, SP support)
 BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
-    "allgather_reducescatter":     (True,  True,  True, True),
-    "mori":                        (True, False, False, False),
-    "flashinfer_nvlink_two_sided": (True, True, False, False),
-    "flashinfer_nvlink_one_sided": (True, True, False, False),
-    "deepep_low_latency":          (True, False, False, True),
-    "deepep_high_throughput":      (True, False, False, True),
-    "nixl_ep":                     (True, False, False, False),
+    "allgather_reducescatter":     (True,  True,  True,  True),
+    "mori":                        (True, False, False,  True),
+    "flashinfer_nvlink_two_sided": (True,  True, False, False),
+    "flashinfer_nvlink_one_sided": (True,  True, False, False),
+    "deepep_low_latency":          (True, False, False,  True),
+    "deepep_high_throughput":      (True, False, False,  True),
+    "nixl_ep":                     (True, False, False,  True),
 }
 # fmt: on
 
@@ -197,7 +199,9 @@ def sp_wrapper(
             # Run MoE on local chunk
             result = fn(hidden_states, router_logits)
             # Gather results from all TP ranks
-            return tensor_model_parallel_all_gather(result, 0)
+            result = tensor_model_parallel_all_gather(result, 0)
+            # Remove any padding added by SP.
+            return result[: hidden_states.shape[0]]
 
         return wrapper
     return fn
@@ -494,7 +498,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
                 )
 
         if config.backend == "nixl_ep":
-            from vllm.model_executor.layers.fused_moe.nixl_ep_prepare_finalize import (  # noqa: E501
+            from vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep import (  # noqa: E501
                 NixlEPPrepareAndFinalize,
             )
 

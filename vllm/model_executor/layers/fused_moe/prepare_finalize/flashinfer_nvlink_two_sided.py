@@ -185,13 +185,14 @@ def flashinfer_alltoall_dispatch(
             ep_size,
         )
 
-        x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
-            x_sf,
-            alltoall_info,
-            all2all_manager.workspace_tensor,  # type: ignore[attr-defined]
-            ep_rank,
-            ep_size,
-        )
+        if x_sf is not None:
+            x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
+                x_sf,
+                alltoall_info,
+                all2all_manager.workspace_tensor,  # type: ignore[attr-defined]
+                ep_rank,
+                ep_size,
+            )
 
         # Swizzle after the A2A if MoE kernel expects swizzled scales.
         if quant_config.quant_dtype == "nvfp4" and quant_config.is_nvfp4_scale_swizzled:
