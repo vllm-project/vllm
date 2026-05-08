@@ -49,7 +49,6 @@ def _create_proposer(
     method: str,
     num_speculative_tokens: int,
     attention_backend: str | None = None,
-    speculative_token_tree: list[tuple[int, ...]] | None = None,
     parallel_drafting: bool = False,
 ) -> EagleProposer:
     # Method-dependent setup
@@ -75,18 +74,12 @@ def _create_proposer(
         trust_remote_code=(method == "dflash"),
     )
 
-    spec_token_tree_str = None
-    if speculative_token_tree is not None:
-        assert num_speculative_tokens == len(speculative_token_tree)
-        spec_token_tree_str = str(speculative_token_tree)
-
     speculative_config = SpeculativeConfig(
         target_model_config=model_config,
         target_parallel_config=ParallelConfig(),
         model=draft_model_dir,
         method=method,
         num_speculative_tokens=num_speculative_tokens,
-        speculative_token_tree=spec_token_tree_str,
         parallel_drafting=parallel_drafting,
     )
     if parallel_drafting:
