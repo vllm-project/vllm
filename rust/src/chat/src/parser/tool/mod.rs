@@ -12,6 +12,7 @@ mod deepseek_json;
 mod external;
 mod gemma4;
 mod glm_xml;
+mod json;
 mod kimi_k2;
 mod minimax_m2;
 mod parameters;
@@ -37,6 +38,7 @@ pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use external::*;
 pub use gemma4::Gemma4ToolParser;
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
+pub use json::{HermesToolParser, Qwen3XmlToolParser};
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
@@ -51,6 +53,7 @@ pub mod names {
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
+    pub const HERMES: &str = "hermes";
     pub const JSON: &str = "json";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
@@ -200,6 +203,7 @@ impl ToolParserFactory {
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
+            .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<JsonToolParser>(names::JSON)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
@@ -219,6 +223,7 @@ impl ToolParserFactory {
             .register_pattern("qwen2.5-coder", names::QWEN3_CODER)
             .register_pattern("qwen3.5", names::QWEN3_CODER)
             .register_pattern("qwen", names::QWEN3_XML)
+            .register_pattern("hermes", names::HERMES)
             .register_pattern("llama-4", names::LLAMA4_PYTHONIC)
             .register_pattern("llama-3.2", names::LLAMA3_JSON)
             .register_pattern("llama-3.1", names::LLAMA3_JSON)

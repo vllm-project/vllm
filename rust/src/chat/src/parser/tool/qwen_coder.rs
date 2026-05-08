@@ -49,6 +49,9 @@ enum QwenCoderEvent {
 /// ```
 ///
 /// Arguments are emitted only after a full `tool_call` block is parsed.
+///
+/// Note: parallel calls are represented as repeated
+/// `<tool_call>...</tool_call>` blocks, not as multiple calls inside one tag.
 pub struct Qwen3CoderToolParser {
     buffer: String,
     mode: QwenCoderMode,

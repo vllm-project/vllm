@@ -165,6 +165,52 @@ pub(super) fn take_json_object(
     Ok(text.len())
 }
 
+/// Parse a JSON string literal.
+pub(super) fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
+    let text = **input;
+    if text.is_empty() {
+        return incomplete();
+    }
+
+    let bytes = text.as_bytes();
+    if bytes[0] != b'"' {
+        return Err(json_scan_error(
+            "JSON string",
+            StrContextValue::CharLiteral('"'),
+        ));
+    }
+
+    let mut escape = false;
+    let mut index = 1;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        index += 1;
+
+        if escape {
+            escape = false;
+            continue;
+        }
+
+        match byte {
+            b'\\' => escape = true,
+            b'"' => {
+                let raw = &text[..index];
+                let value = serde_json::from_str::<String>(raw).map_err(|_| {
+                    json_scan_error(
+                        "JSON string",
+                        StrContextValue::Description("valid JSON string"),
+                    )
+                })?;
+                input.next_slice(index);
+                return Ok(value);
+            }
+            _ => {}
+        }
+    }
+
+    incomplete()
+}
+
 fn json_scan_error(label: &'static str, expected: StrContextValue) -> ErrMode<ContextError> {
     let mut error = ContextError::new();
     error.push(StrContext::Label(label));
@@ -213,7 +259,9 @@ mod tests {
     use winnow::error::ErrMode;
     use winnow::stream::{Offset, Partial, Stream};
 
-    use super::{JsonObjectScanState, partial_prefix_len, safe_text_len, take_json_object};
+    use super::{
+        JsonObjectScanState, json_str, partial_prefix_len, safe_text_len, take_json_object,
+    };
 
     #[test]
     fn partial_prefix_len_handles_ascii_markers() {
@@ -387,5 +435,24 @@ mod tests {
             invalid JSON object argument
             expected nested arrays to close before the top-level object"#]]
         .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn json_str_decodes_escaped_content() {
+        let mut input = Partial::new(r#""say_\"hi\u0021" rest"#);
+
+        let value = json_str(&mut input).unwrap();
+
+        assert_eq!(value, "say_\"hi!");
+        assert_eq!(*input, " rest");
+    }
+
+    #[test]
+    fn json_str_reports_incomplete_escaped_string() {
+        let mut input = Partial::new(r#""say_\"#);
+
+        let error = json_str(&mut input).unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
     }
 }

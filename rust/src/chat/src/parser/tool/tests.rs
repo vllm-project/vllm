@@ -140,6 +140,10 @@ fn factory_new_resolves_external_default_patterns() {
         factory.resolve_name_for_model("google/gemma-4-27b-it"),
         Some(names::GEMMA4)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
+        Some(names::HERMES)
+    );
 }
 
 #[test]
