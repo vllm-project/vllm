@@ -232,8 +232,10 @@ def _dequantize_autoround_gptq_router_weight(
         # AutoRound's GPTQ-style symmetric checkpoints store router qzeros
         # with a -1 offset relative to the effective zero point.
         unpacked_qzeros = unpacked_qzeros + 1
+    effective_group_size = group_size if group_size > 0 else unpacked_qweight.shape[0]
     row_groups = (
-        torch.arange(unpacked_qweight.shape[0], device=qweight.device) // group_size
+        torch.arange(unpacked_qweight.shape[0], device=qweight.device)
+        // effective_group_size
     )
     scales_per_row = scales.to(torch.float32)[row_groups]
     qzeros_per_row = unpacked_qzeros[row_groups]
@@ -1501,9 +1503,13 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                         qweight=quant_params["qweight"],
                         qzeros=quant_params["qzeros"],
                         scales=quant_params["scales"],
-                        num_bits=self.quant_config.weight_bits,
-                        group_size=self.quant_config.group_size,
-                        sym=self.quant_config.sym,
+                        num_bits=getattr(
+                            self.quant_config,
+                            "weight_bits",
+                            getattr(self.quant_config, "bits", 4),
+                        ),
+                        group_size=getattr(self.quant_config, "group_size", -1),
+                        sym=getattr(self.quant_config, "sym", True),
                         params_dtype=param.dtype,
                     )
                     weight_loader(param, router_weight)
