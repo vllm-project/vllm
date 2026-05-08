@@ -21,9 +21,6 @@ class DamorkVLVideoProcessor(Qwen3VLVideoProcessor):
 class DamorkVLProcessor(Qwen3VLProcessor):
     """Damork alias for the Qwen3-VL processor."""
 
-    image_processor_class = "DamorkVLImageProcessorFast"
-    video_processor_class = "DamorkVLVideoProcessor"
-
 
 AutoImageProcessor.register(
     DamorkConfig,
