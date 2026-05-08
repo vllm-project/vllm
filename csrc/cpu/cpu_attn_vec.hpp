@@ -27,8 +27,8 @@ FORCE_INLINE std::pair<vec_op::FP32Vec16, vec_op::FP32Vec16> load_b_pair_vec(
     return {vec_op::FP32Vec16(bf16_b_reg, 0), vec_op::FP32Vec16(bf16_b_reg, 1)};
   } else {
     using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
-    return {vec_op::FP32Vec16(load_vec_t(ptr)),
-            vec_op::FP32Vec16(load_vec_t(ptr + 16))};
+    return std::make_pair(vec_op::FP32Vec16(load_vec_t(ptr)),
+                          vec_op::FP32Vec16(load_vec_t(ptr + 16)));
   }
 }
 

@@ -6,6 +6,15 @@
 import json
 from unittest.mock import MagicMock
 
+import pytest
+from xgrammar import StructuralTag
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
@@ -18,6 +27,43 @@ INV_START = '<｜DSML｜invoke name="'
 INV_END = "</｜DSML｜invoke>"
 PARAM_START = '<｜DSML｜parameter name="'
 PARAM_END = "</｜DSML｜parameter>"
+
+
+@pytest.fixture
+def sample_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_current_weather",
+                "description": "Get the current weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "The city name"},
+                        "state": {"type": "string", "description": "The state code"},
+                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
+                    },
+                    "required": ["city", "state"],
+                },
+            },
+        ),
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "calculate_area",
+                "description": "Calculate area of a shape",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "shape": {"type": "string"},
+                        "dimensions": {"type": "object"},
+                        "precision": {"type": "integer"},
+                    },
+                },
+            },
+        ),
+    ]
 
 
 def make_parser(tools=None) -> DeepSeekV4ToolParser:
@@ -121,3 +167,72 @@ def test_streaming_extracts_complete_invokes():
     ]
     assert names == ["search"]
     assert json.loads(reconstruct_args(deltas)) == {"query": "deepseek v4"}
+
+
+def test_get_vllm_registry_structural_tag_returns_structural_tag(
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    parser = make_parser()
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="auto",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=sample_tools,
+        tool_choice="required",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+    if sample_tools:
+        tool = sample_tools[0]
+        req = ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=sample_tools,
+        )
+        req.tool_choice = ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=tool.function.name)
+        )
+        tag = parser.get_structural_tag(req)
+        assert isinstance(tag, StructuralTag)
+
+
+def test_extract_tool_calls_arguments_wrapper():
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.get_vocab.return_value = {}
+
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+            },
+        },
+    )
+
+    parser = DeepSeekV4ToolParser(mock_tokenizer, tools=[tool])
+    request = MagicMock()
+    request.tools = [tool]
+
+    model_output = (
+        f"{TC_START}"
+        f'{INV_START}get_weather">'
+        f'{PARAM_START}arguments" string="false">{{"location":"Beijing"}}{PARAM_END}'
+        f"{INV_END}"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {"location": "Beijing"}
