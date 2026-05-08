@@ -43,7 +43,8 @@ WEIGHT_SHAPES = {
 def prepare_hybrid_weights(K, N, group_size, device="cuda"):
     """Create random weights for benchmarking.
 
-    Returns (w_q_skinny, w_s_skinny, w_fp16, w_q_skinny_i32).
+    Returns (w_q_skinny, w_s_skinny, w_s_skinny_bf16, w_fp16, w_bf16,
+             w_q_skinny_i32, w_zp).
     """
     num_groups = K // group_size
 
@@ -53,52 +54,68 @@ def prepare_hybrid_weights(K, N, group_size, device="cuda"):
     )
     w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
     w_s_skinny = torch.randn(N, num_groups, dtype=torch.float16, device=device) * 0.01
+    w_s_skinny_bf16 = w_s_skinny.to(torch.bfloat16)
 
     # Raw per-group zero-points for asymmetric benchmarks
     w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
         torch.float16
     )
 
-    # FP16 baseline for F.linear
+    # FP16 / BF16 baselines for F.linear
     w_fp16 = torch.randn(N, K, dtype=torch.float16, device=device) * 0.01
+    w_bf16 = w_fp16.to(torch.bfloat16)
 
-    return w_q_skinny, w_s_skinny, w_fp16, w_q_skinny_i32, w_zp
+    return (
+        w_q_skinny,
+        w_s_skinny,
+        w_s_skinny_bf16,
+        w_fp16,
+        w_bf16,
+        w_q_skinny_i32,
+        w_zp,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Benchmark
 # ---------------------------------------------------------------------------
-PROVIDERS = ["torch-fp16", "hybrid-w4a16", "hybrid-w4a16-zp"]
+PROVIDERS = [
+    "torch-fp16",
+    "torch-bf16",
+    "hybrid-w4a16",
+    "hybrid-w4a16-bf16",
+    "hybrid-w4a16-zp",
+]
 
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
-        x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
+        x_vals=[1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 3968, 4096],
         x_log=False,
         line_arg="provider",
         line_vals=PROVIDERS,
         line_names=PROVIDERS,
         ylabel="TFLOP/s (larger is better)",
-        plot_name="FP16 vs Hybrid W4A16",
+        plot_name="fp16_bf16_vs_hybrid_w4a16",
         args={},
     )
 )
 def benchmark(batch_size, provider, N, K, group_size, weights):
     M = batch_size
     device = "cuda"
-    dtype = torch.float16
+    dtype = torch.bfloat16 if provider.endswith("bf16") else torch.float16
     a = torch.randn((M, K), device=device, dtype=dtype)
 
     quantiles = [0.5, 0.2, 0.8]
 
-    if provider == "torch-fp16":
-        w_fp16 = weights["w_fp16"]
+    if provider in ("torch-fp16", "torch-bf16"):
+        w = weights["w_fp16" if dtype == torch.float16 else "w_bf16"]
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.nn.functional.linear(a, w_fp16),
+            lambda: torch.nn.functional.linear(a, w),
             quantiles=quantiles,
         )
-    elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp"):
+    elif provider in ("hybrid-w4a16", "hybrid-w4a16-bf16", "hybrid-w4a16-zp"):
         from vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16 import (
             _hybrid_w4a16_apply_impl,
         )
@@ -107,12 +124,13 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
         w = weights
         cu_count = num_compute_units()
         use_zp = provider == "hybrid-w4a16-zp"
+        scales_key = "w_s_skinny_bf16" if dtype == torch.bfloat16 else "w_s_skinny"
 
         def run():
             return _hybrid_w4a16_apply_impl(
                 a,
                 w["w_q_skinny"],
-                w["w_s_skinny"],
+                w[scales_key],
                 w["w_q_skinny_i32"],
                 w["w_zp"] if use_zp else None,
                 None,  # bias
@@ -161,14 +179,22 @@ if __name__ == "__main__":
         print(f"{model}, N={N} K={K}, group_size={group_size}")
         print(f"{'=' * 70}")
 
-        w_q_skinny, w_s_skinny, w_fp16, w_q_skinny_i32, w_zp = prepare_hybrid_weights(
-            K, N, group_size
-        )
+        (
+            w_q_skinny,
+            w_s_skinny,
+            w_s_skinny_bf16,
+            w_fp16,
+            w_bf16,
+            w_q_skinny_i32,
+            w_zp,
+        ) = prepare_hybrid_weights(K, N, group_size)
 
         weights = {
             "w_q_skinny": w_q_skinny,
             "w_s_skinny": w_s_skinny,
+            "w_s_skinny_bf16": w_s_skinny_bf16,
             "w_fp16": w_fp16,
+            "w_bf16": w_bf16,
             "w_q_skinny_i32": w_q_skinny_i32,
             "w_zp": w_zp,
         }

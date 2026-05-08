@@ -56,6 +56,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
+#ifdef VLLM_HAVE_CK_W4A16
+  // AIESW-32176: CK WMMA W4A16 b_scale GEMM.
+  // in_b is in CK pk_i4 layout [K0, N, K1/2] int8; in_s is [K/G, N] fp16.
+  rocm_ops.def(
+      "ck_w4a16_b_scale_gemm(Tensor in_a, Tensor in_b, Tensor in_s, "
+      "int group_size) -> Tensor");
+  rocm_ops.impl("ck_w4a16_b_scale_gemm", torch::kCUDA, &ck_w4a16_b_scale_gemm);
+#endif
+
   // Fused MoE wrapper around wvSplitK_int4_g: iterates expert runs in C++
   rocm_ops.def(
       "fused_moe_wvSplitK_int4_gemm(Tensor a, Tensor w, Tensor scales, "

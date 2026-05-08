@@ -26,6 +26,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                               const std::optional<at::Tensor>& in_bias,
                               const int64_t CuCount, const int64_t group_size);
 
+// AIESW-32176: CK WMMA W4A16 b_scale GEMM. gfx1151-tuned for the Qwen3-4B
+// gate_up_proj prefill shape (M=3968, N=19456, K=2560, group=128).
+torch::Tensor ck_w4a16_b_scale_gemm(const at::Tensor& in_a,
+                                    const at::Tensor& in_b,
+                                    const at::Tensor& in_s, int64_t group_size);
+
 void fused_moe_wvSplitK_int4_gemm(torch::Tensor a, torch::Tensor w,
                                   torch::Tensor scales, torch::Tensor c,
                                   torch::Tensor expert_ids,
