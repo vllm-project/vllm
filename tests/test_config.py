@@ -661,6 +661,16 @@ def test_generation_config_loading():
 
     assert model_config.get_diff_sampling_param() == override_result
 
+    # Non-sampling generation overrides are still needed by InputProcessor.
+    eos_override_generation_config = {"eos_token_id": 3}
+    model_config = ModelConfig(
+        model_id,
+        generation_config="auto",
+        override_generation_config=eos_override_generation_config,
+    )
+
+    assert model_config.try_get_generation_config()["eos_token_id"] == 3
+
     # When generation_config is set to "vllm" and override_generation_config
     # is set, the override_generation_config should be used directly.
     model_config = ModelConfig(

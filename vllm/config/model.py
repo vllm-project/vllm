@@ -1424,9 +1424,11 @@ class ModelConfig:
             )
 
         if config is None:
-            return {}
+            return self.override_generation_config.copy()
 
-        return config.to_diff_dict()
+        generation_config = config.to_diff_dict()
+        generation_config.update(self.override_generation_config)
+        return generation_config
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
@@ -1445,10 +1447,11 @@ class ModelConfig:
         """
         src = self.generation_config
 
-        config = {} if src == "vllm" else self.try_get_generation_config()
-
-        # Overriding with given generation config
-        config.update(self.override_generation_config)
+        config = (
+            self.override_generation_config.copy()
+            if src == "vllm"
+            else self.try_get_generation_config()
+        )
 
         available_params = [
             "repetition_penalty",

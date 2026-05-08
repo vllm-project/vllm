@@ -569,6 +569,10 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
             )
             scheduler_config.max_num_seqs = 1
 
+        model_config.override_generation_config.setdefault(
+            "eos_token_id", model_config.hf_config.eos_token_id
+        )
+
         if not model_config.enforce_eager:
             logger.warning_once(
                 "Parakeet TDT uses stateful decoder outputs; enforcing "

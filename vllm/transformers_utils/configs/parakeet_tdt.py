@@ -3,8 +3,6 @@
 
 from transformers import ParakeetEncoderConfig, PretrainedConfig
 
-PARAKEET_TDT_EOS_TOKEN_ID = 3
-
 
 class ParakeetTDTConfig(PretrainedConfig):
     """Configuration for NVIDIA Parakeet TDT checkpoints.
@@ -29,7 +27,7 @@ class ParakeetTDTConfig(PretrainedConfig):
         sample_rate: int = 16000,
         hidden_act: str = "relu",
         pad_token_id: int = 2,
-        eos_token_id: int = PARAKEET_TDT_EOS_TOKEN_ID,
+        eos_token_id: int = 3,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -64,4 +62,4 @@ class ParakeetTDTConfig(PretrainedConfig):
         self.is_encoder_decoder = True
 
 
-__all__ = ["PARAKEET_TDT_EOS_TOKEN_ID", "ParakeetTDTConfig"]
+__all__ = ["ParakeetTDTConfig"]
