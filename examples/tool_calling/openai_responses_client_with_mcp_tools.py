@@ -19,7 +19,6 @@ Environment variables:
 """
 
 from openai import OpenAI
-from utils import get_first_model
 
 
 def example_no_filter():
@@ -30,7 +29,7 @@ def example_no_filter():
 
     base_url = "http://0.0.0.0:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
 
     response = client.responses.create(
         model=model,
@@ -59,7 +58,7 @@ def example_wildcard():
 
     base_url = "http://0.0.0.0:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
 
     response = client.responses.create(
         model=model,
@@ -95,7 +94,7 @@ def example_specific_tools():
 
     base_url = "http://0.0.0.0:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
 
     response = client.responses.create(
         model=model,
@@ -126,7 +125,7 @@ def example_object_format():
 
     base_url = "http://0.0.0.0:8000/v1"
     client = OpenAI(base_url=base_url, api_key="empty")
-    model = get_first_model(client)
+    model = client.models.list().data[0].id
 
     response = client.responses.create(
         model=model,

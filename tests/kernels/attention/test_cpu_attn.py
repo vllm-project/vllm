@@ -20,6 +20,12 @@ from vllm._custom_ops import (
     cpu_attn_reshape_and_cache,
 )
 
+# Enable AMX tile data registers so isolated runs (e.g. -k fp8_amx) don't rely
+# on ref_paged_attn's einsum to trigger oneDNN's _init_amx() first.
+if torch.cpu._is_amx_tile_supported():
+    torch.cpu._init_amx()
+
+
 NUM_HEADS = [
     (4, 4),
     (8, 2),
@@ -178,6 +184,10 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
+_FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
+_FP8_RTOL = 0.1
+
+
 @torch.inference_mode()
 def varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -191,6 +201,9 @@ def varlen_with_paged_kv(
     use_alibi: bool,
     use_sink: bool,
     isa: str,
+    kv_cache_dtype: str = "auto",
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
 ) -> None:
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -211,6 +224,10 @@ def varlen_with_paged_kv(
     s_aux = (
         15 * torch.rand((num_query_heads,), dtype=torch.bfloat16) if use_sink else None
     )
+
+    is_fp8 = kv_cache_dtype != "auto"
+    if is_fp8 and current_platform.get_cpu_architecture() != CpuArchEnum.X86:
+        pytest.skip("FP8 KV cache only supported on x86")
 
     query = tensor_cache(
         elem_num=token_num * num_query_heads * head_size,
@@ -233,11 +250,17 @@ def varlen_with_paged_kv(
         num_kv_heads,
         head_size,
     )
+    if is_fp8:
+        # Clamp KV to [-1, 1] so FP8 quantization error (<=12.5% for E4M3,
+        # <=25% for E5M2) stays within the test tolerances regardless of
+        # which tensor_cache values happen to be in use.
+        key_value = key_value.clamp(-1, 1)
     key_cache, value_cache = key_value.unbind(0)
 
     # KV cache for CPU attention
+    cache_dtype = torch.uint8 if is_fp8 else dtype
     packed_key_cache = torch.empty(
-        num_blocks, num_kv_heads, block_size, head_size, dtype=dtype
+        num_blocks, num_kv_heads, block_size, head_size, dtype=cache_dtype
     )
     packed_value_cache = torch.empty_like(packed_key_cache)
 
@@ -252,6 +275,11 @@ def varlen_with_paged_kv(
 
     # use reshape_and_cache to pack key_cache and value_cache
     slot_mapping = torch.arange(0, num_blocks * block_size, dtype=torch.int64)
+    fp8_kwargs: dict = (
+        dict(k_scale=k_scale, v_scale=v_scale, kv_cache_dtype=kv_cache_dtype)
+        if is_fp8
+        else {}
+    )
     cpu_attn_reshape_and_cache(
         key=key_cache.view(-1, num_kv_heads, head_size),
         value=value_cache.view(-1, num_kv_heads, head_size),
@@ -259,6 +287,7 @@ def varlen_with_paged_kv(
         value_cache=packed_value_cache,
         slot_mapping=slot_mapping,
         isa=isa,
+        **fp8_kwargs,
     )
 
     metadata = cpu_attn_get_scheduler_metadata(
@@ -291,6 +320,7 @@ def varlen_with_paged_kv(
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=metadata,
         s_aux=s_aux,
+        **fp8_kwargs,
     )
 
     metadata = cpu_attn_get_scheduler_metadata(
@@ -323,23 +353,59 @@ def varlen_with_paged_kv(
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=metadata,
         s_aux=s_aux,
+        **fp8_kwargs,
     )
 
-    ref_output = ref_paged_attn(
-        query=query,
-        key_cache=key_cache,
-        value_cache=value_cache,
-        query_lens=query_lens,
-        kv_lens=kv_lens,
-        block_tables=block_tables,
-        scale=scale,
-        sliding_window=sliding_window,
-        soft_cap=soft_cap,
-        alibi_slopes=alibi_slopes,
-        s_aux=s_aux,
-    )
+    if is_fp8:
+        # Build a float KV cache via the non-FP8 path and run float attention
+        # to use as the reference.
+        ref_key_cache = torch.empty(
+            num_blocks, num_kv_heads, block_size, head_size, dtype=dtype
+        )
+        ref_value_cache = torch.empty_like(ref_key_cache)
+        cpu_attn_reshape_and_cache(
+            key=key_cache.view(-1, num_kv_heads, head_size),
+            value=value_cache.view(-1, num_kv_heads, head_size),
+            key_cache=ref_key_cache,
+            value_cache=ref_value_cache,
+            slot_mapping=slot_mapping,
+            isa=isa,
+        )
+        ref_output = torch.empty_like(query)
+        cpu_attention_with_kv_cache(
+            query=query,
+            key_cache=ref_key_cache,
+            value_cache=ref_value_cache,
+            output=ref_output,
+            query_start_loc=cu_query_lens,
+            seq_lens=kv_lens_tensor,
+            scale=scale,
+            causal=True,
+            alibi_slopes=alibi_slopes,
+            sliding_window=window_size,
+            block_table=block_tables,
+            softcap=soft_cap if soft_cap is not None else 0,
+            scheduler_metadata=metadata,
+            s_aux=s_aux,
+        )
+        atol = _FP8_ATOL[kv_cache_dtype]
+        rtol = _FP8_RTOL
+    else:
+        ref_output = ref_paged_attn(
+            query=query,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            query_lens=query_lens,
+            kv_lens=kv_lens,
+            block_tables=block_tables,
+            scale=scale,
+            sliding_window=sliding_window,
+            soft_cap=soft_cap,
+            alibi_slopes=alibi_slopes,
+            s_aux=s_aux,
+        )
+        atol, rtol = 1.5e-2, 1e-2
 
-    atol, rtol = 1.5e-2, 1e-2
     (
         torch.testing.assert_close(out_with_split, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(out_with_split - ref_output))}",
@@ -350,6 +416,7 @@ def varlen_with_paged_kv(
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -373,6 +440,7 @@ def test_varlen_with_paged_kv_normal_vec(
     use_alibi: bool,
     use_sink: bool,
     isa: str,
+    kv_cache_dtype: str,
 ) -> None:
     varlen_with_paged_kv(
         seq_lens=seq_lens,
@@ -386,9 +454,11 @@ def test_varlen_with_paged_kv_normal_vec(
         use_alibi=use_alibi,
         use_sink=use_sink,
         isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
@@ -413,6 +483,7 @@ def test_varlen_with_paged_kv_normal_amx(
     use_alibi: bool,
     use_sink: bool,
     isa: str,
+    kv_cache_dtype: str,
 ) -> None:
     varlen_with_paged_kv(
         seq_lens=seq_lens,
@@ -426,6 +497,7 @@ def test_varlen_with_paged_kv_normal_amx(
         use_alibi=use_alibi,
         use_sink=use_sink,
         isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
@@ -511,6 +583,7 @@ def test_varlen_with_paged_kv_normal_neon(
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", [96])
@@ -534,6 +607,7 @@ def test_varlen_with_paged_kv_softcap(
     use_alibi: bool,
     use_sink: bool,
     isa: str,
+    kv_cache_dtype: str,
 ) -> None:
     varlen_with_paged_kv(
         seq_lens=seq_lens,
@@ -547,9 +621,11 @@ def test_varlen_with_paged_kv_softcap(
         use_alibi=use_alibi,
         use_sink=use_sink,
         isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", [96])
@@ -573,6 +649,7 @@ def test_varlen_with_paged_kv_alibi(
     use_alibi: bool,
     use_sink: bool,
     isa: str,
+    kv_cache_dtype: str,
 ) -> None:
     varlen_with_paged_kv(
         seq_lens=seq_lens,
@@ -586,9 +663,11 @@ def test_varlen_with_paged_kv_alibi(
         use_alibi=use_alibi,
         use_sink=use_sink,
         isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", [96])
@@ -612,6 +691,7 @@ def test_varlen_with_paged_kv_sink(
     use_alibi: bool,
     use_sink: bool,
     isa: str,
+    kv_cache_dtype: str,
 ) -> None:
     varlen_with_paged_kv(
         seq_lens=seq_lens,
@@ -625,4 +705,5 @@ def test_varlen_with_paged_kv_sink(
         use_alibi=use_alibi,
         use_sink=use_sink,
         isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
