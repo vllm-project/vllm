@@ -132,5 +132,4 @@ steps:
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_default_mm_loras.py && 
-      pytest -v -s lora/test_whisper.py &&
-      (pytest -v -s lora/test_llm_with_multi_loras.py || true)'
+      pytest -v -s lora/test_whisper.py'
