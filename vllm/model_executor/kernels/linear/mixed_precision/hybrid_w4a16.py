@@ -83,6 +83,16 @@ def _has_ck_w4a16_op() -> bool:
         return False
 
 
+def _has_ck_w4a16_zp_op() -> bool:
+    """True iff the asymmetric (with-zero-points) CK op is registered.
+    AIESW-32176 Phase 5b — separate from _has_ck_w4a16_op so older builds
+    of _rocm_C that only have the symmetric op still work."""
+    try:
+        return hasattr(torch.ops._rocm_C, "ck_w4a16_b_scale_zp_gemm")
+    except (AttributeError, RuntimeError):
+        return False
+
+
 def _ck_disabled() -> bool:
     """Set VLLM_DISABLE_CK_W4A16=1 to bypass the CK dispatch and stay on Triton.
     Used for A/B benchmarking the CK kernel against the Triton baseline without
@@ -438,8 +448,9 @@ def _hybrid_w4a16_apply_impl(
     group_size: int,
     w_q_ck: torch.Tensor | None = None,
     ck_target_m: int = 0,
+    w_scaled_zp_ck: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Dispatch between skinny GEMM, CK W4A16 b_scale, and Triton based on M.
+    """Dispatch between skinny GEMM, CK W4A16 b_scale (sym/asym), and Triton.
 
     Both skinny and Triton paths read from the same vLLM skinny-format weights:
       w_q:     [N, K//8] int8 (ExLlama shuffle, for skinny kernel)
@@ -450,9 +461,11 @@ def _hybrid_w4a16_apply_impl(
                single format: dequant = (nibble - zp_raw) * scale.
 
     AIESW-32176: w_q_ck is the same weights repacked into CK pk_i4 layout
-    [K0, N, K1//2] int8. When non-None and M matches ck_target_m and the
-    model is symmetric (w_zp is None), the CK b_scale GEMM kernel is used
-    instead of Triton.
+    [K0, N, K1//2] int8. When non-None and M matches ck_target_m the CK
+    GEMM kernel is used instead of Triton:
+      - symmetric (w_zp is None): ck_w4a16_b_scale_gemm
+      - asymmetric (w_zp set, w_scaled_zp_ck = (zp-8)*scale precomputed at
+        load time): ck_w4a16_b_scale_zp_gemm
 
     Registered as a custom op so torch.compile treats it as opaque.
     """
@@ -473,24 +486,40 @@ def _hybrid_w4a16_apply_impl(
         with ctx:
             return ops.wvSplitK_int4_g(w_q, x_2d, w_s, cu_count, group_size, w_zp, bias)
 
-    # AIESW-32176: CK W4A16 b_scale path. Conditional is inside the custom op
-    # so it's opaque to dynamo and the runtime M check is a plain Python compare.
-    if w_q_ck is not None and ck_target_m > 0 and ck_target_m == M and w_zp is None:
+    # AIESW-32176: CK W4A16 b_scale path (sym or asym). Conditional is inside
+    # the custom op so it's opaque to dynamo and the runtime M check is a plain
+    # Python int compare.
+    if w_q_ck is not None and ck_target_m > 0 and ck_target_m == M:
         ctx = (
             nullcontext()
             if torch.compiler.is_compiling()
             else torch.profiler.record_function(f"ck_w4a16 {M}x{N}x{K}")
         )
         with ctx:
-            output = torch.ops._rocm_C.ck_w4a16_b_scale_gemm(
-                x_2d,
-                w_q_ck,
-                w_s,
-                group_size,
-            )
-            if bias is not None:
-                output.add_(bias)
-        return output
+            if w_zp is None:
+                output = torch.ops._rocm_C.ck_w4a16_b_scale_gemm(
+                    x_2d,
+                    w_q_ck,
+                    w_s,
+                    group_size,
+                )
+            elif w_scaled_zp_ck is not None:
+                output = torch.ops._rocm_C.ck_w4a16_b_scale_zp_gemm(
+                    x_2d,
+                    w_q_ck,
+                    w_s,
+                    w_scaled_zp_ck,
+                    group_size,
+                )
+            else:
+                # Asymmetric layer with zp present but scaled_zp not precomputed
+                # — fall through to Triton (shouldn't happen if load-time path
+                # is wired, but defensive).
+                output = None
+            if output is not None:
+                if bias is not None:
+                    output.add_(bias)
+                return output
 
     ctx = (
         nullcontext()
@@ -521,6 +550,7 @@ def _hybrid_w4a16_apply_fake(
     group_size: int,
     w_q_ck: torch.Tensor | None = None,
     ck_target_m: int = 0,
+    w_scaled_zp_ck: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M = x_2d.size(0)
     N = w_q.size(0)
@@ -655,11 +685,15 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         # dtype) matches a registered CK target shape on gfx1151. Done once at
         # load time with regular Python ints (not SymInts), so the lookup is safe
         # outside the dynamo trace. The CK kernel is symmetric-only; skip if zp.
-        if (not c.zero_points) and _has_ck_w4a16_op() and not _ck_disabled():
+        if _has_ck_w4a16_op() and not _ck_disabled():
             N = w_q_skinny_i32.shape[0]
             K = w_q_skinny_i32.shape[1] * 8
             target = _lookup_ck_target(N, K, c.group_size, c.act_type)
-            if target is not None:
+            # Symmetric: just need _hybrid_w_q_ck. Asymmetric: also need
+            # _hybrid_w_scaled_zp_ck = (zp - 8) * scale [N, K/G] precomputed
+            # once, AND the asymmetric CK op must be present in this build.
+            asym_ok = (not c.zero_points) or _has_ck_w4a16_zp_op()
+            if target is not None and asym_ok:
                 M_target, kperblock = target
                 w_q_ck = _repack_vllm_to_ck_b_scale(w_q_skinny_i32, kperblock)
                 layer.register_parameter(
@@ -668,6 +702,25 @@ class HybridW4A16LinearKernel(MPLinearKernel):
                 )
                 # Plain Python int — safe to compare against SymInt M at apply.
                 layer._hybrid_ck_M = int(M_target)
+
+                if c.zero_points:
+                    # AIESW-32176: precompute scaled_zp = (zp - 8) * scale.
+                    # zp is stored on the layer post-process as raw fp16 in
+                    # act dtype (see the c.zero_points block above). scale
+                    # here is w_s_skinny [N, K/G]. Result shape matches.
+                    w_zp_raw = getattr(layer, self.w_zp_name).data
+                    scaled_zp = (
+                        (
+                            (w_zp_raw.to(torch.float32) - 8.0)
+                            * w_s_skinny.to(torch.float32)
+                        )
+                        .to(c.act_type)
+                        .contiguous()
+                    )
+                    layer.register_parameter(
+                        "_hybrid_w_scaled_zp_ck",
+                        torch.nn.Parameter(scaled_zp, requires_grad=False),
+                    )
 
     def apply_weights(
         self,
@@ -685,12 +738,12 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         N = w_q.shape[0]
         out_shape = x.shape[:-1] + (N,)
 
-        # AIESW-32176: pass CK-format weights + target M to the custom op if
-        # registered for this layer. The dispatch decision happens INSIDE the
-        # custom op (opaque to dynamo), so the runtime M check is a plain int
-        # compare with no guard / graph-break complications.
+        # AIESW-32176: pass CK-format weights + target M (and scaled_zp for
+        # asymmetric) to the custom op if registered for this layer. Dispatch
+        # decision happens INSIDE the custom op (opaque to dynamo).
         w_q_ck = getattr(layer, "_hybrid_w_q_ck", None)
         ck_target_m = getattr(layer, "_hybrid_ck_M", 0)
+        w_scaled_zp_ck = getattr(layer, "_hybrid_w_scaled_zp_ck", None)
 
         cu_count = num_compute_units()
         output = torch.ops.vllm.hybrid_w4a16_apply(
@@ -704,5 +757,6 @@ class HybridW4A16LinearKernel(MPLinearKernel):
             c.group_size,
             w_q_ck,
             ck_target_m,
+            w_scaled_zp_ck,
         )
         return output.reshape(out_shape)

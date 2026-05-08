@@ -58,11 +58,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
 #ifdef VLLM_HAVE_CK_W4A16
   // AIESW-32176: CK WMMA W4A16 b_scale GEMM.
-  // in_b is in CK pk_i4 layout [K0, N, K1/2] int8; in_s is [K/G, N] fp16.
+  // in_b is in CK pk_i4 layout [K0, N, K1/2] int8; in_s is [N, K/G] fp16.
   rocm_ops.def(
       "ck_w4a16_b_scale_gemm(Tensor in_a, Tensor in_b, Tensor in_s, "
       "int group_size) -> Tensor");
   rocm_ops.impl("ck_w4a16_b_scale_gemm", torch::kCUDA, &ck_w4a16_b_scale_gemm);
+
+  // AIESW-32176: asymmetric (AWQ) variant. in_scaled_zp = (zp-8)*scale [N,K/G].
+  rocm_ops.def(
+      "ck_w4a16_b_scale_zp_gemm(Tensor in_a, Tensor in_b, Tensor in_s, "
+      "Tensor in_scaled_zp, int group_size) -> Tensor");
+  rocm_ops.impl("ck_w4a16_b_scale_zp_gemm", torch::kCUDA,
+                &ck_w4a16_b_scale_zp_gemm);
 #endif
 
   // Fused MoE wrapper around wvSplitK_int4_g: iterates expert runs in C++

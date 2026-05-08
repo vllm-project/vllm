@@ -148,3 +148,83 @@ torch::Tensor ck_w4a16_b_scale_gemm(const at::Tensor& in_a,
 
   return out;
 }
+
+// AIESW-32176: asymmetric (AWQ) variant.
+//   Same kernel as ck_w4a16_b_scale_gemm except the dequant uses
+//       (nibble - zp) * scale = (nibble - 8) * scale - (zp - 8) * scale
+//   The caller precomputes scaled_zp[N, K/G] = (zp - 8) * scale once at weight
+//   load and passes it as in_scaled_zp. The CK kernel subtracts scaled_zp from
+//   each dequanted half2 inline (one extra fp16 vector subtract per pack).
+//   in_scaled_zp shape and stride match in_s exactly.
+torch::Tensor ck_w4a16_b_scale_zp_gemm(const at::Tensor& in_a,
+                                       const at::Tensor& in_b,
+                                       const at::Tensor& in_s,
+                                       const at::Tensor& in_scaled_zp,
+                                       int64_t group_size) {
+  TORCH_CHECK(in_a.is_cuda() && in_b.is_cuda() && in_s.is_cuda() &&
+                  in_scaled_zp.is_cuda(),
+              "All inputs must be on GPU");
+  TORCH_CHECK(in_a.dtype() == at::kHalf, "in_a must be fp16");
+  TORCH_CHECK(in_s.dtype() == at::kHalf, "in_s must be fp16");
+  TORCH_CHECK(in_scaled_zp.dtype() == at::kHalf, "in_scaled_zp must be fp16");
+  TORCH_CHECK(in_a.dim() == 2, "in_a must be 2-D [M, K]");
+  TORCH_CHECK(in_b.dim() == 3,
+              "in_b must be 3-D [K0, N, K1/2] (CK pk_i4 layout)");
+  TORCH_CHECK(in_s.dim() == 2,
+              "in_s must be 2-D [N, K/G] row-major (vLLM HybridW4A16 native "
+              "scale layout)");
+  TORCH_CHECK(in_scaled_zp.sizes() == in_s.sizes(),
+              "in_scaled_zp must have the same shape as in_s [N, K/G]");
+  TORCH_CHECK(in_scaled_zp.is_contiguous(),
+              "in_scaled_zp must be contiguous row-major [N, K/G]");
+  TORCH_CHECK(group_size == Scale_Block_K,
+              "group_size must equal CK Scale_Block_K (", Scale_Block_K, ")");
+
+  const int64_t M = in_a.size(0);
+  const int64_t K = in_a.size(1);
+  const int64_t K0 = in_b.size(0);
+  const int64_t N = in_b.size(1);
+  const int64_t K1_half = in_b.size(2);
+  TORCH_CHECK(K0 * KPerBlock == K, "K0 * KPerBlock != K (", K0, "*", KPerBlock,
+              "!=", K, ")");
+  TORCH_CHECK(K1_half * 2 == KPerBlock, "in_b last dim must be KPerBlock/2 (",
+              K1_half, "*2 !=", KPerBlock, ")");
+  TORCH_CHECK(in_s.size(0) == N && in_s.size(1) * group_size == K,
+              "in_s shape must be [N, K/G]; got [", in_s.size(0), ",",
+              in_s.size(1), "] for K=", K, " N=", N, " G=", group_size);
+  TORCH_CHECK(in_s.is_contiguous(),
+              "in_s must be contiguous row-major [N, K/G]");
+
+  auto out = torch::empty({M, N}, in_a.options());
+
+  const at::cuda::OptionalCUDAGuard guard(device_of(in_a));
+
+  const ck::index_t StrideA = static_cast<ck::index_t>(K);
+  const ck::index_t StrideB = static_cast<ck::index_t>(K);
+  const ck::index_t StrideC = static_cast<ck::index_t>(N);
+  const ck::index_t Scale_Stride_BN = static_cast<ck::index_t>(K / group_size);
+  const ck::index_t KBatch = 1;
+
+  auto gemm = DeviceGemmInstance{};
+  auto invoker = gemm.MakeInvoker();
+  auto argument = gemm.MakeArgument(
+      reinterpret_cast<const ADataType*>(in_a.data_ptr()),
+      reinterpret_cast<const BDataType*>(in_b.data_ptr()),
+      reinterpret_cast<CDataType*>(out.data_ptr()), static_cast<ck::index_t>(M),
+      static_cast<ck::index_t>(N), static_cast<ck::index_t>(K), StrideA,
+      StrideB, StrideC, Scale_Stride_BN,
+      reinterpret_cast<const BScaleDataType*>(in_s.data_ptr()), KBatch,
+      PassThrough{}, PassThrough{}, PassThrough{},
+      reinterpret_cast<const BScaleDataType*>(in_scaled_zp.data_ptr()));
+
+  TORCH_CHECK(gemm.IsSupportedArgument(argument),
+              "CK W4A16 b_scale_zp device op rejected the argument; ",
+              "shape (M=", M, ", N=", N, ", K=", K, ", G=", group_size,
+              ") not supported by this build");
+
+  StreamConfig stream;
+  stream.stream_id_ = at::cuda::getCurrentCUDAStream();
+  invoker.Run(argument, stream);
+
+  return out;
+}

@@ -32,6 +32,15 @@ torch::Tensor ck_w4a16_b_scale_gemm(const at::Tensor& in_a,
                                     const at::Tensor& in_b,
                                     const at::Tensor& in_s, int64_t group_size);
 
+// AIESW-32176: asymmetric (AWQ-style) variant with per-group zero points.
+// in_scaled_zp = (zp - 8) * scale precomputed at weight load (same shape and
+// stride as in_s).
+torch::Tensor ck_w4a16_b_scale_zp_gemm(const at::Tensor& in_a,
+                                       const at::Tensor& in_b,
+                                       const at::Tensor& in_s,
+                                       const at::Tensor& in_scaled_zp,
+                                       int64_t group_size);
+
 void fused_moe_wvSplitK_int4_gemm(torch::Tensor a, torch::Tensor w,
                                   torch::Tensor scales, torch::Tensor c,
                                   torch::Tensor expert_ids,
