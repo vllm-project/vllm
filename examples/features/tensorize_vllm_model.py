@@ -33,7 +33,7 @@ https://github.com/coreweave/tensorizer
 To serialize a model, install vLLM from source, then run something 
 like this from the root level of this repository:
 
-python examples/others/tensorize_vllm_model.py \
+python examples/features/tensorize_vllm_model.py \
    --model facebook/opt-125m \
    serialize \
    --serialized-directory s3://my-bucket \
@@ -53,7 +53,7 @@ providing a `--keyfile` argument.
 To deserialize a model, you can run something like this from the root 
 level of this repository:
 
-python examples/others/tensorize_vllm_model.py \
+python examples/features/tensorize_vllm_model.py \
    --model EleutherAI/gpt-j-6B \
    --dtype float16 \
    deserialize \
@@ -71,11 +71,11 @@ shard's rank. Sharded models serialized with this script will be named as
 model-rank-%03d.tensors
 
 For more information on the available arguments for serializing, run 
-`python -m examples.others.tensorize_vllm_model serialize --help`.
+`python -m examples.features.tensorize_vllm_model serialize --help`.
 
 Or for deserializing:
 
-`python examples/others/tensorize_vllm_model.py deserialize --help`.
+`python examples/features/tensorize_vllm_model.py deserialize --help`.
 
 Once a model is serialized, tensorizer can be invoked with the `LLM` class 
 directly to load models:
@@ -100,7 +100,7 @@ vllm serve s3://my-bucket/vllm/facebook/opt-125m/v1 \
 In order to see all of the available arguments usable to configure 
 loading with tensorizer that are given to `TensorizerConfig`, run:
 
-`python examples/others/tensorize_vllm_model.py deserialize --help`
+`python examples/features/tensorize_vllm_model.py deserialize --help`
 
 under the `tensorizer options` section. These can also be used for
 deserialization in this example script, although `--tensorizer-uri` and
