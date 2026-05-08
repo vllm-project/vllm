@@ -87,6 +87,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_text_generation_model,
 )
 from vllm.model_executor.offloader import (
+    NoopOffloader,
     create_offloader,
     get_offloader,
     set_offloader,
@@ -5965,6 +5966,12 @@ class GPUModelRunner(
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()
+
+        # Reset the global offloader singleton so that UVA/pinned-memory
+        # tensors are released before the CUDA context is torn down.
+        # Without this, on UMA systems (e.g. GH200) the CUDA driver may
+        # not reclaim the mapped memory after process exit.
+        set_offloader(NoopOffloader())
 
         reset_workspace_manager()
 
