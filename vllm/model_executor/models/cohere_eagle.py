@@ -9,7 +9,6 @@ from transformers import CohereConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -22,20 +21,13 @@ from vllm.model_executor.models.commandr import (
     LayerNorm,
 )
 
-from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix
+from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
 
 class CohereEagleDecoderLayer(CohereDecoderLayer):
-    """Eagle draft variant of CohereDecoderLayer.
-
-    Optionally replaces ``input_layernorm`` with ``nn.Identity`` on the very
-    first draft layer to mirror the original EAGLE implementation.
-
-    Reference:
-    https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
-    """
+    """Eagle draft variant of CohereDecoderLayer."""
 
     def __init__(
         self,
@@ -43,7 +35,6 @@ class CohereEagleDecoderLayer(CohereDecoderLayer):
         cache_config=None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        disable_input_layernorm: bool = False,
     ) -> None:
         super().__init__(
             config,
@@ -51,9 +42,6 @@ class CohereEagleDecoderLayer(CohereDecoderLayer):
             quant_config=quant_config,
             prefix=prefix,
         )
-        if disable_input_layernorm:
-            del self.input_layernorm
-            self.input_layernorm = nn.Identity()
 
 
 @support_torch_compile
@@ -180,17 +168,6 @@ class CohereEagleModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # When PP is disabled the draft model shares its token
-                # embeddings with the target model, so skip loading any
-                # embed_tokens weights coming from the EAGLE checkpoint.
-                if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                    continue
-
-                # lm_head is tied with embed_tokens; skip to avoid duplicate
-                # loads.
-                if "lm_head.weight" in name:
-                    continue
-
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
@@ -205,6 +182,11 @@ class EagleCohereForCausalLM(CohereForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        # Flags checked by the speculative proposer to decide whether to share
+        # embed_tokens / lm_head with the target model. Cohere EAGLE checkpoints
+        # use tied embeddings so these weights are absent from the draft file.
+        self.has_own_embed_tokens = False
+        self.has_own_lm_head = False
         target_layer_num = vllm_config.model_config.get_num_layers(
             vllm_config.parallel_config
         )
@@ -236,6 +218,11 @@ class EagleCohereForCausalLM(CohereForCausalLM):
         return self.model(input_ids, positions, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        def _track_and_forward(inputs):
+            name, weight = inputs
+            process_eagle_weight(self, name)
+            return name, weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(
@@ -245,7 +232,9 @@ class EagleCohereForCausalLM(CohereForCausalLM):
             ),
         )
 
-        loaded_weight_names = loader.load_weights(weights)
+        loaded_weight_names = loader.load_weights(
+            map(_track_and_forward, weights)
+        )
 
         # Embed tokens are tied with the target model and therefore not
         # present in the EAGLE checkpoint; mark them as loaded explicitly to
