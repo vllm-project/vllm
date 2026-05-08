@@ -30,7 +30,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
-from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+from vllm.v1.attention.backends.mla.prefill.selector import get_mla_prefill_backend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
