@@ -290,7 +290,7 @@ def test_models(
     )
 
 
-@multi_gpu_test(num_gpus=2, method="spawn")
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", ["openai/whisper-large-v3-turbo"])
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", "mp"])
