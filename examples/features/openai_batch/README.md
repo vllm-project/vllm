@@ -193,7 +193,7 @@ You can now run the batch runner, using the urls generated in the previous secti
 python -m vllm.entrypoints.openai.run_batch \
     -i "https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_INPUT_FILE.jsonl?AWSAccessKeyId=ABCDEFGHIJKLMNOPQRST&Signature=abcdefghijklmnopqrstuvwxyz12345&Expires=1715800091" \
     -o "https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_OUTPUT_FILE.jsonl?AWSAccessKeyId=ABCDEFGHIJKLMNOPQRST&Signature=abcdefghijklmnopqrstuvwxyz12345&Expires=1715800091" \
-    --model --model meta-llama/Meta-Llama-3-8B-Instruct
+    --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
 or use command-line:
@@ -202,7 +202,7 @@ or use command-line:
 vllm run-batch \
     -i "https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_INPUT_FILE.jsonl?AWSAccessKeyId=ABCDEFGHIJKLMNOPQRST&Signature=abcdefghijklmnopqrstuvwxyz12345&Expires=1715800091" \
     -o "https://s3.us-west-2.amazonaws.com/MY_BUCKET/MY_OUTPUT_FILE.jsonl?AWSAccessKeyId=ABCDEFGHIJKLMNOPQRST&Signature=abcdefghijklmnopqrstuvwxyz12345&Expires=1715800091" \
-    --model --model meta-llama/Meta-Llama-3-8B-Instruct
+    --model meta-llama/Meta-Llama-3-8B-Instruct
 ```
 
 ### Step 4: View your results
