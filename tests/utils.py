@@ -1511,6 +1511,16 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     return wrapper
 
 
+def _format_subprocess_exit(returncode: int) -> str:
+    """Render a subprocess exit code, naming the signal for negative codes."""
+    if returncode >= 0:
+        return f"exit code {returncode}"
+    try:
+        return f"killed by {signal.Signals(-returncode).name} ({returncode})"
+    except ValueError:
+        return f"exit code {returncode}"
+
+
 # Set on the spawn-child interpreter so the wrapper short-circuits when the
 # child resolves `module.qualname` back to its own decorated form, instead of
 # launching another subprocess.
@@ -1531,6 +1541,12 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
     ``vllm.compilation.counter.compilation_counter``) into stale clones in
     the child, so increments performed by the production code in the child
     would never be observable to the test.
+
+    The child inherits the parent's stdout/stderr so its output (engine
+    cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
+    traceback is serialized to ``tb_file`` for structured re-raising. A
+    native crash leaves ``tb_file`` empty — the diagnostic is then only in
+    the inherited subprocess output.
     """
 
     @functools.wraps(f)
@@ -1581,23 +1597,20 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             result = subprocess.run(
                 [sys.executable, "-c", child_script],
                 input=payload,
-                capture_output=True,
                 env=env,
             )
 
             if result.returncode != 0:
-                # Prefer the child's traceback file; fall back to stderr if
-                # the child crashed before its except handler ran.
                 try:
                     with open(tb_file) as fp:
                         tb = fp.read()
                 except OSError:
                     tb = ""
                 if not tb:
-                    tb = result.stderr.decode()
+                    tb = "<no Python traceback; see subprocess output above>"
                 raise RuntimeError(
                     f"Test subprocess '{f.__name__}' failed "
-                    f"(exit code {result.returncode}):\n{tb}"
+                    f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
                 )
         finally:
             with contextlib.suppress(OSError):
