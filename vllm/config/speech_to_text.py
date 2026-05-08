@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vllm.config.utils import config
 
@@ -76,9 +76,6 @@ class SpeechToTextConfig:
     audio chunks. The algorithm looks for the quietest moment within this
     window to minimize cutting through speech. Default 1600 samples ≈ 100ms
     at 16kHz. If None, no chunking will be done."""
-
-    generation_config: dict[str, Any] = field(default_factory=dict)
-    """Model-provided generation config applied to STT sampling parameters."""
 
     @property
     def allow_audio_chunking(self) -> bool:

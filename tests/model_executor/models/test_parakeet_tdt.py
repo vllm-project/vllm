@@ -89,8 +89,9 @@ def test_parakeet_tdt_forward_rejects_multiple_encoder_outputs():
 def test_parakeet_tdt_config_updates_runtime_metadata():
     model_config = SimpleNamespace(
         enforce_eager=False,
-        hf_config=SimpleNamespace(),
-        hf_text_config=SimpleNamespace(),
+        hf_config=SimpleNamespace(eos_token_id=3),
+        hf_text_config=SimpleNamespace(eos_token_id=3),
+        override_generation_config={},
     )
     scheduler_config = SimpleNamespace(max_num_seqs=8)
     vllm_config = SimpleNamespace(
@@ -103,15 +104,14 @@ def test_parakeet_tdt_config_updates_runtime_metadata():
 
     assert model_config.enforce_eager is True
     assert scheduler_config.max_num_seqs == 1
-    assert not hasattr(model_config.hf_config, "eos_token_id")
-    assert not hasattr(model_config.hf_text_config, "eos_token_id")
+    assert model_config.override_generation_config == {"eos_token_id": 3}
 
 
 def test_parakeet_tdt_config_defines_eos_token_id():
     assert ParakeetTDTConfig().eos_token_id == 3
 
 
-def test_parakeet_tdt_stt_config_carries_generation_eos():
+def test_parakeet_tdt_stt_config_uses_audio_metadata_only():
     model_config = SimpleNamespace(
         hf_config=SimpleNamespace(sample_rate=16000, eos_token_id=3)
     )
@@ -120,7 +120,8 @@ def test_parakeet_tdt_stt_config_carries_generation_eos():
         model_config, task_type="transcribe"
     )
 
-    assert stt_config.generation_config == {"eos_token_id": 3}
+    assert stt_config.sample_rate == 16000
+    assert stt_config.max_audio_clip_s == 30
 
 
 def test_parakeet_tdt_pads_variable_length_audio_features():

@@ -542,7 +542,6 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         return SpeechToTextConfig(
             sample_rate=hf_config.sample_rate,
             max_audio_clip_s=30,
-            generation_config={"eos_token_id": hf_config.eos_token_id},
         )
 
     @classmethod
