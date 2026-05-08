@@ -16,14 +16,14 @@ build:
           ELAPSED=0
           while :; do
             RAW=$(curl -sS -w "\n%{http_code}" "https://api.github.com/repos/vllm-project/vllm/commits/${READTHEDOCS_GIT_COMMIT_HASH}/check-runs?check_name=pre-run-check&filter=latest")
-            HTTP_CODE=$(printf '%s' "$RAW" | tail -n1)
-            BODY=$(printf '%s' "$RAW" | sed '$d')
+            HTTP_CODE=$(printf %s "$RAW" | tail -n1)
+            BODY=$(printf %s "$RAW" | head -n -1)
             if [ "$HTTP_CODE" != "200" ]; then
               echo "GitHub API returned HTTP $HTTP_CODE (likely rate-limited); skipping pre-run-check gate."
               break
             fi
-            STATUS=$(printf '%s' "$BODY" | python3 -c "import sys, json; r=json.load(sys.stdin).get('check_runs',[]); print((r[0].get('status') or '') if r else 'none')")
-            CONCLUSION=$(printf '%s' "$BODY" | python3 -c "import sys, json; r=json.load(sys.stdin).get('check_runs',[]); print((r[0].get('conclusion') or '') if r else '')")
+            STATUS=$(printf %s "$BODY" | python3 -c "import sys, json; r=json.load(sys.stdin).get(\"check_runs\",[]); print((r[0].get(\"status\") or \"\") if r else \"none\")")
+            CONCLUSION=$(printf %s "$BODY" | python3 -c "import sys, json; r=json.load(sys.stdin).get(\"check_runs\",[]); print((r[0].get(\"conclusion\") or \"\") if r else \"\")")
             if [ "$STATUS" = "none" ]; then
               echo "no pre-run-check found for this commit; skipping gate."
               break
