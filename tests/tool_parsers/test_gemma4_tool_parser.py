@@ -684,3 +684,20 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+
+def test_parse_gemma4_args_pdf_array():
+    """Regression test: STRING_DELIM must not leak into output values."""
+    raw = 'pdfs:[<|"|>/home/h/.openclaw/pdfs/a.pdf<|"|>,<|"|>/home/h/.openclaw/pdfs/b.pdf<|"|>],prompt:<|"|>analyse these 2 pdfs.<|"|>'
+
+    result = _parse_gemma4_args(raw)
+
+    assert result["pdfs"] == [
+        "/home/h/.openclaw/pdfs/a.pdf",
+        "/home/h/.openclaw/pdfs/b.pdf",
+    ]
+    assert result["prompt"] == "analyse these 2 pdfs."
+
+    output_json = json.dumps(result)
+    assert '<|"' not in output_json
+    assert '"|>' not in output_json
