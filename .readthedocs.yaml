@@ -11,8 +11,8 @@ build:
     post_checkout:
       - |
         if [ "$READTHEDOCS_VERSION_TYPE" = "external" ]; then
-          MAX_WAIT=600
-          INTERVAL=15
+          MAX_WAIT=300
+          INTERVAL=60
           ELAPSED=0
           while :; do
             RAW=$(curl -sS -w "\n%{http_code}" "https://api.github.com/repos/vllm-project/vllm/commits/${READTHEDOCS_GIT_COMMIT_HASH}/check-runs?check_name=pre-run-check&filter=latest")
