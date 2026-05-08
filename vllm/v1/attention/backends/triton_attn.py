@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import async_tensor_h2d, is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -117,10 +117,9 @@ class TritonAttentionMetadata:
         for r in range_lists:
             padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
             padded.append(padded_r)
-        # Create tensor with efficient H2D transfer
-        return torch.tensor(padded, dtype=torch.int32, device=device).view(
-            num_seqs, max_ranges, 2
-        )
+        # Build on pinned CPU memory so the H2D transfer is non-blocking.
+        padded = async_tensor_h2d(padded, dtype=torch.int32, device=device)
+        return padded.view(num_seqs, max_ranges, 2)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -296,6 +295,10 @@ class TritonAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "TRITON_ATTN"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["TritonAttentionImpl"]:
         return TritonAttentionImpl
@@ -458,6 +461,7 @@ class TritonAttentionImpl(AttentionImpl):
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
         use_alibi_sqrt: bool = False,
+        chunk_lookback: int = -1,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -492,6 +496,7 @@ class TritonAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
         self.use_alibi_sqrt = use_alibi_sqrt
+        self.chunk_lookback = chunk_lookback
         self.supports_quant_query_input = current_platform.is_cuda()
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
@@ -631,6 +636,7 @@ class TritonAttentionImpl(AttentionImpl):
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            chunk_lookback=self.chunk_lookback,
         )
 
         return output

@@ -80,6 +80,21 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
+def _make_control_bundle(node_ip: str) -> dict[str, float]:
+    # The engine actor is scheduled on the final CPU-only bundle. Keep that
+    # bundle colocated with the group's first GPU bundle so the actor does not
+    # float to an unrelated node and reorder worker ranks away from the
+    # advertised DP bootstrap host.
+    return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+
+def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
+    for key in bundle:
+        if key.startswith("node:"):
+            return key.split(":", 1)[1]
+    raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -293,6 +308,18 @@ def get_device_indices(
     return value
 
 
+def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
+    # Ray actor names (RayExecutorV2) and KV-connector engine_ids must
+    # be unique across sibling DP engines or registration collides.
+    # Use the global DP rank, not a node-local rank, since sibling DP
+    # engines can span multiple nodes.
+    dp_vllm_config.instance_id = f"{dp_vllm_config.instance_id}_dp{dp_rank}"
+    if dp_vllm_config.kv_transfer_config is not None:
+        dp_vllm_config.kv_transfer_config.engine_id = (
+            f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
+        )
+
+
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -388,15 +415,10 @@ class CoreEngineActorManager:
             range(dp_size), local_dp_ranks, placement_groups
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
+            if dp_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, index)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
-
-            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
-                # that the kv_transfer_config is unique for each DP rank.
-                dp_vllm_config.kv_transfer_config.engine_id = (
-                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{local_index}"
-                )
 
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
@@ -597,10 +619,20 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    control_node_ip = _get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        _make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
-                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+                    # STRICT_PACK already keeps every bundle in the placement
+                    # group on one node, so the explicit node affinity on the
+                    # control bundle is redundant for correctness here. Keep it
+                    # anyway for consistency with the span path and to preserve
+                    # intent if this scheduling strategy changes later.
+                    bundles = device_bundle * world_size + [
+                        _make_control_bundle(node_ip)
+                    ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
@@ -759,6 +791,8 @@ class CoreEngineActorManager:
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
+            if new_data_parallel_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, rank)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
 
@@ -927,7 +961,7 @@ def get_engine_zmq_addresses(
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
-    # examples/offline_inference/data_parallel.py.
+    # examples/features/data_parallel/data_parallel_offline.py.
     offline_mode = local_start_index is not None
 
     # client_local_only = True for cases where this front-end

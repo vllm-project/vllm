@@ -570,6 +570,8 @@ class FusedMoEExperts(ABC):
             return False, _make_reason(f"{activation_format.value} activation format")
         elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
             return False, _make_reason("batch invariance")
+        elif moe_config.is_lora_enabled and not cls.supports_lora():
+            return False, _make_reason("LoRA")
         return True, None
 
     @staticmethod
@@ -733,6 +735,15 @@ class FusedMoEExperts(ABC):
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
+
+    @staticmethod
+    def supports_lora() -> bool:
+        """Return True if this expert impl natively handles LoRA.
+
+        LoRA-aware experts should mix in LoRAExpertsMixin, which flips this
+        to True and provides the per-forward LoRA state plumbing.
+        """
+        return False
 
     @abstractmethod
     def supports_expert_map(self) -> bool:
@@ -1204,6 +1215,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        output_alias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1231,6 +1243,23 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+
+        # If caller's output buffer already matches fused_out shape/dtype, alias
+        # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
+        # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
+        # double-copy MoE write-back path).
+        if current_platform.is_rocm():
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if (
+                rocm_aiter_ops.is_fused_moe_enabled()
+                and output_alias is not None
+                and output_alias.shape == fused_out.shape
+                and output_alias.dtype == fused_out.dtype
+                and output_alias.device == fused_out.device
+                and output_alias.is_contiguous()
+            ):
+                fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,
@@ -1261,7 +1290,7 @@ class FusedMoEKernelModularImpl:
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
@@ -1392,6 +1421,7 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            output_alias=output,
         )
 
         return self._finalize(
@@ -1526,6 +1556,9 @@ class FusedMoEKernel:
     @property
     def fused_experts(self) -> FusedMoEExperts:
         return self.impl.fused_experts
+
+    def supports_lora(self) -> bool:
+        return self.fused_experts.supports_lora()
 
     def _post_init_setup(self):
         """

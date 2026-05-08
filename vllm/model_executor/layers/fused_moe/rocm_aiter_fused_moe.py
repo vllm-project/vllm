@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -108,6 +109,55 @@ def init_aiter_topK_meta_data(
     aiter_topK_meta_data = (total_topk_weights, total_topk_ids)
 
 
+def inject_shared_expert_weights(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    topk: int,
+    num_fused_shared_experts: int,
+    shared_expert_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Merge routed topk results with the shared expert buffer and inject
+    dynamic per-token shared expert gate values for AITER fusion.
+
+    For routers that already return the combined buffer (e.g. GroupedTopKRouter
+    via rocm_aiter_grouped_topk), only the dynamic weight injection is needed.
+    For routers that return only routed slots (e.g. FusedTopKRouter), this also
+    copies the routed results into the pre-allocated combined buffer.
+    """
+    if num_fused_shared_experts == 0:
+        return topk_weights, topk_ids
+
+    assert aiter_topK_meta_data is not None, (
+        "aiter_topK_meta_data is not initialized but "
+        "num_fused_shared_experts > 0. Ensure init_aiter_topK_meta_data "
+        "is called before routing."
+    )
+
+    total_topk_weights, total_topk_ids = aiter_topK_meta_data
+    token = topk_weights.shape[0]
+
+    assert total_topk_weights.shape[0] >= token, (
+        f"AITER topK meta data supports {total_topk_weights.shape[0]} "
+        f"tokens, but got {token} tokens."
+    )
+
+    total_topk_weights_slice = total_topk_weights[:token]
+    total_topk_ids_slice = total_topk_ids[:token]
+
+    if topk_weights.shape[1] == topk:
+        total_topk_weights_slice[:, :topk] = topk_weights
+        total_topk_ids_slice[:, :topk] = topk_ids
+        topk_weights = total_topk_weights_slice
+        topk_ids = total_topk_ids_slice
+
+    if shared_expert_weights is not None:
+        topk_weights[:, topk : topk + num_fused_shared_experts] = shared_expert_weights[
+            :token
+        ]
+
+    return topk_weights, topk_ids
+
+
 def rocm_aiter_grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -152,7 +202,7 @@ def rocm_aiter_grouped_topk(
     if e_score_correction_bias is not None:
         rocm_aiter_ops.biased_grouped_topk(
             gating_output,
-            e_score_correction_bias.to(gating_output.dtype),
+            e_score_correction_bias,
             topk_weights,
             topk_ids,
             num_expert_group,
@@ -252,7 +302,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
+        # mxfp4 i.e. w4a4, w4a16 uses BLOCK_1X32
+        # mxfp6 and mxfp8 are unsupported in AITER currently and use emulation instead
         if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
@@ -437,4 +488,16 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
         )
-        output.copy_(result)
+        # avoid redundant copy when output is a view of the result
+        if (
+            output.shape == result.shape
+            and output.dtype == result.dtype
+            and output.device == result.device
+            and output.is_contiguous()
+            and result.is_contiguous()
+            and output._base is None
+            and disable_inplace()
+        ):
+            output.set_(result)
+        else:
+            output.copy_(result)

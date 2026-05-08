@@ -62,6 +62,17 @@ def encode_pooling_output_float(output: PoolingRequestOutput) -> list[float]:
     return output.outputs.data.tolist()
 
 
+def encode_pooling_output_float_or_ndarray(output: PoolingRequestOutput) -> Any:
+    """Return an ndarray when the response renderer can serialize NumPy."""
+    try:
+        data = output.outputs.data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        return data.numpy()
+    except (RuntimeError, TypeError):
+        return output.outputs.data.tolist()
+
+
 def encode_pooling_output_base64(
     output: PoolingRequestOutput,
     embed_dtype: EmbedDType,
@@ -141,10 +152,14 @@ def enable_scoring_api(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ) -> bool:
-    if any(t in supported_tasks for t in ("embed", "token_embed")):
+    if model_config is None:
+        return False
+
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+    if pooling_task in ("embed", "token_embed"):
         return True
 
-    if model_config is not None and "classify" in supported_tasks:
+    if pooling_task == "classify":
         num_labels = getattr(model_config.hf_config, "num_labels", 0)
         if num_labels != 1:
             logger.debug_once("Scoring API is only enabled for num_labels == 1.")

@@ -128,26 +128,30 @@ async def fetch_spec_decode_metrics(
                     continue
 
                 if line.startswith("vllm:spec_decode"):
+                    # Extract metric name (before labels) to avoid matching
+                    # substrings inside label values.
+                    parts = line.split(None, 1)
+                    metric_name = parts[0].split("{")[0]
+                    if not metric_name.endswith("_total"):
+                        continue
                     found_spec_decode = True
-                    parts = line.split()
-                    if parts:
-                        with contextlib.suppress(ValueError):
-                            if "num_drafts" in line:
-                                num_drafts += int(float(parts[-1]))
-                            elif "num_draft_tokens" in line:
-                                num_draft_tokens += int(float(parts[-1]))
-                            elif "num_accepted_tokens_per_pos" in line:
-                                pos_label = 'position="'
-                                if pos_label in line:
-                                    start = line.index(pos_label) + len(pos_label)
-                                    end = line.index('"', start)
-                                    pos = int(line[start:end])
-                                    val = int(float(parts[-1]))
-                                    accepted_per_pos[pos] = (
-                                        accepted_per_pos.get(pos, 0) + val
-                                    )
-                            elif "num_accepted_tokens" in line:
-                                num_accepted_tokens += int(float(parts[-1]))
+                    with contextlib.suppress(ValueError):
+                        if "num_drafts" in metric_name:
+                            num_drafts += int(float(parts[-1]))
+                        elif "num_draft_tokens" in metric_name:
+                            num_draft_tokens += int(float(parts[-1]))
+                        elif "num_accepted_tokens_per_pos" in metric_name:
+                            pos_label = 'position="'
+                            if pos_label in line:
+                                start = line.index(pos_label) + len(pos_label)
+                                end = line.index('"', start)
+                                pos = int(line[start:end])
+                                val = int(float(parts[-1]))
+                                accepted_per_pos[pos] = (
+                                    accepted_per_pos.get(pos, 0) + val
+                                )
+                        elif "num_accepted_tokens" in metric_name:
+                            num_accepted_tokens += int(float(parts[-1]))
 
             if not found_spec_decode:
                 return None
@@ -1611,14 +1615,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
     parser.add_argument(
         "--timeline-itl-thresholds",
-        type=float,
-        nargs=2,
-        default=[25.0, 50.0],
-        metavar=("THRESHOLD1", "THRESHOLD2"),
+        type=str,
+        default="25,50",
         help="ITL thresholds in milliseconds for timeline plot coloring. "
-        "Specify two values to categorize inter-token latencies into three groups: "
-        "below first threshold (green), between thresholds (orange), "
-        "and above second threshold (red). Default: 25 50 (milliseconds).",
+        "Specify two comma-separated values to categorize inter-token "
+        "latencies into three groups: below first threshold (green), "
+        "between thresholds (orange), and above second threshold (red).",
     )
     parser.add_argument(
         "--plot-dataset-stats",
@@ -1636,6 +1638,19 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
+
+    # Validate timeline ITL thresholds
+    if args.plot_timeline:
+        try:
+            itl_thresholds = [
+                float(t.strip()) for t in args.timeline_itl_thresholds.split(",")
+            ]
+            if len(itl_thresholds) != 2:
+                raise ValueError(
+                    f"Expected 2 ITL threshold values, got {len(itl_thresholds)}"
+                )
+        except ValueError as e:
+            raise ValueError(f"Invalid --timeline-itl-thresholds format: {e}") from e
 
     # Validate ramp-up arguments
     if args.ramp_up_strategy is not None:
@@ -1711,10 +1726,23 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             trust_remote_code=args.trust_remote_code,
         )
 
+    # Validate dataset name/path
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
+        )
+
+    if (
+        args.dataset_name
+        in ["random", "random-mm", "random-rerank", "prefix_repetition"]
+        and args.dataset_path is not None
+    ):
+        raise ValueError(
+            f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
+            "Please specify the appropriate --dataset-name (e.g., "
+            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            f"{args.dataset_path}"
         )
 
     # Map general --input-len and --output-len to all dataset-specific arguments
@@ -1893,7 +1921,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
                 timeline_path = Path(file_name).with_suffix(".timeline.html")
                 # Convert thresholds from milliseconds to seconds
-                itl_thresholds_sec = [t / 1000.0 for t in args.timeline_itl_thresholds]
+                itl_thresholds_sec = [
+                    float(t) / 1000.0 for t in args.timeline_itl_thresholds.split(",")
+                ]
                 generate_timeline_plot(
                     per_request_data, timeline_path, itl_thresholds=itl_thresholds_sec
                 )
