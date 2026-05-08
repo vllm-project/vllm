@@ -267,6 +267,7 @@ class ModelArchConfigConvertorBase:
             "bagel",
             "gemma3",
             "molmo2",
+            "moondream3",
             "paligemma",
             "umm",
         )
@@ -350,6 +351,9 @@ class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
             "Encoder and decoder must have the same number of kv heads"
         )
         return enc_num_kv_heads
+
+    def is_mm_prefix_lm(self) -> bool:
+        return False
 
 
 class MambaModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -458,6 +462,8 @@ def _strip_mimo_v2_attention_chunk_size(
 
 class MimoV2ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(self, hf_config: PretrainedConfig, hf_text_config: PretrainedConfig):
+        if getattr(hf_config, "vision_config", None):
+            hf_config.architectures = ["MiMoV2OmniForCausalLM"]
         super().__init__(hf_config, hf_text_config)
         _strip_mimo_v2_attention_chunk_size(hf_config, hf_text_config)
 
@@ -506,6 +512,18 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
+class Gemma4MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_hidden_size(self) -> int:
+        # The speculator buffer must match the backbone (target) model's
+        # hidden dimension, not the draft model's smaller dimension.
+        return getattr(
+            self.hf_config, "backbone_hidden_size", super().get_hidden_size()
+        )
+
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self.hf_text_config, "num_hidden_layers", 0)
+
+
 class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def is_mm_prefix_lm(self) -> bool:
         return (
@@ -535,6 +553,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "falcon": FalconModelArchConfigConvertor,
     "gemma4": Gemma4ModelArchConfigConvertor,
     "gemma4_text": Gemma4ModelArchConfigConvertor,
+    "gemma4_mtp": Gemma4MTPModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
@@ -542,7 +561,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
     "mimo_mtp": MimoMTPModelArchConfigConvertor,
-    "mimo_v2_pro": MimoV2ModelArchConfigConvertor,
+    "mimo_v2": MimoV2ModelArchConfigConvertor,
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,

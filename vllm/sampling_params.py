@@ -25,6 +25,10 @@ logger = init_logger(__name__)
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
 
+MAX_LOGPROB_TOKEN_IDS = 128
+"""Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
+the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
+
 
 class SamplingType(IntEnum):
     GREEDY = 0
@@ -628,6 +632,16 @@ class SamplingParams(
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 
+    @property
+    def num_logprobs(self) -> int | None:
+        """Number of sample logprobs to return per output token, or `None` if
+        no sample logprobs were requested. Takes `logprob_token_ids` into
+        account: when `logprobs` is unset but `logprob_token_ids` is set,
+        returns `len(logprob_token_ids)`."""
+        if self.logprobs is not None:
+            return self.logprobs
+        return len(self.logprob_token_ids) if self.logprob_token_ids else None
+
     def clone(self) -> "SamplingParams":
         """If skip_clone is True, uses shallow copy instead of deep copy."""
         if self.skip_clone:
@@ -664,6 +678,17 @@ class SamplingParams(
                     f"which is greater than max allowed: {max_logprobs}",
                     parameter="logprobs",
                     value=num_logprobs,
+                )
+
+        # Validate logprob_token_ids.
+        if self.logprob_token_ids is not None:
+            n = len(self.logprob_token_ids)
+            if n > MAX_LOGPROB_TOKEN_IDS:
+                raise VLLMValidationError(
+                    f"Requested logprob_token_ids of length {n}, "
+                    f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
+                    parameter="logprob_token_ids",
+                    value=n,
                 )
 
         # Validate prompt logprobs.
