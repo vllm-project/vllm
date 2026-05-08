@@ -1,13 +1,85 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+import math
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+
 logger = init_logger(__name__)
+
+# FA3's combine kernel supports up to 256 splits (kLogMaxSplits=8).
+_FA3_MAX_SPLITS = 256
+
+# Default num_splits for CUDA graph decode (used as floor by the heuristic).
+_FA3_DEFAULT_NUM_SPLITS = 32
+
+# Minimum max_model_len to apply the heuristic. Below this, the combine
+# kernel overhead outweighs the SM-utilization gain.
+_FA3_HEURISTIC_MIN_CONTEXT = 100000
+
+
+def compute_fa3_num_splits(
+    kv_heads_per_device: int,
+    max_num_seqs: int,
+    num_sms: int,
+) -> int:
+    """Compute num_splits for FA3 CUDA graph mode to maximize SM utilization.
+
+    Returns at least _FA3_DEFAULT_NUM_SPLITS and at most
+    min(num_sms, _FA3_MAX_SPLITS).
+    """
+    ctas_without_splits = kv_heads_per_device * max_num_seqs
+    optimal = math.ceil(num_sms / ctas_without_splits)
+    return min(max(optimal, _FA3_DEFAULT_NUM_SPLITS), num_sms, _FA3_MAX_SPLITS)
+
+
+def resolve_fa_num_splits(vllm_config: "VllmConfig") -> int:
+    """Resolve the num_splits upper bound for FA3 CUDA graph decode.
+
+    If the user set ``flash_attn_max_num_splits_for_cuda_graph``, honor it.
+    Otherwise, for FA3 on Hopper (SM90) with sufficiently long context,
+    compute a value that fills all SMs; fall back to
+    ``_FA3_DEFAULT_NUM_SPLITS`` otherwise.
+    """
+    user_override = (
+        vllm_config.attention_config.flash_attn_max_num_splits_for_cuda_graph
+    )
+    if user_override is not None:
+        return user_override
+
+    model_config = vllm_config.model_config
+    if (
+        model_config is not None
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and model_config.max_model_len > _FA3_HEURISTIC_MIN_CONTEXT
+    ):
+        fa_version = vllm_config.attention_config.flash_attn_version
+        # FA3 is the default on Hopper when not explicitly set.
+        if fa_version is None or fa_version == 3:
+            kv_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+            num_sms = current_platform.num_compute_units()
+            resolved = compute_fa3_num_splits(
+                kv_heads_per_device=kv_heads,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+                num_sms=num_sms,
+            )
+            if resolved != _FA3_DEFAULT_NUM_SPLITS:
+                logger.debug(
+                    "flash_attn_max_num_splits_for_cuda_graph set to %d "
+                    "by FA3 SM-utilization heuristic (default: %d).",
+                    resolved,
+                    _FA3_DEFAULT_NUM_SPLITS,
+                )
+            return resolved
+    return _FA3_DEFAULT_NUM_SPLITS
+
 
 # Track whether upstream flash-attn is available on ROCm.
 # Set during module initialization and never modified afterwards.

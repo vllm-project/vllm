@@ -8,7 +8,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.config.attention import _FA3_DEFAULT_NUM_SPLITS
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -31,6 +30,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_mla,
     get_flash_attn_version,
+    resolve_fa_num_splits,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
@@ -151,10 +151,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = (
-                vllm_config.attention_config.flash_attn_max_num_splits_for_cuda_graph
-                or _FA3_DEFAULT_NUM_SPLITS
-            )
+            self.max_num_splits = resolve_fa_num_splits(vllm_config)
 
         if envs.VLLM_BATCH_INVARIANT:
             self.max_num_splits = 1
