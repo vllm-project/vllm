@@ -1511,62 +1511,106 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     return wrapper
 
 
+def _format_subprocess_exit(returncode: int) -> str:
+    """Render a subprocess exit code, naming the signal for negative codes."""
+    if returncode >= 0:
+        return f"exit code {returncode}"
+    try:
+        return f"killed by {signal.Signals(-returncode).name} ({returncode})"
+    except ValueError:
+        return f"exit code {returncode}"
+
+
+# Set on the spawn-child interpreter so the wrapper short-circuits when the
+# child resolves `module.qualname` back to its own decorated form, instead of
+# launching another subprocess.
+_SPAWN_CHILD_ENV = "VLLM_TEST_SPAWN_CHILD"
+
+
 def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
     """Decorator to spawn a new process for each test function.
 
-    Uses subprocess with cloudpickle to serialize the test function and
-    propagates exceptions back to the parent, so test failures are never
-    silently swallowed (fixes https://github.com/vllm-project/vllm/issues/41415).
+    Uses subprocess to run each test in a fresh interpreter and propagates
+    exceptions back to the parent, so test failures are never silently
+    swallowed (fixes https://github.com/vllm-project/vllm/issues/41415).
+
+    The child resolves the test function by importing its module and looking
+    it up by qualified name, rather than reconstructing it from a cloudpickle
+    blob. Pickling the function by value would also pickle its ``__globals__``
+    by value — turning module-level singletons (e.g.
+    ``vllm.compilation.counter.compilation_counter``) into stale clones in
+    the child, so increments performed by the production code in the child
+    would never be observable to the test.
+
+    The child inherits the parent's stdout/stderr so its output (engine
+    cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
+    traceback is serialized to ``tb_file`` for structured re-raising. A
+    native crash leaves ``tb_file`` empty — the diagnostic is then only in
+    the inherited subprocess output.
     """
 
     @functools.wraps(f)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        if os.environ.get(_SPAWN_CHILD_ENV) == "1":
+            return f(*args, **kwargs)
+
         with tempfile.NamedTemporaryFile(delete=False, suffix=".tb", mode="wb") as tmp:
             tb_file = tmp.name
 
         try:
-            # Serialize the function + args with cloudpickle so closures work
-            payload = cloudpickle.dumps((f, args, kwargs, tb_file))
+            payload = cloudpickle.dumps(
+                {
+                    "module": f.__module__,
+                    "qualname": f.__qualname__,
+                    "args": args,
+                    "kwargs": kwargs,
+                    "tb_file": tb_file,
+                }
+            )
 
             child_script = (
-                "import sys, cloudpickle, traceback\n"
+                "import sys, importlib, cloudpickle, traceback\n"
                 "try:\n"
                 "    from _pytest.outcomes import Skipped\n"
                 "except ImportError:\n"
                 "    class Skipped(BaseException): pass\n"
-                "f, args, kwargs, tb_file = "
-                "cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "data = cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "mod = importlib.import_module(data['module'])\n"
+                "target = mod\n"
+                "for name in data['qualname'].split('.'):\n"
+                "    target = getattr(target, name)\n"
                 "try:\n"
-                "    f(*args, **kwargs)\n"
+                "    target(*data['args'], **data['kwargs'])\n"
                 "except Skipped:\n"
                 "    sys.exit(0)\n"
                 "except BaseException:\n"
-                "    open(tb_file, 'w').write(traceback.format_exc())\n"
+                "    with open(data['tb_file'], 'w') as fp:\n"
+                "        fp.write(traceback.format_exc())\n"
                 "    sys.exit(1)\n"
             )
 
             repo_root = str(VLLM_PATH.resolve())
             env = os.environ.copy()
             env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+            env[_SPAWN_CHILD_ENV] = "1"
 
             result = subprocess.run(
                 [sys.executable, "-c", child_script],
                 input=payload,
-                capture_output=True,
                 env=env,
             )
 
             if result.returncode != 0:
-                # Read traceback written by child, fall back to stderr
-                tb = ""
-                if os.path.exists(tb_file) and os.path.getsize(tb_file) > 0:
+                try:
                     with open(tb_file) as fp:
                         tb = fp.read()
-                else:
-                    tb = result.stderr.decode()
+                except OSError:
+                    tb = ""
+                if not tb:
+                    tb = "<no Python traceback; see subprocess output above>"
                 raise RuntimeError(
                     f"Test subprocess '{f.__name__}' failed "
-                    f"(exit code {result.returncode}):\n{tb}"
+                    f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
                 )
         finally:
             with contextlib.suppress(OSError):
