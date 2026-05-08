@@ -199,6 +199,23 @@ class AsyncLLM(EngineClient):
         else:
             self.profiler = None
 
+        # Setup snapshot manager if enabled
+        additional_config = self.vllm_config.additional_config
+        enable_snapshot = False
+        snapshot_provider = None
+        if isinstance(additional_config, dict):
+            enable_snapshot = additional_config.get(
+                "enable_snapshot_post_startup", False
+            )
+            snapshot_provider = additional_config.get("snapshot_provider", None)
+
+        self.snapshot_manager = None
+        self.snapshot_task = None
+        if enable_snapshot:
+            from vllm.engine.snapshot.manager import SnapshotManager
+
+            self.snapshot_manager = SnapshotManager(snapshot_provider)
+
     @classmethod
     def from_vllm_config(
         cls,

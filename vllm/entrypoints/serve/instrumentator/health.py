@@ -28,6 +28,17 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     try:
         await client.check_health()
+
+        # Check if snapshot is enabled and in progress/pending
+        if getattr(client, "snapshot_manager", None) is not None:
+            snapshot_task = getattr(client, "snapshot_task", None)
+            if snapshot_task is None or not snapshot_task.done():
+                logger.info(
+                    "Snapshot is still running or pending, returning 503 "
+                    "for health check."
+                )
+                return Response(status_code=503, content="Snapshot in progress")
+
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)
