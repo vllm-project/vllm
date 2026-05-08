@@ -211,7 +211,8 @@ def install_dummy_logitproc_entrypoint(
     )
 
     monkeypatch.syspath_prepend(str(tmp_path))
+    pythonpath = os.environ.get("PYTHONPATH")
     monkeypatch.setenv(
         "PYTHONPATH",
-        str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        os.pathsep.join(filter(None, [str(tmp_path), pythonpath])),
     )
