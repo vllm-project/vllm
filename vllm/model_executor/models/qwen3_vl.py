@@ -97,6 +97,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.transformers_utils.processors.damork_vl import DamorkVLProcessor
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
@@ -866,7 +867,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> Qwen3VLProcessor:
         return self.ctx.get_hf_processor(
-            Qwen3VLProcessor,
+            (Qwen3VLProcessor, DamorkVLProcessor),
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
