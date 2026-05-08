@@ -6,6 +6,7 @@ import weakref
 from datetime import timedelta
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
+import torch
 import torch.distributed
 
 from vllm.config import ParallelConfig
@@ -62,11 +63,42 @@ class ScaleDownRemovingEngineState(enum.IntEnum):
     COMPLETE = 2
 
 
+class RecoveryReplacementEngineState(enum.IntEnum):
+    """State machine for the replacement rank in a same-size DP peer swap.
+
+    The replacement rank follows the same broad sequence as a scale-up new
+    worker (receive expert mapping → load dummy weights → receive actual
+    weights → prepare NIXL buffer → sync wave counters) but uses
+    ``receive_weights_from_donor`` instead of ``receive_weights`` because the
+    DP size is unchanged and the normal sender-rank calculation breaks.
+    """
+
+    PRE_KV_INIT = 0  # receive weights from donor, sync KV size, prepare NIXL
+    PREPARE = 1       # sync wave/step counters with survivors
+    COMPLETE = 2
+
+
+class RecoverySurvivingEngineState(enum.IntEnum):
+    """State machine for surviving ranks during a same-size DP peer swap.
+
+    Surviving ranks run ``reconnect_peer`` synchronously, then wait
+    for the replacement rank to signal it is ready to receive weights before
+    doing the weight transfer and wave-counter sync.
+    """
+
+    RECONNECT_FABRIC = 0        # run reconnect_peer (groups + NIXL)
+    WAIT_REPLACEMENT_READY = 1  # wait for NEW_CORE_ENGINES_WEIGHTS_INIT_READY
+    TRANSFER_WEIGHTS = 2         # rank 0 sends weights; all ranks sync KV size + waves
+    COMPLETE = 3
+
+
 EngineState: TypeAlias = (
     ScaleUpExistingEngineState
     | ScaleUpNewEngineState
     | ScaleDownRemainingEngineState
     | ScaleDownRemovingEngineState
+    | RecoveryReplacementEngineState
+    | RecoverySurvivingEngineState
 )
 
 
@@ -87,7 +119,7 @@ class ElasticEPScalingState:
         vllm_config: "VllmConfig",
         new_parallel_config: ParallelConfig,
         worker_type: WorkerType,
-        scale_type: Literal["scale_up", "scale_down"],
+        scale_type: Literal["scale_up", "scale_down", "recovery"],
         reconfig_request: ReconfigureDistributedRequest | None = None,
     ):
         self.model_executor_ref = weakref.ref(model_executor)
@@ -102,12 +134,32 @@ class ElasticEPScalingState:
         self.scale_type = scale_type
         self.reconfig_request = reconfig_request
 
+        # Donor rank for recovery weight transfer — computed once here so that
+        # both _progress_recovery_replacement_engine and
+        # _progress_recovery_surviving_engine are guaranteed to use the same
+        # rank.  None for non-recovery scale operations.
+        self.donor_dp_rank: int | None = None
+        if scale_type == "recovery" and reconfig_request is not None:
+            _dead = reconfig_request.dead_data_parallel_rank
+            # TODO: prefer a donor on the same physical node as the replacement
+            # rank to reduce cross-node bandwidth during weight transfer.
+            self.donor_dp_rank = next(
+                r for r in range(reconfig_request.new_data_parallel_size)
+                if r != _dead
+            )
+
         self.state: EngineState
         if scale_type == "scale_up":
             self.state = (
                 ScaleUpNewEngineState.PRE_KV_INIT
                 if worker_type == "new"
                 else ScaleUpExistingEngineState.WAIT_NEW_CORE_ENGINES_INIT
+            )
+        elif scale_type == "recovery":
+            self.state = (
+                RecoveryReplacementEngineState.PRE_KV_INIT
+                if worker_type == "new"
+                else RecoverySurvivingEngineState.RECONNECT_FABRIC
             )
         else:
             self.state = (
@@ -131,6 +183,12 @@ class ElasticEPScalingState:
         return engine_core
 
     def progress(self) -> bool:
+        if self.scale_type == "recovery":
+            return (
+                self._progress_recovery_replacement_engine()
+                if self.worker_type == "new"
+                else self._progress_recovery_surviving_engine()
+            )
         if self.scale_type == "scale_up":
             return (
                 self._progress_new_engine()
@@ -144,10 +202,15 @@ class ElasticEPScalingState:
         )
 
     def run_pre_kv_init_states(self) -> None:
-        assert self.scale_type == "scale_up" and self.worker_type == "new"
-        assert self.state == ScaleUpNewEngineState.PRE_KV_INIT
-        assert self.progress()
-        assert self.state == ScaleUpNewEngineState.PREPARE
+        assert self.scale_type in ("scale_up", "recovery") and self.worker_type == "new"
+        if self.scale_type == "recovery":
+            assert self.state == RecoveryReplacementEngineState.PRE_KV_INIT
+            assert self.progress()
+            assert self.state == RecoveryReplacementEngineState.PREPARE
+        else:
+            assert self.state == ScaleUpNewEngineState.PRE_KV_INIT
+            assert self.progress()
+            assert self.state == ScaleUpNewEngineState.PREPARE
 
     def _execute_tcp_store_barrier(
         self, dp_store, group_rank, group_size, barrier_id, timeout=None
@@ -448,8 +511,20 @@ class ElasticEPScalingState:
         ):
             self.old_dp_store.add("eep_barrier_engine_count", 1)
             self.state = ScaleUpExistingEngineState.TRANSFER_WEIGHTS
+        elif (
+            notification_type == EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
+            and self.scale_type == "recovery"
+            and self.state == RecoverySurvivingEngineState.WAIT_REPLACEMENT_READY
+        ):
+            self.state = RecoverySurvivingEngineState.TRANSFER_WEIGHTS
 
     def is_complete(self) -> bool:
+        if self.scale_type == "recovery":
+            return (
+                self.state == RecoveryReplacementEngineState.COMPLETE
+                if self.worker_type == "new"
+                else self.state == RecoverySurvivingEngineState.COMPLETE
+            )
         if self.scale_type == "scale_up":
             return (
                 self.state == ScaleUpNewEngineState.COMPLETE
@@ -461,6 +536,143 @@ class ElasticEPScalingState:
             if self.worker_type == "removing"
             else self.state == ScaleDownRemainingEngineState.COMPLETE
         )
+
+    def _progress_recovery_replacement_engine(self) -> bool:
+        """State machine for the replacement rank in a same-size peer swap.
+
+        PRE_KV_INIT: signal survivors, receive weights from donor rank,
+            sync KV cache size, prepare NIXL buffer.
+        PREPARE: sync wave/step counters with all survivors via all-reduce.
+
+        Returns:
+            True if the state advanced and the caller should invoke
+            progress() again; always True for this engine since the
+            replacement rank never blocks on an external event.
+        """
+        state = self.state
+        assert self.new_dp_group is not None and self.new_dp_store is not None
+
+        if state == RecoveryReplacementEngineState.PRE_KV_INIT:
+            assert self.donor_dp_rank is not None
+            # Tell surviving ranks we are ready to receive weights.
+            self.engine_core._eep_send_engine_core_notification(
+                EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
+            )
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute",
+                args=("receive_weights_from_donor", self.donor_dp_rank),
+            )
+            self.engine_core.available_gpu_memory_for_kv_cache = (
+                ParallelConfig.sync_kv_cache_memory_size(self.new_dp_group, -1)
+            )
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute", args=("prepare_new_worker",)
+            )
+            self.state = RecoveryReplacementEngineState.PREPARE
+            return True
+
+        elif state == RecoveryReplacementEngineState.PREPARE:
+            tensor = torch.tensor([0, 0, 0], dtype=torch.int32, device="cpu")
+            torch.distributed.all_reduce(
+                tensor,
+                op=torch.distributed.ReduceOp.MAX,
+                group=self.new_dp_group,
+            )
+            data = tensor.tolist()
+            self.engine_core.engines_running = bool(data[0])
+            self.engine_core.current_wave = int(data[1])
+            self.engine_core.step_counter = int(data[2])
+            self.state = RecoveryReplacementEngineState.COMPLETE
+            return True
+
+        else:
+            assert self.state == RecoveryReplacementEngineState.COMPLETE, (
+                f"Unexpected recovery replacement state: {self.state}"
+            )
+            return True
+
+    def _progress_recovery_surviving_engine(self) -> bool:
+        """State machine for surviving ranks in a same-size peer swap.
+
+        RECONNECT_FABRIC: call reconnect_peer synchronously — rebuilds
+            StatelessGroupCoordinator groups and NIXL peer connections.
+            Blocks until the replacement rank joins the recovery rendezvous.
+        WAIT_REPLACEMENT_READY: idle until the replacement signals it is
+            ready to receive weights (NEW_CORE_ENGINES_WEIGHTS_INIT_READY).
+        TRANSFER_WEIGHTS: donor rank sends weights; all ranks sync KV cache
+            size and wave/step counters with the replacement.
+
+        Returns:
+            True if the state advanced and the caller should invoke
+            progress() again; False if blocked waiting for an external
+            event (e.g. the replacement rank's ready notification).
+        """
+        state = self.state
+        assert self.old_dp_group is not None and self.old_dp_store is not None
+
+        if state == RecoverySurvivingEngineState.RECONNECT_FABRIC:
+            assert self.reconfig_request is not None
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute",
+                args=("reconnect_peer", self.reconfig_request),
+            )
+            # reconnect_peer promotes the standby groups to active via
+            # _replace_active_groups.  Capture the new communicator (which now
+            # includes the replacement rank) for use in TRANSFER_WEIGHTS.
+            self.new_dp_group = self.engine_core.dp_group
+            self.new_dp_store = self.engine_core.dp_store
+            self.state = RecoverySurvivingEngineState.WAIT_REPLACEMENT_READY
+            if self.old_dp_group.rank() == 0:
+                logger.info("[Elastic EP Recovery] Fabric reconnected, waiting for replacement rank")
+            return True
+
+        elif state == RecoverySurvivingEngineState.WAIT_REPLACEMENT_READY:
+            return False
+
+        elif state == RecoverySurvivingEngineState.TRANSFER_WEIGHTS:
+            assert self.reconfig_request is not None
+            assert self.donor_dp_rank is not None
+            dead_dp_rank = self.reconfig_request.dead_data_parallel_rank
+            # Sync KV cache memory size with the replacement rank.
+            assert self.new_dp_group is not None
+            ParallelConfig.sync_kv_cache_memory_size(
+                self.new_dp_group,
+                self.engine_core.available_gpu_memory_for_kv_cache,
+            )
+            # Donor rank sends weights; other surviving ranks are no-ops.
+            self.model_executor.collective_rpc(
+                "elastic_ep_execute",
+                args=("transfer_weights_to_replacement", dead_dp_rank, self.donor_dp_rank),
+            )
+            # Sync wave/step counters with the replacement rank.
+            engines_running = int(self.engine_core.engines_running)
+            current_wave = self.engine_core.current_wave
+            step_counter = self.engine_core.step_counter
+            tensor = torch.tensor(
+                [engines_running, current_wave, step_counter],
+                dtype=torch.int32,
+                device="cpu",
+            )
+            torch.distributed.all_reduce(
+                tensor,
+                op=torch.distributed.ReduceOp.MAX,
+                group=self.new_dp_group,
+            )
+            data = tensor.tolist()
+            self.engine_core.engines_running = bool(data[0])
+            self.engine_core.current_wave = int(data[1])
+            self.engine_core.step_counter = int(data[2])
+            self.state = RecoverySurvivingEngineState.COMPLETE
+            if self.new_dp_group.rank() == 0:
+                self.engine_core._eep_send_engine_core_notification(
+                    EEPNotificationType.RECONFIGURE_FINISHED
+                )
+                logger.info("[Elastic EP Recovery] Replacement rank fully integrated")
+            return True
+
+        else:
+            assert self.state == RecoverySurvivingEngineState.COMPLETE
+            return True
 
     def _create_standby_groups(self):
         assert self.old_dp_group is not None

@@ -51,7 +51,11 @@ def create_standby_groups(
 
     from vllm.distributed.utils import get_cached_tcp_store_client
 
-    assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size
+    assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size, (
+        f"new_world_size_across_dp={new_world_size_across_dp} != "
+        f"torch.distributed.get_world_size()={torch.distributed.get_world_size()} "
+        f"* new_dp_size={new_dp_size}"
+    )
     world_group = get_world_group()
     assert isinstance(world_group, StatelessGroupCoordinator)
     backend = backend or world_group.backend
@@ -97,6 +101,46 @@ def create_standby_groups(
             backend,
             coord_store=coord_store,
         )
+
+
+def create_recovery_groups(
+    recovery_coord_store_port: int,
+    master_ip: str,
+    enable_eplb: bool = True,
+    backend: str | None = None,
+) -> None:
+    """Build recovery groups for a same-size DP rank peer swap.
+
+    Identical topology to the current active groups (dp_size unchanged), but
+    rendezvous on a fresh TCPStore at ``recovery_coord_store_port`` so that
+    stale keys written during the original init — which TCPStore.get() would
+    return immediately — cannot block the new rendezvous.  This mirrors the
+    approach used by elastic EP scaling, which also allocates a new
+    ``coord_store_port`` per reconfiguration.
+
+    The replacement rank and all surviving ranks must call this function with
+    the same ``recovery_coord_store_port``; rank 0 allocates fresh TCP ports
+    and publishes them, everyone else blocks until they appear.
+
+    Results are stored in _STANDBY_* so the existing
+    ``pop_standby_groups()`` → ``_replace_active_groups()`` path promotes
+    them without modification.
+    """
+    world_group = get_world_group()
+    assert isinstance(world_group, StatelessGroupCoordinator)
+    tp_size = get_tp_group().world_size
+    pp_size = get_pp_group().world_size
+    world_size = world_group.world_size
+    dp_size = world_size // (tp_size * pp_size)
+
+    create_standby_groups(
+        new_dp_size=dp_size,
+        new_world_size_across_dp=world_size,
+        master_ip=master_ip,
+        coord_store_port=recovery_coord_store_port,
+        enable_eplb=enable_eplb,
+        backend=backend,
+    )
 
 
 def pop_standby_groups() -> dict:
