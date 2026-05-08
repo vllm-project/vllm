@@ -230,10 +230,7 @@ class MoERunner(MoERunnerInterface):
         # F.linear produces combined logits. The topk kernel can then
         # apply routing softmax and shared expert activation (sigmoid)
         # in a single launch.
-        self._fse_fuse_gate = (
-            gate is not None
-            and shared_expert_gate is not None
-        )
+        self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
         self._combined_gate_weight: torch.Tensor | None = None
 
         self._shared_experts: SharedExperts | None = None
