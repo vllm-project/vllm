@@ -1398,6 +1398,14 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 ("w3", "up_proj"),
             ]
         ]
+
+        # Suffixes to skip when the remapped name doesn't exist in
+        # params_dict (e.g. extra GPTQ/ModelOpt scale parameters).
+        ignore_suffixes = (
+            ".bias", "_bias",
+            ".weight_scale", "_weight_scale",
+            ".input_scale", "_input_scale",
+        )
         params_dict = dict(self.named_parameters())
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
@@ -1441,6 +1449,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 loaded_params.add(stacked_name)
                 break
             else:
+                is_expert_weight = False
                 for (
                     param_name,
                     weight_name,
@@ -1454,41 +1463,58 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     weight_name_base = weight_name.rstrip(".")
                     if weight_name in name:
                         # Has suffix (e.g., .weight_scale)
-                        moe_name = name.replace(weight_name, param_name)
+                        name_mapped = name.replace(weight_name, param_name)
                     elif name.endswith(weight_name_base):
                         # Bare weight (no suffix)
-                        moe_name = name.replace(
+                        name_mapped = name.replace(
                             weight_name_base, param_name.rstrip("_") + "_weight"
                         )
                     else:
                         continue
-                    if moe_name not in params_dict:
+
+                    is_expert_weight = True
+
+                    if is_pp_missing_parameter(name_mapped, self):
                         continue
-                    if is_pp_missing_parameter(moe_name, self):
+
+                    # Skip extra parameters for GPTQ/ModelOpt models.
+                    if (
+                        name_mapped.endswith(ignore_suffixes)
+                        and name_mapped not in params_dict
+                    ):
                         continue
-                    param = params_dict[moe_name]
-                    # Expert weights are already in the correct
-                    # orientation for FusedMoE after _weight_iterator:
-                    #   gate/up: [I, H] → w1/w3 expects [I, H]
-                    #   down:    [H, I] → w2 expects [H, I]
-                    # Scales and other quantization params may be 1D or scalar.
+
+                    if name_mapped not in params_dict:
+                        continue
+
+                    param = params_dict[name_mapped]
                     weight_loader = param.weight_loader
-                    weight_loader(
+                    success = weight_loader(
                         param,
                         loaded_weight,
-                        moe_name,  # Pass mapped name (handles both weights and scales)
+                        name_mapped,
                         shard_id=shard_id,
                         expert_id=expert_id,
+                        return_success=True,
                     )
-                    loaded_params.add(moe_name)
-                    break
+                    if success:
+                        name = name_mapped
+                        break
                 else:
+                    if is_expert_weight:
+                        # Expert weight not mapped to this rank — skip.
+                        continue
+
+                    if name.endswith(ignore_suffixes) and name not in params_dict:
+                        continue
                     if name.endswith(".bias") and name not in params_dict:
                         continue
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue
                     if is_pp_missing_parameter(name, self):
+                        continue
+                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(
