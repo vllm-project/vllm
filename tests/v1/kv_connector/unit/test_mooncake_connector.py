@@ -276,6 +276,15 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+            ".mooncake_connector.torch.accelerator.current_device_index",
+            return_value=0,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+            ".mooncake_connector.current_platform.set_device"
+        ),
         patch("httpx.AsyncClient") as mock_async_client,
     ):
         # Mock PP group
@@ -300,6 +309,37 @@ def patch_worker_dependencies():
             "mock_async_client": mock_async_client,
             "mock_http_client": mock_http_client_instance,
         }
+
+
+def test_mooncake_worker_warns_for_multiple_candidate_host_ips(monkeypatch):
+    """Warn users when Mooncake auto-selects an IP on a multi-NIC host."""
+    monkeypatch.delenv("VLLM_HOST_IP", raising=False)
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_producer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+            ".mooncake_connector.get_non_loopback_ip_addresses",
+            return_value=["10.208.130.185", "192.168.30.10"],
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+            ".mooncake_connector.logger.warning"
+        ) as mock_warning,
+    ):
+        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        assert connector.connector_worker is not None
+        connector.connector_worker.shutdown()
+
+    warning_message = mock_warning.call_args.args[0]
+    warning_args = mock_warning.call_args.args[1:]
+    assert "multiple non-loopback IP addresses were detected" in warning_message
+    assert "Set VLLM_HOST_IP" in warning_message
+    assert warning_args == ("10.208.130.185, 192.168.30.10", "127.0.0.1")
 
 
 @pytest.mark.asyncio
@@ -452,7 +492,11 @@ async def test_kv_producer(monkeypatch):
             mock_socket.send_multipart.assert_called_once()
             _, sent_payload = mock_socket.send_multipart.call_args[0][0]
             response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
-            assert response.err_msg == "Mooncake transfer engine returned 123"
+            assert response.err_msg is not None
+            assert "Mooncake transfer engine returned 123" in response.err_msg
+            assert "remote session consumer-host:54321" in response.err_msg
+            assert "local advertised address 127.0.0.1:12345" in response.err_msg
+            assert "Set VLLM_HOST_IP" in response.err_msg
             assert response.err_reqs == ["d-req-1"]
 
         # Clean up
