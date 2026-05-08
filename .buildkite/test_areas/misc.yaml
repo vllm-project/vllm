@@ -6,26 +6,13 @@ steps:
   key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
-    - vllm/_aiter_ops.py
-    - vllm/_custom_ops.py
-    - vllm/benchmarks/datasets
-    - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
-    - vllm/engine/
-    - vllm/envs.py
-    - vllm/forward_context.py
     - vllm/inputs/
-    - vllm/ir/
-    - vllm/kernels/
     - vllm/model_executor/
-    - vllm/multimodal/
     - vllm/platforms/
-    - vllm/plugins/
     - vllm/sampling_params.py
-    - vllm/sequence.py
     - vllm/transformers_utils/
-    - vllm/triton_utils/
     - vllm/utils/
     - vllm/v1/
     - tests/v1/spec_decode
@@ -39,25 +26,14 @@ steps:
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
-    - vllm/_aiter_ops.py
-    - vllm/_custom_ops.py
-    - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
     - vllm/engine/
-    - vllm/envs.py
-    - vllm/forward_context.py
     - vllm/inputs/
-    - vllm/ir/
-    - vllm/kernels/
     - vllm/model_executor/
-    - vllm/multimodal/
     - vllm/platforms/
-    - vllm/plugins/
     - vllm/sampling_params.py
-    - vllm/sequence.py
     - vllm/transformers_utils/
-    - vllm/triton_utils/
     - vllm/utils/
     - vllm/v1/
     - tests/v1/sample
@@ -82,32 +58,21 @@ steps:
   key: v1-core-kv-metrics
   timeout_in_minutes: 30
   source_file_dependencies:
-    - vllm/_aiter_ops.py
-    - vllm/_custom_ops.py
-    - vllm/assets/
-    - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
     - vllm/engine/
-    - vllm/entrypoints/
-    - vllm/envs.py
-    - vllm/forward_context.py
+    - vllm/entrypoints/pooling/
     - vllm/inputs/
-    - vllm/ir/
-    - vllm/kernels/
     - vllm/lora/
     - vllm/model_executor/
     - vllm/multimodal/
     - vllm/outputs.py
     - vllm/platforms/
-    - vllm/plugins/
     - vllm/pooling_params.py
     - vllm/profiler/
     - vllm/sampling_params.py
-    - vllm/sequence.py
     - vllm/tokenizers/
     - vllm/transformers_utils/
-    - vllm/triton_utils/
     - vllm/utils/
     - vllm/v1/
     - tests/v1/core
@@ -139,8 +104,6 @@ steps:
     - vllm/config/
     - vllm/distributed/
     - vllm/engine/
-    - vllm/envs.py
-    - vllm/forward_context.py
     - vllm/inputs/
     - vllm/lora/
     - vllm/multimodal/
@@ -167,25 +130,15 @@ steps:
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
-  - vllm/_aiter_ops.py
-  - vllm/_custom_ops.py
-  - vllm/compilation/
   - vllm/config/
   - vllm/distributed/
   - vllm/engine/
-  - vllm/envs.py
-  - vllm/forward_context.py
   - vllm/inputs/
-  - vllm/ir/
-  - vllm/kernels/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
-  - vllm/plugins/
   - vllm/sampling_params.py
-  - vllm/sequence.py
   - vllm/transformers_utils/
-  - vllm/triton_utils/
   - vllm/utils/
   - vllm/v1/
   - tests/test_regression
@@ -231,26 +184,16 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   source_file_dependencies:
-  - vllm/_aiter_ops.py
-  - vllm/_custom_ops.py
-  - vllm/compilation/
   - vllm/config/
   - vllm/distributed/
   - vllm/engine/
-  - vllm/envs.py
-  - vllm/forward_context.py
   - vllm/inputs/
-  - vllm/ir/
-  - vllm/kernels/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
-  - vllm/plugins/
   - vllm/sampling_params.py
-  - vllm/sequence.py
   - vllm/tracing/
   - vllm/transformers_utils/
-  - vllm/triton_utils/
   - vllm/utils/
   - vllm/v1/
   - tests/v1/tracing
@@ -276,29 +219,17 @@ steps:
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
-  - vllm/_aiter_ops.py
-  - vllm/_custom_ops.py
   - vllm/assets/
-  - vllm/compilation/
   - vllm/config/
   - vllm/distributed/
   - vllm/engine/
-  - vllm/entrypoints/llm.py
-  - vllm/envs.py
-  - vllm/forward_context.py
   - vllm/inputs/
-  - vllm/ir/
-  - vllm/kernels/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
-  - vllm/plugins/
-  - vllm/ray/
   - vllm/sampling_params.py
-  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/transformers_utils/
-  - vllm/triton_utils/
   - vllm/utils/
   - vllm/v1/
   - tests/detokenizer
