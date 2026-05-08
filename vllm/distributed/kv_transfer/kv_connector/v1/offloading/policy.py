@@ -116,9 +116,10 @@ class StoreOnComputePolicy(OffloadPolicy):
         # Use setdefault so that a load preceding the first store call still
         # advances the index, preventing already-loaded blocks from being
         # returned by a subsequent get_blocks_to_store call.
-        stored = self._stored_idx.setdefault(
-            req_id, [0] * len(self._config.kv_group_configs)
-        )
+        stored = self._stored_idx.get(req_id)
+        if stored is None:
+            stored = [0] * len(self._config.kv_group_configs)
+            self._stored_idx[req_id] = stored
         for group_idx, group_config in enumerate(self._config.kv_group_configs):
             num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
             stored[group_idx] = num_blocks
