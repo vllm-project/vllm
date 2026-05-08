@@ -444,6 +444,51 @@ class SingleTypeKVCacheManager(ABC):
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Track block hashes committed to the cache in the current scheduling
+        # step so we can defer requests that would otherwise read KV blocks
+        # that the GPU has not yet written (same-step ghost block race).
+        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+
+    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+        num_cached_before = self.num_cached_block.get(request.request_id, 0)
+        super().cache_blocks(request, num_tokens)
+        num_cached_after = self.num_cached_block.get(request.request_id, 0)
+        for block in self.req_to_blocks[request.request_id][
+            num_cached_before:num_cached_after
+        ]:
+            if block.is_null or block.block_hash is None:
+                continue
+            self.cached_blocks_this_step.add(block.block_hash)
+
+    def new_step_starts(self) -> None:
+        self.cached_blocks_this_step.clear()
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        total_computed_tokens: int,
+        num_tokens_main_model: int,
+    ) -> int:
+        if (
+            len(new_computed_blocks) > 0
+            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
+        ):
+            # A block at the tail of the prefix hit was committed by another
+            # request in the current scheduling step; the GPU has not written
+            # its KV yet. Return an impossible block count so the scheduler
+            # skips this request and retries in the next step (same pattern
+            # used by MambaManager, see PR #29387).
+            return self.block_pool.num_gpu_blocks + 1
+        return super().get_num_blocks_to_allocate(
+            request_id, num_tokens, new_computed_blocks,
+            total_computed_tokens, num_tokens_main_model,
+        )
+
     @classmethod
     def find_longest_cache_hit(
         cls,
