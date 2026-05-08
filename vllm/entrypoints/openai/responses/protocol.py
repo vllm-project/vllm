@@ -23,7 +23,9 @@ from openai.types.responses import (
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
     ResponsePrompt,
+    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
@@ -105,8 +107,8 @@ def serialize_message(msg):
     elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
-        # fallback to pyandic dump
-        return msg.model_dump_json()
+        # fallback to pydantic dump
+        return msg.model_dump(mode="json", by_alias=True)
 
 
 def serialize_messages(msgs):
@@ -173,6 +175,24 @@ class ResponsesRequest(OpenAIBaseModel):
     user: str | None = None
     skip_special_tokens: bool = True
     include_stop_str_in_output: bool = False
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
     prompt_cache_key: str | None = Field(
         default=None,
         description=(
@@ -328,6 +348,12 @@ class ResponsesRequest(OpenAIBaseModel):
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
 
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get("presence_penalty", 0.0)
+
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
+
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -367,6 +393,8 @@ class ResponsesRequest(OpenAIBaseModel):
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
             stop=stop,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
@@ -425,18 +453,21 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def function_call_parsing(cls, data):
-        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
-        This ensures Pydantic can properly resolve union types in the input field.
-        Function calls provided as dicts are converted to ResponseFunctionToolCall
-        objects before validation, while invalid structures are left for Pydantic
-        to reject with appropriate error messages.
-        """
+    def input_item_parsing(cls, data):
+        """Parse input items that are missing required fields or that Pydantic
+        cannot disambiguate in a Union of TypedDict / BaseModel types.
 
+        Specifically handles:
+        - function_call -> ResponseFunctionToolCall
+        - reasoning     -> ResponseReasoningItem (auto-generates id)
+        - message(role=assistant) -> ResponseOutputMessage (auto-generates
+          id/status and annotations)
+
+        Invalid structures are left for Pydantic to reject.
+        """
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
-        # (strings are iterable but shouldn't be processed)
         if input_data is None or isinstance(input_data, (str, bytes)):
             return data
 
@@ -450,20 +481,105 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            if not isinstance(item, dict):
+                processed_input.append(item)
+                continue
+
+            item_type = item.get("type")
+
+            if item_type == "function_call":
                 try:
                     processed_input.append(ResponseFunctionToolCall(**item))
                 except ValidationError:
-                    # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
                     processed_input.append(item)
+
+            elif item_type == "reasoning":
+                if "id" not in item:
+                    item = {**item, "id": f"rs_{random_uuid()}"}
+                try:
+                    processed_input.append(ResponseReasoningItem(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse reasoning to ResponseReasoningItem, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
+            elif item_type == "message" and item.get("role") == "assistant":
+                item = dict(item)
+                if "id" not in item:
+                    item["id"] = f"msg_{random_uuid()}"
+                if "status" not in item:
+                    item["status"] = "completed"
+                # ResponseOutputText requires annotations
+                if isinstance(item.get("content"), list):
+                    new_content = []
+                    for c in item["content"]:
+                        if (
+                            isinstance(c, dict)
+                            and c.get("type") == "output_text"
+                            and "annotations" not in c
+                        ):
+                            c = {**c, "annotations": []}
+                        new_content.append(c)
+                    item["content"] = new_content
+                try:
+                    processed_input.append(ResponseOutputMessage(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse assistant message to ResponseOutputMessage, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
             else:
                 processed_input.append(item)
 
         data["input"] = processed_input
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_usage(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        tools = data.get("tools")
+        tool_choice = data.get("tool_choice", "auto")
+        has_tools = tools is not None and len(tools) > 0
+        is_named_tool_choice = (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+        )
+
+        if not has_tools:
+            if tool_choice in ("auto", "none"):
+                data["tool_choice"] = "none"
+            elif tool_choice == "required":
+                raise VLLMValidationError(
+                    "Tool choice 'required' must be specified with 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            elif is_named_tool_choice:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+        elif is_named_tool_choice and tools is not None:
+            tool_name = tool_choice.get("name")
+            tool_names = {
+                t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+                for t in tools
+            }
+            if not tool_name or tool_name not in tool_names:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+
         return data
 
 
@@ -495,6 +611,25 @@ class ResponsesResponse(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"]
     usage: ResponseUsage | None = None
     user: str | None = None
+
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
 
     # vLLM-specific fields that are not in OpenAI spec
     kv_transfer_params: dict[str, Any] | None = Field(
@@ -574,6 +709,8 @@ class ResponsesResponse(OpenAIBaseModel):
             prompt=request.prompt,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            presence_penalty=sampling_params.presence_penalty,
+            frequency_penalty=sampling_params.frequency_penalty,
             status=status,
             text=request.text,
             top_logprobs=sampling_params.logprobs,

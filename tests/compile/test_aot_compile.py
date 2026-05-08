@@ -441,6 +441,37 @@ def test_partition_wrapper_applied_on_aot_load(
         )
 
 
+@create_new_process_for_each_test("spawn")
+def test_standalone_compile_correctness():
+    """Outputs must match regardless of VLLM_USE_STANDALONE_COMPILE."""
+    import json
+
+    from ..utils import compare_two_settings
+
+    compilation_config = json.dumps(
+        {
+            "mode": CompilationMode.VLLM_COMPILE,
+        }
+    )
+
+    common_args = [
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "256",
+        "--compilation_config",
+        compilation_config,
+    ]
+
+    compare_two_settings(
+        "facebook/opt-125m",
+        common_args,
+        common_args,
+        env1={"VLLM_USE_STANDALONE_COMPILE": "1"},
+        env2={"VLLM_USE_STANDALONE_COMPILE": "0"},
+    )
+
+
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):

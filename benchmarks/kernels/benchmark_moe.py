@@ -627,9 +627,8 @@ class BenchmarkWorker:
                 need_device_guard = True
 
         with (
-            torch.accelerator.device_index(self.device_id)
-            if need_device_guard
-            else nullcontext()
+            # Ray restricts each worker to one GPU; use local index 0
+            torch.accelerator.device_index(0) if need_device_guard else nullcontext()
         ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:
