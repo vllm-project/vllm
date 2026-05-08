@@ -140,19 +140,52 @@ class PriorityRequestQueue(RequestQueue):
 
     def __init__(self) -> None:
         self._heap: list[Request] = []
+        self._active_requests: set[Request] = set()
+        self._removed_requests: set[Request] = set()
+
+    def _rebuild_if_needed(self, min_invalid: int = 32) -> bool:
+        """Rebuild the heap when invalid entries accumulate.
+
+        We rebuild only when tombstones are both:
+        1) large enough in absolute number, and
+        2) at least half of heap entries.
+        """
+        invalid_count = len(self._removed_requests)
+        if invalid_count < min_invalid:
+            return False
+        if invalid_count * 2 < len(self._heap):
+            return False
+
+        self._heap = [req for req in self._heap if req not in self._removed_requests]
+        heapq.heapify(self._heap)
+        self._removed_requests.clear()
+        return True
+
+    def _clean_heap_top(self) -> None:
+        """Discard logically removed requests from the heap top."""
+        self._rebuild_if_needed()
+        while self._heap and self._heap[0] in self._removed_requests:
+            request = heapq.heappop(self._heap)
+            self._removed_requests.remove(request)
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
+        self._removed_requests.discard(request)
         heapq.heappush(self._heap, request)
+        self._active_requests.add(request)
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
+        self._clean_heap_top()
         if not self._heap:
             raise IndexError("pop from empty heap")
-        return heapq.heappop(self._heap)
+        request = heapq.heappop(self._heap)
+        self._active_requests.remove(request)
+        return request
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
+        self._clean_heap_top()
         if not self._heap:
             raise IndexError("peek from empty heap")
         return self._heap[0]
@@ -174,25 +207,26 @@ class PriorityRequestQueue(RequestQueue):
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
-        self._heap.remove(request)
-        heapq.heapify(self._heap)
+        if request in self._active_requests:
+            self._active_requests.remove(request)
+            self._removed_requests.add(request)
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
-        requests_to_remove = requests if isinstance(requests, set) else set(requests)
-        self._heap = [r for r in self._heap if r not in requests_to_remove]
-        heapq.heapify(self._heap)
+        for request in requests:
+            self.remove_request(request)
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
-        return bool(self._heap)
+        return bool(self._active_requests)
 
     def __len__(self) -> int:
         """Get number of requests in queue."""
-        return len(self._heap)
+        return len(self._active_requests)
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
+        self._rebuild_if_needed(min_invalid=0)
         heap_copy = self._heap[:]
         while heap_copy:
             yield heapq.heappop(heap_copy)
