@@ -184,7 +184,7 @@ def test_tp2_serialize_and_deserialize_lora(
         result = subprocess.run(
             [
                 sys.executable,
-                f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py",
+                f"{VLLM_PATH}/examples/features/tensorize_vllm_model.py",
                 "--model",
                 MODEL_PATH,
                 "--lora-path",
