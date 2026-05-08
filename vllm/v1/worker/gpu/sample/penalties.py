@@ -58,8 +58,7 @@ class PenaltiesState:
             idx_mapping = async_tensor_h2d(
                 self._new_penalties_reqs,
                 dtype=torch.int32,
-                target_device=self.device,
-                pin_memory=True,
+                device=self.device,
             )
 
             prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]

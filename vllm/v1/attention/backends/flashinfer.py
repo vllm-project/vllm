@@ -1105,7 +1105,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr_prefill_gpu = self.paged_kv_indptr.gpu[
                     prefill_start : num_reqs + 1
                 ]
-                paged_kv_indptr_prefill_gpu[0] = 0
+                # Assign to slice to avoid cpu sync.
+                paged_kv_indptr_prefill_gpu[:1] = 0
                 torch.cumsum(
                     num_blocks_per_req,
                     dim=0,
