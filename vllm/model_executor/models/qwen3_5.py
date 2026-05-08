@@ -94,6 +94,7 @@ from .qwen3_vl import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -582,6 +583,25 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+
+    # PEFT adapters trained on the language-only Qwen3_5MoeForCausalLM view
+    # save keys as `base_model.model.model.layers.X.*`. After the
+    # `base_model.model.` strip, those become `model.layers.X.*` -- no
+    # `language_model.` segment for the parent class's mapper rule to match.
+    # The wrapped multimodal class roots the language model at
+    # `language_model.model.layers.X.*`, so without an extra remap the LoRA
+    # module lookup misses every expert layer. Inherit the parent multimodal
+    # mapping and add the LoRA-specific prefix.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.visual.": "visual.",
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            # LoRA-specific: adapter keys have `model.layers.X` with no
+            # `language_model.` segment.
+            "model.layers.": "language_model.model.layers.",
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__

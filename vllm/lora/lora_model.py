@@ -29,12 +29,16 @@ class LoRAModel:
         lora_model_id: int,
         rank: int,
         loras: dict[str, LoRALayerWeights],
+        target_parameters: list[str] | None = None,
     ) -> None:
         """
         Args:
             lora_model_id: The integer id for the lora model.
             rank: lora rank.
             loras: module name -> weights for lora-replaced layers.
+            target_parameters: the PEFT 0.18+ `target_parameters` list from
+                adapter_config.json, propagated for downstream consumers
+                (e.g. _stack_moe_lora_weights) to detect the loaded layout.
 
         """
         self.id = lora_model_id
@@ -44,6 +48,7 @@ class LoRAModel:
         )
         self.rank = rank
         self.loras: dict[str, LoRALayerWeights] = loras
+        self.target_parameters: list[str] | None = target_parameters
 
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
@@ -53,6 +58,11 @@ class LoRAModel:
             lora_model_id,
             rank=self.rank,
             loras=self.loras.copy(),
+            target_parameters=(
+                list(self.target_parameters)
+                if self.target_parameters is not None
+                else None
+            ),
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
@@ -118,7 +128,12 @@ class LoRAModel:
                 if pin_memory:
                     loras[module_name].lora_b = loras[module_name].lora_b.pin_memory()
 
-        return cls(lora_model_id, peft_helper.r, loras)
+        return cls(
+            lora_model_id,
+            peft_helper.r,
+            loras,
+            target_parameters=peft_helper.target_parameters,
+        )
 
     @classmethod
     def from_local_checkpoint(

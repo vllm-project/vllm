@@ -743,6 +743,26 @@ class LoRAModelManager:
                     lora.lora_a = lora.lora_a.pin_memory()
                     lora.lora_b = lora.lora_b.pin_memory()
 
+    @staticmethod
+    def _target_parameters_indicates_3d_lora(lora_model: LoRAModel) -> bool:
+        """Return True iff the adapter's PEFT 0.18+ ``target_parameters``
+        list names a fused MoE expert weight (e.g.
+        ``mlp.experts.gate_up_proj``), signalling that the loaded LoRA
+        tensors follow the PEFT 3D layout (``lora_A`` applied to PEFT's
+        "in" axis, which is the layer's *output* axis) rather than vllm's
+        native layout. Match by name suffix so prefixes like
+        ``model.layers.0.mlp.experts.gate_up_proj`` and ``mlp.experts.
+        gate_up_proj`` both resolve.
+        """
+        target_parameters = lora_model.target_parameters or []
+        keywords = (
+            "experts.gate_up_proj",
+            "experts.down_proj",
+            "experts.w13_weight",
+            "experts.w2_weight",
+        )
+        return any(any(kw in tp for kw in keywords) for tp in target_parameters)
+
     def _stack_moe_lora_weights(
         self, lora_model: LoRAModel, module: FusedMoE3DWithLoRA, module_name: str
     ):
@@ -763,30 +783,103 @@ class LoRAModelManager:
             assert down_proj_lora is not None
             if self._is_3d_moe_model:
                 num_experts = module.w13_lora_a_stacked[0].shape[1]
+                hidden_size = module.base_layer.hidden_size
 
-                # (num_experts,rank,input_size)
-                gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
-                    num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
-                )
-                down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
-                    num_experts, -1, down_proj_lora.lora_a.shape[-1]
-                )
+                # PEFT 0.18+ `target_parameters` against a fused 3D expert
+                # tensor `[E, dim1, dim2]` saves the adapter as
+                # `lora_A[E*r, in=dim1]` / `lora_B[out=dim2, E*r]`,
+                # interpreting the parameter positionally as
+                # `[E, in=dim1, out=dim2]`. For Qwen3-MoE that flips the
+                # natural forward semantics: `gate_up_proj` of shape
+                # `[E, 2*intermediate, hidden]` is used as
+                # `y[..., e, 2*intermediate] = einsum("...d, eod -> ...eo", x, W)`,
+                # so PEFT's "in" is actually the layer's *output* side and
+                # PEFT's "out" is the *input* side.
+                #
+                # vllm's create_dummy_lora_weights uses the opposite,
+                # native, layout: `lora_A[r*E, in=hidden]` for w13 and
+                # `lora_A[r*E, in=intermediate]` for w2. The two layouts
+                # share the same flat shape but have *opposite* dim
+                # semantics, so we have to disambiguate.
+                #
+                # Primary signal: PEFT 0.18+ writes its `target_parameters`
+                # list into adapter_config.json. If a fused expert weight
+                # name is in that list, we know we are loading the PEFT
+                # layout (not a vllm-native dummy). Fall back to a shape
+                # check (gate_up trailing dim == hidden_size means native)
+                # so adapters and dummies built without
+                # `target_parameters` still resolve correctly.
+                if lora_model.target_parameters:
+                    is_peft_layout = self._target_parameters_indicates_3d_lora(
+                        lora_model
+                    )
+                else:
+                    is_peft_layout = gate_up_proj_lora.lora_a.shape[-1] != hidden_size
 
-                # (output_size,rank,num_experts)
-                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
-                    gate_up_proj_lora.lora_b.shape[0], -1, num_experts
-                )
-                down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
-                    down_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                if not is_peft_layout:
+                    # vllm-native (dummy) path — original reshape.
+                    gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
+                        num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                    )
+                    down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
+                        num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                    )
+                    gate_up_proj_lora.lora_b = (
+                        gate_up_proj_lora.lora_b.reshape(
+                            gate_up_proj_lora.lora_b.shape[0], -1, num_experts
+                        )
+                        .permute(2, 0, 1)
+                        .contiguous()
+                    )
+                    down_proj_lora.lora_b = (
+                        down_proj_lora.lora_b.reshape(
+                            down_proj_lora.lora_b.shape[0], -1, num_experts
+                        )
+                        .permute(2, 0, 1)
+                        .contiguous()
+                    )
+                else:
+                    # PEFT target_parameters path — A and B trade roles
+                    # relative to vllm's add_lora_w13/w2 kernels. Swap and
+                    # transpose so the resulting tensors match the buffer
+                    # layout `[E, r, in]` and `[E, out, r]`. Mathematically
+                    # equivalent to merging delta into the param: see the
+                    # ParamWrapper einsum in PEFT (peft/tuners/lora/layer.py).
+                    peft_a_w13 = gate_up_proj_lora.lora_a.reshape(
+                        num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                    )  # [E, r, peft_in=2*intermediate]
+                    peft_b_w13 = (
+                        gate_up_proj_lora.lora_b.reshape(
+                            gate_up_proj_lora.lora_b.shape[0], -1, num_experts
+                        )
+                        .permute(2, 0, 1)
+                        .contiguous()
+                    )  # [E, peft_out=hidden, r]
+                    peft_a_w2 = down_proj_lora.lora_a.reshape(
+                        num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                    )  # [E, r, peft_in=hidden]
+                    peft_b_w2 = (
+                        down_proj_lora.lora_b.reshape(
+                            down_proj_lora.lora_b.shape[0], -1, num_experts
+                        )
+                        .permute(2, 0, 1)
+                        .contiguous()
+                    )  # [E, peft_out=intermediate, r]
 
-                # (num_experts,output_size,rank)
-                gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
-                    2, 0, 1
-                ).contiguous()
-                down_proj_lora.lora_b = down_proj_lora.lora_b.permute(
-                    2, 0, 1
-                ).contiguous()
+                    # vllm A = PEFT B^T (applied to the layer input);
+                    # vllm B = PEFT A^T (produces the layer output).
+                    gate_up_proj_lora.lora_a = peft_b_w13.transpose(
+                        -2, -1
+                    ).contiguous()  # [E, r, hidden]
+                    gate_up_proj_lora.lora_b = peft_a_w13.transpose(
+                        -2, -1
+                    ).contiguous()  # [E, 2*intermediate, r]
+                    down_proj_lora.lora_a = peft_b_w2.transpose(
+                        -2, -1
+                    ).contiguous()  # [E, r, intermediate]
+                    down_proj_lora.lora_b = peft_a_w2.transpose(
+                        -2, -1
+                    ).contiguous()  # [E, hidden, r]
 
                 module_lora.lora_a = [
                     gate_up_proj_lora.lora_a,
