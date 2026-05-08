@@ -71,36 +71,30 @@ class DFlashProposer(SpecDecodeBaseProposer):
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
-        # [Divinci-AI fork] DEFENSIVE FIX + DIAGNOSTIC: when the target is
-        # Gemma 4 (heterogeneous head dimensions), Gemma4Config force-locks
-        # `attention_config.backend` to TRITON_ATTN. The base proposer at
-        # llm_base_proposer.py:1320-1326 SHOULD reset that to None for the
-        # drafter via spec_cfg.attention_backend, but in practice the
-        # drafter still ends up on TRITON, which DFlash's non-causal
-        # attention then rejects at engine init. Defensively force the
-        # drafter's backend back to None here so the autoselector picks
-        # FlashInfer (which supports non-causal). Diagnostic prints below
-        # let us trace the actual values across base->fix.
-        before_backend = base.attention_config.backend
-        result = replace(
+        # When the target is Gemma 4 (heterogeneous head dimensions:
+        # head_dim=256, global_head_dim=512), Gemma4Config.verify_and_update_config
+        # force-locks `attention_config.backend` to TRITON_ATTN to prevent
+        # mixed-backend numerical divergence within the target's own forward.
+        # The base SpecDecodeBaseProposer._create_draft_vllm_config resets
+        # backend to spec_cfg.attention_backend (default None), but in
+        # practice the drafter still ends up on TRITON_ATTN which then
+        # rejects DFlash's non-causal drafter attention at engine init.
+        #
+        # The "mixed-backend numerical divergence" concern doesn't apply
+        # to spec-decode where target and drafter are separate models with
+        # separate KV caches and separate forwards — rejection sampling
+        # tolerates numerical drift by design. Force backend=None here so
+        # the drafter goes through the standard autoselect path and picks
+        # FLEX_ATTENTION (or any other non-causal-capable backend) when
+        # use_non_causal=True is set.
+        return replace(
             base,
             attention_config=replace(
                 base.attention_config,
                 use_non_causal=True,
-                backend=None,  # ← DEFENSIVE: force autoselect for drafter
+                backend=None,
             ),
         )
-        after_backend = result.attention_config.backend
-        logger.warning(
-            "[DIVINCI-FORK] DFlashProposer._create_draft_vllm_config: "
-            "before_backend=%s after_backend=%s spec_cfg.attention_backend=%s "
-            "target_attention_config.backend=%s",
-            before_backend,
-            after_backend,
-            self.vllm_config.speculative_config.attention_backend,
-            self.vllm_config.attention_config.backend,
-        )
-        return result
 
     @override
     def _warn_if_multimodal(self):
