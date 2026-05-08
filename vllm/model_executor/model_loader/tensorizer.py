@@ -211,7 +211,7 @@ class TensorizerConfig(MutableMapping):
         encryption_keyfile: File path to a binary file containing a  
             binary key to use for decryption. `None` (the default) means 
             no decryption. See the example script in 
-            examples/others/tensorize_vllm_model.py. 
+            examples/features/tensorize_vllm_model.py. 
         s3_access_key_id: The access key for the S3 bucket. Can also be set via
             the S3_ACCESS_KEY_ID environment variable.
         s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -579,7 +579,7 @@ def tensorizer_weights_iterator(
         "loading on vLLM, as tensorizer is forced to load to CPU. "
         "Consider deserializing a vLLM model instead for faster "
         "load times. See the "
-        "examples/others/tensorize_vllm_model.py example script "
+        "examples/features/tensorize_vllm_model.py example script "
         "for serializing vLLM models."
     )
 

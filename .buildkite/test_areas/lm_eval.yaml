@@ -51,7 +51,7 @@ steps:
 - label: LM Eval Qwen3.5 Models (B200)
   key: lm-eval-qwen3-5-models-b200
   timeout_in_minutes: 120
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   source_file_dependencies:
@@ -84,7 +84,7 @@ steps:
   
 - label: MoE Refactor Integration Test (B200 - TEMPORARY)
   key: moe-refactor-integration-test-b200-temporary
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   commands:
@@ -137,3 +137,10 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
+
+- label: MRCR Eval Small Models
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - tests/evals/mrcr/
+  commands:
+    - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt

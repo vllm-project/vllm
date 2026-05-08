@@ -590,6 +590,33 @@ def _test_extract_tool_calls_streaming(
     ]
     assert_tool_calls(actual_tool_calls, expected_tool_calls)
 
+    if expected_tool_calls:
+        assert len(tool_parser.streamed_args_for_tool) == len(expected_tool_calls)
+        assert len(tool_parser.prev_tool_call_arr) == len(expected_tool_calls)
+        for i in range(len(expected_tool_calls)):
+            assert (
+                tool_parser.prev_tool_call_arr[i]["arguments"]
+                == tool_parser.streamed_args_for_tool[i]
+            )
+            assert tool_parser.streamed_args_for_tool[i] == function_args_strs[i]
+            assert (
+                tool_parser.prev_tool_call_arr[i]["name"]
+                == expected_tool_calls[i].function.name
+            )
+
+        # Simulate the serving layer's unstreamed-args check
+        index = len(tool_parser.prev_tool_call_arr) - 1
+        args = tool_parser.prev_tool_call_arr[index].get("arguments", {})
+        expected_call = (
+            args if isinstance(args, str) else json.dumps(args, ensure_ascii=False)
+        )
+        actual_call = tool_parser.streamed_args_for_tool[index]
+        remaining_call = expected_call.replace(actual_call, "", 1)
+        assert remaining_call == ""
+    else:
+        assert len(tool_parser.streamed_args_for_tool) == 0
+        assert len(tool_parser.prev_tool_call_arr) == 0
+
 
 @pytest.mark.parametrize(
     ids=[
@@ -855,6 +882,8 @@ def test_extract_tool_calls_streaming_v11_no_tools(
         previous_text = current_text
 
     assert collected_content == model_output
+    assert len(mistral_tool_parser.streamed_args_for_tool) == 0
+    assert len(mistral_tool_parser.prev_tool_call_arr) == 0
 
 
 @pytest.mark.parametrize(
