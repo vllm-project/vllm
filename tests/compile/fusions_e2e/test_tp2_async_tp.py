@@ -19,12 +19,10 @@ from .models import (
     FLASHINFER_ATTN,
     TRITON_ATTN,
     llama3_8b,
+    llama3_8b_fp4,
     llama3_8b_fp8,
     llama4_scout_fp8,
     qwen3_a3b,
-)
-from .models import (
-    llama3_8b_fp4 as llama3_8b_nvfp4,
 )
 
 pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
@@ -97,7 +95,7 @@ def test_tp2_async_tp_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_nvfp4],
+    [llama3_8b_fp4],
 )
 @pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -116,9 +114,7 @@ def test_tp2_async_tp_nvfp4_fusions(
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
 ):
-    # NVFP4 currently wires the all-gather + GEMM path only. The generic
-    # reduce-scatter fusion is intentionally not reused because NVFP4 group
-    # scales need layout-aware sharding.
+    # NVFP4 currently wires the all-gather + GEMM path only.
     matches = matches_fn(n_layers)._replace(async_tp=n_layers * 2)
 
     # Reduce size of model and skip weight loading time

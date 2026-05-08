@@ -392,6 +392,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "nvfp4": "nvidia/Llama-3.1-8B-Instruct-NVFP4",
             "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),

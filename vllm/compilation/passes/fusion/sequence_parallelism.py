@@ -29,8 +29,8 @@ from .matcher_utils import MatcherQuantFP8
 logger = init_logger(__name__)
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
-    STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
-    DYNAMIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
+    SCALED_FP4_QUANT_OUT_OVERLOAD = torch.ops._C.scaled_fp4_quant.out
+    SCALED_FP4_QUANT_DEFAULT_OVERLOAD = torch.ops._C.scaled_fp4_quant.default
 
 # Min hidden size per device capability for sequence parallelism
 # Only apply sequence parallelism for models with hidden_size >= threshold
@@ -357,7 +357,7 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             all_reduce = self._all_reduce(input)
             rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
             quant = auto_functionalized(
-                STATIC_FP4_QUANT_OP,
+                SCALED_FP4_QUANT_OUT_OVERLOAD,
                 input=rms,
                 input_scale=input_global_scale,
                 is_sf_swizzled_layout=True,
@@ -376,7 +376,7 @@ class FirstAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
             reduce_scatter = self._reduce_scatter(input)
             rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
             rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
-            quant = DYNAMIC_FP4_QUANT_OP(
+            quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
                 rms,
                 input_global_scale,
                 True,
@@ -423,7 +423,7 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
                 all_reduce, residual, rms_norm_weights, self.epsilon
             )
             quant = auto_functionalized(
-                STATIC_FP4_QUANT_OP,
+                SCALED_FP4_QUANT_OUT_OVERLOAD,
                 input=rms,
                 input_scale=input_global_scale,
                 is_sf_swizzled_layout=True,
@@ -448,7 +448,7 @@ class MiddleAllReduceRMSNormStaticNVFP4Pattern(_SequenceParallelPatternHelper):
                 reduce_scatter, residual, rms_norm_weights, self.epsilon
             )
             rms = torch.ops.aten.view.default(rms, [-1, rms.shape[-1]])
-            quant = DYNAMIC_FP4_QUANT_OP(
+            quant = SCALED_FP4_QUANT_DEFAULT_OVERLOAD(
                 rms,
                 input_global_scale,
                 True,
@@ -532,7 +532,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                 epsilon, self.model_dtype, self.device
             ).register(self.patterns)
 
-            if "STATIC_FP4_QUANT_OP" in globals():
+            if "SCALED_FP4_QUANT_OUT_OVERLOAD" in globals():
                 FirstAllReduceRMSNormStaticNVFP4Pattern(
                     epsilon, self.model_dtype, self.device
                 ).register(self.patterns)

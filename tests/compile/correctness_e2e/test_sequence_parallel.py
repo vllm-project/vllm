@@ -27,6 +27,7 @@ from ...utils import compare_two_settings, create_new_process_for_each_test
 logger = init_logger("test_sequence_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
+NVFP4_MODEL_ID = "nvidia/Llama-3.1-8B-Instruct-NVFP4"
 
 
 class ParallelSetup(NamedTuple):
@@ -170,6 +171,7 @@ def _compare_sp(
     *,
     method: Literal["generate", "encode"],
     is_multimodal: bool,
+    dtype: str = "float16",
 ):
     (
         tp_size,
@@ -220,7 +222,7 @@ def _compare_sp(
     common_args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "float16",
+        dtype,
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -351,4 +353,34 @@ def test_tp_sp_generation(
         fuse_gemm_comms=fuse_gemm_comms,
         method="generate",
         is_multimodal=False,
+    )
+
+
+@create_new_process_for_each_test()
+def test_tp_sp_nvfp4_generation(num_gpus_available: int):
+    if (
+        not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+    ):
+        pytest.skip("NVFP4 requires Blackwell")
+
+    _compare_sp(
+        NVFP4_MODEL_ID,
+        ParallelSetup(
+            tp_size=2,
+            pp_size=1,
+            fuse_norm_quant=True,
+            fuse_act_quant=True,
+            eager_mode=True,
+            chunked_prefill=False,
+        ),
+        "mp",
+        "auto",
+        SPTestOptions(multi_node_only=False, load_format="dummy"),
+        num_gpus_available,
+        use_inductor_graph_partition=False,
+        fuse_gemm_comms=False,
+        method="generate",
+        is_multimodal=False,
+        dtype="bfloat16",
     )

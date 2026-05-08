@@ -956,10 +956,11 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
-                # NVFP4 activation scales are block/group scales, not FP8
-                # row-wise scales. Register only the all-gather path until the
-                # reduce-scatter side has a dedicated NVFP4 scale-sharding
-                # implementation.
+                # NVFP4 reduce-scatter does not need scale communication: FP4
+                # scales are consumed by the local GEMM and only BF16 partial
+                # outputs are reduced. Keep this PR scoped to the all-gather
+                # path; reduce-scatter needs a dedicated FP4 producer rather
+                # than the existing FP8-style helper.
 
         self.dump_patterns(config, self.pm_pass)
 
