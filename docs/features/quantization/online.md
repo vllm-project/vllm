@@ -42,18 +42,76 @@ vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 
 For fine-grained control, use a `quantization_config` dictionary.
 
+### Schema
+
+```yaml
+quantization_config:
+  linear:
+    weight: <quant-key-name>      # e.g. fp8_per_block_static
+    activation: <quant-key-name>  # e.g. fp8_per_block_dynamic
+  moe:
+    weight: <quant-key-name>
+    activation: <quant-key-name>
+  ignore: [<layer-name-or-regex>, ...]
+```
+
+`linear` and `moe` are per-layer-kind specs. Each takes a `weight` and an
+`activation` key — both naming entries from the public `QUANT_KEY_NAMES`
+table (`mxfp8`, `mxfp4`, `fp8_per_tensor_static`, `fp8_per_block_static`,
+`fp8_per_block_dynamic`, `fp8_per_token`, `int8_per_channel_static`). Fields
+left out fall back to either the `--quantization` shorthand's defaults or, for
+already-quantized checkpoints, the value baked into the checkpoint.
+
+`linear` and `moe` also accept a bare string for compactness: an online
+shorthand name (e.g. `"fp8_per_block"`) pulls that shorthand's matching
+slot, otherwise the string is treated as a weight format name (shorthand for
+`{"weight": <name>}`).
+
+The CLI accepts the same shape as JSON via `--quantization-config`, or as
+dotted keys for individual fields. The two are equivalent:
+
+```bash
+vllm serve <model> --quantization-config '{"moe":{"activation":"mxfp8"}}'
+vllm serve <model> --quantization-config.moe.activation mxfp8
+```
+
+The dotted form is the easier shape for shell quoting; nested keys merge into
+the same dict (e.g. `--quantization-config.linear.weight fp8_per_block_static`
+plus `--quantization-config.moe.activation mxfp8`).
+
+### Activation overrides on already-quantized checkpoints
+
+`quantization_config` is also consumed by some checkpoint-quant paths to
+let you pick an activation format independently of the weights baked into
+the checkpoint. The headline case is gpt-oss MXFP4 weights, where you can
+opt into MXFP8 activations:
+
+```bash
+# Auto-detected MXFP4 weights from the checkpoint, MXFP8 activations on top.
+vllm serve openai/gpt-oss-20b \
+    --quantization-config.moe.activation mxfp8
+
+# Same, pinned to the FlashInfer CUTLASS backend.
+vllm serve openai/gpt-oss-20b \
+    --moe-backend flashinfer_cutlass \
+    --quantization-config.moe.activation mxfp8
+```
+
+Without an override, gpt-oss runs with BF16 activations (today's default).
+
 ### Separate Schemes for Dense and MoE Layers
 
-You can apply different quantization schemes to dense linear layers and MoE expert layers:
+You can apply different quantization schemes to dense linear layers and MoE expert layers via the `linear` and `moe` fields. Each accepts either a full spec dict, or a bare string naming an online shorthand (e.g. `"fp8_per_block"`) or weight format (e.g. `"fp8_per_block_static"`); fields not set fall back to the shorthand defaults.
 
 ```python
 from vllm import LLM
 
+# Linear: per-block FP8; MoE: per-tensor FP8 (inherited from the shorthand)
 llm = LLM(
     "ibm-granite/granite-3.0-1b-a400m-base",
     quantization="fp8_per_tensor",
     quantization_config={
-        "linear_scheme_override": "fp8_per_block",
+        "linear": "fp8_per_block",
     },
 )
 ```
@@ -63,11 +121,12 @@ Or,
 ```python
 from vllm import LLM
 
+# Linear: per-tensor FP8 (inherited); MoE: per-block FP8
 llm = LLM(
     "ibm-granite/granite-3.0-1b-a400m-base",
     quantization="fp8_per_tensor",
     quantization_config={
-        "moe_scheme_override": "fp8_per_block",
+        "moe": "fp8_per_block",
     },
 )
 ```
