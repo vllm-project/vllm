@@ -1,11 +1,11 @@
 # Examples
 
-vLLM's examples are organized by **functionality** to help you quickly find examples for specific use cases and features.
+vLLM's examples are organized into the following categories:
 
 - **[`basic/`](../../examples/basic)** – Minimal examples for offline inference and online serving.
 - **[`generate/`](../../examples/generate)** – Text generation examples, including multimodal models.
 - **[`pooling/`](../../examples/pooling)** – Examples for embedding, classification, scoring, reward, etc.
-- **[`speech_to_text/`](../../examples/speech_to_text)** – Speech transcription and real-time audio examples.
+- **[`speech_to_text/`](../../examples/speech_to_text)** – Speech transcription, translation and real-time audio examples.
 - **[`features/`](../../examples/features)** – Demonstrations of individual vLLM features: automatic prefix caching, speculative decoding, LoRA, structured outputs, prompt embedding, pause/resume, batch invariance, KV events, data parallelism, and more.
 - **[`reasoning/`](../../examples/reasoning)** – Examples for reasoning with vLLM.
 - **[`tool_calling/`](../../examples/tool_calling)** – Examples for function/tool calling with vLLM.
