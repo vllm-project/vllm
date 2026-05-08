@@ -211,6 +211,18 @@ class OffloadingManager(ABC):
         """
         return
 
+    def request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called by the scheduler when a request has finished.
+
+        Implementations may use this to kick off deferred transfers (e.g. the
+        last partial offloaded block) or to clean up per-request state.
+
+        Args:
+            req_context: the context object for the finished request.
+        """
+        return
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
         Take the offloading events from the manager.
