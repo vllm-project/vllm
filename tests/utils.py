@@ -132,6 +132,16 @@ def requires_spawn_multiprocessing() -> bool:
     return current_platform.is_rocm() or current_platform.is_xpu()
 
 
+def _run_in_new_process_group(
+    child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
+    env_dict: dict[str, str] | None,
+    model: str,
+    vllm_serve_args: list[str],
+) -> None:
+    os.setsid()
+    child_process_fxn(env_dict, model, vllm_serve_args)
+
+
 class RemoteVLLMServer:
     """Base class for launching vLLM server subprocesses for testing.
 
@@ -745,9 +755,10 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     ) -> None:
         method = "spawn" if requires_spawn_multiprocessing() else "fork"
         ctx = get_context(method)
-        self.proc: Process = cast(Any, ctx).Process(  # type: ignore[assignment]
-            target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
-        )
+        self.proc: Process = cast(Any, ctx).Process(
+            target=_run_in_new_process_group,
+            args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
+        )  # type: ignore[assignment]
         self.proc.start()
 
     def __init__(
@@ -778,6 +789,19 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
 
     def _terminate_process_tree(self) -> None:
         pid = self.proc.pid
+        if pid is None:
+            return
+
+        pgid: int | None
+        try:
+            pgid = os.getpgid(pid)
+            # _run_in_new_process_group should make the child the group
+            # leader. Avoid signaling pytest's process group if startup failed
+            # before os.setsid() ran.
+            if pgid != pid:
+                pgid = None
+        except (ProcessLookupError, OSError):
+            pgid = None
 
         with contextlib.suppress(ProcessLookupError, OSError):
             self.proc.terminate()
@@ -787,10 +811,16 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         if self.proc.is_alive():
             print(
                 f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
-                "to SIGTERM, sending SIGKILL"
+                "to SIGTERM, sending SIGKILL to process group"
             )
-            self.proc.kill()
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
             self.proc.join(10)
+
+        self._kill_process_group_survivors(pgid)
 
 
 def _test_completion(
