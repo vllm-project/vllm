@@ -563,7 +563,15 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         model_config = vllm_config.model_config
-        model_config.uses_request_ids_for_generation = True
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        if scheduler_config is not None and scheduler_config.max_num_seqs != 1:
+            logger.warning_once(
+                "Parakeet TDT currently stores decoder state inside the model "
+                "and supports one active request; limiting max_num_seqs to 1 "
+                "to keep decoding state correct."
+            )
+            scheduler_config.max_num_seqs = 1
+
         hf_configs = (model_config.hf_config, model_config.hf_text_config)
         seen_config_ids: set[int] = set()
         for hf_config in hf_configs:
@@ -575,7 +583,7 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
 
         if not model_config.enforce_eager:
             logger.warning_once(
-                "Parakeet TDT uses request-keyed decoder state; enforcing "
+                "Parakeet TDT uses stateful decoder outputs; enforcing "
                 "eager execution to avoid CUDA graph replaying stale forced "
                 "tokens."
             )
