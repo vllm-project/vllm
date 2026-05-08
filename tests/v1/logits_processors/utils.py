@@ -220,6 +220,10 @@ def register_fake_entrypoint(monkeypatch) -> str:
         "PYTHONPATH", tmpdir + (os.pathsep + existing if existing else "")
     )
 
+    # Also update sys.path for the current process so the driver can
+    # discover the entrypoint.
+    monkeypatch.syspath_prepend(tmpdir)
+
     return tmpdir
 
 
