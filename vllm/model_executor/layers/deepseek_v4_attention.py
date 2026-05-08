@@ -30,6 +30,8 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
+from aiter.ops.triton.rope.inv_rope_fp8_quant import inv_rope_fp8_quant
+
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
@@ -306,14 +308,33 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         # Keep ROCm on the BF16 reference wo_a path util kernel ready.
         if current_platform.is_rocm():
-            z = rocm_inv_rope_einsum(
-                self.rotary_emb,
+            o_fp8, o_scale = inv_rope_fp8_quant(
                 o,
                 positions,
-                self.rope_head_dim,
-                self.n_local_groups,
-                self.o_lora_rank,
-                self.wo_a,
+                self.rotary_emb.cos_sin_cache,
+                n_groups=self.n_local_groups,
+                heads_per_group=self.n_local_heads // self.n_local_groups,
+                rope_head_dim=self.rope_head_dim,
+            )
+            o_fp8 = o_fp8.transpose(0, 1).contiguous()
+            o_scale = o_scale.transpose(0, 1).contiguous()
+
+            wo_a_fp8 = self.wo_a.weight
+            wo_a_scale = self.wo_a.weight_scale_inv
+
+            z = torch.empty(
+                (num_tokens, self.n_local_groups, self.o_lora_rank),
+                device=o.device,
+                dtype=torch.bfloat16,
+            )
+            torch.ops.vllm.deepseek_v4_fp8_einsum(
+                o_fp8,
+                o_scale,
+                wo_a_fp8,
+                wo_a_scale,
+                z,
+                "bhr,hdr->bhd",
+                list(self._einsum_recipe),
             )
             return self.wo_b(z.flatten(1))
 
