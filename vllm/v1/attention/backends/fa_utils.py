@@ -9,11 +9,16 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-# Track whether upstream flash-attn is available on ROCm.
+# Track which flash-attn varlen implementation is bound at module load.
 # Set during module initialization and never modified afterwards.
-# This module-level flag avoids repeated import attempts and ensures
-# consistent behavior (similar to IS_AITER_FOUND in _aiter_ops.py).
+# - "upstream": vllm.vllm_flash_attn (CUDA) / flash_attn (ROCm) / xpu_ops (XPU)
+# - "aiter":    rocm_aiter_ops.flash_attn_varlen_func (ROCm fallback)
+# - "none":     no working impl; flash_attn_varlen_func is a stub that raises
+# Some kwargs (e.g. fa_version) are upstream-only; callers can gate on the
+# module flag _FA_VARLEN_HAS_VERSION_KW to avoid passing them when bound to
+# the AITER fallback.
 _ROCM_FLASH_ATTN_AVAILABLE = False
+_FA_VARLEN_SOURCE = "none"
 
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
@@ -22,6 +27,8 @@ if current_platform.is_cuda():
         get_scheduler_metadata,
     )
 
+    _FA_VARLEN_SOURCE = "upstream"
+
 elif current_platform.is_xpu():
     from vllm import _custom_ops as ops
     from vllm._xpu_ops import xpu_ops
@@ -29,19 +36,48 @@ elif current_platform.is_xpu():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
+    _FA_VARLEN_SOURCE = "upstream"
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
 
         # Mark that upstream flash-attn is available on ROCm
         _ROCM_FLASH_ATTN_AVAILABLE = True
+        _FA_VARLEN_SOURCE = "upstream"
     except ImportError:
+        # Upstream flash-attn isn't shipped in ROCm prebuilt wheels and a
+        # from-source build of Composable Kernel can take 30-60 minutes.
+        # Fall back to AITER's flash_attn_varlen_func which installs in
+        # seconds and runs natively on gfx9. Without this fallback, callers
+        # that import `flash_attn_varlen_func` from this module hit a stub
+        # at call time, which previously sent some long-context paths into
+        # an O(N^2) torch SDPA path and OOMed at 32K context. AITER is an
+        # already-supported optional dep on ROCm (see vllm._aiter_ops), so
+        # this preserves the existing dependency surface.
+        from vllm._aiter_ops import IS_AITER_FOUND
 
-        def flash_attn_varlen_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef,misc]
-            raise ImportError(
-                "ROCm platform requires upstream flash-attn "
-                "to be installed. Please install flash-attn first."
+        if IS_AITER_FOUND:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            flash_attn_varlen_func = (  # type: ignore[no-redef,assignment]
+                rocm_aiter_ops.flash_attn_varlen_func
             )
+            _FA_VARLEN_SOURCE = "aiter"
+            logger.info_once(
+                "Upstream flash-attn not found on ROCm; using AITER "
+                "flash_attn_varlen_func as fallback. Install flash-attn "
+                "from source for the upstream path."
+            )
+        else:
+
+            def flash_attn_varlen_func(  # type: ignore[no-redef,misc]
+                *args: Any, **kwargs: Any
+            ) -> Any:
+                raise ImportError(
+                    "ROCm platform requires upstream flash-attn or AITER "
+                    "to be installed. Install flash-attn from source, or "
+                    "install AITER (`pip install amd-aiter`)."
+                )
 
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
     def get_scheduler_metadata(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
@@ -51,6 +87,12 @@ elif current_platform.is_rocm():
     from vllm import _custom_ops as ops
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
+
+# Whether the bound flash_attn_varlen_func accepts the upstream-only
+# `fa_version` kwarg. AITER's variant does not, so callers should gate on
+# this flag (or on `is_flash_attn_varlen_func_available()` returning True
+# *and* this being True) before passing fa_version.
+_FA_VARLEN_HAS_VERSION_KW = _FA_VARLEN_SOURCE == "upstream"
 
 
 def get_flash_attn_version(
@@ -240,11 +282,9 @@ def is_flash_attn_varlen_func_available() -> bool:
     Platform-specific sources:
     - CUDA: vllm.vllm_flash_attn.flash_attn_varlen_func
     - XPU: xpu_ops.flash_attn_varlen_func
-    - ROCm: upstream flash_attn.flash_attn_varlen_func (if available)
-
-    Note: This is separate from the AITER flash attention backend (rocm_aiter_fa.py)
-    which uses rocm_aiter_ops.flash_attn_varlen_func. The condition to use AITER is
-    handled separately via _aiter_ops.is_aiter_found_and_supported().
+    - ROCm: upstream flash_attn.flash_attn_varlen_func, or AITER's
+      rocm_aiter_ops.flash_attn_varlen_func as a fallback when upstream
+      flash-attn is not installed.
 
     Returns:
         bool: True if a working flash_attn_varlen_func implementation is available.
@@ -254,8 +294,7 @@ def is_flash_attn_varlen_func_available() -> bool:
         return True
 
     if current_platform.is_rocm():
-        # Use the flag set during module import to check if
-        # upstream flash-attn was successfully imported
-        return _ROCM_FLASH_ATTN_AVAILABLE
+        # True if either upstream flash-attn or the AITER fallback is bound.
+        return _FA_VARLEN_SOURCE != "none"
 
     return False
