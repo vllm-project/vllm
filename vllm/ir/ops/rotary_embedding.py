@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
+from model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from torch import Tensor
 
 from ..op import register_op
@@ -160,3 +161,32 @@ def rotary_embedding(
     else:
         raise ValueError(f"Unsupported cos_sin_format={cos_sin_format!r}")
     return query_out, key_out
+
+
+@register_op
+def rotary_embedding_query_only(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+) -> tuple[Tensor]:
+    """A PyTorch-native implementation of forward()."""
+    positions = positions.flatten()
+    num_tokens = positions.shape[0]
+    cos_sin = cos_sin_cache.index_select(0, positions)
+    cos, sin = cos_sin.chunk(2, dim=-1)
+
+    query_shape = query.shape
+    query = query.view(num_tokens, -1, head_size)
+    query_rot = query[..., :rotary_dim]
+    query_pass = query[..., rotary_dim:]
+    query_rot = ApplyRotaryEmb.forward_static(
+        query_rot,
+        cos,
+        sin,
+        is_neox_style,
+    )
+    query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+    return query

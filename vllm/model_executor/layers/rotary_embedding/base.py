@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
+from vllm import ir
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import ApplyRotaryEmb
@@ -46,14 +46,6 @@ class RotaryEmbeddingBase(CustomOp):
         # Check if use_flashinfer is already set
         if not hasattr(self, "use_flashinfer"):
             self.use_flashinfer = False
-
-        self.use_aiter = (
-            self.enabled() and rocm_aiter_ops.is_triton_rotary_embed_enabled()
-        )
-        if self.use_aiter:
-            self.rocm_aiter_triton_rotary_embedding = (
-                rocm_aiter_ops.get_triton_rotary_embedding_op()
-            )
 
         if init_cache:
             cache = self._compute_cos_sin_cache()
@@ -136,49 +128,6 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             init_cache=init_cache,
         )
 
-    @staticmethod
-    def forward_static(
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        head_size: int,
-        rotary_dim: int,
-        cos_sin_cache: torch.Tensor,
-        is_neox_style: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """A PyTorch-native implementation of forward()."""
-        positions = positions.flatten()
-        num_tokens = positions.shape[0]
-        cos_sin = cos_sin_cache.index_select(0, positions)
-        cos, sin = cos_sin.chunk(2, dim=-1)
-
-        query_shape = query.shape
-        query = query.view(num_tokens, -1, head_size)
-        query_rot = query[..., :rotary_dim]
-        query_pass = query[..., rotary_dim:]
-        query_rot = ApplyRotaryEmb.forward_static(
-            query_rot,
-            cos,
-            sin,
-            is_neox_style,
-        )
-        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
-
-        # key may be None in some cases, e.g. cross-layer KV sharing
-        if key is not None:
-            key_shape = key.shape
-            key = key.view(num_tokens, -1, head_size)
-            key_rot = key[..., :rotary_dim]
-            key_pass = key[..., rotary_dim:]
-            key_rot = ApplyRotaryEmb.forward_static(
-                key_rot,
-                cos,
-                sin,
-                is_neox_style,
-            )
-            key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
-        return query, key
-
     def forward_native(
         self,
         positions: torch.Tensor,
@@ -187,7 +136,17 @@ class RotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """A PyTorch-native implementation of forward()."""
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-        return self.forward_static(
+        if key is None:
+            query_out = ir.ops.rotary_embedding_query_only(
+                positions,
+                query,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox_style,
+            )
+            return query_out, None
+        query_out, key_out = ir.ops.rotary_embedding.maybe_inplace(
             positions,
             query,
             key,
@@ -195,7 +154,10 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self.rotary_dim,
             cos_sin_cache,
             self.is_neox_style,
+            None,
+            "standard",
         )
+        return query_out, key_out
 
     def forward_cuda(
         self,
