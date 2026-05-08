@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-ipv4-netif-driver-2026-05-08-v4"
+SCRIPT_VERSION="arc-ray-tp2-pp2-netdebug-2026-05-08-v5"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
@@ -139,6 +139,16 @@ export VLLM_HOST_IP="${HEAD_NODE_IP}"
 echo "VLLM_HOST_IP=${VLLM_HOST_IP}"
 configure_socket_ifnames "${HEAD_NODE_IP}" 0
 
+# Debug/validation defaults for ARC multi-node NCCL. Keep these overrideable so
+# a production run can restore IB/RDMA once the socket path is proven stable.
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens,eno}"
+export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,ENV}"
+export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
+export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
+
 export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 echo "RAY_PORT=${RAY_PORT} RAY_ADDRESS=${RAY_ADDRESS}"
@@ -203,15 +213,21 @@ export VLLM_DEEP_GEMM_WARMUP="${VLLM_DEEP_GEMM_WARMUP:-skip}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
-TP="${TP:-4}"
-EP="${EP:-1}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
+NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
+TP="${TP:-${GPUS_PER_NODE}}"
+PP="${PP:-${NUM_NODES}}"
+EP="${EP:-1}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
 echo "=== runtime knobs ==="
-echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} EP=${EP}"
-echo "GPUS_PER_NODE=${GPUS_PER_NODE} CPUS_PER_TASK=${CPUS_PER_TASK}"
+echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
+echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
+echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
+echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
+echo "NCCL_DEBUG=${NCCL_DEBUG} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
 echo "SERVE_SCRIPT=${SERVE_SCRIPT}"
 if [ -n "${HF_TOKEN:-}" ]; then
   echo "HF_TOKEN is set"
@@ -250,6 +266,7 @@ RAY_HEAD_CMD="$(
   declare -f configure_socket_ifnames
 )
 source \"${VENV_DIR}/bin/activate\"
+unset GLOO_SOCKET_IFNAME NCCL_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\"
 \"${RAY_BIN}\" start --block --head --node-ip-address=${HEAD_NODE_IP} --port=${RAY_PORT}"
@@ -281,6 +298,7 @@ if [ -n "${WORKER_NODES}" ]; then
       declare -f configure_socket_ifnames
     )
 source \"${VENV_DIR}/bin/activate\"
+unset GLOO_SOCKET_IFNAME NCCL_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\"
 \"${RAY_BIN}\" start --block --address=${HEAD_NODE_IP}:${RAY_PORT} --node-ip-address=${WORKER_IP}"
@@ -323,6 +341,8 @@ python -m vllm.entrypoints.openai.api_server \
   --port "${PORT}" \
   --distributed-executor-backend ray \
   --tensor-parallel-size "${TP}" \
+  --pipeline-parallel-size "${PP}" \
+  --max-model-len "${MAX_MODEL_LEN}" \
   --enable-expert-parallel \
   --additional-config "{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":${TP},\"expert_parallelism\":${EP}}}}" \
   --enforce-eager \
