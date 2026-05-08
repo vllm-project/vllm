@@ -30,6 +30,8 @@ See ``docs/design/capture_consumers.md`` for the full spec.
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -85,6 +87,36 @@ class _RequestCaptureState:
     steps_seen: int = 0
     error: str | None = None
     sidecar_fields: dict[str, Any] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# Dispatch packet — main thread → dispatch thread queue item
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _DispatchPacket:
+    """One step's worth of capture work, handed to the dispatch thread.
+
+    Built on the main thread by ``dispatch_step_captures`` after issuing
+    H2D copies into pinned host buffers.  Once the packet is queued, the
+    main thread is free to return to the runner; the dispatch thread
+    waits on ``cuda_event`` (signalled when the H2Ds complete), then
+    walks ``entries`` to fan out CPU-resident slices to each consumer's
+    sink.
+
+    ``scratch_pinned`` maps ``(layer, hook)`` to ``(owner_buffer, view)``.
+    ``view`` is the row-bounded slice consumed by the dispatch loop;
+    ``owner_buffer`` (if not ``None``) is the pinned-pool tensor that
+    must be returned to the pool after the packet is processed.  CPU
+    scratches (``owner_buffer is None``) need no recycling.
+    """
+
+    entries: list[CapturePositionEntry]
+    scratch_pinned: dict[
+        tuple[int, str], tuple[torch.Tensor | None, torch.Tensor]
+    ]
+    cuda_event: torch.cuda.Event | None
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +225,33 @@ class CaptureManager:
         # compiled forward graph.  Cleared by ``consume_step_plan`` once
         # the runner's finalize path has copied the scratch tensors out.
         self._step_plan: StepCapturePlan | None = None
+
+        # Async dispatch path.  ``dispatch_step_captures`` issues H2D
+        # copies into pinned host buffers, records a CUDA event, and
+        # queues a ``_DispatchPacket``; the main runner thread returns
+        # immediately.  A single dispatch thread waits on each event,
+        # then fans the captured rows out to consumer sinks.  This pulls
+        # the previous in-line ``cuda.synchronize()`` and per-chunk
+        # construction off the model-runner critical path so they can
+        # overlap with the next forward step.
+        self._dispatch_queue: queue.Queue[_DispatchPacket | None] = queue.Queue()
+        self._pinned_pool: dict[tuple[int, str], list[torch.Tensor]] = {}
+        self._pinned_lock = threading.Lock()
+        self._pending_dispatches = 0
+        self._pending_cond = threading.Condition()
+        # Dedicated CUDA stream for the H2D copies in
+        # ``dispatch_step_captures``.  Issuing the ``copy_`` on the
+        # compute stream serialises against the next forward step;
+        # placing it on a side stream lets the device pipe the transfer
+        # over PCIe while the next step's kernels run.  Lazily allocated
+        # on first use so non-CUDA managers (CPU tests) skip the cost.
+        self._capture_stream: torch.cuda.Stream | None = None
+        self._dispatch_thread = threading.Thread(
+            target=self._dispatch_loop,
+            name="vllm-capture-dispatch",
+            daemon=True,
+        )
+        self._dispatch_thread.start()
 
     # ------------------------------------------------------------------ props
 
@@ -484,55 +543,170 @@ class CaptureManager:
     # ----------------------------------------------------- dispatch
 
     def dispatch_step_captures(self, plan: StepCapturePlan) -> None:
-        """Fan out captured rows to each consumer's sink.
+        """Hand a finished step's scratch tensors to the dispatch thread.
 
-        For each consumer, walk the entries where that consumer's bit is
-        set in ``consumer_mask``, slice rows out of scratch tensors, and
-        call ``submit_chunk``.
+        Issues a non-blocking H2D copy of every ``scratch_gpu`` tensor
+        into a pinned host buffer, records a CUDA event that fires when
+        all copies complete, and queues a ``_DispatchPacket`` for the
+        dispatch thread to consume.  Returns immediately — the
+        ``cuda.synchronize`` and per-chunk fan-out happen off the main
+        runner thread so they overlap with the next forward step.
 
-        GPU→CPU transfers are coalesced: every scratch tensor is moved
-        to host memory non-blocking (one transfer per ``(layer, hook)``
-        key), followed by a single ``cuda.synchronize()``.  Consumers
-        then slice their rows on the CPU, replacing the previous
-        O(consumers × layers) device-sync overhead with O(layers) async
-        transfers and O(consumers) cheap CPU index ops.
+        Pinned destinations are required for ``copy_(non_blocking=True)``
+        to deliver an asynchronous transfer; without pinning CUDA falls
+        back to a synchronous staged copy.
 
-        Each consumer's dispatch is wrapped in try/except so a failure in
-        one sink never blocks delivery to the others.
+        Each consumer's dispatch is wrapped in try/except inside the
+        dispatch loop, so a failure in one sink never blocks delivery
+        to the others.
         """
         if not plan.entries:
             return
 
-        # Transfer all scratch tensors to host in one shot, non-blocking.
-        # On-device index_select is not needed here — the union gather
-        # already ran in on_hook; we just need the host-side bytes.
-        # This replaces the previous O(consumers × layers) per-consumer
-        # GPU→CPU round-trips with O(layers) transfers + one sync.
-        scratch_cpu: dict[tuple[int, str], torch.Tensor] = {}
-        needs_sync = False
-        for key, scratch in plan.scratch_gpu.items():
-            if scratch.is_cuda:
-                scratch_cpu[key] = scratch.to("cpu", non_blocking=True)
-                needs_sync = True
-            else:
-                scratch_cpu[key] = scratch
-        if needs_sync:
-            torch.cuda.synchronize()
+        scratch_pinned: dict[
+            tuple[int, str], tuple[torch.Tensor | None, torch.Tensor]
+        ] = {}
+        cuda_event: torch.cuda.Event | None = None
 
+        has_cuda = any(s.is_cuda for s in plan.scratch_gpu.values())
+        if has_cuda:
+            if self._capture_stream is None:
+                self._capture_stream = torch.cuda.Stream(device=self._device)
+            compute_stream = torch.cuda.current_stream()
+            # Make the side stream wait for the union-gather kernels on
+            # the compute stream to finish writing ``scratch`` before we
+            # start copying.  Without this we'd race the producer.
+            self._capture_stream.wait_stream(compute_stream)
+            with torch.cuda.stream(self._capture_stream):
+                for key, scratch in plan.scratch_gpu.items():
+                    if scratch.is_cuda:
+                        rows, hidden = scratch.shape
+                        pinned = self._acquire_pinned(
+                            key, rows, hidden, scratch.dtype
+                        )
+                        view = pinned.narrow(0, 0, rows)
+                        # ``record_stream`` keeps the caching allocator
+                        # from recycling ``scratch`` until this stream
+                        # finishes the copy.  Cheap; without it we risk
+                        # use-after-free when the runner immediately
+                        # reuses the same scratch slot next step.
+                        scratch.record_stream(self._capture_stream)
+                        view.copy_(scratch, non_blocking=True)
+                        scratch_pinned[key] = (pinned, view)
+                    else:
+                        scratch_pinned[key] = (None, scratch)
+                cuda_event = torch.cuda.Event()
+                cuda_event.record(stream=self._capture_stream)
+        else:
+            for key, scratch in plan.scratch_gpu.items():
+                scratch_pinned[key] = (None, scratch)
+
+        packet = _DispatchPacket(
+            entries=list(plan.entries),
+            scratch_pinned=scratch_pinned,
+            cuda_event=cuda_event,
+        )
+        with self._pending_cond:
+            self._pending_dispatches += 1
+        self._dispatch_queue.put(packet)
+
+    # --------------------------------------------------- pinned-pool helpers
+
+    def _acquire_pinned(
+        self,
+        key: tuple[int, str],
+        rows: int,
+        hidden: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Lease a pinned host buffer of at least ``rows × hidden``.
+
+        Reuses a buffer from the per-key pool if one is large enough and
+        has the right dtype/width; allocates fresh otherwise.  Allocations
+        round capacity up to a 16-row boundary so a request whose row
+        count nudges by one doesn't trigger a fresh allocation.
+        """
+        with self._pinned_lock:
+            free = self._pinned_pool.setdefault(key, [])
+            for i, buf in enumerate(free):
+                if (
+                    buf.shape[0] >= rows
+                    and buf.shape[1] == hidden
+                    and buf.dtype == dtype
+                ):
+                    return free.pop(i)
+        capacity = ((rows + 15) // 16) * 16
+        return torch.empty((capacity, hidden), dtype=dtype, pin_memory=True)
+
+    def _release_pinned(
+        self,
+        key: tuple[int, str],
+        buf: torch.Tensor,
+    ) -> None:
+        """Return a pinned buffer to its per-key pool.
+
+        Pool size is capped per key so a long-lived manager doesn't
+        pin unbounded host memory if the workload thrashes between
+        large and small requests.
+        """
+        with self._pinned_lock:
+            free = self._pinned_pool.setdefault(key, [])
+            if len(free) < 4:
+                free.append(buf)
+
+    # ------------------------------------------------------- dispatch thread
+
+    def _dispatch_loop(self) -> None:
+        """Background thread that drains ``_dispatch_queue``.
+
+        Started once per manager.  Each iteration:
+
+        1. Pop a packet (blocks).  ``None`` is the shutdown sentinel.
+        2. Wait on the packet's CUDA event so the H2D copies are
+           guaranteed visible on the host.
+        3. Fan out the now-CPU-resident rows to every consumer that
+           wants them.
+        4. Return the pinned buffers to their pools and decrement the
+           pending-dispatches counter, notifying any caller waiting in
+           :meth:`_drain_dispatch_queue`.
+        """
+        while True:
+            packet = self._dispatch_queue.get()
+            if packet is None:
+                return
+            try:
+                if packet.cuda_event is not None:
+                    packet.cuda_event.synchronize()
+                self._fan_out_to_consumers(packet)
+            except Exception:
+                logger.exception("capture dispatch loop error")
+            finally:
+                for key, (pinned, _view) in packet.scratch_pinned.items():
+                    if pinned is not None:
+                        self._release_pinned(key, pinned)
+                with self._pending_cond:
+                    self._pending_dispatches -= 1
+                    if self._pending_dispatches == 0:
+                        self._pending_cond.notify_all()
+
+    def _fan_out_to_consumers(self, packet: _DispatchPacket) -> None:
+        """Walk consumers and submit chunks for ``packet`` (dispatch thread).
+
+        Same per-(consumer × request × layer × hook) shape the inline
+        path used to have, but reading from the packet's pinned host
+        views instead of touching GPU memory.  Each consumer's submit
+        loop is isolated by try/except so one failing sink doesn't
+        block delivery to the others.
+        """
         for consumer_idx, sink in enumerate(self._consumers):
             bit = 1 << consumer_idx
 
-            # Group entries for this consumer by (request_id, layer, hook).
             grouped: dict[tuple[str, int, str], list[CapturePositionEntry]] = (
                 defaultdict(list)
             )
-            for entry in plan.entries:
+            for entry in packet.entries:
                 if entry.consumer_mask & bit:
-                    grouped_key = (
-                        entry.request_id,
-                        entry.layer,
-                        entry.hook,
-                    )
+                    grouped_key = (entry.request_id, entry.layer, entry.hook)
                     grouped[grouped_key].append(entry)
 
             if not grouped:
@@ -541,22 +715,15 @@ class CaptureManager:
             try:
                 for (req_id, layer, hook), chunk_entries in grouped.items():
                     scratch_key = (layer, hook)
-                    cpu_scratch = scratch_cpu.get(scratch_key)
-                    if cpu_scratch is None:
+                    if scratch_key not in packet.scratch_pinned:
                         continue
+                    _pinned, view = packet.scratch_pinned[scratch_key]
 
-                    # Slice rows for this consumer on the CPU.  All
-                    # consumers share the same already-transferred tensor
-                    # in ``cpu_scratch``; use that — not ``scratch``,
-                    # which is leftover from the GPU→CPU transfer loop
-                    # above and points at whichever (layer, hook) was
-                    # iterated last.
                     row_indices = [e.scratch_row for e in chunk_entries]
                     idx_tensor = torch.tensor(row_indices, dtype=torch.long)
-                    chunk_tensor = cpu_scratch.index_select(0, idx_tensor)
+                    chunk_tensor = view.index_select(0, idx_tensor)
 
                     step_index = chunk_entries[0].step_index
-
                     capture_key = (
                         VllmInternalRequestId(req_id),
                         layer,
@@ -581,10 +748,40 @@ class CaptureManager:
                     consumer_idx,
                 )
                 # Record error for each request this consumer was handling.
+                # ``_requests`` is touched by the main thread (register) and
+                # the dispatch thread here; in-place ``error`` assignment
+                # is safe under the GIL given the simple read-modify-write
+                # pattern, and we only set the field if it's still ``None``.
                 for req_id_key in {k[0] for k in grouped}:
                     s = self._requests.get(req_id_key)
                     if s is not None and s.error is None:
                         s.error = f"consumer {consumer_idx} dispatch failed"
+
+    def _drain_dispatch_queue(self) -> None:
+        """Block the calling thread until the dispatch queue is empty.
+
+        Called from :meth:`finalize_request` so that all per-step chunks
+        for a request have been submitted to the consumer's sink before
+        we issue ``submit_finalize`` and start waiting on results.
+        Without this barrier a finalize could race ahead of late chunks
+        still queued for the dispatch thread.
+        """
+        with self._pending_cond:
+            while self._pending_dispatches > 0:
+                self._pending_cond.wait()
+
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """Drain the dispatch queue and stop the dispatch thread.
+
+        Idempotent: safe to call multiple times.  Held back from being
+        a destructor because ``__del__`` ordering during interpreter
+        shutdown is not reliable for thread joins.
+        """
+        if not self._dispatch_thread.is_alive():
+            return
+        self._drain_dispatch_queue()
+        self._dispatch_queue.put(None)
+        self._dispatch_thread.join(timeout=timeout)
 
     # ----------------------------------------------------- finalization
 
@@ -596,7 +793,13 @@ class CaptureManager:
         per-key results.
 
         Returns a dict mapping consumer index to ``CaptureResult``.
+
+        Drains any in-flight dispatches first, so all per-step chunks
+        for this request have already been submitted by the time we
+        send the finalize and start waiting on results.
         """
+        self._drain_dispatch_queue()
+
         state = self._requests.pop(req_id, None)
         results: dict[int, CaptureResult] = {}
 
