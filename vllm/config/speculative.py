@@ -5,7 +5,7 @@ import ast
 import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
 
 from vllm.config import LoadConfig
@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config
 from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader, has_arctic_inference
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -34,6 +35,7 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
+    "mimo_v2_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
@@ -48,6 +50,7 @@ MTPModelTypes = Literal[
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
+    "gemma4_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
@@ -105,6 +108,10 @@ class SpeculativeConfig:
     inherits the target model's `--moe-backend` setting. Useful when the
     drafter and generator require different MoE kernels (e.g. quantized
     generator with unquantized drafter)."""
+    attention_backend: AttentionBackendEnum | None = None
+    """Attention backend to use for the draft model. When `None`, the backend is
+    automatically selected. Useful when the drafter requires a different attention
+    backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
     max_model_len: int | None = Field(default=None, ge=1)
     """The maximum model length of the draft model. Used when testing the
     ability to skip speculation for some sequences."""
@@ -332,6 +339,48 @@ class SpeculativeConfig:
                 }
             )
 
+        if (arch := hf_config.architectures[0]) in (
+            "MiMoV2ForCausalLM",
+            "MiMoV2OmniForCausalLM",
+        ):
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS,
+            )
+
+            mtp_arch_maps = {
+                "MiMoV2ForCausalLM": "MiMoV2MTPModel",
+                "MiMoV2OmniForCausalLM": "MiMoV2OmniMTPModel",
+            }
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": [mtp_arch_maps[arch]],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
+                }
+            )
+
         if hf_config.architectures[0] == "Glm4MoeForCausalLM":
             hf_config.model_type = "glm4_moe_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -442,6 +491,17 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
+
+        if hf_config.model_type == "gemma4_assistant":
+            hf_config.model_type = "gemma4_mtp"
+            text_config = getattr(hf_config, "text_config", hf_config)
+            # The assistant runs all decoder layers in a single forward
+            # call to produce one draft token, so n_predict=1.
+            # num_kv_shared_layers must be 0: cross-model KV sharing is
+            # set up by the proposer after model construction.
+            if hasattr(text_config, "num_kv_shared_layers"):
+                text_config.num_kv_shared_layers = 0
+            hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
 
         return hf_config
 
@@ -578,6 +638,7 @@ class SpeculativeConfig:
                     revision=self.revision,
                     code_revision=self.code_revision,
                     tokenizer_revision=self.target_model_config.tokenizer_revision,
+                    max_model_len=self.max_model_len,  # type: ignore[arg-type]
                     spec_target_max_model_len=self.target_model_config.max_model_len,
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
@@ -789,10 +850,17 @@ class SpeculativeConfig:
 
             return speculative_max_model_len
 
-        return min(
+        result = min(
             draft_max_model_len,
             target_max_model_len,
         )
+        if result != draft_max_model_len:
+            logger.info(
+                "Overriding draft model max model len from %d to %d",
+                draft_max_model_len,
+                result,
+            )
+        return result
 
     @staticmethod
     def _verify_and_get_draft_tp(
@@ -868,6 +936,15 @@ class SpeculativeConfig:
 
         return draft_parallel_config
 
+    @field_validator("attention_backend", mode="before")
+    @classmethod
+    def _parse_attention_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if value.lower() == "auto":
+                return None
+            return AttentionBackendEnum[value.upper()]
+        return value
+
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         if self.tensor_parallel_size is not None:
@@ -926,6 +1003,7 @@ class SpeculativeConfig:
             "kimi_k25",
             "minimax_m2",
             "gemma4",
+            "laguna",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states", "dflash")
@@ -974,6 +1052,14 @@ class SpeculativeConfig:
             # Since we do not slice the draft tokens
             slots_per_req += 1
         return slots_per_req
+
+    def use_gemma4_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "gemma4_mtp"
+        )
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp", "dflash")
