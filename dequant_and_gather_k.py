@@ -8,7 +8,7 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import BFloat16, Float32, Int32, Int64, Uint8, Uint32, const_expr
+from cutlass import BFloat16, Float32, Int32, Uint8, Uint32
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -161,109 +161,6 @@ def _bf16x2_mul(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
     return Uint32(out)
 
 
-# Custom vectorized load to support cache modifiers. For some reason,
-# cute.autovec_copy() does not currently emit the requested modifiers.
-# tensor and coord is only used to select the base pointer. actual load
-# is done using out_dtype
-@dsl_user_op
-def _ldg_vec(
-    tensor: cute.Tensor,
-    coord: cute.Coord,
-    vec_size: cutlass.Constexpr[int],
-    modifier: cutlass.Constexpr[str] = "",
-    ld_type: cutlass.Constexpr[type[cutlass.Numeric] | None] = None,
-    *,
-    loc=None,
-    ip=None,
-) -> cute.TensorSSA:
-    if ld_type is None:
-        ld_type = tensor.element_type
-    if const_expr(ld_type is Float32):
-        ptx_ty = "f32"
-        constraint = "=f"
-    elif const_expr(ld_type is Uint32):
-        ptx_ty = "u32"
-        constraint = "=r"
-    else:
-        raise TypeError(f"_ldg_vec only supports Uint32 and Float32, got {ld_type}")
-
-    # compute base pointer
-    base_ptr = (
-        tensor.iterator + cute.crd2idx(coord, tensor.layout, loc=loc, ip=ip)
-    ).toint()
-
-    # build PTX string
-    ptx_str = f"ld.global{modifier}.v{vec_size}.{ptx_ty}"
-    ptx_str += "{" + ", ".join(f"${i}" for i in range(vec_size)) + "}"
-    ptx_str += f", [${vec_size}];"
-
-    out = llvm.inline_asm(
-        llvm.StructType.get_literal([ld_type.mlir_type] * vec_size),
-        [Int64(base_ptr).ir_value(loc=loc, ip=ip)],
-        ptx_str,
-        ",".join([constraint] * vec_size + ["l"]),
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    vec = vector.from_elements(
-        ir.VectorType.get([vec_size], ld_type.mlir_type, loc=loc),
-        [
-            llvm.extractvalue(ld_type.mlir_type, out, [i], loc=loc, ip=ip)
-            for i in range(vec_size)
-        ],
-        loc=loc,
-        ip=ip,
-    )
-    return cute.TensorSSA(vec, vec_size, ld_type)
-
-
-@dsl_user_op
-def _stg_vec(
-    tensor: cute.Tensor,
-    coord: cute.Coord,
-    values: cute.Tensor,
-    vec_size: cutlass.Constexpr[int],
-    modifier: cutlass.Constexpr[str] = "",
-    *,
-    loc=None,
-    ip=None,
-) -> None:
-    # NOTE: st_type is derived from values tensor
-    st_type = values.element_type
-    if const_expr(st_type is Float32):
-        ptx_ty = "f32"
-        constraint = "f"
-    elif const_expr(st_type is Uint32):
-        ptx_ty = "u32"
-        constraint = "r"
-    elif const_expr(st_type is Int32):
-        ptx_ty = "s32"
-        constraint = "r"
-    else:
-        raise TypeError(
-            f"_stg_vec only supports Uint32, Int32, and Float32, got {st_type}"
-        )
-
-    # compute base pointer
-    base_ptr = (
-        tensor.iterator + cute.crd2idx(coord, tensor.layout, loc=loc, ip=ip)
-    ).toint()
-
-    # build PTX string
-    ptx_str = f"st.global{modifier}.v{vec_size}.{ptx_ty} [$0], "
-    ptx_str += "{" + ", ".join(f"${i + 1}" for i in range(vec_size)) + "};"
-
-    llvm.inline_asm(
-        None,
-        [Int64(base_ptr).ir_value(loc=loc, ip=ip)]
-        + [values[i].ir_value(loc=loc, ip=ip) for i in range(vec_size)],
-        ptx_str,
-        ",".join(["l"] + [constraint] * vec_size),
-        has_side_effects=True,
-        is_align_stack=False,
-    )
-
-
 class DequantGatherKCacheKernel:
     # hard-coded for DSv4
     head_dim = 512
@@ -277,6 +174,9 @@ class DequantGatherKCacheKernel:
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
 
+        self.u32_ld_size = 4
+        self.threads_per_tok = self.head_dim // (self.u32_ld_size * 4)
+
     @cute.jit
     def __call__(
         self,
@@ -288,7 +188,7 @@ class DequantGatherKCacheKernel:
         offset: Int32,
         stream: CUstream,
     ):
-        grid = (out.shape[0], 512, 1)
+        grid = (out.shape[0], 1024, 1)
         self.kernel(
             out,
             k_cache,
@@ -311,25 +211,28 @@ class DequantGatherKCacheKernel:
         req_id, worker_id, _ = cute.arch.block_idx()
         tid, _, _ = cute.arch.thread_idx()
         _, num_workers, _ = cute.arch.grid_dim()
-        warp_id = cute.arch.make_warp_uniform(tid // 32)
-        lane_id = tid % 32
+
+        subwarp_id = tid // self.threads_per_tok
+        sublane_id = tid % self.threads_per_tok
 
         # split k_cache into k_data and k_scale
         # each [block_size, head_bytes] block is actually a concat of
         # [block_size, fp8_dim + bf16_dim * 2] and [block_size, 8]
         data_dim = cutlass.const_expr(self.fp8_dim + self.bf16_dim * 2)
+        k_ptr = cute.make_ptr(Uint8, k_cache.iterator.toint(), assumed_align=32)
+        cache_stride = cute.assume(k_cache.stride[0], 32)
         k_data = cute.make_tensor(
-            k_cache.iterator,
+            k_ptr,
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, data_dim),
-                stride=(k_cache.stride[0], data_dim, 1),
+                stride=(cache_stride, data_dim, 1),
             ),
         )
         k_scale = cute.make_tensor(
-            k_cache.iterator + (self.block_size * data_dim),
+            k_ptr + (self.block_size * data_dim),
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, 8),
-                stride=(k_cache.stride[0], 8, 1),
+                stride=(cache_stride, 8, 1),
             ),
         )
 
@@ -339,6 +242,9 @@ class DequantGatherKCacheKernel:
             gather_len = gather_lens[req_id]
         start_pos = seq_len - gather_len
 
+        u32_ld_size = self.u32_ld_size
+        fp8_elems = cutlass.const_expr(u32_ld_size * 4)
+
         # at each position, we have 448 FP8 values + 64 BF16 values.
         # to make our lives easier, we will use 16B loads for FP8,
         # then 32B stores for the dequantized BF16.
@@ -347,9 +253,16 @@ class DequantGatherKCacheKernel:
         # the first 28 threads do 16B loads = 448 FP8 values.
         # the last 4 threads do 32B loads = 64 BF16 values.
         # then the whole warp do 32B stores = 512 BF16 values.
+        cp_op = cute.nvgpu.CopyUniversalOp()
+        cp_fp8_atom = cute.make_copy_atom(
+            cp_op, Uint32, num_bits_per_copy=u32_ld_size * 32
+        )
+        cp_bf16_atom = cute.make_copy_atom(
+            cp_op, Uint32, num_bits_per_copy=u32_ld_size * 64
+        )
 
         for i in range(
-            worker_id * self.num_warps + warp_id,
+            worker_id * self.num_warps + subwarp_id,
             gather_len,
             num_workers * self.num_warps,
         ):
@@ -363,17 +276,24 @@ class DequantGatherKCacheKernel:
             # extensive alignment/divisibility hints. to keep the code
             # compact, we will just issue ld PTX directly.
             k_block_offset = pos % self.block_size
-            coord = (page_id, k_block_offset, lane_id * 16)
-            data = _ldg_vec(k_data, coord, 4, "", Uint32)
-            scale = k_scale[page_id, k_block_offset, lane_id * 16 // self.group_size]
+            data = cute.make_rmem_tensor((u32_ld_size,), Uint32)
+            src = cute.local_tile(
+                k_data[page_id, k_block_offset, None],
+                tiler=(u32_ld_size * 4,),
+                coord=(sublane_id,),
+            )
+            cute.copy(cp_fp8_atom, cute.recast_tensor(src, Uint32), data)
+            scale = k_scale[
+                page_id, k_block_offset, sublane_id * fp8_elems // self.group_size
+            ]
 
             # convert to bf16x2 via bit manipulation
             scale_u32 = Uint32(scale)
             scale_bf16x2 = (scale_u32 << Uint32(23)) | (scale_u32 << Uint32(7))
 
             # cvt.rn.scaled::n2::ue8m0.bf16x2.e4m3x2 requires PTX 9.2 (CUDA 13.2)
-            dequant = cute.make_rmem_tensor(8, Uint32)
-            for j in cutlass.range_constexpr(4):
+            dequant = cute.make_rmem_tensor(u32_ld_size * 2, Uint32)
+            for j in cutlass.range_constexpr(u32_ld_size):
                 tmp = _fp8x4_to_bf16x4(data[j])
 
                 # bf16 multiply is safe
@@ -381,12 +301,20 @@ class DequantGatherKCacheKernel:
                 dequant[j * 2 + 1] = _bf16x2_mul(tmp[1], scale_bf16x2)
 
             # the last 4 threads load BF16 data
-            if lane_id * 16 >= self.fp8_dim:
-                coord = (page_id, k_block_offset, lane_id * 32 - self.fp8_dim)
-                dequant.store(_ldg_vec(k_data, coord, 8, "", Uint32))
+            if sublane_id * fp8_elems >= self.fp8_dim:
+                src_ = cute.local_tile(
+                    k_data[page_id, k_block_offset, None],
+                    tiler=(u32_ld_size * 8,),
+                    coord=(sublane_id - self.fp8_dim // (u32_ld_size * 8),),
+                )
+                cute.copy(cp_bf16_atom, cute.recast_tensor(src_, Uint32), dequant)
 
-            dst = cute.local_tile(out, (1, 1, 16), (req_id, offset + i, lane_id))
-            cute.autovec_copy(dequant, cute.recast_tensor(dst, Uint32))
+            dst = cute.local_tile(
+                out[req_id, offset + i, None],
+                tiler=(fp8_elems,),
+                coord=(sublane_id,),
+            )
+            cute.copy(cp_bf16_atom, dequant, cute.recast_tensor(dst, Uint32))
 
     @cache
     @staticmethod
