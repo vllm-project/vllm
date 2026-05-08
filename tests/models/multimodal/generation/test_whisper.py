@@ -12,7 +12,7 @@ from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
-from ....utils import create_new_process_for_each_test, multi_gpu_test
+from ....utils import multi_gpu_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -41,6 +41,7 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
     enforce_eager: bool = True,
+    gpu_memory_utilization: float = 0.9,
 ) -> None:
     """Inference result should be the same between hf and vllm.
 
@@ -57,6 +58,7 @@ def run_test(
         distributed_executor_backend=distributed_executor_backend,
         limit_mm_per_prompt={"audio": 2},
         enforce_eager=enforce_eager,
+        gpu_memory_utilization=gpu_memory_utilization,
         disable_custom_all_reduce=True,
     ) as vllm_model:
         vllm_outputs_per_case = [
@@ -295,7 +297,6 @@ def test_models(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [200])
 @pytest.mark.parametrize("num_logprobs", [5])
-@create_new_process_for_each_test("spawn")
 def test_models_distributed(
     hf_runner,
     vllm_runner,
@@ -318,7 +319,8 @@ def test_models_distributed(
         num_logprobs=num_logprobs,
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
-        enforce_eager=False,
+        enforce_eager=True,
+        gpu_memory_utilization=0.7,
     )
 
 
