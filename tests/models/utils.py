@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -277,7 +277,7 @@ def build_model_context(
     dtype: ModelDType = "auto",
     model_config_kwargs: dict[str, Any] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    limit_mm_per_prompt: dict[str, int] | None = None,
+    limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]] | None = None,
     mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputProcessingContext for a given model.
@@ -300,7 +300,10 @@ def build_model_context(
     )
 
     model_config_kwargs = model_config_kwargs or {}
-    limit_mm_per_prompt = limit_mm_per_prompt or {}
+    limit_mm_per_prompt = {
+        modality: dict(limit) if isinstance(limit, Mapping) else limit
+        for modality, limit in (limit_mm_per_prompt or {}).items()
+    }
     model_config = ModelConfig(
         model_id,
         runner=runner,
