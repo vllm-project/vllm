@@ -95,6 +95,10 @@ def _inline_kwargs(config: InlineConfig, *, with_spec: bool) -> dict[str, Any]:
         "enforce_eager": True,
         "trust_remote_code": True,
         "disable_log_stats": False,
+        # MLA + batch invariance currently disables prefix caching at runtime
+        # (see vllm/v1/attention/backends/mla/common.py); set explicitly so the
+        # configuration is unambiguous.
+        "enable_prefix_caching": False,
     }
     if config.enable_eplb:
         kwargs["enable_eplb"] = True
@@ -151,9 +155,6 @@ def test_deepseek_mtp_load_inline(
     if config.skip_reason is not None:
         pytest.skip(config.skip_reason)
 
-    # DeepSeek MTP testing disables MLA; matches the existing
-    # test_mtp_correctness setup.
-    monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
     # Required for exact-match equality between the spec and no-spec runs;
     # see https://github.com/vllm-project/vllm/pull/30018 and
     # tests/v1/distributed/test_eagle_dp.py for the same pattern.
@@ -204,7 +205,6 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch):
     expose ``get_metrics()``, so the non-vacuity guard from the inline cells
     is omitted here; output equality across spec / no-spec is the gate.
     """
-    monkeypatch.setenv("VLLM_MLA_DISABLE", "1")
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
     base_args = AsyncEngineArgs(
@@ -216,6 +216,7 @@ async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch):
         gpu_memory_utilization=GPU_MEM_UTIL,
         enforce_eager=True,
         trust_remote_code=True,
+        enable_prefix_caching=False,
     )
     spec_args = replace(
         base_args,
