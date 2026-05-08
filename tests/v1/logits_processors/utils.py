@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import types
 from enum import Enum, auto
+from pathlib import Path
 from typing import Any
 
+import pytest
 import torch
 
 from vllm.config import VllmConfig
@@ -189,3 +192,26 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
 """Fake version of importlib.metadata.entry_points"""
 entry_points = lambda group: EntryPoints(group)
+
+
+def install_dummy_logitproc_entrypoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Install a temporary entrypoint visible to spawned worker processes."""
+    dist_info = tmp_path / "dummy_vllm_logitproc-0.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: dummy-vllm-logitproc\nVersion: 0.0\n",
+        encoding="utf-8",
+    )
+    (dist_info / "entry_points.txt").write_text(
+        f"[{LOGITSPROCS_GROUP}]\n"
+        f"{DUMMY_LOGITPROC_ENTRYPOINT} = {DUMMY_LOGITPROC_FQCN}\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv(
+        "PYTHONPATH",
+        str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+    )

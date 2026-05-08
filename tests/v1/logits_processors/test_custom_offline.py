@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,9 +16,9 @@ from tests.v1.logits_processors.utils import (
     CustomLogitprocSource,
     DummyLogitsProcessor,
     WrappedPerReqLogitsProcessor,
+    install_dummy_logitproc_entrypoint,
     prompts,
 )
-from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
@@ -102,7 +103,11 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
 
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("logitproc_source", list(CustomLogitprocSource))
-def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource):
+def test_custom_logitsprocs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    logitproc_source: CustomLogitprocSource,
+) -> None:
     """Test offline Python interface for passing custom logitsprocs
 
     Construct an `LLM` instance which loads a custom logitproc that has a
@@ -145,13 +150,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_ENTRYPOINT:
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
-        # To that end, mock a dummy logitproc entrypoint
-        import importlib.metadata
-
-        importlib.metadata.entry_points = fake_entry_points  # type: ignore
-
-        # fork is required for workers to see entrypoint patch
-        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        install_dummy_logitproc_entrypoint(monkeypatch, tmp_path)
         _run_test({}, logitproc_loaded=True)
         return
 
@@ -167,7 +166,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
 
 @create_new_process_for_each_test()
-def test_custom_logitsprocs_req(monkeypatch):
+def test_custom_logitsprocs_req(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test passing request-level logits processor to offline Python interface
 
     Wrap a request-level logits processor to create a batch level logits
@@ -210,8 +209,11 @@ def test_custom_logitsprocs_req(monkeypatch):
     ],
 )
 def test_rejects_custom_logitsprocs(
-    monkeypatch, model_scenario: str, logitproc_source: CustomLogitprocSource
-):
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_scenario: str,
+    logitproc_source: CustomLogitprocSource,
+) -> None:
     """Validate that vLLM engine initialization properly rejects custom
     logitsprocs when the model is a pooling model or speculative decoding
     enabled.
@@ -266,14 +268,7 @@ def test_rejects_custom_logitsprocs(
         # Scenario: vLLM loads a model and ignores a logitproc that is
         # available at a preconfigured entrypoint
 
-        # Patch in dummy logitproc entrypoint
-        import importlib.metadata
-
-        importlib.metadata.entry_points = fake_entry_points  # type: ignore
-
-        # fork is required for entrypoint patch to be visible to workers,
-        # although they should ignore the entrypoint patch anyway
-        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+        install_dummy_logitproc_entrypoint(monkeypatch, tmp_path)
 
         llm = LLM(**llm_kwargs)
         # Require that no custom logitsprocs have been loaded

@@ -4,6 +4,8 @@
 import os
 import random
 import sys
+from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 
 import openai
@@ -17,9 +19,9 @@ from tests.v1.logits_processors.utils import (
     MAX_TOKENS,
     MODEL_NAME,
     TEMP_GREEDY,
+    install_dummy_logitproc_entrypoint,
     prompts,
 )
-from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 
 
 def _server_with_logitproc_entrypoint(
@@ -28,15 +30,8 @@ def _server_with_logitproc_entrypoint(
     vllm_serve_args: list[str],
 ) -> None:
     """Start vLLM server, inject dummy logitproc entrypoint"""
-
-    # Patch `entry_points` to inject logitproc entrypoint
-    import importlib.metadata
-
-    importlib.metadata.entry_points = fake_entry_points  # type: ignore
     from vllm.entrypoints.cli import main
 
-    # fork is required for workers to see entrypoint patch
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
     if env_dict is not None:
         os.environ.update(env_dict)
 
@@ -62,7 +57,7 @@ def _server_with_logitproc_fqcn(
 
 
 @pytest.fixture(scope="module")
-def default_server_args():
+def default_server_args() -> list[str]:
     return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -77,7 +72,12 @@ def default_server_args():
 @pytest.fixture(
     scope="function", params=[[], ["--logits-processors", DUMMY_LOGITPROC_FQCN]]
 )
-def server(default_server_args, request, monkeypatch):
+def server(
+    default_server_args: list[str],
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> Iterator[RemoteOpenAIServerCustom]:
     """Consider two server configurations:
     (1) --logits-processors cli arg specifies dummy logits processor via fully-
     qualified class name (FQCN); patch in a dummy logits processor module
@@ -93,7 +93,8 @@ def server(default_server_args, request, monkeypatch):
         args = default_server_args + request.param
         _server_fxn = _server_with_logitproc_fqcn
     else:
-        # Launch server, inject dummy logitproc entrypoint
+        # Launch server with a discoverable dummy logitproc entrypoint
+        install_dummy_logitproc_entrypoint(monkeypatch, tmp_path)
         args = default_server_args
         _server_fxn = _server_with_logitproc_entrypoint
 
@@ -102,7 +103,9 @@ def server(default_server_args, request, monkeypatch):
 
 
 @pytest_asyncio.fixture
-async def client(server):
+async def client(
+    server: RemoteOpenAIServerCustom,
+) -> AsyncIterator[openai.AsyncOpenAI]:
     async with server.get_async_client() as async_client:
         yield async_client
 
@@ -124,7 +127,7 @@ api_keyword_args = {
     "model_name",
     [MODEL_NAME],
 )
-def test_custom_logitsprocs(server, model_name: str):
+def test_custom_logitsprocs(server: RemoteOpenAIServerCustom, model_name: str) -> None:
     """Test custom logitsprocs when starting OpenAI server from CLI
 
     Launch vLLM OpenAI-compatible server, configured to load a custom logitproc
