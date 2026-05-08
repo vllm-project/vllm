@@ -408,7 +408,7 @@ class OpenAIServing:
                 request_id,
                 stop_reason,
             )
-            message = stop_reason if isinstance(stop_reason, str) else None
+            message = stop_reason.strip() if isinstance(stop_reason, str) else None
             raise GenerationError(message or "Internal server error")
 
     def _convert_generation_error_to_streaming_response(

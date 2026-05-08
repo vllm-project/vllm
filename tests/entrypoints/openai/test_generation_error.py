@@ -22,3 +22,10 @@ def test_raise_if_error_falls_back_for_missing_stop_reason():
 
     with pytest.raises(GenerationError, match="Internal server error"):
         serving._raise_if_error("error", "test-request")
+
+
+def test_raise_if_error_falls_back_for_blank_stop_reason():
+    serving = OpenAIServing.__new__(OpenAIServing)
+
+    with pytest.raises(GenerationError, match="Internal server error"):
+        serving._raise_if_error("error", "test-request", "   ")
