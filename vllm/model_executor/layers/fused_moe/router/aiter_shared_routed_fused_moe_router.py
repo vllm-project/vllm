@@ -5,7 +5,6 @@ from collections.abc import Callable
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -15,9 +14,7 @@ from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
     dispatch_topk_softmax_func,
 )
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    aiter_topK_meta_data,
-)
+
 
 class AiterSharedRoutedFusedMoERouter(BaseRouter):
     """
@@ -72,10 +69,12 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
-
         assert hidden_states.size(0) == router_logits.size(0), (
             "Number of tokens mismatch"
+        )
+
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            aiter_topK_meta_data,
         )
 
         M = hidden_states.size(0)

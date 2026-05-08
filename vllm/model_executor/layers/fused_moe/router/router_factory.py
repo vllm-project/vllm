@@ -5,10 +5,14 @@ from collections.abc import Callable
 import torch
 
 import vllm.envs as envs
-from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm._aiter_ops import rocm_aiter_ops
-
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (  # noqa: E501
+    AiterSharedRoutedFusedMoERouter,
+)
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
@@ -26,9 +30,6 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter,
-)
-from vllm.model_executor.layers.fused_moe.router.aiter_shared_routed_fused_moe_router import (
-    AiterSharedRoutedFusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
