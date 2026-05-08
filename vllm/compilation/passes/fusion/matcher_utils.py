@@ -10,7 +10,6 @@ from torch._ops import OpOverload
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -155,72 +154,6 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
                 cos_sin_cache,
                 self.is_neox,
             )
-        )
-        return result
-
-
-class MatcherFusedAddRMSNorm(MatcherCustomOp):
-    def __init__(
-        self,
-        epsilon: float,
-        enabled: bool | None = None,
-        match_rocm_aiter: bool = False,
-    ) -> None:
-        if enabled is None:
-            enabled = RMSNorm.enabled()
-
-        super().__init__(enabled)
-        self.epsilon = epsilon
-        self.match_rocm_aiter = match_rocm_aiter
-
-        self._rmsnorm_op = RMS_ADD_OP
-
-        if match_rocm_aiter:
-            self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_fused_add_op()
-
-    def inputs(self) -> list[torch.Tensor]:
-        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
-        weight = self.empty(16)
-        residual = self.empty(5, 16)
-        return [input, weight, residual]
-
-    def forward_rocm_aiter(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self._rmsnorm_op(  # type: ignore[no-any-return]
-            x=input, residual=residual, weight=weight, variance_epsilon=self.epsilon
-        )
-
-    def forward_custom(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.match_rocm_aiter:
-            return self.forward_rocm_aiter(input, weight, residual)
-
-        _, result, residual = auto_functionalized(
-            self._rmsnorm_op,
-            input=input,
-            residual=residual,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
-
-        return result, residual
-
-    def forward_native(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        residual: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        result: tuple[torch.Tensor, torch.Tensor] = RMSNorm.forward_static(
-            input, self.epsilon, input.size(-1), self.model_dtype, weight, residual
         )
         return result
 
