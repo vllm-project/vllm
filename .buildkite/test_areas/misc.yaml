@@ -30,6 +30,7 @@ steps:
     - vllm/distributed/
     - vllm/engine/
     - vllm/inputs/
+    - vllm/logger.py
     - vllm/model_executor/
     - vllm/platforms/
     - vllm/sampling_params.py
@@ -107,6 +108,7 @@ steps:
     - vllm/inputs/
     - vllm/lora/
     - vllm/multimodal/
+    - vllm/outputs.py
     - vllm/platforms/
     - vllm/pooling_params.py
     - vllm/profiler/
