@@ -391,9 +391,6 @@ def test_mla_rope_kvcache_cat_fusion(
             kv_cache_fused = attn_layer.kv_cache
         del dummy
 
-        # TODO: Remove before merge
-        backend.print_graphs()
-
         assert fusion_pass.matched_count == 1
 
         backend.check_before_ops(model.ops_in_model_before())
