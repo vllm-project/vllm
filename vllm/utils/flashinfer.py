@@ -18,6 +18,7 @@ import requests
 import torch
 
 import vllm.envs as envs
+from vllm.config.kernel import BF16LinearBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -324,6 +325,43 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def get_flashinfer_bf16_supported_backends(
+    compute_capability: int | None = None,
+) -> tuple[str, ...]:
+    """Probe FlashInfer's ``mm_bf16`` and return the backend Literal options.
+
+    Returns an empty tuple when ``flashinfer`` is missing, ``mm_bf16`` is
+    absent, or its signature does not match the contract this integration
+    relies on: a Literal-typed ``backend`` keyword **and** a ``pdl`` keyword.
+    Older FlashInfer installs that expose ``mm_bf16`` without these are
+    treated as unavailable so dispatch falls back to torch.
+    """
+    if not current_platform.is_cuda() or not has_flashinfer():
+        return ()
+
+    mod = _get_submodule("flashinfer")
+    mm_bf16 = getattr(mod, "mm_bf16", None) if mod else None
+    if mm_bf16 is None or not hasattr(mm_bf16, "is_backend_supported"):
+        return ()
+
+    if compute_capability is None:
+        device_capability = current_platform.get_device_capability()
+        if device_capability is None:
+            return ()
+        compute_capability = device_capability.to_int()
+
+    supported_backends: list[str] = []
+    for backend in BF16LinearBackend:
+        try:
+            if mm_bf16.is_backend_supported(backend, compute_capability):
+                supported_backends.append(backend)
+        except Exception:
+            continue
+
+    return tuple(supported_backends)
 
 
 @functools.cache
@@ -714,6 +752,44 @@ if has_flashinfer():
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
 
+    def _flashinfer_mm_bf16(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        bias: torch.Tensor | None,
+        backend: str,
+        pdl: bool,
+    ) -> torch.Tensor:
+        from flashinfer import mm_bf16 as flashinfer_mm_bf16_
+
+        return flashinfer_mm_bf16_(
+            A,
+            B,
+            bias=bias,
+            backend=backend,
+            pdl=pdl,
+        )
+
+    def _flashinfer_mm_bf16_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        bias: torch.Tensor | None,
+        backend: str,
+        pdl: bool,
+    ) -> torch.Tensor:
+        # A is [M, K] BF16, B is [K, N] BF16 -> output [M, N] BF16.
+        return torch.empty(
+            A.shape[0],
+            B.shape[0],
+            dtype=torch.bfloat16,
+            device=A.device,
+        )
+
+    direct_register_custom_op(
+        op_name="flashinfer_mm_bf16",
+        op_func=_flashinfer_mm_bf16,
+        fake_impl=_flashinfer_mm_bf16_fake,
+    )
+
 
 def flashinfer_bf16_mm(
     a: torch.Tensor,
@@ -811,6 +887,25 @@ def flashinfer_scaled_fp4_mm(
         use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
     )
+
+
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None,
+    *,
+    backend: str,
+    pdl: bool,
+) -> torch.Tensor:
+    """BF16 MM helper mirroring ``torch.nn.functional.linear`` semantics.
+
+    Computes ``a @ b.T (+ bias)`` where ``a`` is ``[M, K]`` BF16 and ``b``
+    is the linear-layer weight in ``[N, K]`` BF16. Output is ``[M, N]`` BF16.
+    """
+    assert a.ndim == 2 and b.ndim == 2
+    assert a.shape[1] == b.shape[1]
+    assert a.stride(-1) == 1 and b.stride(-1) == 1
+    return torch.ops.vllm.flashinfer_mm_bf16(a, b.t(), bias, backend, pdl)
 
 
 def flashinfer_scaled_fp8_mm(
@@ -986,6 +1081,7 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "get_flashinfer_bf16_supported_backends",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
