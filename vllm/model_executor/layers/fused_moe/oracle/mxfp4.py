@@ -420,15 +420,30 @@ def select_mxfp4_moe_backend(
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
-    def _activation_matches(backend: Mxfp4MoeBackend) -> bool:
-        # When the caller (or user override) requested a specific activation,
-        # only consider backends whose intrinsic activation matches. The
-        # backend-to-kernel mapping isn't 1:1 (e.g. both TRTLLM_BF16 and
+    def _filter_by_activation(
+        backends: list[Mxfp4MoeBackend],
+    ) -> list[Mxfp4MoeBackend]:
+        # The backend-to-kernel mapping isn't 1:1 (e.g. both TRTLLM_BF16 and
         # TRTLLM_MXFP8 use the same experts class), so is_supported_config
-        # alone can't pick the right variant -- gate it here.
-        if requested_activation_key is None:
-            return True
-        return _backend_activation_key(backend) == requested_activation_key
+        # alone can't pick the right variant -- gate by the requested
+        # activation here.
+        #
+        # When the caller (model quant_config or user override) set a specific
+        # activation, accept only backends whose intrinsic activation matches.
+        # When no activation was requested, drop backends that demand a
+        # non-BF16 activation -- a BF16-default model shouldn't silently land
+        # on an MXFP8/FP8-act kernel just because it appears in the candidate
+        # list. The exception is when *every* candidate is non-BF16 (e.g.
+        # `--moe-backend flashinfer_trtllm_afp8`): the user explicitly picked
+        # an activation-quantized variant, so honor it.
+        if requested_activation_key is not None:
+            return [
+                b
+                for b in backends
+                if _backend_activation_key(b) == requested_activation_key
+            ]
+        bf16 = [b for b in backends if _backend_activation_key(b) is None]
+        return bf16 if bf16 else backends
 
     runner_backend = config.moe_backend
     if runner_backend != "auto":
@@ -438,7 +453,7 @@ def select_mxfp4_moe_backend(
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
             ]
-        candidates = [b for b in requested_backends if _activation_matches(b)]
+        candidates = _filter_by_activation(requested_backends)
         if not candidates:
             raise ValueError(
                 f"moe_backend={runner_backend!r} does not support "
@@ -466,9 +481,7 @@ def select_mxfp4_moe_backend(
         raise last_error
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = [
-        b for b in _get_priority_backends_for_gpt_oss() if _activation_matches(b)
-    ]
+    AVAILABLE_BACKENDS = _filter_by_activation(_get_priority_backends_for_gpt_oss())
 
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
