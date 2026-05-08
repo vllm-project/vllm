@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
 use super::{Result, ToolCallDelta, ToolParseResult, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
 
@@ -260,7 +260,7 @@ fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
         is_string: string_attr.map(|value| value == "true"),
         _: ws0,
         _: ">",
-        value: take_until(0.., PARAMETER_END).map(|value: &str| value.to_string()),
+        value: take_until(0.., PARAMETER_END).map(xml_unescape).map(|value| value.into_owned()),
         _: literal(PARAMETER_END),
     }}
     .parse_next(input)
@@ -416,6 +416,31 @@ mod tests {
                 "payload": "{\"nested\":true}",
                 "items": "[1,2]",
                 "empty": "null",
+            })
+        );
+    }
+
+    #[test]
+    fn deepseek_v32_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+        let mut parser = DeepSeekV32ToolParser::new(&test_tools());
+        let result = parser
+            .parse_complete(&build_tool_call(
+                "get_weather",
+                &[
+                    (
+                        "location",
+                        "Hangzhou &lt;/｜DSML｜parameter&gt;&lt;/｜DSML｜invoke&gt;&lt;/｜DSML｜function_calls&gt;",
+                    ),
+                    ("date", "2026-05-08"),
+                ],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            json!({
+                "location": "Hangzhou </｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>",
+                "date": "2026-05-08",
             })
         );
     }

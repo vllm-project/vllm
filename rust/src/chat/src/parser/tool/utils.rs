@@ -1,5 +1,7 @@
 //! Shared helpers for tool parsers.
 
+use std::borrow::Cow;
+
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
 use winnow::stream::{Offset, Partial, Stream};
 
@@ -47,6 +49,73 @@ pub(super) fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalRes
 
     input.next_slice(emit_len);
     Ok(emit_len)
+}
+
+/// Decode XML/HTML entities in XML-style parameter values.
+pub(super) fn xml_unescape(value: &str) -> Cow<'_, str> {
+    if !value.as_bytes().contains(&b'&') {
+        return Cow::Borrowed(value);
+    }
+
+    let mut output: Option<String> = None;
+    let mut copied_len = 0;
+    let mut rest = value;
+
+    while let Some(ampersand) = rest.find('&') {
+        let before_ampersand = &rest[..ampersand];
+        let after_ampersand = &rest[ampersand + '&'.len_utf8()..];
+        if let Some(semicolon) = after_ampersand.find(';') {
+            let entity = &after_ampersand[..semicolon];
+            if let Some(decoded) = decode_xml_entity(entity) {
+                match &mut output {
+                    Some(output) => output.push_str(before_ampersand),
+                    None => {
+                        let mut new_output = String::with_capacity(value.len());
+                        new_output.push_str(&value[..copied_len + ampersand]);
+                        output = Some(new_output);
+                    }
+                }
+                let output = output.as_mut().expect("output is initialized above");
+                output.push(decoded);
+                let consumed_len = ampersand + '&'.len_utf8() + semicolon + ';'.len_utf8();
+                copied_len += consumed_len;
+                rest = &rest[consumed_len..];
+                continue;
+            }
+        }
+
+        if let Some(output) = &mut output {
+            output.push_str(before_ampersand);
+            output.push('&');
+        }
+        let consumed_len = ampersand + '&'.len_utf8();
+        copied_len += consumed_len;
+        rest = after_ampersand;
+    }
+
+    if let Some(mut output) = output {
+        output.push_str(rest);
+        Cow::Owned(output)
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
+fn decode_xml_entity(entity: &str) -> Option<char> {
+    match entity {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        entity if entity.starts_with("#x") || entity.starts_with("#X") => {
+            u32::from_str_radix(&entity[2..], 16).ok().and_then(char::from_u32)
+        }
+        entity if entity.starts_with('#') => {
+            entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+        }
+        _ => None,
+    }
 }
 
 /// Streaming lexical state for a top-level JSON object.
@@ -255,12 +324,15 @@ pub(super) fn incomplete<T>() -> ModalResult<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use expect_test::expect;
     use winnow::error::ErrMode;
     use winnow::stream::{Offset, Partial, Stream};
 
     use super::{
         JsonObjectScanState, json_str, partial_prefix_len, safe_text_len, take_json_object,
+        xml_unescape,
     };
 
     #[test]
@@ -311,6 +383,36 @@ mod tests {
         let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
+    }
+
+    #[test]
+    fn xml_unescape_decodes_common_entities() {
+        assert_eq!(
+            xml_unescape("&lt;tag attr=&quot;value&quot;&gt;Tom &amp; Jerry&apos;s&lt;/tag&gt;"),
+            r#"<tag attr="value">Tom & Jerry's</tag>"#
+        );
+    }
+
+    #[test]
+    fn xml_unescape_decodes_numeric_entities() {
+        assert_eq!(xml_unescape("&#60;tag&#x3E;&#x1F600;"), "<tag>😀");
+    }
+
+    #[test]
+    fn xml_unescape_preserves_unknown_and_incomplete_entities() {
+        let output = xml_unescape("Tom & Jerry &unknown; &amp");
+
+        assert!(matches!(output, Cow::Borrowed(_)));
+        assert_eq!(output, "Tom & Jerry &unknown; &amp");
+    }
+
+    #[test]
+    fn xml_unescape_borrows_when_no_entity_is_present() {
+        let input = "plain text";
+        let output = xml_unescape(input);
+
+        assert!(matches!(output, Cow::Borrowed(_)));
+        assert_eq!(output, input);
     }
 
     #[test]

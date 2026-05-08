@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
 use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
 use crate::request::ChatTool;
 
@@ -207,12 +207,12 @@ fn parameter(input: &mut MinimaxM2Input<'_>) -> ModalResult<(String, String)> {
         _: (ws1, literal("name=")),
         attr_value,
         _: literal(">"),
-        take_until(0.., PARAMETER_END),
+        take_until(0.., PARAMETER_END).map(xml_unescape),
         _: literal(PARAMETER_END),
     )
     .parse_next(input)?;
 
-    Ok((name.trim().to_string(), value.to_string()))
+    Ok((name.trim().to_string(), value.into_owned()))
 }
 
 /// Parse a quoted or unquoted XML attribute value.
@@ -342,6 +342,31 @@ mod tests {
                 "payload": { "nested": true },
                 "items": [1, 2],
                 "empty": "42",
+            })
+        );
+    }
+
+    #[test]
+    fn minimax_m2_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+        let mut parser = MinimaxM2ToolParser::new(&test_tools());
+        let result = parser
+            .parse_complete(&build_tool_block(&[(
+                "get_weather",
+                vec![
+                    (
+                        "city",
+                        "Seattle &lt;/parameter&gt;&lt;/invoke&gt;&lt;/minimax:tool_call&gt;",
+                    ),
+                    ("days", "5"),
+                ],
+            )]))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            json!({
+                "city": "Seattle </parameter></invoke></minimax:tool_call>",
+                "days": 5,
             })
         );
     }
