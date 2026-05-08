@@ -76,14 +76,14 @@ class RequestManager:
             num_buckets=self.cp_world_size,
             max_length=long_request_threshold)
 
-    def select_dp(self, request: Request, is_long: bool, num_new_tokens: int, rank_budgets: list[int]) -> list[int] | None:
+    def select_dp(self, request: Request, is_long: bool, specify_dp: bool, num_new_tokens: int, rank_budgets: list[int]) -> list[int] | None:
         if len(request.cp_ranks) > 0:
             if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]):
                 return request.cp_ranks
             else:
                 return None
 
-        if is_long:
+        if is_long and not specify_dp:
             return [
                 i for i in range(self.cp_world_size)
             ]
@@ -1046,10 +1046,16 @@ class CrossDPScheduler(Scheduler):
                     else 0
                 )
 
+                kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
+                if kv_role == 'kv_consumer':
+                    specify_dp = True
+                else:
+                    specify_dp = False
                 if len(request.cp_ranks) == 0:
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
+                        specify_dp,
                         num_new_tokens,
                         rank_budgets,
                     )
@@ -1057,6 +1063,7 @@ class CrossDPScheduler(Scheduler):
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
+                        specify_dp,
                         num_new_tokens,
                         rank_budgets,
                     )
