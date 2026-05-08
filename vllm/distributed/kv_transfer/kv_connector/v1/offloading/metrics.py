@@ -11,7 +11,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.metrics import get_offloading_counter_metadata
+from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
 from vllm.v1.kv_offload.worker.worker import TransferType
 
 logger = init_logger(__name__)
@@ -21,18 +22,11 @@ COUNTER_PREFIX = "counter:"
 
 
 @dataclass
-class OffloadingOperationMetrics:
-    op_size: int
-    op_time: float
-
-
-@dataclass
 class OffloadingConnectorStats(KVConnectorStats):
     """
     Offloading connector stats encode the stat type in each key.
 
-    * ``xfer:<transfer_type>`` maps to a list of serialized
-      OffloadingOperationMetrics.
+    * ``xfer:<transfer_type>`` maps to a list of serialized operation metrics.
     * ``counter:<counter_name>`` maps to an int or float increment.
     """
 
@@ -58,7 +52,7 @@ class OffloadingConnectorStats(KVConnectorStats):
                     assert isinstance(value, int | float)
                     self.data[key] = self.data.get(key, 0) + value
                 else:
-                    raise ValueError(f"Unknown offloading stats key: {key}")
+                    raise AssertionError(f"Unknown offloading stats key: {key}")
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -76,24 +70,16 @@ class OffloadingConnectorStats(KVConnectorStats):
                 total_bytes = 0
                 total_time = 0.0
                 for op in value:
-                    assert isinstance(op, OffloadingOperationMetrics | dict)
-                    total_bytes += (
-                        op.op_size
-                        if isinstance(op, OffloadingOperationMetrics)
-                        else op["op_size"]
-                    )
-                    total_time += (
-                        op.op_time
-                        if isinstance(op, OffloadingOperationMetrics)
-                        else op["op_time"]
-                    )
+                    assert isinstance(op, dict)
+                    total_bytes += op["op_size"]
+                    total_time += op["op_time"]
                 return_dict[f"{transfer_type}_total_bytes"] = total_bytes
                 return_dict[f"{transfer_type}_total_time"] = total_time
             elif key.startswith(COUNTER_PREFIX):
                 assert isinstance(value, int | float)
                 return_dict[key.removeprefix(COUNTER_PREFIX)] = value
             else:
-                raise ValueError(f"Unknown offloading stats key: {key}")
+                raise AssertionError(f"Unknown offloading stats key: {key}")
         return return_dict
 
     def is_empty(self) -> bool:
@@ -102,7 +88,7 @@ class OffloadingConnectorStats(KVConnectorStats):
     def record_transfer(self, num_bytes: int, time: float, transfer_type: TransferType):
         src, dst = transfer_type
         transfer_type_key = TRANSFER_PREFIX + src + "_to_" + dst
-        op = OffloadingOperationMetrics(num_bytes, time)
+        op = {"op_size": num_bytes, "op_time": time}
         self.data.setdefault(transfer_type_key, []).append(op)
 
     def set_counter(self, counter_name: str, counter_value: int | float) -> None:
@@ -123,6 +109,9 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
+        self._offloading_manager_counter_metadata: dict[
+            str, OffloadingCounterMetadata
+        ] = OffloadingSpecFactory.get_counter_definitions(vllm_config)
         self._offloading_manager_counter_defs: dict[str, PromMetricT] = {}
         self.offloading_manager_counters: dict[tuple[int, str], PromMetricT] = {}
         buckets = [  # In bytes
@@ -157,73 +146,73 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames + ["transfer_type"],
         )
 
-    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
-        """
-        Observe transfer statistics.
-        """
+    def _ensure_offloading_manager_counter(
+        self, counter_name: str, engine_idx: int
+    ) -> PromMetricT:
+        assert counter_name in self._offloading_manager_counter_metadata
+        if counter_name not in self._offloading_manager_counter_defs:
+            metadata = self._offloading_manager_counter_metadata[counter_name]
+            self._offloading_manager_counter_defs[counter_name] = self._counter_cls(
+                name=metadata.name,
+                documentation=metadata.documentation,
+                labelnames=self._labelnames,
+            )
+        if (engine_idx, counter_name) not in self.offloading_manager_counters:
+            counter = self._offloading_manager_counter_defs[counter_name]
+            self.offloading_manager_counters[(engine_idx, counter_name)] = (
+                counter.labels(*self.per_engine_labelvalues[engine_idx])
+            )
+        return self.offloading_manager_counters[(engine_idx, counter_name)]
 
+    def _ensure_transfer_metrics(
+        self, transfer_type: str, engine_idx: int
+    ) -> tuple[PromMetricT, PromMetricT, PromMetricT]:
+        if (engine_idx, transfer_type) not in self.histogram_transfer_size:
+            self.histogram_transfer_size[(engine_idx, transfer_type)] = (
+                self._histogram_transfer_size.labels(
+                    *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                )
+            )
+            self.counter_kv_bytes[(engine_idx, transfer_type)] = (
+                self._counter_kv_bytes.labels(
+                    *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                )
+            )
+            self.counter_kv_transfer_time[(engine_idx, transfer_type)] = (
+                self._counter_kv_transfer_time.labels(
+                    *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
+                )
+            )
+        return (
+            self.histogram_transfer_size[(engine_idx, transfer_type)],
+            self.counter_kv_bytes[(engine_idx, transfer_type)],
+            self.counter_kv_transfer_time[(engine_idx, transfer_type)],
+        )
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        """Observe transfer statistics."""
         for key, value in transfer_stats_data.items():
             if key.startswith(COUNTER_PREFIX):
                 counter_name = key.removeprefix(COUNTER_PREFIX)
                 assert isinstance(value, int | float)
-                if counter_name not in self._offloading_manager_counter_defs:
-                    metadata = get_offloading_counter_metadata(counter_name)
-                    self._offloading_manager_counter_defs[counter_name] = (
-                        self._counter_cls(
-                            name=metadata.name,
-                            documentation=metadata.documentation,
-                            labelnames=self._labelnames,
-                        )
-                    )
-                if (engine_idx, counter_name) not in self.offloading_manager_counters:
-                    counter = self._offloading_manager_counter_defs[counter_name]
-                    self.offloading_manager_counters[(engine_idx, counter_name)] = (
-                        counter.labels(*self.per_engine_labelvalues[engine_idx])
-                    )
-                self.offloading_manager_counters[(engine_idx, counter_name)].inc(value)
-
-        for key, ops in transfer_stats_data.items():
-            if not key.startswith(TRANSFER_PREFIX):
+                counter = self._ensure_offloading_manager_counter(
+                    counter_name, engine_idx
+                )
+                counter.inc(value)
                 continue
+
+            if not key.startswith(TRANSFER_PREFIX):
+                raise AssertionError(f"Unknown offloading stats key: {key}")
+
+            ops = value
             transfer_type = key.removeprefix(TRANSFER_PREFIX)
-            # Cache:
-            if (engine_idx, transfer_type) not in self.histogram_transfer_size:
-                self.histogram_transfer_size[(engine_idx, transfer_type)] = (
-                    self._histogram_transfer_size.labels(
-                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
-                    )
-                )
-                self.counter_kv_bytes[(engine_idx, transfer_type)] = (
-                    self._counter_kv_bytes.labels(
-                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
-                    )
-                )
-                self.counter_kv_transfer_time[(engine_idx, transfer_type)] = (
-                    self._counter_kv_transfer_time.labels(
-                        *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
-                    )
-                )
+            transfer_size, kv_bytes, transfer_time = self._ensure_transfer_metrics(
+                transfer_type, engine_idx
+            )
 
-            # Process ops:
             assert isinstance(ops, list)
-            for op in ops:  # ops is a list of serialized OffloadingOperationMetrics
-                assert isinstance(op, OffloadingOperationMetrics | dict)
-                op_size = (
-                    op.op_size
-                    if isinstance(op, OffloadingOperationMetrics)
-                    else op["op_size"]
-                )
-                op_time = (
-                    op.op_time
-                    if isinstance(op, OffloadingOperationMetrics)
-                    else op["op_time"]
-                )
-                # Observe size histogram
-                self.histogram_transfer_size[(engine_idx, transfer_type)].observe(
-                    op_size
-                )
-
-                # Increment byte and time counters
-                self.counter_kv_bytes[(engine_idx, transfer_type)].inc(op_size)
-
-                self.counter_kv_transfer_time[(engine_idx, transfer_type)].inc(op_time)
+            for op in ops:
+                assert isinstance(op, dict)
+                transfer_size.observe(op["op_size"])
+                kv_bytes.inc(op["op_size"])
+                transfer_time.inc(op["op_time"])

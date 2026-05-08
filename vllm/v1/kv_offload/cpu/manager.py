@@ -6,6 +6,7 @@ from typing import Literal
 
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -19,6 +20,7 @@ from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
 
 _CACHE_POLICIES: dict[str, type[CachePolicy]] = {
     "lru": LRUCachePolicy,
@@ -35,6 +37,18 @@ class CPUOffloadingManager(OffloadingManager):
     Policy-specific block organization and eviction decisions are delegated
     to the CachePolicy implementation.
     """
+
+    @classmethod
+    def get_counter_definitions(cls) -> dict[str, OffloadingCounterMetadata]:
+        return {
+            "stores_skipped": OffloadingCounterMetadata(
+                name="vllm:kv_offload_stores_skipped",
+                documentation=(
+                    "Number of KV offload stores skipped because the reuse "
+                    "threshold was not reached."
+                ),
+            )
+        }
 
     def __init__(
         self,
@@ -58,6 +72,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
+        self.stores_skipped: int = 0
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -154,7 +169,9 @@ class CPUOffloadingManager(OffloadingManager):
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         if self.counts is not None:
+            num_keys = len(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
+            self.stores_skipped += num_keys - len(keys)
         # filter out blocks that are already stored
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
@@ -253,3 +270,16 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+    def get_stats(self) -> KVConnectorStats | None:
+        if not self.stores_skipped:
+            return None
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+            OffloadingConnectorStats,
+        )
+
+        stats = OffloadingConnectorStats()
+        stats.set_counter("stores_skipped", self.stores_skipped)
+        self.stores_skipped = 0
+        return stats

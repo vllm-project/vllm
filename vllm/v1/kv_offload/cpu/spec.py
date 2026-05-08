@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
+from typing import Any
 
 from typing_extensions import override
 
@@ -18,11 +19,21 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.metrics import OffloadingCounterMetadata
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = 1
+
+    @classmethod
+    def get_counter_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingCounterMetadata]:
+        store_threshold = int(extra_config.get("store_threshold", 0))
+        if store_threshold >= 2:
+            return CPUOffloadingManager.get_counter_definitions()
+        return {}
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)

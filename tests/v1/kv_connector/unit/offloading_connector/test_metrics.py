@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -34,7 +36,10 @@ class _FakeMetric:
 
 
 class _FakeVllmConfig:
-    kv_transfer_config = None
+    def __init__(self, store_threshold: int = 2):
+        self.kv_transfer_config = SimpleNamespace(
+            kv_connector_extra_config={"store_threshold": store_threshold}
+        )
 
 
 def test_build_kv_connector_stats_with_none():
@@ -207,3 +212,18 @@ def test_prom_metrics_observes_manager_counter():
     counter_def = prom_metrics._offloading_manager_counter_defs["stores_skipped"]
     assert counter_def.kwargs["name"] == "vllm:kv_offload_stores_skipped"
     assert counter.labelvalues == ("model", "0")
+
+
+def test_prom_metrics_uses_configured_manager_counters():
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(store_threshold=0),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    assert prom_metrics._offloading_manager_counter_metadata == {}

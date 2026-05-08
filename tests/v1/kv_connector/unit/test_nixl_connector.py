@@ -1358,6 +1358,60 @@ def test_scheduler_kv_connector_stats_aggregation():
     assert nixl_stats.data["remote_tokens"] == [128]
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_scheduler_kv_connector_stats_without_worker_stats():
+    """Test scheduler KV connector stats are emitted without worker stats."""
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    scheduler = create_scheduler(create_vllm_config())
+
+    scheduler_stats = NixlKVConnectorStats()
+    scheduler_stats.data.update(
+        {
+            "transfer_duration": [0],
+            "post_duration": [0],
+            "bytes_transferred": [0],
+            "num_descriptors": [0],
+            "remote_tokens": [128],
+        }
+    )
+
+    scheduler.connector.get_kv_connector_stats = lambda: MultiKVConnectorStats(
+        data={"NixlConnector": scheduler_stats}
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=["req_0"],
+        req_id_to_index={"req_0": 0},
+        sampled_token_ids=[[123]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[None],
+        kv_connector_output=None,
+    )
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=None,
+        num_scheduled_tokens={"req_0": 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[0],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)
+
+    final_stats = next(
+        iter(engine_core_outputs.values())
+    ).scheduler_stats.kv_connector_stats
+    assert final_stats["NixlConnector"].data["remote_tokens"] == [128]
+
+
 @pytest.mark.parametrize("distributed_executor_backend", ["ray", None])
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",

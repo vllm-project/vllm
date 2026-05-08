@@ -49,6 +49,7 @@ class KVConnectorStats:
         """Return True if the stats are empty."""
         raise NotImplementedError
 
+
 class KVConnectorLogging:
     def __init__(self, kv_transfer_config: KVTransferConfig | None):
         # Instantiate the connector's stats class.
