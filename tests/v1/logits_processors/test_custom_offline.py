@@ -16,7 +16,7 @@ from tests.v1.logits_processors.utils import (
     DummyLogitsProcessor,
     WrappedPerReqLogitsProcessor,
     prompts,
-    register_fake_entrypoint,
+    setup_fake_entrypoint,
 )
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import (
@@ -147,7 +147,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
         # Scenario: vLLM loads a logitproc from a preconfigured entrypoint
         # To that end, register a real dist-info package so spawned
         # workers can discover the entrypoint via PYTHONPATH
-        register_fake_entrypoint(monkeypatch)
+        setup_fake_entrypoint(monkeypatch)
         _run_test({}, logitproc_loaded=True)
         return
 
@@ -264,7 +264,7 @@ def test_rejects_custom_logitsprocs(
 
         # Register real dist-info package so spawned workers can
         # discover the entrypoint via PYTHONPATH (spawn-compatible)
-        register_fake_entrypoint(monkeypatch)
+        setup_fake_entrypoint(monkeypatch)
 
         llm = LLM(**llm_kwargs)
         # Require that no custom logitsprocs have been loaded
