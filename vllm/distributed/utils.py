@@ -673,3 +673,22 @@ def get_worker_rank_suffix(global_rank: int | None = None) -> str:
         if global_rank is not None:
             return f"rank{global_rank}"
         return ""
+
+
+def init_distributed_coordination(parallel_config):
+    from vllm.utils.network_utils import get_open_ports_list
+
+    parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
+    parallel_config.data_parallel_master_port = (
+        parallel_config._data_parallel_master_port_list.pop()
+    )
+    ip = parallel_config.data_parallel_master_ip
+    store = create_tcp_store(
+        ip,
+        0,
+        is_master=True,
+        world_size=-1,
+        wait_for_workers=False,
+    )
+    parallel_config._coord_store_port = store.port
+    return ip, store

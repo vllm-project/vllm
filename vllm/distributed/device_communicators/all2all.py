@@ -453,6 +453,13 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         assert isinstance(self.buffer, deep_ep.Buffer)
         return self.buffer.low_latency_query_mask_buffer(mask)
 
+    def clean_mask(self):
+        import deep_ep  # type: ignore[import-not-found]
+
+        assert self.enable_ft, "Fault tolerance must be enabled to use clean_mask"
+        assert isinstance(self.buffer, deep_ep.Buffer)
+        self.buffer.low_latency_clean_mask_buffer()
+
 
 class NixlEPAll2AllManager(All2AllManagerBase):
     """
@@ -571,6 +578,10 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     def query_mask(self, mask: torch.Tensor) -> torch.Tensor:
         assert self._buffer is not None
         return self._buffer[0].query_mask_buffer(mask)
+
+    def clean_mask(self):
+        assert self._buffer is not None
+        self._buffer[0].clean_mask_buffer()
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):

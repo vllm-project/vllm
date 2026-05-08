@@ -8,8 +8,9 @@ import msgspec.msgpack
 import zmq.asyncio
 from torch.distributed import default_pg_timeout
 
+from vllm.distributed.utils import init_distributed_coordination
 from vllm.logger import init_logger
-from vllm.utils.network_utils import close_sockets, make_zmq_socket
+from vllm.utils.network_utils import close_sockets, get_open_port, make_zmq_socket
 from vllm.v1.engine import EngineCoreOutputs as FTUtilityOutputs
 from vllm.v1.engine import EngineStatusType, UtilityOutput
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
@@ -132,6 +133,7 @@ class ClientSentinel(BaseSentinel):
                 self.engine_identities,
             )
         }
+        self._coord_store = None
         asyncio.create_task(self.run())
         asyncio.create_task(self.poll_and_execute_cmd())
 
@@ -167,6 +169,34 @@ class ClientSentinel(BaseSentinel):
     @property
     def client(self) -> "AsyncMPClient":
         return self.host
+
+    async def retry(self, ft_request: FaultToleranceRequest):  # type: ignore[override]
+        """Expected params: timeout."""
+        for engine_status in self.engine_status_dict.values():
+            if engine_status["status"] == EngineStatusType.DEAD.name.lower():
+                logger.error("Engine core is dead; retry won't work.")
+                return FaultToleranceResult(ft_request.request_id, False, "Engine dead")
+
+        ip, store = init_distributed_coordination(self.parallel_config)
+        self._coord_store = store
+        ft_request.params["coord_store_port"] = self.parallel_config._coord_store_port
+        if "new_stateless_dp_group_port" not in ft_request.params:
+            ft_request.params["new_stateless_dp_group_port"] = get_open_port()
+
+        # try to recover all engines except ones already marked dead or being excluded.
+        target_engines = [
+            self.engine_identities[i - self.start_rank]
+            for i, status in self.engine_status_dict.items()
+        ]
+        res = await self._execute_cmd_on_engines(ft_request, target_engines)
+        if res.success:
+            logger.info("vLLM instance is recovered after retry command.")
+            for i in self.engine_status_dict:
+                self.engine_status_dict[i]["status"] = (
+                    EngineStatusType.HEALTHY.name.lower()
+                )
+            await self._pub_engine_status()
+        return res
 
     async def _pub_engine_status(self):
         engine_status = self.engine_status_dict.copy()
@@ -298,4 +328,5 @@ class ClientSentinel(BaseSentinel):
         self.sentinel_dead = True
         close_sockets([self.fault_receiver_socket, self.fault_state_pub_socket])
         close_sockets(self.ft_request_sockets + self.ft_result_sockets)
+        self._coord_store = None
         super().shutdown()

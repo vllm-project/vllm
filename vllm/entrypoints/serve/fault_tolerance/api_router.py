@@ -30,7 +30,11 @@ INSTRUCTION_PARAMS: dict[str, dict[str, dict[str, ParamType]]] = {
     "pause": {
         "required": {"timeout": (int, float)},
         "optional": {"exclude_engine_index": list},
-    }
+    },
+    "retry": {
+        "required": {"timeout": (int, float)},
+        "optional": {},
+    },
 }
 
 

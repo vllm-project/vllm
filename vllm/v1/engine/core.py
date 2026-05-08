@@ -890,6 +890,8 @@ class EngineCoreProc(EngineCore):
                 assert addresses.fault_tolerance_addresses is not None
                 ft_addresses = addresses.fault_tolerance_addresses
                 engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
+                ft_config = vllm_config.parallel_config.fault_tolerance_config
+                self.engine_recovery_timeout_sec = ft_config.engine_recovery_timeout_sec
                 # The ZMQ address between engine_core_sentinel and worker_sentinel.
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
                 self.sentinel = EngineCoreSentinel(
@@ -1852,6 +1854,11 @@ class DPEngineCoreProc(EngineCoreProc):
             return True
 
         return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
+
+    def reinit_dp_group_on_fault_tolerance(self):
+        stateless_destroy_torch_distributed_process_group(self.dp_group)
+        self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group()
+        self.step_counter = 0
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

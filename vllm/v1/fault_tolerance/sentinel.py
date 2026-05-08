@@ -74,6 +74,13 @@ class BaseSentinel(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        """
+        Retry execution after a transient recoverable fault.
+        """
+        raise NotImplementedError
+
     @property
     def host(self):
         host = self._host_ref()
