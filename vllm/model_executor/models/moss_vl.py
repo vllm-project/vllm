@@ -41,7 +41,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.inputs import (
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -55,7 +59,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
 from .qwen3 import Qwen3DecoderLayer
 from .qwen3_vl import Qwen3_VisionBlock, Qwen3_VisionPatchEmbed
 from .utils import WeightsMapper, maybe_prefix
@@ -762,7 +766,7 @@ class MossVLMultiModalProcessor(BaseMultiModalProcessor[MossVLProcessingInfo]):
     info=MossVLProcessingInfo,
     dummy_inputs=MossVLDummyInputsBuilder,
 )
-class MossVLForConditionalGeneration(nn.Module, SupportsMultiModal):
+class MossVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -939,6 +943,19 @@ class MossVLForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        # MOSS-VL keeps a single placeholder token per image in the decoder
+        # stream, so decoder positions are sequential text positions; the three
+        # M-RoPE axes are identical (vision T/H/W positions live on the
+        # encoder K side via cross-attention).
+        n = len(input_tokens)
+        positions = torch.arange(n, dtype=torch.long).unsqueeze(0).expand(3, n)
+        return positions.contiguous(), 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [

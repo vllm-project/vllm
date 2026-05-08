@@ -1713,13 +1713,6 @@ class ModelConfig:
 
     @property
     def is_chunked_prefill_supported(self) -> bool:
-        if "MossVLForConditionalGeneration" in self.architectures:
-            logger.debug(
-                "MOSS-VL does not support chunked prefill because it uses "
-                "cross-attention over multimodal encoder outputs."
-            )
-            return False
-
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:
@@ -1766,14 +1759,6 @@ class ModelConfig:
 
     @property
     def is_prefix_caching_supported(self) -> bool:
-        if "MossVLForConditionalGeneration" in self.architectures:
-            logger.debug(
-                "MOSS-VL does not support prefix caching because decoder "
-                "self-attention states are conditioned on cross-attention "
-                "encoder outputs."
-            )
-            return False
-
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:
