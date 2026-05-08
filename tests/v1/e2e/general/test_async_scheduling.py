@@ -26,6 +26,13 @@ MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 # Need to enforce eager for MRV2 while we sort out cudagraph issues.
 ENFORCE_EAGER = os.getenv("ENFORCE_EAGER", "0") == "1"
 
+# Rank can flip by ±1 across executor / async-scheduling / preemption /
+# chunked-prefill paths when two vocab tokens have logits within fp32 precision
+# of the prompt token's logit (see _ranks_kernel in
+# vllm/v1/worker/gpu/sample/logprob.py). _logprobs_match accepts that drift
+# only when the logprob value already matches within tolerance.
+RANK_TIE_TOL = 1
+
 first_prompt = (
     "The following numbers of the sequence "
     + ", ".join(str(i) for i in range(10))
@@ -429,11 +436,17 @@ def _logprobs_match(
         and lps_a.keys() == lps_b.keys()
         and all(
             a.decoded_token == b.decoded_token
-            and a.rank == b.rank
             and a.logprob == pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol)
+            and _ranks_match(a.rank, b.rank)
             for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
         )
     )
+
+
+def _ranks_match(rank_a: int | None, rank_b: int | None) -> bool:
+    if rank_a is None or rank_b is None:
+        return rank_a is rank_b
+    return abs(rank_a - rank_b) <= RANK_TIE_TOL
 
 
 def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
