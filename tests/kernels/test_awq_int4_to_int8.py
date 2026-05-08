@@ -20,7 +20,11 @@ import numpy as np
 import pytest
 import torch
 
-from vllm._custom_ops import _supports_cpu_w4a8_int8
+from vllm._custom_ops import (
+    CPUQuantAlgo,
+    convert_weight_packed_scale_zp,
+    int4_scaled_mm_cpu,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_cols,
 )
@@ -28,11 +32,6 @@ from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
-
-requires_cpu_w4a8_int8 = pytest.mark.skipif(
-    not _supports_cpu_w4a8_int8,
-    reason="Requires vLLM CPU build with SGLang INT4 W4A8 kernels",
-)
 
 
 def make_awq_checkpoint_data(K, N, group_size, seed=42):
@@ -87,7 +86,6 @@ def make_awq_checkpoint_data(K, N, group_size, seed=42):
 class TestConvertWeightPackedScaleZp:
     """Tests for convert_weight_packed_scale_zp weightpacking."""
 
-    @requires_cpu_w4a8_int8
     @pytest.mark.parametrize(
         "K,N,group_size",
         [
@@ -102,8 +100,11 @@ class TestConvertWeightPackedScaleZp:
             K, N, group_size
         )
 
-        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
-            packed_qweight, packed_qzeros, scales
+        blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
+            packed_qweight,
+            packed_qzeros,
+            scales,
+            CPUQuantAlgo.AWQ,
         )
 
         block_n = 32
@@ -129,7 +130,6 @@ class TestConvertWeightPackedScaleZp:
 class TestInt4ScaledMmCpu:
     """Tests for int4_scaled_mm_cpu GEMM kernel."""
 
-    @requires_cpu_w4a8_int8
     @pytest.mark.parametrize(
         "M,K,N,group_size",
         [
@@ -146,12 +146,15 @@ class TestInt4ScaledMmCpu:
             make_awq_checkpoint_data(K, N, group_size)
         )
 
-        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
-            packed_qweight, packed_qzeros, scales
+        blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
+            packed_qweight,
+            packed_qzeros,
+            scales,
+            CPUQuantAlgo.AWQ,
         )
 
         x = torch.randn(M, K, dtype=torch.bfloat16)
-        out = torch.ops._C.int4_scaled_mm_cpu(x, blocked_w, blocked_zp, blocked_s, None)
+        out = int4_scaled_mm_cpu(x, blocked_w, blocked_zp, blocked_s, None)
 
         ref_out = torch.mm(x.float(), float_ref)
 
@@ -169,7 +172,6 @@ class TestInt4ScaledMmCpu:
         )
         print(f"  [PASS] INT4 GEMM correct: M={M}, K={K}, N={N}")
 
-    @requires_cpu_w4a8_int8
     @pytest.mark.parametrize("M", [1, 8, 32])
     def test_gemm_with_bias(self, M):
         """INT4 W4A8 GEMM with bias should match reference."""
@@ -178,14 +180,17 @@ class TestInt4ScaledMmCpu:
             make_awq_checkpoint_data(K, N, group_size)
         )
 
-        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
-            packed_qweight, packed_qzeros, scales
+        blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
+            packed_qweight,
+            packed_qzeros,
+            scales,
+            CPUQuantAlgo.AWQ,
         )
 
         bias = torch.randn(N, dtype=torch.float32)
         x = torch.randn(M, K, dtype=torch.bfloat16)
 
-        out = torch.ops._C.int4_scaled_mm_cpu(x, blocked_w, blocked_zp, blocked_s, bias)
+        out = int4_scaled_mm_cpu(x, blocked_w, blocked_zp, blocked_s, bias)
 
         ref_out = torch.mm(x.float(), float_ref) + bias
         abs_diff = (out.float() - ref_out).abs()
@@ -197,7 +202,6 @@ class TestInt4ScaledMmCpu:
         )
         print(f"  [PASS] INT4 GEMM with bias: M={M}")
 
-    @requires_cpu_w4a8_int8
     def test_gemm_3d_input(self):
         """apply() reshapes 3D input [B, S, K] -> [B*S, K] -> back to 3D."""
         K, N, group_size = 256, 128, 128
@@ -205,17 +209,18 @@ class TestInt4ScaledMmCpu:
             make_awq_checkpoint_data(K, N, group_size)
         )
 
-        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
-            packed_qweight, packed_qzeros, scales
+        blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
+            packed_qweight,
+            packed_qzeros,
+            scales,
+            CPUQuantAlgo.AWQ,
         )
 
         B, S = 2, 8
         x_3d = torch.randn(B, S, K, dtype=torch.bfloat16)
         x_2d = x_3d.reshape(-1, K)
 
-        out_2d = torch.ops._C.int4_scaled_mm_cpu(
-            x_2d, blocked_w, blocked_zp, blocked_s, None
-        )
+        out_2d = int4_scaled_mm_cpu(x_2d, blocked_w, blocked_zp, blocked_s, None)
         out_3d = out_2d.reshape(B, S, N)
 
         ref_out = torch.mm(x_2d.float(), float_ref).reshape(B, S, N)
@@ -229,7 +234,6 @@ class TestInt4ScaledMmCpu:
         assert mean_rel < 0.05, f"Mean relative error {mean_rel:.4f} for 3D exceeds 5%"
         print(f"  [PASS] 3D input [{B},{S},{K}] -> output [{B},{S},{N}]")
 
-    @requires_cpu_w4a8_int8
     def test_gemm_fp16_input(self):
         """INT4 GEMM should also work with fp16 input."""
         K, N, group_size, M = 256, 256, 128, 8
@@ -237,12 +241,15 @@ class TestInt4ScaledMmCpu:
             make_awq_checkpoint_data(K, N, group_size)
         )
 
-        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
-            packed_qweight, packed_qzeros, scales
+        blocked_w, blocked_zp, blocked_s = convert_weight_packed_scale_zp(
+            packed_qweight,
+            packed_qzeros,
+            scales,
+            CPUQuantAlgo.AWQ,
         )
 
         x = torch.randn(M, K, dtype=torch.float16)
-        out = torch.ops._C.int4_scaled_mm_cpu(x, blocked_w, blocked_zp, blocked_s, None)
+        out = int4_scaled_mm_cpu(x, blocked_w, blocked_zp, blocked_s, None)
 
         ref_out = torch.mm(x.float(), float_ref)
         abs_diff = (out.float() - ref_out).abs()

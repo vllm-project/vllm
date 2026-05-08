@@ -42,12 +42,6 @@ steps:
   - tests/models/test_registry.py
   commands:
     - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
-
 
 - label: Basic Models Test (Other CPU) # 5min
   key: basic-models-test-other-cpu
