@@ -135,6 +135,11 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
         assert result == {"name": "test"}
 
+    @pytest.mark.timeout(5)
+    def test_malformed_partial_array(self):
+        result = _parse_gemma4_args(":[t:[]")
+        assert isinstance(result, dict)
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -148,6 +153,16 @@ class TestParseGemma4Array:
     def test_bare_values(self):
         result = _parse_gemma4_array("42,true,3.14")
         assert result == [42, True, 3.14]
+
+    @pytest.mark.timeout(5)
+    def test_string_element_with_closing_bracket(self):
+        result = _parse_gemma4_array('[<|"|>a]b<|"|>,<|"|>c<|"|>],<|"|>tail<|"|>')
+        assert result == [["a]b", "c"], "tail"]
+
+    @pytest.mark.timeout(5)
+    def test_stray_closing_bracket(self):
+        result = _parse_gemma4_array("42,]trailing")
+        assert result == [42]
 
 
 # ---------------------------------------------------------------------------
