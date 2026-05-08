@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import contextlib
 import os
 import signal
 import sys
@@ -16,6 +17,9 @@ if TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     FlexibleArgumentParser = argparse.ArgumentParser
+
+with contextlib.suppress(ImportError):
+    import readline  # noqa: F401
 
 
 def _register_signal_handlers():
