@@ -70,7 +70,7 @@ _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 _DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD: dict[int, int] = {
     2048: 64,  # DeepSeek-V4-Flash
-    3072: 128,  # DeepSeek-V4-Pro
+    3072: 64,  # DeepSeek-V4-Pro
 }
 
 # When overlap is engaged, cap deep_gemm at this fraction of total SMs so
@@ -437,11 +437,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
-        # Routing + shared MLP live on this module so the dynamo-opaque op
-        # can reach them via a single ``no_compile_layers[layer_name]`` lookup
-        # (mirrors ``FusedMoE``'s arg-style: gate / shared_experts injected by
-        # the wrapping DeepseekV4MoE).
         self.gate = gate
         self.shared_experts = shared_experts
         self.scoring_func = scoring_func
@@ -740,8 +735,7 @@ def _deepseek_v4_mega_moe_op(
             fast_math,
         )
 
-    # Threshold is empirically tuned per model (Flash @ 2048 -> 64,
-    # Pro @ 3072 -> 128).
+
     overlap_token_threshold = _DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD.get(
         self.intermediate_size
     )
