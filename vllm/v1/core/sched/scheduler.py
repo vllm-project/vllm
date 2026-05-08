@@ -295,6 +295,17 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+        # KV connector early-prefetch config and per-step cache.
+        # See `_early_prefetch_waiting_kv` for details.
+        self.kv_connector_prefetch_token_budget = (
+            self.scheduler_config.kv_connector_prefetch_token_budget
+        )
+        # Cache of per-request connector lookup results within a single
+        # schedule() call: req_id -> (ext_tokens, load_kv_async).
+        # Populated by the early-prefetch pass and consumed by the
+        # waiting-queue scheduling loop to avoid duplicate connector calls.
+        self._step_prefetch_cache: dict[str, tuple[int | None, bool]] = {}
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -345,6 +356,63 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _early_prefetch_waiting_kv(self) -> None:
+        """Eagerly probe the KV connector for waiting requests so that
+        async KV cache loads (e.g. LMCache disk reads) are kicked off as
+        soon as the request joins the waiting queue, rather than only when
+        the request reaches the head of the waiting-queue scheduling loop.
+
+        Without this pass, when the running queue saturates the per-step
+        token budget, the waiting-queue scheduling loop never executes and
+        `connector.get_num_new_matched_tokens` is never called for newly
+        arrived waiting requests, leaving their async KV prefetches
+        unscheduled. Once the running requests finally drain, the scheduler
+        is forced to wait on the just-started prefetch, causing avoidable
+        GPU idle time (see GH issue #41784).
+
+        The probe is bounded by `kv_connector_prefetch_token_budget`
+        (summed over `request.num_tokens` of probed requests in this step)
+        to bound in-flight prefetch memory pressure on the connector. The
+        per-request lookup result is cached in `self._step_prefetch_cache`
+        and reused by the regular waiting-queue scheduling loop within the
+        same schedule() call, so no duplicate connector calls are made.
+        """
+        # Clear stale cache entries from a prior schedule step. We always
+        # clear, even when the feature is disabled, so toggling at runtime
+        # cannot leave stale state behind.
+        self._step_prefetch_cache.clear()
+
+        budget = self.kv_connector_prefetch_token_budget
+        if budget <= 0 or self.connector is None:
+            return
+        if self._pause_state == PauseState.PAUSED_ALL:
+            return
+
+        prefetch_tokens_used = 0
+        # Probe the regular waiting queue first, then any non-blocked
+        # entries in the skipped_waiting queue. We only probe requests
+        # that are in plain WAITING status with no computed tokens yet,
+        # which matches the gating condition in the main scheduling loop.
+        for queue in (self.waiting, self.skipped_waiting):
+            for request in queue:
+                if prefetch_tokens_used >= budget:
+                    return
+                req_id = request.request_id
+                if req_id in self._step_prefetch_cache:
+                    continue
+                if request.num_computed_tokens != 0:
+                    continue
+                if self._is_blocked_waiting_status(request.status):
+                    continue
+                # Fire the connector lookup. This is the side-effecting
+                # call that kicks off async loads for connectors that
+                # support them (e.g. LMCache async loading).
+                ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
+                    request, 0
+                )
+                self._step_prefetch_cache[req_id] = (ext_tokens, load_kv_async)
+                prefetch_tokens_used += request.num_tokens
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -379,6 +447,13 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+
+        # Early-prefetch pass: kick off KV connector lookups for waiting
+        # requests before scheduling the running queue. This ensures that
+        # async KV loads start even when the running queue would otherwise
+        # consume the entire per-step token budget and prevent the waiting
+        # loop from running. Results are cached and reused below.
+        self._early_prefetch_waiting_kv()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -615,11 +690,21 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        ext_tokens, load_kv_async = (
-                            self.connector.get_num_new_matched_tokens(
-                                request, num_new_local_computed_tokens
+                        # Reuse the result from the early-prefetch pass if
+                        # available, so we don't hit the connector twice in
+                        # the same schedule() call. The early-prefetch pass
+                        # always probes with num_computed_tokens=0 and we
+                        # are in the `request.num_computed_tokens == 0`
+                        # branch here, so the inputs match.
+                        cached = self._step_prefetch_cache.pop(request.request_id, None)
+                        if cached is not None and num_new_local_computed_tokens == 0:
+                            ext_tokens, load_kv_async = cached
+                        else:
+                            ext_tokens, load_kv_async = (
+                                self.connector.get_num_new_matched_tokens(
+                                    request, num_new_local_computed_tokens
+                                )
                             )
-                        )
 
                         if ext_tokens is None:
                             # The request cannot be scheduled because

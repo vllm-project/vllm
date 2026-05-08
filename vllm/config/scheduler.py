@@ -153,6 +153,16 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    kv_connector_prefetch_token_budget: int = Field(default=0, ge=0)
+    """Per-step token budget for early KV connector prefetching of WAITING
+    requests. When >0, the scheduler probes `KVConnector.get_num_new_matched_tokens`
+    for waiting requests at the beginning of every schedule step (regardless of
+    the running-queue token budget), kicking off async KV loads earlier and
+    reducing GPU idle caused by KV connector stalls. The probe is bounded by
+    the sum of `request.num_tokens` of probed requests, which approximates the
+    in-flight prefetch memory pressure on the connector. A value of 0 (default)
+    disables early prefetching and preserves prior behavior."""
+
     @staticmethod
     def default_factory(**kwargs):
         """
