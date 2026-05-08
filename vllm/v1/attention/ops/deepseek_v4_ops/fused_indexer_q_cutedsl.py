@@ -9,8 +9,8 @@ import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
-from cutlass._mlir.dialects import llvm, vector
-from cutlass.cutlass_dsl import T, dsl_user_op, ir
+from cutlass._mlir.dialects import llvm
+from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
 from vllm.vllm_flash_attn.cute import utils as cute_utils
@@ -40,13 +40,13 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
     rope_type = _TORCH_TO_CUTE[index_q_cos_sin_cache.dtype]
 
     # compile all variants at first invocation
-    for tile_head in (1, 4):
-        IndexerQMxFp4Kernel.compile(head_dim, rope_dim, num_heads, rope_type, tile_head)
+    for coarsen in (1, 4):
+        IndexerQMxFp4Kernel.compile(head_dim, rope_dim, num_heads, rope_type, coarsen)
 
     # heuristic
-    tile_head = 1 if num_tokens < 512 else 4
+    coarsen = 1 if num_tokens < 256 else 4
     compiled = IndexerQMxFp4Kernel.compile(
-        head_dim, rope_dim, num_heads, rope_type, tile_head
+        head_dim, rope_dim, num_heads, rope_type, coarsen
     )
     scale = float(index_weights_softmax_scale * index_weights_head_scale)
     compiled(
@@ -59,6 +59,11 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
         index_weights_out,
         scale,
     )
+
+
+@dsl_user_op
+def _recast_val(x, dtype, *, loc=None, ip=None):
+    return dtype(llvm.bitcast(dtype.mlir_type, x.ir_value(loc=loc, ip=ip)))
 
 
 @dsl_user_op
@@ -75,7 +80,7 @@ def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
 
 
 @dsl_user_op
-def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
+def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
     out = llvm.inline_asm(
         llvm.StructType.get_literal([T.f32(), T.f32()]),
         [data.ir_value(loc=loc, ip=ip)],
@@ -84,16 +89,10 @@ def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
         has_side_effects=False,
         is_align_stack=False,
     )
-    vec = vector.from_elements(
-        ir.VectorType.get([2], T.f32(), loc=loc),
-        [
-            llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip),
-            llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip),
-        ],
-        loc=loc,
-        ip=ip,
+    return (
+        Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
+        Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
     )
-    return cute.TensorSSA(vec, 2, Float32)
 
 
 @dsl_user_op
@@ -243,13 +242,17 @@ class IndexerQMxFp4Kernel:
         q_bf16x2 = cute.make_rmem_tensor(_layout, Uint32)
 
         if in_bounds:
-            src = cute.local_tile(
+            # we can't do cute.copy on the whole 2D tile directly because
+            # cute.recast_tensor() is wrong for 2D strided layout :(
+            q_tile = cute.local_tile(
                 q[token_id, None, None],
                 tiler=(self.coarsen, 16),
                 coord=(head_tile_id, sublane),
             )
             cp_u32x8 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=256)
-            cute.copy(cp_u32x8, cute.recast_tensor(src, Uint32), q_bf16x2)
+            for i in cutlass.range_constexpr(self.coarsen):
+                src = cute.recast_tensor(q_tile[i, None], Uint32)
+                cute.copy(cp_u32x8, src, q_bf16x2[i, None])
 
         # RoPE applies only to the trailing rope_dim values. We keep the rounded
         # BF16 result in q_bits so the later amax and quantization see BF16.
@@ -282,18 +285,19 @@ class IndexerQMxFp4Kernel:
                 cute.copy(cp_u32x4, cute.recast_tensor(cos_src, Uint32), cos_bf16x2)
                 cute.copy(cp_u32x4, cute.recast_tensor(sin_src, Uint32), sin_bf16x2)
 
-                cos_vals_view = cute.logical_divide(cos_vals, 2)  # (2, 4)
-                sin_vals_view = cute.logical_divide(sin_vals, 2)
-
                 for i in cutlass.range_constexpr(4):
-                    cos_vals_view[None, i].store(_bf16x2_to_fp32(cos_bf16x2[i]))
-                    sin_vals_view[None, i].store(_bf16x2_to_fp32(sin_bf16x2[i]))
+                    cos0, cos1 = _bf16x2_to_fp32(cos_bf16x2[i])
+                    sin0, sin1 = _bf16x2_to_fp32(sin_bf16x2[i])
+                    cos_vals[i * 2] = cos0
+                    cos_vals[i * 2 + 1] = cos1
+                    sin_vals[i * 2] = sin0
+                    sin_vals[i * 2 + 1] = sin1
 
             for i in cutlass.range_constexpr(self.coarsen):
                 for j in cutlass.range_constexpr(8):
-                    q_pair = _bf16x2_to_fp32(q_bf16x2[i, j])
-                    rot0 = q_pair[0] * cos_vals[j] - q_pair[1] * sin_vals[j]
-                    rot1 = q_pair[0] * sin_vals[j] + q_pair[1] * cos_vals[j]
+                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    rot0 = q0 * cos_vals[j] - q1 * sin_vals[j]
+                    rot1 = q0 * sin_vals[j] + q1 * cos_vals[j]
                     # convert back to BF16 to match numerics
                     q_bf16x2[i, j] = _fp32x2_to_bf16x2(rot0, rot1)
 
@@ -323,10 +327,9 @@ class IndexerQMxFp4Kernel:
                 # compute block scale with bit manipulation
                 # UE8M0 stores ceil(log2(fp4_scale)) + 127. Adding the mantissa mask
                 # increments the exponent whenever fp4_scale is not exactly a power of 2
-                fp4_scale = cute_utils.fmax(amax, float.fromhex("0x6p-126")) * Float32(
-                    1.0 / 6.0
-                )
-                bits = Uint32(llvm.bitcast(T.i32(), fp4_scale.ir_value()))
+                eps = cutlass.const_expr(float.fromhex("0x6p-126"))
+                fp4_scale = cute_utils.fmax(amax, eps) * Float32(1.0 / 6.0)
+                bits = _recast_val(fp4_scale, Uint32)
                 ue8m0 = cute_utils.shr_u32(
                     bits + Uint32(0x7FFFFF), Uint32(23)
                 ) & Uint32(0xFF)
@@ -339,15 +342,13 @@ class IndexerQMxFp4Kernel:
                 # If scale = 2^A and ue8m0 = A + 127, then inverse scale has exponent
                 # -A + 127 = 254 - ue8m0.
                 inv_scale_bits = (Uint32(254) - ue8m0) << Uint32(23)
-                inv_fp4_scale = Float32(
-                    llvm.bitcast(T.f32(), inv_scale_bits.ir_value())
-                )
+                inv_fp4_scale = _recast_val(inv_scale_bits, Float32)
 
                 vals = cute.make_rmem_tensor(16, Float32)
                 for j in cutlass.range_constexpr(8):
-                    tmp = _bf16x2_to_fp32(q_bf16x2[i, j])
-                    vals[j * 2] = tmp[0] * inv_fp4_scale
-                    vals[j * 2 + 1] = tmp[1] * inv_fp4_scale
+                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    vals[j * 2] = q0 * inv_fp4_scale
+                    vals[j * 2 + 1] = q1 * inv_fp4_scale
 
                 # pack to FP4
                 packed = cute.make_rmem_tensor((2,), Uint32)
@@ -360,7 +361,7 @@ class IndexerQMxFp4Kernel:
 
         # Weight scaling is independent of the Q subwarp work. The first
         # num_tokens * num_heads logical threads cover one weight each.
-        if global_tid * 8 < num_token_heads:
+        if global_tid < num_token_heads:
             weight_token_id = global_tid // self.num_heads
             weight_head_id = global_tid % self.num_heads
             weights_out[weight_token_id, weight_head_id] = (
@@ -374,7 +375,7 @@ class IndexerQMxFp4Kernel:
         rope_dim: int = 64,
         num_heads: int = 64,
         cos_sin_dtype: type[cutlass.Numeric] = Float32,
-        tile_head: int = 4,
+        coarsen: int = 4,
     ):
         num_tokens = cute.sym_int()
         max_pos = cute.sym_int()
@@ -402,7 +403,7 @@ class IndexerQMxFp4Kernel:
         weights_out = make_fake_tensor(Float32, (num_tokens, num_heads), divisibility=4)
 
         kernel = IndexerQMxFp4Kernel(
-            head_dim, rope_dim, num_heads, cos_sin_dtype, tile_head
+            head_dim, rope_dim, num_heads, cos_sin_dtype, coarsen
         )
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
