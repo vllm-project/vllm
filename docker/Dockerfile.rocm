@@ -507,6 +507,10 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
+# Install RIXL wheel
+RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
+    uv pip install --system /rixl_install/*.whl
+
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 ARG NIC_BACKEND
@@ -516,6 +520,10 @@ ARG AINIC_VERSION
 COPY --from=export_vllm /benchmarks ${COMMON_WORKDIR}/vllm/benchmarks
 COPY --from=export_vllm /examples ${COMMON_WORKDIR}/vllm/examples
 COPY --from=export_vllm /docker ${COMMON_WORKDIR}/vllm/docker
+
+# Use legacy IPC mode for HSA to avoid GPU memory pinning issues with UCX rocm_ipc
+# See: https://github.com/ROCm/rocm-libraries/issues/6266
+ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 
 ENV TOKENIZERS_PARALLELISM=false
 
