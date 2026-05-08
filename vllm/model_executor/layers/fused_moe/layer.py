@@ -373,6 +373,15 @@ class FusedMoE(PluggableLayer):
         )
         self.shared_expert_gate = shared_expert_gate
 
+        if (
+            not self.aiter_fmoe_shared_expert_enabled
+            and self.num_fused_shared_experts != 0
+        ):
+            raise ValueError(
+                "n_shared_experts is only supported on ROCm aiter when "
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
+            )
+
         # Determine expert maps
         if self.use_ep:
             if self.enable_eplb:
@@ -487,9 +496,7 @@ class FusedMoE(PluggableLayer):
             scoring_func=scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=(
-                self.num_fused_shared_experts if fse_fuse_gate else 0
-            ),
+            num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
@@ -520,7 +527,6 @@ class FusedMoE(PluggableLayer):
             activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
-            num_fused_shared_experts=self.num_fused_shared_experts,
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
         )

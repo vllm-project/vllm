@@ -153,7 +153,6 @@ class BaseRouter(FusedMoERouter):
         # TODO(bnell): Once the MK is constructed at layer init time, we
         # can make this a plain value instead of a callback.
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        num_fused_shared_experts: int = 0,
     ):
         """
         Note: the indices dtype might not be available at router construction
@@ -167,7 +166,6 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
-        self.num_fused_shared_experts = num_fused_shared_experts
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
@@ -284,10 +282,7 @@ class BaseRouter(FusedMoERouter):
 
         # Step 3: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
-            hidden_states,
-            router_logits,
-            indices_type,
-            input_ids=input_ids,
+            hidden_states, router_logits, indices_type, input_ids=input_ids
         )
 
         # Capture logical ids before EPLB mapping.
