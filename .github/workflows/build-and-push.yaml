@@ -190,6 +190,7 @@ jobs:
           fi
           COMMIT_SHA=$(git rev-parse HEAD)
           IMAGE_NAME="us-central1-docker.pkg.dev/cohere-artifacts/cohere/vllm-${IMG_SUFFIX}:${COMMIT_SHA}"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
           FORCE_BUILD=${{ (inputs.force_build || github.event_name == 'push') && 'true' || 'false' }}
           BUILD_TARGET="build-and-push-${{ matrix.provider }}"
           if [[ "${{ matrix.provider }}" != "cpu" ]]; then
@@ -247,6 +248,16 @@ jobs:
             USE_SCCACHE=1 COMMIT_SHA=${{ env.COMMIT_SHA }} PUSH_TAG=${{ env.PUSH_TAG }} CUSTOM_TAG=${{ inputs.custom_tag }} VLLM_USE_PRECOMPILED=${{ inputs.use_precompiled && '1' || '0' }} TORCH_CUDA_ARCH_LIST="${{ inputs.torch_cuda_arch_list }}" make ${{ steps.check_image.outputs.build_target }}
         env:
           DEPOT_PROJECT: rkhjmshqw9
+
+      - name: Print docker image
+        run: |
+          IMAGE="${{ steps.check_image.outputs.image_name }}"
+          echo "::notice title=Docker image (${{ matrix.provider }})::$IMAGE"
+          {
+            echo "### Docker image (${{ matrix.provider }})"
+            echo
+            echo "\`$IMAGE\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   upload-wheels:
     needs: build-and-push

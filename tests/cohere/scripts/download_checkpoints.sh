@@ -64,16 +64,56 @@ is_public_hf_model () {
     [[ "$MODEL_NAME" == */* ]]
 }
 
+replace_dir_from_gcs_cp () {
+    local SOURCE_URL="$1"
+    local DEST="$2"
+    local PARENT
+    local TMP
+
+    PARENT=$(dirname "$DEST")
+    mkdir -p "$PARENT"
+    TMP=$(mktemp -d "${DEST}.tmp.XXXXXX")
+
+    if gcloud storage cp -r "${SOURCE_URL%/}"/* "$TMP/"; then
+        rm -rf "$DEST"
+        mv "$TMP" "$DEST"
+    else
+        rm -rf "$TMP"
+        return 1
+    fi
+}
+
+replace_dir_from_gcs_rsync () {
+    local SOURCE_URL="$1"
+    local DEST="$2"
+    shift 2
+    local PARENT
+    local TMP
+
+    PARENT=$(dirname "$DEST")
+    mkdir -p "$PARENT"
+    TMP=$(mktemp -d "${DEST}.tmp.XXXXXX")
+
+    if gcloud storage rsync -r "$@" "${SOURCE_URL%/}/" "$TMP/"; then
+        rm -rf "$DEST"
+        mv "$TMP" "$DEST"
+    else
+        rm -rf "$TMP"
+        return 1
+    fi
+}
+
 download_model_if_missing () {
     local MODEL_NAME="$1"
     local CHECKPOINT_URL
+    local DEST
 
     CHECKPOINT_URL=$(get_checkpoint_url "$MODEL_NAME")
+    DEST="${ENGINES_DIR}/${MODEL_NAME}"
 
-    if [[ ! -d "${ENGINES_DIR}/${MODEL_NAME}" ]]; then
+    if [[ ! -d "$DEST" ]]; then
         echo "==> Downloading ${MODEL_NAME} model checkpoint from ${CHECKPOINT_URL}"
-        mkdir -p "${ENGINES_DIR}/${MODEL_NAME}"
-        gcloud storage cp -r ${CHECKPOINT_URL}/* "${ENGINES_DIR}/${MODEL_NAME}/"
+        replace_dir_from_gcs_cp "$CHECKPOINT_URL" "$DEST"
     else
         echo "${MODEL_NAME} model checkpoint already exists, skipping download."
     fi
@@ -82,26 +122,36 @@ download_model_if_missing () {
 download_model_always () {
     local MODEL_NAME="$1"
     local CHECKPOINT_URL
+    local DEST
 
     CHECKPOINT_URL=$(get_checkpoint_url "$MODEL_NAME")
+    DEST="${ENGINES_DIR}/${MODEL_NAME}"
 
     echo "==> Downloading ${MODEL_NAME} model checkpoint from ${CHECKPOINT_URL}"
-    mkdir -p "${ENGINES_DIR}/${MODEL_NAME}"
-    gcloud storage cp -r ${CHECKPOINT_URL}/* "${ENGINES_DIR}/${MODEL_NAME}/"
+    replace_dir_from_gcs_cp "$CHECKPOINT_URL" "$DEST"
 }
 
 download_and_untar () {
     local TAR_NAME="hub_${TEST_GROUP}.tar"
     local OBJ="gs://cohere-model-efficiency-ci/hf_cache/${TAR_NAME}"
+    local TMP
+    local TAR_PATH
+    local HUB_TMP
 
     echo "Downloading checkpoints for test group: $TEST_GROUP"
-    mkdir -p "$HF_CACHE_DIR/hub"
+    TMP=$(mktemp -d "${HF_CACHE_DIR}/.${TEST_GROUP}.tmp.XXXXXX")
+    TAR_PATH="${TMP}/${TAR_NAME}"
+    HUB_TMP="${TMP}/hub"
+    mkdir -p "$HUB_TMP"
 
-    if gcloud storage cp "$OBJ" "$HF_CACHE_DIR/" && \
-        tar -xf "$HF_CACHE_DIR/$TAR_NAME" -C "$HF_CACHE_DIR/hub" && \
-        rm "$HF_CACHE_DIR/$TAR_NAME"; then
+    if gcloud storage cp "$OBJ" "$TAR_PATH" && \
+        tar -xf "$TAR_PATH" -C "$HUB_TMP"; then
+        rm -rf "$HF_CACHE_DIR/hub"
+        mv "$HUB_TMP" "$HF_CACHE_DIR/hub"
+        rm -rf "$TMP"
         echo "Checkpoint download and extraction complete."
     else
+        rm -rf "$TMP"
         echo "Failed to download or extract checkpoints for $TEST_GROUP" >&2
         return 1
     fi
@@ -148,10 +198,8 @@ download_performance () {
 
         echo "==> Downloading checkpoint for model: ${MODEL_NAME}"
 
-        # Create destination directory and download the checkpoint, excluding .safetensors files
         CHECKPOINT_URL=$(get_checkpoint_url "$MODEL_NAME")
-        mkdir -p "${ENGINES_DIR}/${MODEL_NAME}"
-        gcloud storage rsync -r -x '.*\.safetensors$' ${CHECKPOINT_URL}/ "${ENGINES_DIR}/${MODEL_NAME}/"
+        replace_dir_from_gcs_rsync "$CHECKPOINT_URL" "${ENGINES_DIR}/${MODEL_NAME}" -x '.*\.safetensors$'
     done
 }
 
@@ -202,8 +250,7 @@ download_model_arch_c5_lora_assets () {
     local DEST="${ENGINES_DIR}/c5-3a30t-petfatt-bf16"
     if [[ ! -d "${DEST}" ]]; then
         echo "==> Downloading c5 LoRA base model checkpoint"
-        mkdir -p "${DEST}"
-        gcloud storage cp -r gs://cohere-model-efficiency-ci/engines/c5_3a30t_petfatt-141_hf_export_bf16/* "${DEST}/"
+        replace_dir_from_gcs_cp "gs://cohere-model-efficiency-ci/engines/c5_3a30t_petfatt-141_hf_export_bf16" "$DEST"
     else
         echo "c5 LoRA base model checkpoint already exists, skipping download."
     fi
@@ -213,8 +260,7 @@ download_model_arch_reward_assets () {
     # download reward v4.3.0 checkpoint if it doesn't exist
     if [[ ! -d "${ENGINES_DIR}/reward_v430" ]]; then
         echo "==> Downloading reward model checkpoint"
-        mkdir -p "${ENGINES_DIR}/reward_v430"
-        gcloud storage cp -r gs://cohere-model-efficiency-ci/engines/reward_111B_v4.3.0/poseidon/* "${ENGINES_DIR}/reward_v430"
+        replace_dir_from_gcs_cp "gs://cohere-model-efficiency-ci/engines/reward_111B_v4.3.0/poseidon" "${ENGINES_DIR}/reward_v430"
     else
         echo "Reward model checkpoint already exists, skipping download."
     fi

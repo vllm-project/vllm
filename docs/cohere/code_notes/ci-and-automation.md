@@ -120,6 +120,7 @@ Design intent:
 - selects behavior by `TEST_GROUP`,
 - reads `MODELS`, `TP_SIZE`, `GPU_TYPE` envs from workflow,
 - skips checkpoint pre-download for performance runs when every requested model is a public Hugging Face repo ID, while still pre-downloading internal GCS-backed checkpoints,
+- stages checkpoint and Hugging Face cache downloads in temporary directories before moving them into place, so workflow-level retries do not treat partial copies as complete artifacts,
 - performs SHM cleanup to avoid stale buffer collisions,
 - supports `bee_eval` and `lm_eval` as independent test groups (nightly
   dispatch should request each benchmark explicitly when both are needed),

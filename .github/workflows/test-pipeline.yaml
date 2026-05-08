@@ -115,9 +115,14 @@ jobs:
 
     - name: Download Model Artifacts
       if: ${{ inputs.test_group != 'cpu_check' }}
-      run: |
-        MODEL_PATH_PREFIX="${{ inputs.model_path }}" \
-          bash ./tests/cohere/scripts/download_checkpoints.sh ${{ inputs.test_group }} "${{ inputs.models }}"
+      uses: nick-fields/retry@v3
+      with:
+        timeout_minutes: 30
+        max_attempts: 3
+        retry_on: error
+        command: |
+          MODEL_PATH_PREFIX="${{ inputs.model_path }}" \
+            bash ./tests/cohere/scripts/download_checkpoints.sh ${{ inputs.test_group }} "${{ inputs.models }}"
 
     - name: Override Hardware Profiles
       if: ${{ inputs.hardware_profiles_override != '' && inputs.test_group != 'cpu_check' }}
