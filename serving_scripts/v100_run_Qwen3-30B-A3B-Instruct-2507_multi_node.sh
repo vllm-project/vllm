@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=vllm-host-qwen3-30b
 #SBATCH --nodes=2
-#SBATCH --partition=short
-#SBATCH --gres=gpu:h100:1
+#SBATCH --partition=devel
+#SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:10:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
