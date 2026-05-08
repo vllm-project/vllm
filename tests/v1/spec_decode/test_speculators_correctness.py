@@ -60,24 +60,19 @@ SPECULATOR_CONFIGS = [
 
 
 def compute_spec_decode_stats(metrics) -> dict:
+    """Extract all spec-decode metrics and compute derived stats."""
     name2metric = {m.name: m for m in metrics}
 
     n_drafts = name2metric["vllm:spec_decode_num_drafts"].value
     n_draft_tokens = name2metric["vllm:spec_decode_num_draft_tokens"].value
     n_accepted = name2metric["vllm:spec_decode_num_accepted_tokens"].value
 
-    per_pos_vec = name2metric[
-        "vllm:spec_decode_num_accepted_tokens_per_pos"
-    ].values
+    per_pos_vec = name2metric["vllm:spec_decode_num_accepted_tokens_per_pos"].values
 
     acceptance_len = 1 + (n_accepted / n_drafts) if n_drafts > 0 else 1.0
     draft_tokens_per_step = (n_draft_tokens / n_drafts) if n_drafts > 0 else 0
-    overall_acceptance_rate = (
-        (n_accepted / n_draft_tokens) if n_draft_tokens > 0 else 0
-    )
-    per_pos_rates = (
-        [v / n_drafts for v in per_pos_vec] if n_drafts > 0 else []
-    )
+    overall_acceptance_rate = (n_accepted / n_draft_tokens) if n_draft_tokens > 0 else 0
+    per_pos_rates = [v / n_drafts for v in per_pos_vec] if n_drafts > 0 else []
 
     return {
         "num_drafts": n_drafts,
@@ -92,17 +87,14 @@ def compute_spec_decode_stats(metrics) -> dict:
 
 
 def print_spec_decode_stats(stats: dict) -> None:
+    """Print all spec-decode metrics and derived values."""
     print("\n===== Spec Decode Metrics =====")
     print(f"  num_drafts:              {stats['num_drafts']}")
     print(f"  num_draft_tokens:        {stats['num_draft_tokens']}")
     print(f"  num_accepted_tokens:     {stats['num_accepted_tokens']}")
     print(f"  draft_tokens_per_step:   {stats['draft_tokens_per_step']:.2f}")
-    print(
-        f"  overall_acceptance_rate: {stats['overall_acceptance_rate']:.4f}"
-    )
-    print(
-        f"  acceptance_len (1+acc/drafts): {stats['acceptance_len']:.4f}"
-    )
+    print(f"  overall_acceptance_rate: {stats['overall_acceptance_rate']:.4f}")
+    print(f"  acceptance_len (1+acc/drafts): {stats['acceptance_len']:.4f}")
     print("  per-position accepted tokens:", stats["per_pos_accepted"])
     print("  per-position acceptance rates:")
     for i, rate in enumerate(stats["per_pos_acceptance_rates"]):
@@ -112,6 +104,17 @@ def print_spec_decode_stats(stats: dict) -> None:
 
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
+    """
+    Test speculators model properly initializes speculative decoding.
+
+    Verifies:
+    1. Speculative config is automatically initialized from speculators config
+    2. Method is detected correctly
+    3. parallel_drafting is set correctly (if applicable)
+    4. The draft model path is correctly set
+    5. Speculative tokens count is valid
+    6. Text generation works with speculative decoding enabled
+    """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     runner_kwargs = dict(dtype=torch.bfloat16, enforce_eager=True)
@@ -139,22 +142,24 @@ def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
             f"got {spec_config.num_speculative_tokens}"
         )
         assert spec_config.model == config.model_path, (
-            f"Draft model should be {config.model_path}, "
-            f"got {spec_config.model}"
+            f"Draft model should be {config.model_path}, got {spec_config.model}"
         )
 
-        vllm_outputs = vllm_model.generate_greedy(
-            example_prompts, max_tokens=20
-        )
-        assert vllm_outputs, (
-            f"No outputs generated for speculators model {config.model_path}"
-        )
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens=20)
+        assert vllm_outputs, f"No outputs generated for speculators model {config.model_path}"
 
 
 @pytest.mark.slow_test
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
 def test_speculators_correctness(monkeypatch, config):
+    """
+    E2E correctness test via the speculators auto-detect path.
+
+    Evaluates GSM8k accuracy to ensure the speculators-format model produces
+    correct outputs, and checks that acceptance length does not collapse under
+    batched inference (lm-eval style).
+    """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     spec_llm = LLM(
@@ -171,8 +176,7 @@ def test_speculators_correctness(monkeypatch, config):
     accuracy = results["accuracy"]
     accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
     assert accuracy >= accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, "
-        f"got {accuracy:.3f}"
+        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"
     )
 
     current_metrics = spec_llm.get_metrics()
