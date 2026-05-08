@@ -42,8 +42,9 @@ profiles:
     when: server.type == "vllm" && matches(gpu.name, "mi300x")
     args:
       attention-backend: "TRITON_ATTN"
+      block-size: "64"
     env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MHA: "1"
-      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      VLLM_ROCM_USE_AITER_PAGED_ATTN: "1"
       VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: "1"
