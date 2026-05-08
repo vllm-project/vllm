@@ -81,5 +81,10 @@ name = "kimi_k2_tool_parser"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "gemma4_tool_parser"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true

@@ -16,7 +16,6 @@ mod kimi_k2;
 mod minimax_m2;
 mod parameters;
 mod qwen_coder;
-pub(super) mod streaming;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 mod utils;

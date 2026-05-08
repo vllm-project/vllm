@@ -1,16 +1,32 @@
 use serde_json::{Map, Number, Value};
+use winnow::ascii::multispace0 as ws0;
+use winnow::combinator::{alt, delimited, opt, separated, seq, terminated};
+use winnow::error::{ContextError, ErrMode, ModalResult};
+use winnow::prelude::*;
+use winnow::stream::Partial;
+use winnow::token::{literal, take_till, take_until};
 
-use super::streaming::StreamingToolState;
-use super::utils::partial_prefix_len;
-use super::{
-    Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, bail_parsing_failed,
-};
+use super::utils::{parse_buffered_event, safe_text_len};
+use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
 use crate::request::{ChatRequest, ChatTool};
 
 const TOOL_CALL_START: &str = "<|tool_call>";
 const TOOL_CALL_END: &str = "<tool_call|>";
 const STRING_DELIM: &str = "<|\"|>";
 const CALL_PREFIX: &str = "call:";
+
+type Gemma4Input<'i> = Partial<&'i str>;
+
+#[derive(Debug, Clone, PartialEq)]
+enum Gemma4Event {
+    Text {
+        len: usize,
+    },
+    ToolCall {
+        name: String,
+        args: Map<String, Value>,
+    },
+}
 
 /// Tool parser for Google Gemma4 models.
 ///
@@ -21,166 +37,43 @@ const CALL_PREFIX: &str = "call:";
 ///
 /// `<|tool_call>call:func_name{key:<|"|>value<|"|>}<tool_call|>`
 ///
-/// Streaming strategy: **accumulate-then-parse-then-diff**
-///
-/// Instead of trying to convert Gemma4's custom format to JSON
-/// token-by-token (which fails because Gemma4 uses bare keys, custom
-/// delimiters, and structural braces that differ from JSON), this parser:
-///
-/// 1. Accumulates the raw Gemma4 argument string during streaming
-/// 2. Parses it with `parse_gemma4_args()` into a JSON object
-/// 3. Converts to JSON with `Value::to_string()`
-/// 4. Diffs against the previously-streamed JSON string
-/// 5. Emits only the new JSON fragment as the delta
-///
-/// This follows the same pattern used by FunctionGemma, Hermes, and Llama
-/// tool parsers.
+/// Arguments are emitted only after a full Gemma4 tool call is parsed.
 pub struct Gemma4ToolParser {
     buffer: String,
-    state: StreamingToolState,
+    emitted_tool_count: usize,
 }
 
 impl Gemma4ToolParser {
     fn new(_tools: &[ChatTool]) -> Self {
         Self {
             buffer: String::new(),
-            state: StreamingToolState::default(),
+            emitted_tool_count: 0,
         }
     }
 
-    fn process_text_mode(&mut self, result: &mut ToolParseResult) -> bool {
-        if let Some(start_idx) = self.buffer.find(TOOL_CALL_START) {
-            if start_idx > 0 {
-                result.normal_text.push_str(&self.buffer[..start_idx]);
-                self.buffer.drain(..start_idx);
-                return true;
+    fn apply_event(&mut self, event: Gemma4Event, result: &mut ToolParseResult) -> Result<()> {
+        match event {
+            Gemma4Event::Text { len: consumed_len } => {
+                result.normal_text.push_str(&self.buffer[..consumed_len]);
             }
+            Gemma4Event::ToolCall { name, args } => {
+                let arguments = serde_json::to_string(&args)
+                    .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-            self.buffer.drain(..TOOL_CALL_START.len());
-            self.state.begin_tool_call();
-            return true;
+                result.calls.push(ToolCallDelta {
+                    tool_index: self.emitted_tool_count,
+                    name: Some(name),
+                    arguments,
+                });
+                self.emitted_tool_count += 1;
+            }
         }
-
-        let keep_len = partial_prefix_len(&self.buffer, TOOL_CALL_START);
-        let emit_len = self.buffer.len().saturating_sub(keep_len);
-        if emit_len > 0 {
-            result.normal_text.push_str(&self.buffer[..emit_len]);
-            self.buffer.drain(..emit_len);
-            return true;
-        }
-
-        false
+        Ok(())
     }
 
-    fn process_tool_mode(&mut self, result: &mut ToolParseResult) -> Result<bool> {
-        let Some(tool_index) = self.state.active_tool_index() else {
-            return Ok(false);
-        };
-        let mut progressed = false;
-
-        if !self.state.active_tool_name_sent() {
-            match parse_tool_header(&self.buffer) {
-                ToolHeader::NeedMore => return Ok(progressed),
-                ToolHeader::Invalid(message) => bail_parsing_failed!("{}", message),
-                ToolHeader::Ready { name, consumed_len } => {
-                    self.state.mark_active_tool_name_sent();
-                    self.buffer.drain(..consumed_len);
-                    result.calls.push(ToolCallDelta {
-                        tool_index,
-                        name: Some(name),
-                        arguments: String::new(),
-                    });
-                    progressed = true;
-                }
-            }
-        }
-
-        let tail_state = scan_tool_tail(&self.buffer);
-        let raw_args_end = match tail_state {
-            ToolTailState::Complete { args_end, .. }
-            | ToolTailState::PendingAfterBrace { args_end } => args_end,
-            ToolTailState::Incomplete => self.buffer.len(),
-        };
-        let raw_args = self.buffer[..raw_args_end].to_string();
-        let args_complete = matches!(tail_state, ToolTailState::Complete { .. });
-        if self.emit_argument_diff(tool_index, &raw_args, !args_complete, result)? {
-            progressed = true;
-        }
-
-        if let ToolTailState::Complete { consumed_len, .. } = tail_state {
-            self.buffer.drain(..consumed_len);
-            self.state.clear_active_tool();
-            progressed = true;
-        }
-
-        Ok(progressed)
-    }
-
-    /// Parse raw Gemma4 arguments, convert to JSON, diff, and emit.
-    ///
-    /// This is the core of the accumulate-then-parse-then-diff strategy:
-    /// 1. Parse `raw_args` with `parse_gemma4_args()`
-    /// 2. Convert to JSON string
-    /// 3. Withhold trailing closing characters (`"}`) that may move as more
-    ///    tokens arrive
-    /// 4. Diff against previously streamed JSON and emit only new chars
-    ///
-    /// Why withholding is necessary:
-    ///
-    /// Gemma4's custom format produces *structurally incomplete* JSON
-    /// during streaming. For example, when `<|"|>Paris` arrives
-    /// without a closing delimiter, `parse_gemma4_args()` treats it
-    /// as a complete value and produces `{"location":"Paris"}`. But
-    /// when `, France<|"|>` arrives next, the JSON becomes
-    /// `{"location":"Paris, France"}`. If we had sent the closing
-    /// `"}` from the first parse, the concatenated client output
-    /// would be `{"location":"Paris"}France"}`, which is garbage.
-    ///
-    /// The solution: never send trailing closing chars during
-    /// streaming. They get flushed by `finish()` when the stream ends.
-    fn emit_argument_diff(
-        &mut self,
-        tool_index: usize,
-        raw_args: &str,
-        partial: bool,
-        result: &mut ToolParseResult,
-    ) -> Result<bool> {
-        let current_args = parse_gemma4_args(raw_args, partial)?;
-        let current_args_json = Value::Object(current_args).to_string();
-
-        let safe_json = if partial {
-            strip_partial_json_suffix(current_args_json)
-        } else {
-            current_args_json
-        };
-
-        let streamed_args = self.state.active_streamed_arguments().unwrap_or_default();
-        if safe_json.is_empty() || safe_json == streamed_args {
-            return Ok(false);
-        }
-
-        let diff = if streamed_args.is_empty() {
-            safe_json.clone()
-        } else {
-            let prefix = find_common_prefix(streamed_args, &safe_json);
-            if prefix.len() < streamed_args.len() {
-                self.state.set_active_streamed_arguments(prefix);
-                return Ok(false);
-            }
-            safe_json[streamed_args.len()..].to_string()
-        };
-
-        if diff.is_empty() {
-            return Ok(false);
-        }
-
-        self.state.set_active_streamed_arguments(safe_json);
-        result.calls.push(ToolCallDelta {
-            tool_index,
-            name: None,
-            arguments: diff,
-        });
-        Ok(true)
+    fn reset(&mut self) {
+        self.buffer.clear();
+        self.emitted_tool_count = 0;
     }
 }
 
@@ -204,15 +97,11 @@ impl ToolParser for Gemma4ToolParser {
         self.buffer.push_str(chunk);
         let mut result = ToolParseResult::default();
 
-        loop {
-            let progressed = if self.state.active_tool_index().is_some() {
-                self.process_tool_mode(&mut result)?
-            } else {
-                self.process_text_mode(&mut result)
-            };
-            if !progressed {
-                break;
-            }
+        while let Some((event, consumed_len)) =
+            parse_buffered_event(&self.buffer, parse_next_gemma4_event)?
+        {
+            self.apply_event(event, &mut result)?;
+            self.buffer.drain(..consumed_len);
         }
 
         Ok(result)
@@ -221,435 +110,213 @@ impl ToolParser for Gemma4ToolParser {
     fn finish(&mut self) -> Result<ToolParseResult> {
         let mut result = ToolParseResult::default();
 
-        if let Some(tool_index) = self.state.active_tool_index() {
-            if self.state.active_tool_name_sent() {
-                match scan_tool_tail(&self.buffer) {
-                    ToolTailState::Complete { args_end, .. }
-                    | ToolTailState::PendingAfterBrace { args_end } => {
-                        let raw_args = self.buffer[..args_end].to_string();
-                        self.emit_argument_diff(tool_index, &raw_args, false, &mut result)?;
-                    }
-                    ToolTailState::Incomplete => {}
-                }
-            } else {
-                result.normal_text.push_str(TOOL_CALL_START);
-                result.normal_text.push_str(&self.buffer);
+        if !self.buffer.is_empty() {
+            if self.buffer.starts_with(TOOL_CALL_START) {
+                self.reset();
+                return Err(parsing_failed!("incomplete Gemma4 tool call"));
             }
-        } else if !self.buffer.is_empty() {
             result.normal_text.push_str(&self.buffer);
         }
 
-        self.buffer.clear();
-        self.state.reset();
+        self.reset();
         Ok(result)
     }
 }
 
-enum ToolHeader {
-    NeedMore,
-    Invalid(String),
-    Ready { name: String, consumed_len: usize },
+/// Parse one Gemma4 event from buffered streaming input.
+fn parse_next_gemma4_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    alt((tool_call_event, safe_text_event)).parse_next(input)
 }
 
-enum ToolTailState {
-    Incomplete,
-    PendingAfterBrace {
-        args_end: usize,
-    },
-    Complete {
-        args_end: usize,
-        consumed_len: usize,
-    },
+/// Parse a complete Gemma4 tool call.
+// TODO: incremental parsing arguments to reduce scanning from O(n^2) to O(n).
+fn tool_call_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    let (name, args) = seq!(
+        _: literal(TOOL_CALL_START),
+        _: literal(CALL_PREFIX),
+        gemma4_tool_name,
+        _: literal("{"),
+        gemma4_args,
+        _: literal("}"),
+        _: literal(TOOL_CALL_END),
+    )
+    .parse_next(input)?;
+
+    Ok(Gemma4Event::ToolCall { name, args })
 }
 
-fn parse_tool_header(buffer: &str) -> ToolHeader {
-    // Expect "call:name{args...}".
-    if CALL_PREFIX.starts_with(buffer) && buffer.len() < CALL_PREFIX.len() {
-        return ToolHeader::NeedMore;
-    }
-    if !buffer.starts_with(CALL_PREFIX) {
-        return ToolHeader::Invalid("Gemma4 tool call must start with `call:`".to_string());
-    }
-
-    let Some(brace_rel) = buffer[CALL_PREFIX.len()..].find('{') else {
-        return ToolHeader::NeedMore;
-    };
-    let brace_idx = CALL_PREFIX.len() + brace_rel;
-    let name = buffer[CALL_PREFIX.len()..brace_idx].trim();
+/// Parse a Gemma4 tool name.
+fn gemma4_tool_name(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
+    let name = take_until(1.., "{").parse_next(input)?.trim();
     if name.is_empty() {
-        return ToolHeader::Invalid("Gemma4 tool call is missing a function name".to_string());
+        return Err(ErrMode::Cut(ContextError::new()));
     }
-
-    ToolHeader::Ready {
-        name: name.to_string(),
-        consumed_len: brace_idx + 1,
-    }
+    Ok(name.to_string())
 }
 
-fn scan_tool_tail(input: &str) -> ToolTailState {
-    let mut i = 0usize;
-    let mut object_depth = 0usize;
-    let mut array_depth = 0usize;
-
-    while i < input.len() {
-        if input[i..].starts_with(STRING_DELIM) {
-            let start = i + STRING_DELIM.len();
-            let Some(rel_end) = input[start..].find(STRING_DELIM) else {
-                return ToolTailState::Incomplete;
-            };
-            i = start + rel_end + STRING_DELIM.len();
-            continue;
-        }
-
-        let next = input[i..].chars().next().expect("scan index must stay in bounds");
-        match next {
-            '{' => object_depth += 1,
-            '[' => array_depth += 1,
-            '}' => {
-                if object_depth == 0 && array_depth == 0 {
-                    let after_brace = i + next.len_utf8();
-                    if input[after_brace..].starts_with(TOOL_CALL_END) {
-                        return ToolTailState::Complete {
-                            args_end: i,
-                            consumed_len: after_brace + TOOL_CALL_END.len(),
-                        };
-                    }
-                    return ToolTailState::PendingAfterBrace { args_end: i };
-                }
-                object_depth -= 1;
-            }
-            ']' => {
-                array_depth = array_depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-        i += next.len_utf8();
-    }
-
-    ToolTailState::Incomplete
+/// Parse a safe text run before the next Gemma4 marker.
+fn safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    safe_text_len(input, TOOL_CALL_START).map(|len| Gemma4Event::Text { len })
 }
 
-/// Parse a single Gemma4 value (after key:) into a JSON value.
-fn parse_gemma4_value(value: &str) -> Result<Value> {
+/// Parse Gemma4's custom key-value argument object content.
+fn gemma4_args(input: &mut Gemma4Input<'_>) -> ModalResult<Map<String, Value>> {
+    let pairs: Vec<(String, Value)> = delimited(
+        ws0,
+        terminated(
+            separated(0.., gemma4_pair, comma_separator),
+            opt(comma_separator),
+        ),
+        ws0,
+    )
+    .parse_next(input)?;
+    Ok(pairs.into_iter().collect())
+}
+
+/// Parse a Gemma4 key-value pair.
+fn gemma4_pair(input: &mut Gemma4Input<'_>) -> ModalResult<(String, Value)> {
+    let (key, value) = seq!(
+        _: ws0,
+        gemma4_key,
+        _: ws0,
+        _: literal(":"),
+        _: ws0,
+        gemma4_value,
+    )
+    .parse_next(input)?;
+    Ok((key, value))
+}
+
+/// Parse a Gemma4 bare key.
+fn gemma4_key(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
+    let key = take_till(1.., |char: char| char == ':').parse_next(input)?.trim();
+    if key.is_empty() {
+        return Err(ErrMode::Cut(ContextError::new()));
+    }
+    Ok(key.to_string())
+}
+
+/// Parse a Gemma4 value.
+fn gemma4_value(input: &mut Gemma4Input<'_>) -> ModalResult<Value> {
+    alt((
+        gemma4_string.map(|value: &str| Value::String(value.to_string())),
+        gemma4_object.map(Value::Object),
+        gemma4_array_value.map(Value::Array),
+        gemma4_bare_value,
+    ))
+    .parse_next(input)
+}
+
+/// Parse a Gemma4 string delimited by `<|"|>`.
+fn gemma4_string<'i>(input: &mut Gemma4Input<'i>) -> ModalResult<&'i str> {
+    delimited(
+        literal(STRING_DELIM),
+        take_until(0.., STRING_DELIM),
+        literal(STRING_DELIM),
+    )
+    .parse_next(input)
+}
+
+/// Parse a nested Gemma4 object.
+fn gemma4_object(input: &mut Gemma4Input<'_>) -> ModalResult<Map<String, Value>> {
+    delimited(literal("{"), gemma4_args, literal("}")).parse_next(input)
+}
+
+/// Parse a Gemma4 array value.
+fn gemma4_array_value(input: &mut Gemma4Input<'_>) -> ModalResult<Vec<Value>> {
+    delimited(literal("["), gemma4_array_content, literal("]")).parse_next(input)
+}
+
+/// Parse Gemma4 array content.
+fn gemma4_array_content(input: &mut Gemma4Input<'_>) -> ModalResult<Vec<Value>> {
+    delimited(
+        ws0,
+        terminated(
+            separated(0.., gemma4_value, comma_separator),
+            opt(comma_separator),
+        ),
+        ws0,
+    )
+    .parse_next(input)
+}
+
+/// Parse a Gemma4 bare scalar.
+fn gemma4_bare_value(input: &mut Gemma4Input<'_>) -> ModalResult<Value> {
+    take_till(1.., |char: char| matches!(char, ',' | '}' | ']'))
+        .map(parse_gemma4_scalar)
+        .parse_next(input)
+}
+
+/// Parse a Gemma4 comma separator.
+fn comma_separator(input: &mut Gemma4Input<'_>) -> ModalResult<()> {
+    delimited(ws0, literal(","), ws0).void().parse_next(input)
+}
+
+fn parse_gemma4_scalar(value: &str) -> Value {
     let value = value.trim();
     if value.is_empty() {
-        return Ok(Value::String(String::new()));
+        return Value::String(String::new());
     }
-    // Boolean
     if value == "true" {
-        return Ok(Value::Bool(true));
+        return Value::Bool(true);
     }
     if value == "false" {
-        return Ok(Value::Bool(false));
+        return Value::Bool(false);
     }
-    // Null
     if matches!(value, "null" | "none" | "nil" | "NULL" | "None" | "NIL") {
-        return Ok(Value::Null);
+        return Value::Null;
     }
-    // Number (int or float)
     if value.contains('.') {
-        if let Ok(parsed) = value.parse::<f64>() {
-            let Some(number) = Number::from_f64(parsed) else {
-                bail_parsing_failed!("Gemma4 float argument is not finite");
-            };
-            return Ok(Value::Number(number));
+        if let Ok(parsed) = value.parse::<f64>()
+            && let Some(number) = Number::from_f64(parsed)
+        {
+            return Value::Number(number);
         }
     } else if let Ok(parsed) = value.parse::<i64>() {
-        return Ok(Value::Number(Number::from(parsed)));
+        return Value::Number(Number::from(parsed));
     }
 
-    // Bare string (no <|"|> delimiters — shouldn't happen but be safe)
-    Ok(Value::String(value.to_string()))
-}
-
-/// Parse Gemma4's custom key:value format into a JSON object.
-///
-/// Format examples:
-///
-/// ```text
-/// location:<|"|>Tokyo<|"|>
-/// location:<|"|>San Francisco<|"|>,unit:<|"|>celsius<|"|>
-/// count:42,flag:true
-/// nested:{inner_key:<|"|>val<|"|>}
-/// items:[<|"|>a<|"|>,<|"|>b<|"|>]
-/// ```
-///
-/// When `partial` is true (streaming), bare values at end of string are
-/// omitted because they may be incomplete and type-unstable
-/// (e.g. partial boolean parsed as bare string).
-fn parse_gemma4_args(args: &str, partial: bool) -> Result<Map<String, Value>> {
-    let mut result = Map::new();
-    if args.trim().is_empty() {
-        return Ok(result);
-    }
-
-    let mut i = 0usize;
-    while i < args.len() {
-        // Skip whitespace and commas
-        skip_separators(args, &mut i);
-        if i >= args.len() {
-            break;
-        }
-
-        // Parse key (unquoted, ends at ':')
-        let Some(colon_rel) = args[i..].find(':') else {
-            break;
-        };
-        let colon_idx = i + colon_rel;
-        let key = args[i..colon_idx].trim();
-        i = colon_idx + 1;
-
-        if i >= args.len() {
-            if !partial {
-                result.insert(key.to_string(), Value::String(String::new()));
-            }
-            break;
-        }
-
-        skip_value_whitespace(args, &mut i);
-        if i >= args.len() {
-            if !partial {
-                result.insert(key.to_string(), Value::String(String::new()));
-            }
-            break;
-        }
-
-        let value = if args[i..].starts_with(STRING_DELIM) {
-            // String value: <|"|>...<|"|>
-            i += STRING_DELIM.len();
-            let value_start = i;
-            let Some(end_rel) = args[i..].find(STRING_DELIM) else {
-                // Unterminated string — take rest
-                result.insert(
-                    key.to_string(),
-                    Value::String(args[value_start..].to_string()),
-                );
-                break;
-            };
-            let end_idx = i + end_rel;
-            let parsed = Value::String(args[value_start..end_idx].to_string());
-            i = end_idx + STRING_DELIM.len();
-            parsed
-        } else if args[i..].starts_with('{') {
-            // Nested object: {...}
-            let value_start = i + 1;
-            i += 1;
-            let mut depth = 1usize;
-            while i < args.len() && depth > 0 {
-                if args[i..].starts_with(STRING_DELIM) {
-                    // Skip over string contents to avoid counting { inside strings
-                    i = skip_over_string_delim(args, i).unwrap_or(args.len());
-                    continue;
-                }
-                let next = args[i..].chars().next().expect("index must stay in bounds");
-                match next {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-                i += next.len_utf8();
-            }
-            let inner = if depth > 0 {
-                // Incomplete nested object — recurse as partial.
-                &args[value_start..i]
-            } else {
-                &args[value_start..i - 1]
-            };
-            Value::Object(parse_gemma4_args(inner, depth > 0)?)
-        } else if args[i..].starts_with('[') {
-            // Array: [...]
-            let value_start = i + 1;
-            i += 1;
-            let mut depth = 1usize;
-            while i < args.len() && depth > 0 {
-                if args[i..].starts_with(STRING_DELIM) {
-                    i = skip_over_string_delim(args, i).unwrap_or(args.len());
-                    continue;
-                }
-                let next = args[i..].chars().next().expect("index must stay in bounds");
-                match next {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
-                }
-                i += next.len_utf8();
-            }
-            let inner = if depth > 0 {
-                &args[value_start..i]
-            } else {
-                &args[value_start..i - 1]
-            };
-            Value::Array(parse_gemma4_array(inner, depth > 0)?)
-        } else {
-            // Bare value (number, boolean, etc.)
-            let value_start = i;
-            while i < args.len() {
-                let next = args[i..].chars().next().expect("index must stay in bounds");
-                if matches!(next, ',' | '}' | ']') {
-                    break;
-                }
-                i += next.len_utf8();
-            }
-            if partial && i >= args.len() {
-                // Value may be incomplete (e.g. partial boolean) —
-                // withhold to avoid type instability during streaming.
-                break;
-            }
-            parse_gemma4_value(&args[value_start..i])?
-        };
-
-        result.insert(key.to_string(), value);
-    }
-
-    Ok(result)
-}
-
-/// Parse a Gemma4 array content string into a JSON array.
-fn parse_gemma4_array(array: &str, partial: bool) -> Result<Vec<Value>> {
-    let mut result = Vec::new();
-    let mut i = 0usize;
-
-    while i < array.len() {
-        skip_separators(array, &mut i);
-        if i >= array.len() {
-            break;
-        }
-
-        let value = if array[i..].starts_with(STRING_DELIM) {
-            // String element
-            i += STRING_DELIM.len();
-            let Some(end_rel) = array[i..].find(STRING_DELIM) else {
-                result.push(Value::String(array[i..].to_string()));
-                break;
-            };
-            let end_idx = i + end_rel;
-            let parsed = Value::String(array[i..end_idx].to_string());
-            i = end_idx + STRING_DELIM.len();
-            parsed
-        } else if array[i..].starts_with('{') {
-            // Nested object
-            let value_start = i + 1;
-            i += 1;
-            let mut depth = 1usize;
-            while i < array.len() && depth > 0 {
-                if array[i..].starts_with(STRING_DELIM) {
-                    i = skip_over_string_delim(array, i).unwrap_or(array.len());
-                    continue;
-                }
-                let next = array[i..].chars().next().expect("index must stay in bounds");
-                match next {
-                    '{' => depth += 1,
-                    '}' => depth -= 1,
-                    _ => {}
-                }
-                i += next.len_utf8();
-            }
-            let inner = if depth > 0 {
-                &array[value_start..i]
-            } else {
-                &array[value_start..i - 1]
-            };
-            Value::Object(parse_gemma4_args(inner, depth > 0)?)
-        } else if array[i..].starts_with('[') {
-            // Nested array
-            let value_start = i + 1;
-            i += 1;
-            let mut depth = 1usize;
-            while i < array.len() && depth > 0 {
-                if array[i..].starts_with(STRING_DELIM) {
-                    i = skip_over_string_delim(array, i).unwrap_or(array.len());
-                    continue;
-                }
-                let next = array[i..].chars().next().expect("index must stay in bounds");
-                match next {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
-                }
-                i += next.len_utf8();
-            }
-            let inner = if depth > 0 {
-                &array[value_start..i]
-            } else {
-                &array[value_start..i - 1]
-            };
-            Value::Array(parse_gemma4_array(inner, depth > 0)?)
-        } else {
-            // Bare value
-            let value_start = i;
-            while i < array.len() {
-                let next = array[i..].chars().next().expect("index must stay in bounds");
-                if matches!(next, ',' | ']') {
-                    break;
-                }
-                i += next.len_utf8();
-            }
-            if partial && i >= array.len() {
-                break;
-            }
-            parse_gemma4_value(&array[value_start..i])?
-        };
-
-        result.push(value);
-    }
-
-    Ok(result)
-}
-
-fn skip_over_string_delim(input: &str, start: usize) -> Option<usize> {
-    let value_start = start + STRING_DELIM.len();
-    input[value_start..]
-        .find(STRING_DELIM)
-        .map(|end_rel| value_start + end_rel + STRING_DELIM.len())
-}
-
-fn skip_separators(input: &str, index: &mut usize) {
-    while *index < input.len() {
-        let next = input[*index..].chars().next().expect("index must stay in bounds");
-        if !matches!(next, ' ' | ',' | '\n' | '\t') {
-            break;
-        }
-        *index += next.len_utf8();
-    }
-}
-
-fn skip_value_whitespace(input: &str, index: &mut usize) {
-    while *index < input.len() {
-        let next = input[*index..].chars().next().expect("index must stay in bounds");
-        if !matches!(next, ' ' | '\n' | '\t') {
-            break;
-        }
-        *index += next.len_utf8();
-    }
-}
-
-fn strip_partial_json_suffix(mut json: String) -> String {
-    while matches!(
-        json.chars().last(),
-        Some('}' | '"' | ']' | '<' | '|' | '\\' | '>')
-    ) {
-        json.pop();
-    }
-    json
-}
-
-fn find_common_prefix(lhs: &str, rhs: &str) -> String {
-    lhs.chars()
-        .zip(rhs.chars())
-        .take_while(|(lhs_char, rhs_char)| lhs_char == rhs_char)
-        .map(|(matched, _)| matched)
-        .collect()
+    Value::String(value.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use thiserror_ext::AsReport;
+    use winnow::combinator::{eof, terminated};
+    use winnow::error::ErrMode;
+    use winnow::prelude::*;
+    use winnow::stream::Partial;
 
     use super::{
-        Gemma4ToolParser, ToolCallDelta, ToolParseResult, ToolParser, parse_gemma4_args,
-        parse_gemma4_array,
+        Gemma4ToolParser, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, gemma4_args,
+        gemma4_array_content, parsing_failed,
     };
     use crate::request::{ChatRequest, ChatTool};
+
+    fn parse_gemma4_args(args: &str) -> super::Result<serde_json::Map<String, Value>> {
+        let mut input = Partial::new(args);
+        let _ = input.complete();
+        match terminated(gemma4_args, eof).parse_next(&mut input) {
+            Ok(value) => Ok(value),
+            Err(ErrMode::Incomplete(_)) => Err(parsing_failed!("incomplete Gemma4 arguments")),
+            Err(ErrMode::Backtrack(error) | ErrMode::Cut(error)) => {
+                Err(parsing_failed!("{}", error))
+            }
+        }
+    }
+
+    fn parse_gemma4_array(array: &str) -> super::Result<Vec<Value>> {
+        let mut input = Partial::new(array);
+        let _ = input.complete();
+        match terminated(gemma4_array_content, eof).parse_next(&mut input) {
+            Ok(value) => Ok(value),
+            Err(ErrMode::Incomplete(_)) => Err(parsing_failed!("incomplete Gemma4 array")),
+            Err(ErrMode::Backtrack(error) | ErrMode::Cut(error)) => {
+                Err(parsing_failed!("{}", error))
+            }
+        }
+    }
 
     fn test_tools() -> Vec<ChatTool> {
         vec![
@@ -734,7 +401,6 @@ mod tests {
     fn gemma4_parse_args_handles_scalars_and_nested_values() {
         let parsed = parse_gemma4_args(
             "name:<|\"|>test<|\"|>,count:42,active:true,score:114.514,nested:{inner:<|\"|>value<|\"|>},items:[<|\"|>a<|\"|>,<|\"|>b<|\"|>]",
-            false,
         )
         .unwrap();
 
@@ -752,14 +418,14 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_parse_args_partial_withholds_empty_trailing_value() {
-        let parsed = parse_gemma4_args("name:<|\"|>test<|\"|>,flag:", true).unwrap();
-        assert_eq!(Value::Object(parsed), json!({ "name": "test" }));
+    fn gemma4_parse_args_handles_empty_arguments() {
+        let parsed = parse_gemma4_args("").unwrap();
+        assert_eq!(Value::Object(parsed), json!({}));
     }
 
     #[test]
     fn gemma4_parse_array_handles_bare_values() {
-        let parsed = parse_gemma4_array("42,true,114.514", false).unwrap();
+        let parsed = parse_gemma4_array("42,true,114.514").unwrap();
         assert_eq!(Value::Array(parsed), json!([42, true, 114.514]));
     }
 
@@ -780,15 +446,13 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_parse_complete_keeps_incomplete_tool_call_as_tool_intent() {
+    fn gemma4_parse_complete_rejects_incomplete_tool_call() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let result = parser
+        let error = parser
             .parse_complete("<|tool_call>call:get_weather{location:<|\"|>London")
-            .unwrap();
+            .unwrap_err();
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
-        assert_eq!(first_call(&result).arguments, "{\"location\":\"London");
+        assert!(error.to_report_string().contains("incomplete Gemma4 tool call"));
     }
 
     #[test]
@@ -827,6 +491,30 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
             json!({ "location": "London" })
+        );
+    }
+
+    #[test]
+    fn gemma4_streaming_waits_for_complete_tool_call() {
+        let mut parser = Gemma4ToolParser::new(&test_tools());
+        let mut result = ToolParseResult::default();
+
+        for chunk in [
+            "<|tool_call>",
+            "call:get_weather{",
+            "location:<|\"|>Paris<|\"|>}",
+        ] {
+            result.append(parser.push(chunk).unwrap());
+            assert!(result.calls.is_empty());
+        }
+
+        result.append(parser.push("<tool_call|>").unwrap());
+        let result = result.coalesce_calls();
+
+        assert_eq!(first_call(&result).name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            json!({ "location": "Paris" })
         );
     }
 
@@ -884,6 +572,23 @@ mod tests {
             json!({ "content": "Buy milk" })
         );
         assert!(!first_call(&result).arguments.contains("<|"));
+    }
+
+    #[test]
+    fn gemma4_streaming_handles_end_marker_literal_inside_string() {
+        let result = collect_stream(&[
+            "<|tool_call>",
+            "call:todowrite{",
+            "content:<|\"|>literal }<tool_call|> inside",
+            "<|\"|>}",
+            "<tool_call|>",
+        ]);
+
+        assert_eq!(first_call(&result).name.as_deref(), Some("todowrite"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
+            json!({ "content": "literal }<tool_call|> inside" })
+        );
     }
 
     #[test]
@@ -951,19 +656,14 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_finish_flushes_complete_args_without_end_marker() {
+    fn gemma4_finish_rejects_complete_args_without_end_marker() {
         let mut parser = Gemma4ToolParser::new(&test_tools());
-        let mut result = ToolParseResult::default();
         for chunk in ["<|tool_call>", "call:get_status{}"] {
-            result.append(parser.push(chunk).unwrap());
+            parser.push(chunk).unwrap();
         }
-        result.append(parser.finish().unwrap());
-        let result = result.coalesce_calls();
 
-        assert_eq!(first_call(&result).name.as_deref(), Some("get_status"));
-        assert_eq!(
-            serde_json::from_str::<Value>(&first_call(&result).arguments).unwrap(),
-            json!({})
-        );
+        let error = parser.finish().unwrap_err();
+
+        assert!(error.to_report_string().contains("incomplete Gemma4 tool call"));
     }
 }
