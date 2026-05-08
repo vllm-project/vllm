@@ -32,10 +32,11 @@ def _make_empty_scheduler_output():
 
 
 def test_kv_connector_mixin_clears_metadata():
-    vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_connector = "TestExampleConnector"
-    vllm_config.kv_transfer_config.kv_role = "kv_both"
-    vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = "unit"
+    vllm_config = create_vllm_config(
+        kv_connector="TestExampleConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"name": "unit"},
+    )
 
     # Initialize the global connector instance
     ensure_kv_transfer_initialized(vllm_config)

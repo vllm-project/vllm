@@ -1298,6 +1298,7 @@ class VllmConfig:
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to disable HMA, but only if the user didn't express a preference.
             if self.kv_transfer_config is not None:
+                from vllm.config.kv_transfer import KVTransferConfig
                 from vllm.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
@@ -1308,7 +1309,22 @@ class VllmConfig:
                 connector_cls = KVConnectorFactory.get_connector_class(
                     self.kv_transfer_config
                 )
-                if not supports_hma(connector_cls):
+                all_support_hma = supports_hma(connector_cls)
+                # MultiConnector subclasses SupportsHMA; only effectively
+                # supports HMA when every sub-connector does.
+                if all_support_hma and connector_cls.__name__ == "MultiConnector":
+                    sub_ktcs = self.kv_transfer_config.kv_connector_extra_config.get(
+                        "connectors", []
+                    )
+                    all_support_hma = all(
+                        supports_hma(
+                            KVConnectorFactory.get_connector_class(
+                                KVTransferConfig(**sub)
+                            )
+                        )
+                        for sub in sub_ktcs
+                    )
+                if not all_support_hma:
                     need_disable_hybrid_kv_cache_manager = True
                     logger.warning(
                         "Turning off hybrid kv cache manager because "

@@ -135,10 +135,11 @@ def test_external_old_signature_factory_instantiation(role):
     via kv_connector_module_path are correctly instantiated with backwards
     compatibility support.
     """
-    vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_connector = "OldStyleTestConnector"
-    vllm_config.kv_transfer_config.kv_connector_module_path = (
-        "tests.v1.kv_connector.unit.test_backwards_compatibility"
+    vllm_config = create_vllm_config(
+        kv_connector="OldStyleTestConnector",
+        kv_connector_module_path=(
+            "tests.v1.kv_connector.unit.test_backwards_compatibility"
+        ),
     )
 
     scheduler = create_scheduler(vllm_config)
@@ -158,10 +159,11 @@ def test_external_new_signature_factory_instantiation(role):
     Test that external connectors with new signature (3 required args) loaded
     via kv_connector_module_path are correctly instantiated.
     """
-    vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_connector = "NewStyleTestConnector"
-    vllm_config.kv_transfer_config.kv_connector_module_path = (
-        "tests.v1.kv_connector.unit.test_backwards_compatibility"
+    vllm_config = create_vllm_config(
+        kv_connector="NewStyleTestConnector",
+        kv_connector_module_path=(
+            "tests.v1.kv_connector.unit.test_backwards_compatibility"
+        ),
     )
 
     scheduler = create_scheduler(vllm_config)
@@ -222,8 +224,7 @@ def test_internal_connector_uses_new_signature():
         ExampleConnector,
     )
 
-    vllm_config = create_vllm_config()
-    vllm_config.kv_transfer_config.kv_connector = "ExampleConnector"
+    vllm_config = create_vllm_config(kv_connector="ExampleConnector")
 
     scheduler = create_scheduler(vllm_config)
     kv_cache_config = scheduler.kv_cache_config
@@ -243,7 +244,12 @@ def test_signature_detection_with_mocking():
     Test that the factory correctly applies compat_sig flag returned from
     _get_connector_class_with_compat.
     """
-    vllm_config = create_vllm_config()
+    vllm_config = create_vllm_config(
+        kv_connector="OldStyleTestConnector",
+        kv_connector_module_path=(
+            "tests.v1.kv_connector.unit.test_backwards_compatibility"
+        ),
+    )
     scheduler = create_scheduler(vllm_config)
     kv_cache_config = scheduler.kv_cache_config
 
