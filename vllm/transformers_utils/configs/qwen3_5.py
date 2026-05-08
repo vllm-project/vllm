@@ -218,6 +218,21 @@ class DamorkConfig(Qwen3_5Config):
         "text_config": DamorkTextConfig,
     }
 
+    def __init__(self, text_config=None, vision_config=None, **kwargs):
+        if isinstance(text_config, dict):
+            text_config = dict(text_config)
+            text_config.pop("model_type", None)
+
+        if isinstance(vision_config, dict):
+            vision_config = dict(vision_config)
+            vision_config.pop("model_type", None)
+
+        super().__init__(
+            text_config=text_config,
+            vision_config=vision_config,
+            **kwargs,
+        )
+
     def get_text_config(self, decoder: bool = False):
         return self.text_config
 
