@@ -1,57 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, field
-
 import pytest
 
 from vllm.v1.core.sched.request_queue import PriorityRequestQueue
 
+from .utils import create_requests
+
 pytestmark = pytest.mark.cpu_test
-
-
-@dataclass(order=True, unsafe_hash=True)
-class DummyRequest:
-    priority: int
-    arrival_time: float
-    request_id: str = field(compare=False)
 
 
 def test_priority_queue_lazy_remove_skips_deleted_requests():
     queue = PriorityRequestQueue()
-    requests = [
-        DummyRequest(priority=3, arrival_time=0.0, request_id="req-3"),
-        DummyRequest(priority=1, arrival_time=0.0, request_id="req-1"),
-        DummyRequest(priority=4, arrival_time=0.0, request_id="req-4"),
-        DummyRequest(priority=0, arrival_time=0.0, request_id="req-0"),
-        DummyRequest(priority=2, arrival_time=0.0, request_id="req-2"),
-    ]
+    requests = create_requests(
+        num_requests=5,
+        req_ids=["req-3", "req-1", "req-4", "req-0", "req-2"],
+    )
+    for req, priority in zip(requests, [3, 1, 4, 0, 2]):
+        req.priority = priority
     for req in requests:
-        queue.add_request(req)  # type: ignore[arg-type]
+        queue.add_request(req)
 
     queue.remove_request(requests[3])  # top
     queue.remove_request(requests[1])  # middle
 
     assert len(queue) == 3
-    popped_ids = [queue.pop_request().request_id for _ in range(3)]  # type: ignore[union-attr]
+    popped_ids = [queue.pop_request().request_id for _ in range(3)]
     assert popped_ids == ["req-2", "req-3", "req-4"]
     assert not queue
 
 
 def test_priority_queue_rebuild_clears_tombstones():
     queue = PriorityRequestQueue()
-    requests = [
-        DummyRequest(priority=i, arrival_time=0.0, request_id=f"req-{i}")
-        for i in range(40)
-    ]
+    requests = create_requests(
+        num_requests=40,
+        req_ids=[f"req-{i}" for i in range(40)],
+    )
+    for i, req in enumerate(requests):
+        req.priority = i
     for req in requests:
-        queue.add_request(req)  # type: ignore[arg-type]
+        queue.add_request(req)
 
     for req in requests[:33]:
         queue.remove_request(req)
 
     # Trigger cleanup path.
-    top = queue.peek_request()  # type: ignore[assignment]
+    top = queue.peek_request()
     assert top.request_id == "req-33"
     assert len(queue) == 7
     assert len(queue._removed_requests) == 0
@@ -60,13 +54,15 @@ def test_priority_queue_rebuild_clears_tombstones():
 
 def test_priority_queue_iter_excludes_deleted_requests():
     queue = PriorityRequestQueue()
-    requests = [
-        DummyRequest(priority=i, arrival_time=0.0, request_id=f"req-{i}")
-        for i in range(6)
-    ]
+    requests = create_requests(
+        num_requests=6,
+        req_ids=[f"req-{i}" for i in range(6)],
+    )
+    for i, req in enumerate(requests):
+        req.priority = i
     for req in requests:
-        queue.add_request(req)  # type: ignore[arg-type]
+        queue.add_request(req)
 
     queue.remove_requests([requests[1], requests[4]])
-    ordered_ids = [req.request_id for req in queue]  # type: ignore[misc]
+    ordered_ids = [req.request_id for req in queue]
     assert ordered_ids == ["req-0", "req-2", "req-3", "req-5"]
