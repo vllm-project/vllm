@@ -952,25 +952,10 @@ class SiglipVisionModel(nn.Module):
                 break
             else:
                 param = params_dict[name]
-                param = maybe_swap_ffn_param(
-                    name, param, loaded_weight, params_dict, self.quant_config
-                )
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-
-
-def maybe_swap_ffn_param(
-    name: str,
-    param: torch.Tensor,
-    loaded_weight: torch.Tensor,
-    params_dict: dict[str, torch.Tensor],
-    quant_config: QuantizationConfig,
-) -> torch.Tensor:
-    if quant_config is None or ".fc" not in name:
-        return param
-    return quant_config.remap_loaded_parameter(name, param, loaded_weight, params_dict)
 
 
 # Adapted from: https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
