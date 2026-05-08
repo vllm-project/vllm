@@ -78,7 +78,7 @@ Key points from the example YAML:
     - sh
     - -c
     - >
-      bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2;
+      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
       python3 -m vllm.entrypoints.openai.api_server
         --port 8080
         --model meta-llama/Llama-3.1-405B-Instruct
@@ -93,7 +93,7 @@ Key points from the example YAML:
     - sh
     - -c
     - >
-      bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
+      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
   ```
 
 ---
@@ -144,7 +144,7 @@ spec:
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
+                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
                     python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
                 resources:
                   limits:
@@ -178,7 +178,7 @@ spec:
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
+                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
