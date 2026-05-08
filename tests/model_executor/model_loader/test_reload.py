@@ -19,7 +19,6 @@ from vllm.model_executor.model_loader.reload.meta import (
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 
 def test_move_metatensors():
@@ -58,6 +57,34 @@ def test_reload_lifecycle():
         assert tensor.shape == materialized_tensor.shape
         assert tensor.__class__ == materialized_tensor.__class__
         assert tensor.__dict__ == materialized_tensor.__dict__
+
+
+def test_materialize_layer_preserves_non_meta_tensors():
+    """Ensure that materialize_layer does not overwrite non meta tensors."""
+    layer = torch.nn.Linear(2, 3, bias=True)
+
+    # Create a non meta bias tensor and meta weight, which can happen with FP8
+    bias_values = torch.ones(3)
+    layer.bias.data.copy_(bias_values)
+    layer.weight = torch.nn.Parameter(layer.weight.data.to("meta"))
+
+    assert layer.weight.is_meta
+    assert not layer.bias.is_meta
+
+    # materialize the layer weights after the bias is initialized
+    info = LayerReloadingInfo(
+        restore_metadata=({}, {}),
+        restore_device=torch.device("cpu"),
+    )
+    materialize_layer(layer, info)
+
+    # Ensure the weight materialized off meta
+    assert not layer.weight.is_meta
+    assert layer.weight.device.type == "cpu"
+
+    # Ensure that the bias is (still) not meta and values are unchanged
+    assert not layer.bias.is_meta
+    assert torch.equal(layer.bias.data, bias_values)
 
 
 def test_model_cleanup(dist_init, default_vllm_config):
@@ -140,7 +167,7 @@ def test_get_numel_loaded():
     ],
 )
 def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
-    if cuda_device_count_stateless() < tp_size:
+    if current_platform.device_count() < tp_size:
         pytest.skip(reason="Not enough CUDA devices")
 
     if "FP8" in base_model and not current_platform.supports_fp8():
@@ -163,6 +190,34 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+def test_kv_scale_reload(vllm_runner):
+    """Test reloading a checkpoint that contains k_scale/v_scale weights."""
+    if not current_platform.supports_fp8():
+        pytest.skip(reason="Requires FP8 support")
+
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+
+    # Load dummy weights, then reload real checkpoint
+    with vllm_runner(
+        model_name=model,
+        load_format="dummy",
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        llm.collective_rpc(
+            "update_config",
+            kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
+        )
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
+
+    assert reloaded_perp < 10
 
 
 @pytest.mark.parametrize(
@@ -206,8 +261,8 @@ def test_reload_weights(base_model, mul_model, add_model, tp_size, vllm_runner):
 def test_online_quantize_reload(
     base_model, mul_model, add_model, quantization, tp_size, vllm_runner
 ):
-    if cuda_device_count_stateless() < tp_size:
-        pytest.skip(reason="Not enough CUDA devices")
+    if current_platform.device_count() < tp_size:
+        pytest.skip(reason="Not enough GPU devices")
 
     if quantization == "fp8" and not current_platform.supports_fp8():
         pytest.skip(reason="Requires FP8 support")

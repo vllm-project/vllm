@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -77,7 +78,9 @@ class Hermes2ProToolParser(ToolParser):
         # Streaming state: what has been sent to the client.
         self._sent_content_idx: int = 0
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because the tool_call tokens are

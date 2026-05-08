@@ -27,6 +27,7 @@ SKIP_TENSORS: set[str] = {
     "expert_global_to_physical",
     "expert_physical_to_global",
     "expert_local_to_global",
+    "e_score_correction_bias",
 }
 
 
@@ -101,7 +102,7 @@ def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
 
     with info.restore_device:
         for name, tensor in get_layer_tensors(layer).items():
-            if name not in SKIP_TENSORS:
+            if name not in SKIP_TENSORS and tensor.is_meta:
                 setattr(layer, name, materialize_meta_tensor(tensor))
 
 

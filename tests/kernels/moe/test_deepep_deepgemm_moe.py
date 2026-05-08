@@ -29,6 +29,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -47,10 +48,12 @@ if has_deep_ep():
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmExperts,
+    )
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),
@@ -80,14 +83,6 @@ def with_dp_metadata(M: int, world_size: int):
         num_tokens_across_dp=num_tokens_across_dp,
     ):
         yield
-
-
-def next_power_of_2(x):
-    import math
-
-    if x == 0:
-        return 1
-    return 2 ** math.ceil(math.log2(x))
 
 
 def make_block_quant_fp8_weights(
