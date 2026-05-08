@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Union
+from typing import Literal, Union
 
 import torch
 
@@ -324,6 +324,54 @@ def _resolve_activation_key(
     )
 
 
+def _make_log_backend(backend: Mxfp4MoeBackend) -> str:
+    return f"Using '{backend.value}' Mxfp4 MoE backend."
+
+
+def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
+    base = (
+        f"Mxfp4 MoE backend '{backend.value}' does not support the "
+        f"deployment configuration"
+    )
+    return f"{base} since {reason}." if reason else f"{base}."
+
+
+def _return_or_raise(
+    backend: Mxfp4MoeBackend,
+    config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+    scope: Literal["process", "global", "local"] = "local",
+) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
+    reason: str | None = None
+    for k_cls in backend_to_kernel_cls(backend):
+        supported, reason = k_cls.is_supported_config(
+            k_cls, config, weight_key, activation_key, activation_format
+        )
+        if supported:
+            logger.info_once(_make_log_backend(backend), scope=scope)
+            return backend, k_cls
+    raise ValueError(_make_log_unsupported(backend, reason))
+
+
+def _filter_by_activation(
+    backends: list[Mxfp4MoeBackend],
+    requested_activation_key: QuantKey | None,
+) -> list[Mxfp4MoeBackend]:
+    """Pick variants matching ``requested_activation_key``; without one,
+    prefer BF16 if the list has any, else keep the list as-is so explicit
+    non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
+    if requested_activation_key is not None:
+        return [
+            b
+            for b in backends
+            if _backend_activation_key(b) == requested_activation_key
+        ]
+    bf16 = [b for b in backends if _backend_activation_key(b) is None]
+    return bf16 if bf16 else backends
+
+
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
     activation_key: QuantKey | None = None,
@@ -369,52 +417,6 @@ def select_mxfp4_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
-    def _filter_by_activation(
-        backends: list[Mxfp4MoeBackend],
-    ) -> list[Mxfp4MoeBackend]:
-        """Pick variants matching ``requested_activation_key``; without one,
-        prefer BF16 if the list has any, else keep the list as-is so explicit
-        non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
-        if requested_activation_key is not None:
-            return [
-                b
-                for b in backends
-                if _backend_activation_key(b) == requested_activation_key
-            ]
-        bf16 = [b for b in backends if _backend_activation_key(b) is None]
-        return bf16 if bf16 else backends
-
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backends = map_mxfp4_backend(runner_backend)
@@ -423,7 +425,7 @@ def select_mxfp4_moe_backend(
                 Mxfp4MoeBackend.BATCHED_MARLIN if b == Mxfp4MoeBackend.MARLIN else b
                 for b in requested_backends
             ]
-        candidates = _filter_by_activation(requested_backends)
+        candidates = _filter_by_activation(requested_backends, requested_activation_key)
         if not candidates:
             raise ValueError(
                 f"moe_backend={runner_backend!r} does not support "
@@ -451,7 +453,9 @@ def select_mxfp4_moe_backend(
         raise last_error
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _filter_by_activation(_get_priority_backends_for_gpt_oss())
+    AVAILABLE_BACKENDS = _filter_by_activation(
+        _get_priority_backends_for_gpt_oss(), requested_activation_key
+    )
 
     # Handle explicit FlashInfer MXFP4 BF16 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
@@ -569,37 +573,6 @@ def select_deepseek_v4_mxfp4_moe_backend(
         if config.moe_parallel_config.use_batched_activation_format
         else mk.FusedMoEActivationFormat.Standard
     )
-
-    def _make_log_backend(backend: Mxfp4MoeBackend):
-        return f"Using '{backend.value}' Mxfp4 MoE backend."
-
-    def _make_log_unsupported(backend: Mxfp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"Mxfp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        return (
-            f"Mxfp4 MoE backend '{backend.value}' does not support the "
-            "deployment configuration."
-        )
-
-    def _return_or_raise(
-        backend: Mxfp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts]]:
-        reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
