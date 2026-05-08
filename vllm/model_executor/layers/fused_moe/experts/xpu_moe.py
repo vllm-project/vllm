@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
+    kInt4Static,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -48,6 +49,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             num_dispatchers,
         )
         self.is_fp8 = False
+        self.is_int4 = False
         self.is_mxfp4 = False
         self.is_mxfp8 = False
         self.fused_moe_impl: XpuFusedMoe | None = None
@@ -148,6 +150,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
                 is_fp8=self.is_fp8,
+                is_int4=self.is_int4,
                 is_mxfp4=self.is_mxfp4,
                 is_mxfp8=self.is_mxfp8,
             )
@@ -213,6 +216,33 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
         SUPPORTED_W_A = [
             (kMxfp8Static, None),
             (kMxfp8Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsInt4(XPUExperts):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_int4 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kInt4Static, None),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
