@@ -29,6 +29,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
 
@@ -361,6 +362,12 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
 
+        if current_platform.is_xpu():
+            self._process_weights_after_loading_xpu(layer)
+        else:
+            self._process_weights_after_loading_cuda(layer)
+
+    def _process_weights_after_loading_cuda(self, layer: torch.nn.Module) -> None:
         # exllama needs to shuffle the weight after the weight is loaded
         # here we do the shuffle on first forward pass
         if layer.exllama_state == ExllamaState.UNINITIALIZED:
@@ -373,7 +380,73 @@ class GPTQLinearMethod(LinearMethodBase):
             layer.exllama_state = ExllamaState.READY
             ops.gptq_shuffle(layer.qweight, layer.g_idx, self.quant_config.weight_bits)
 
+    def _process_weights_after_loading_xpu(self, layer: torch.nn.Module) -> None:
+        from vllm_xpu_kernels.quantization._quantize_convert import (
+            GPTQUtils,
+            transpose_onednn_woq_format,
+        )
+
+        if layer.exllama_state == ExllamaState.UNINITIALIZED:
+            gptq_utils = GPTQUtils(
+                bits=self.quant_config.weight_bits,
+                blocksize=self.quant_config.group_size,
+            )
+            if self.quant_config.desc_act:
+                # shuffle expects original group indices (row → group mapping),
+                # not argsorted indices
+                shuffled_weight, g_idx4kernel = gptq_utils.shuffle(
+                    layer.qweight.data, layer.g_idx.data
+                )
+                layer.qweight.data = shuffled_weight
+                layer.g_idx.data = g_idx4kernel
+            else:
+                layer.g_idx.data = torch.empty(
+                    (0,), dtype=torch.int, device=layer.g_idx.device
+                )
+            layer.exllama_state = ExllamaState.READY
+            # Detect symmetric vs asymmetric quantization
+            is_sym = self._is_symmetric(layer)
+            # Repack weights and zeros for oneDNN int4 GEMM format
+            transpose_onednn_woq_format(layer, method="gptq", is_sym=is_sym)
+            layer.group_size = self.quant_config.group_size
+            layer._xpu_use_dequant_fallback = False
+        elif layer.exllama_state == ExllamaState.UNUSED:
+            # Row-parallel + desc_act: the oneDNN INT4 kernel uses g_idx as
+            # a column permutation (index_select), but here g_idx contains
+            # group indices. Fall back to on-the-fly dequant + FP16 matmul.
+            # Convert v1 qzeros (stored = actual - 1) to actual zero-points.
+            if not self.use_v2_format:
+                layer.qzeros.data = layer.qzeros.data + 0x11111111
+            layer.group_size = self.quant_config.group_size
+            layer._xpu_use_dequant_fallback = True
+        else:
+            # No desc_act, no row-parallel issue
+            is_sym = self._is_symmetric(layer)
+            transpose_onednn_woq_format(layer, method="gptq", is_sym=is_sym)
+            layer.group_size = self.quant_config.group_size
+            layer._xpu_use_dequant_fallback = False
+
+    @staticmethod
+    def _is_symmetric(layer: torch.nn.Module) -> bool:
+        """Check if the GPTQ model uses symmetric quantization.
+        In symmetric mode, all zero points are 8 (the midpoint for 4-bit)."""
+        if layer.qzeros.numel() <= 1:
+            return True
+        # Check if all packed zero values equal 0x88888888
+        # (i.e., all unpacked zeros are 8)
+        return bool((layer.qzeros == 0x88888888).all())
+
     def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if current_platform.is_xpu():
+            return self._apply_xpu(layer, x, bias)
+        return self._apply_cuda(layer, x, bias)
+
+    def _apply_cuda(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
@@ -394,6 +467,59 @@ class GPTQLinearMethod(LinearMethodBase):
             self.use_v2_format,
             self.quant_config.weight_bits,
         )
+        if bias is not None:
+            output.add_(bias)
+        return output.reshape(out_shape)
+
+    def _apply_xpu(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if getattr(layer, "_xpu_use_dequant_fallback", False):
+            return self._apply_xpu_dequant(layer, x, bias)
+
+        out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+
+        g_idx = layer.g_idx if layer.g_idx.numel() > 0 else None
+        output = torch.ops._xpu_C.int4_gemm_w4a16(
+            reshaped_x,
+            layer.qweight,
+            bias if bias is not None else torch.Tensor(),
+            layer.scales,
+            layer.qzeros,
+            layer.group_size,
+            g_idx,
+        )
+        return output.reshape(out_shape)
+
+    def _apply_xpu_dequant(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Fallback for row-parallel + desc_act layers where the oneDNN INT4
+        kernel can't handle g_idx as group indices. Dequantize the weight
+        on-the-fly and use FP16 matmul."""
+        from vllm_xpu_kernels.quantization._quantize_convert import (
+            dequantize,
+        )
+
+        out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
+        reshaped_x = x.reshape(-1, x.shape[-1])
+
+        weight_fp = dequantize(
+            layer.qweight.data,
+            layer.scales.data,
+            layer.qzeros.data,
+            self.quant_config.group_size,
+            layer.g_idx.data,
+        ).to(x.dtype)
+
+        output = torch.matmul(reshaped_x, weight_fp)
         if bias is not None:
             output.add_(bias)
         return output.reshape(out_shape)
