@@ -109,6 +109,16 @@ def can_initialize(
             "which is not configured in test environment"
         )
 
+    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+        import importlib.util
+
+        if importlib.util.find_spec("terratorch") is None:
+            pytest.skip(
+                "terratorch is not installed; "
+                "temporarily skipped while PyPI has `lightning` quarantined "
+                "(see #41376)"
+            )
+
     if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         from vllm.platforms import current_platform
 
