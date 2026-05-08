@@ -146,7 +146,9 @@ def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
         )
 
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens=20)
-        assert vllm_outputs, f"No outputs generated for speculators model {config.model_path}"
+        assert vllm_outputs, (
+            f"No outputs generated for speculators model {config.model_path}"
+        )
 
 
 @pytest.mark.slow_test
