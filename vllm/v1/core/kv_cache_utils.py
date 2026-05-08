@@ -8,9 +8,11 @@ import math
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, NewType, TypeAlias, cast, overload
+
+import regex as re
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -79,6 +81,7 @@ def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
 
 
 logger = init_logger(__name__)
+_LAYER_INDEX_RE = re.compile(r"(?:^|[.])layers[.](\d+)(?:[.]|$)")
 
 # The hash seed for the first block of any prefix block sequence.
 #
@@ -900,7 +903,10 @@ def may_override_num_blocks(vllm_config: VllmConfig, num_blocks: int) -> int:
     return num_blocks
 
 
-def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+def _pool_bytes_per_block(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
     """
     Bytes consumed by one block in the worker's shared KV cache pool, mirroring
     the divisor used by `get_kv_cache_config_from_groups` to convert
@@ -913,7 +919,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
         return kv_cache_groups[0].kv_cache_spec.page_size_bytes
     if all(
         isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
-    ):
+    ) and not _get_dflash_isolated_group_ids(vllm_config, kv_cache_groups):
         # DeepseekV4: shared layout sized by the largest per-page-size bucket.
         full_mla_spec = cast(UniformTypeKVCacheSpecs, kv_cache_groups[0].kv_cache_spec)
         layer_tuple_page_bytes = sum(full_mla_spec.get_page_sizes())
@@ -922,6 +928,18 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
             for g in kv_cache_groups
         )
         return layer_tuple_page_bytes * num_layer_tuples
+    isolated_layers = _get_dflash_isolated_layers(vllm_config, kv_cache_groups)
+    if isolated_layers:
+        shared_groups = _get_shared_kv_cache_groups(vllm_config, kv_cache_groups)
+        shared_bytes = 0
+        if shared_groups:
+            shared_group_size = max(len(g.layer_names) for g in shared_groups)
+            shared_page_size = get_uniform_page_size(
+                [g.kv_cache_spec for g in shared_groups]
+            )
+            shared_bytes = shared_page_size * shared_group_size
+        return shared_bytes + sum(spec.page_size_bytes for _, spec in isolated_layers)
+
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
@@ -954,6 +972,108 @@ def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) == 1
     return page_sizes.pop()
+
+
+def _get_dflash_isolated_layer_names(
+    vllm_config: VllmConfig,
+    layer_names: Iterable[str],
+) -> set[str]:
+    spec_config = vllm_config.speculative_config
+    if spec_config is None or spec_config.method != "dflash":
+        return set()
+
+    try:
+        target_num_layers = vllm_config.model_config.get_num_layers(
+            vllm_config.parallel_config
+        )
+    except Exception:
+        return set()
+
+    isolated_layer_names: set[str] = set()
+    for layer_name in layer_names:
+        match = _LAYER_INDEX_RE.search(layer_name)
+        if match is not None and int(match.group(1)) >= target_num_layers:
+            isolated_layer_names.add(layer_name)
+    return isolated_layer_names
+
+
+def _partition_dflash_isolated_specs(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> tuple[dict[str, KVCacheSpec], dict[str, KVCacheSpec]]:
+    isolated_layer_names = _get_dflash_isolated_layer_names(
+        vllm_config, kv_cache_spec.keys()
+    )
+    if not isolated_layer_names:
+        return kv_cache_spec, {}
+
+    shared_specs = {
+        layer_name: layer_spec
+        for layer_name, layer_spec in kv_cache_spec.items()
+        if layer_name not in isolated_layer_names
+    }
+    isolated_specs = {
+        layer_name: layer_spec
+        for layer_name, layer_spec in kv_cache_spec.items()
+        if layer_name in isolated_layer_names
+    }
+    if not shared_specs or not isolated_specs:
+        return kv_cache_spec, {}
+    return shared_specs, isolated_specs
+
+
+def _get_dflash_isolated_group_ids(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> set[int]:
+    isolated_layer_names = _get_dflash_isolated_layer_names(
+        vllm_config,
+        (layer_name for group in kv_cache_groups for layer_name in group.layer_names),
+    )
+    if not isolated_layer_names:
+        return set()
+
+    group_ids: set[int] = set()
+    for group_id, group in enumerate(kv_cache_groups):
+        if group.layer_names and all(
+            layer_name in isolated_layer_names for layer_name in group.layer_names
+        ):
+            group_ids.add(group_id)
+    return group_ids
+
+
+def _get_layer_spec_from_group(
+    kv_cache_group: KVCacheGroupSpec,
+    layer_name: str,
+) -> KVCacheSpec:
+    group_spec = kv_cache_group.kv_cache_spec
+    if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        return group_spec.kv_cache_specs[layer_name]
+    return group_spec
+
+
+def _get_dflash_isolated_layers(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[tuple[str, KVCacheSpec]]:
+    isolated_group_ids = _get_dflash_isolated_group_ids(vllm_config, kv_cache_groups)
+    return [
+        (layer_name, _get_layer_spec_from_group(kv_cache_groups[group_id], layer_name))
+        for group_id in sorted(isolated_group_ids)
+        for layer_name in kv_cache_groups[group_id].layer_names
+    ]
+
+
+def _get_shared_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> list[KVCacheGroupSpec]:
+    isolated_group_ids = _get_dflash_isolated_group_ids(vllm_config, kv_cache_groups)
+    return [
+        group
+        for group_id, group in enumerate(kv_cache_groups)
+        if group_id not in isolated_group_ids
+    ]
 
 
 def _get_kv_cache_groups_uniform_spec(
@@ -1038,7 +1158,7 @@ def unify_kv_cache_spec_page_size(
                 )
             ratio = max_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
+            new_spec = layer_spec.copy_with_new_block_size(new_block_size)
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
@@ -1275,7 +1395,7 @@ def get_kv_cache_config_from_groups(
     elif all(
         isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for group in kv_cache_groups
-    ):
+    ) and not _get_dflash_isolated_group_ids(vllm_config, kv_cache_groups):
         # DeepseekV4: UniformTypeKVCacheSpecs but multiple groups.
         # Delegate to the DeepseekV4-specific allocator.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4(
@@ -1290,23 +1410,44 @@ def get_kv_cache_config_from_groups(
         # (sw.1, padding) will be: (group_size = 2)
         # full.0, sw.0, sw.1: share a Tensor with size=available_memory//2
         # full.1, sw.2: share another Tensor with size=available_memory//2
-        group_size = max(len(group.layer_names) for group in kv_cache_groups)
-
-        page_size = get_uniform_page_size(
-            [group.kv_cache_spec for group in kv_cache_groups]
+        isolated_layers = _get_dflash_isolated_layers(vllm_config, kv_cache_groups)
+        shared_groups = (
+            _get_shared_kv_cache_groups(vllm_config, kv_cache_groups)
+            if isolated_layers
+            else kv_cache_groups
         )
-        assert group_size > 0, "group_size must be greater than 0"
-        num_blocks = get_num_blocks(
-            vllm_config, group_size, available_memory, page_size
+        shared_group_size = (
+            max(len(group.layer_names) for group in shared_groups)
+            if shared_groups
+            else 0
         )
+        page_size = (
+            get_uniform_page_size([group.kv_cache_spec for group in shared_groups])
+            if shared_groups
+            else 0
+        )
+        bytes_per_block = page_size * shared_group_size + sum(
+            spec.page_size_bytes for _, spec in isolated_layers
+        )
+        assert bytes_per_block > 0, "bytes_per_block must be greater than 0"
+        num_blocks = int(available_memory // bytes_per_block)
+        num_blocks = max(num_blocks, 0)
+        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         kv_cache_tensors = []
-        for i in range(group_size):
+        for i in range(shared_group_size):
             shared_by = []
-            for j in range(len(kv_cache_groups)):
-                if i < len(kv_cache_groups[j].layer_names):
-                    shared_by.append(kv_cache_groups[j].layer_names[i])
+            for group in shared_groups:
+                if i < len(group.layer_names):
+                    shared_by.append(group.layer_names[i])
             kv_cache_tensors.append(
                 KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
+            )
+        for layer_name, layer_spec in isolated_layers:
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=layer_spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
             )
 
     return KVCacheConfig(
@@ -1610,7 +1751,7 @@ def _annotate_eagle_groups_deepseek_v4(
             break
 
 
-def get_kv_cache_groups(
+def _get_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec]:
     """
@@ -1623,9 +1764,6 @@ def get_kv_cache_groups(
     Returns:
         The generated KVCacheGroups
     """
-    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
-        unify_hybrid_kv_cache_specs(kv_cache_spec)
-
     if is_kv_cache_type_attention_free(kv_cache_spec):
         # This returns an empty list to allow for the KVCacheManager to handle
         # attention free models.
@@ -1659,6 +1797,34 @@ def get_kv_cache_groups(
     # into groups with the same number of layers, and thus same total page
     # size.
     return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+
+
+def get_kv_cache_groups(
+    vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
+) -> list[KVCacheGroupSpec]:
+    """
+    Split the layers in the model into groups with the same KV cache spec.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_spec: The kv cache spec of each attention layer in the model
+
+    Returns:
+        The generated KVCacheGroups
+    """
+    if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    shared_specs, isolated_specs = _partition_dflash_isolated_specs(
+        vllm_config, kv_cache_spec
+    )
+    if isolated_specs:
+        return [
+            *_get_kv_cache_groups(vllm_config, shared_specs),
+            *_get_kv_cache_groups(vllm_config, isolated_specs),
+        ]
+
+    return _get_kv_cache_groups(vllm_config, kv_cache_spec)
 
 
 def generate_scheduler_kv_cache_config(
@@ -1741,7 +1907,7 @@ def _max_memory_usage_bytes_from_groups(
     elif all(
         isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for group in kv_cache_groups
-    ):
+    ) and not _get_dflash_isolated_group_ids(vllm_config, kv_cache_groups):
         # Special case (only DeepseekV4 for now): all groups are
         # UniformTypeKVCacheSpecs.
         # They must already be page_size aligned and share a common padded
@@ -1764,18 +1930,29 @@ def _max_memory_usage_bytes_from_groups(
             total_max_mem_usage_bytes += g_max_mem_usage_page_bytes
         return total_max_mem_usage_bytes
 
-    # General case: group_size pools, each shared by one layer per group
-    # Memory = group_size * page_size * blocks_for_max_len
-    group_size = max(len(group.layer_names) for group in kv_cache_groups)
-    page_size = get_uniform_page_size(
-        [group.kv_cache_spec for group in kv_cache_groups]
-    )
-    blocks_needed = sum(
-        cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
-        for group in kv_cache_groups
+    isolated_layers = _get_dflash_isolated_layers(vllm_config, kv_cache_groups)
+    shared_groups = (
+        _get_shared_kv_cache_groups(vllm_config, kv_cache_groups)
+        if isolated_layers
+        else kv_cache_groups
     )
 
-    return group_size * page_size * blocks_needed
+    total_max_mem_usage_bytes = 0
+    if shared_groups:
+        group_size = max(len(group.layer_names) for group in shared_groups)
+        page_size = get_uniform_page_size(
+            [group.kv_cache_spec for group in shared_groups]
+        )
+        blocks_needed = sum(
+            cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
+            for group in shared_groups
+        )
+        total_max_mem_usage_bytes += group_size * page_size * blocks_needed
+
+    total_max_mem_usage_bytes += sum(
+        spec.max_memory_usage_bytes(vllm_config) for _, spec in isolated_layers
+    )
+    return total_max_mem_usage_bytes
 
 
 def _estimate_max_model_len_from_groups(
@@ -1994,7 +2171,7 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(groups)
+            bytes_per_block = _pool_bytes_per_block(vllm_config, groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 avail_mem // bytes_per_block,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionType
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
@@ -109,12 +111,20 @@ class DFlashQwen3Attention(nn.Module):
             max_position=max_position,
             rope_parameters=rope_parameters,
         )
+        # DFlash draft layers use an independent KV cache pool. Keep the
+        # target's block/sliding-window settings, but do not inherit a
+        # quantized target KV dtype into the BF16 draft attention path.
+        draft_cache_config = cache_config
+        if draft_cache_config is not None and is_quantized_kv_cache(
+            draft_cache_config.cache_dtype
+        ):
+            draft_cache_config = replace(draft_cache_config, cache_dtype="auto")
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
+            cache_config=draft_cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,

@@ -3,6 +3,7 @@
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -174,6 +175,19 @@ def new_mamba_spec(
         page_size_padded=page_size_padded,
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def make_dflash_test_config(target_num_layers=2):
+    return SimpleNamespace(
+        speculative_config=SimpleNamespace(method="dflash"),
+        model_config=SimpleNamespace(
+            max_model_len=16,
+            get_num_layers=lambda parallel_config: target_num_layers,
+        ),
+        parallel_config=SimpleNamespace(),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=None),
     )
 
 
@@ -1766,6 +1780,101 @@ def test_get_kv_cache_config_one_worker():
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer_1", "layer_2"], new_kv_cache_spec())],
     )
+
+
+def test_dflash_isolated_specs_are_partitioned_before_page_size_unify():
+    vllm_config = make_dflash_test_config(target_num_layers=2)
+    kv_cache_specs = {
+        "model.layers.0.self_attn.attn": new_kv_cache_spec(head_size=64),
+        "model.layers.1.self_attn.attn": new_sliding_window_spec(head_size=32),
+        "model.layers.2.self_attn.attn": new_kv_cache_spec(
+            dtype=torch.bfloat16,
+            head_size=192,
+        ),
+    }
+
+    groups = kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs)
+
+    assert groups == [
+        KVCacheGroupSpec(
+            ["model.layers.0.self_attn.attn"],
+            new_kv_cache_spec(head_size=64),
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.1.self_attn.attn"],
+            new_sliding_window_spec(block_size=32, head_size=32),
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.2.self_attn.attn"],
+            new_kv_cache_spec(dtype=torch.bfloat16, head_size=192),
+        ),
+    ]
+
+
+def test_dflash_heterogeneous_page_size_allocator_keeps_isolated_pool():
+    vllm_config = make_dflash_test_config(target_num_layers=2)
+    target_page_size = new_kv_cache_spec(head_size=64).page_size_bytes
+    draft_spec = new_kv_cache_spec(dtype=torch.bfloat16, head_size=192)
+    draft_page_size = draft_spec.page_size_bytes
+    groups = [
+        KVCacheGroupSpec(
+            ["model.layers.0.self_attn.attn"],
+            new_kv_cache_spec(head_size=64),
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.1.self_attn.attn"],
+            new_sliding_window_spec(block_size=32, head_size=32),
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.2.self_attn.attn"],
+            draft_spec,
+        ),
+    ]
+    num_blocks = 10
+    available_memory = (target_page_size + draft_page_size) * num_blocks
+
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory
+    )
+
+    assert kv_cache_config.num_blocks == num_blocks
+    assert kv_cache_config.kv_cache_tensors == [
+        KVCacheTensor(
+            size=target_page_size * num_blocks,
+            shared_by=[
+                "model.layers.0.self_attn.attn",
+                "model.layers.1.self_attn.attn",
+            ],
+        ),
+        KVCacheTensor(
+            size=draft_page_size * num_blocks,
+            shared_by=["model.layers.2.self_attn.attn"],
+        ),
+    ]
+    assert sum(t.size for t in kv_cache_config.kv_cache_tensors) == available_memory
+
+
+def test_non_dflash_grouping_still_uses_existing_unify_path():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+    kv_cache_specs = {
+        "model.layers.0.self_attn.attn": new_kv_cache_spec(head_size=64),
+        "model.layers.1.self_attn.attn": new_sliding_window_spec(head_size=32),
+    }
+
+    assert kv_cache_utils._partition_dflash_isolated_specs(
+        vllm_config, kv_cache_specs
+    ) == (kv_cache_specs, {})
+    assert kv_cache_utils.get_kv_cache_groups(vllm_config, kv_cache_specs) == [
+        KVCacheGroupSpec(
+            ["model.layers.0.self_attn.attn"],
+            new_kv_cache_spec(head_size=64),
+        ),
+        KVCacheGroupSpec(
+            ["model.layers.1.self_attn.attn"],
+            new_sliding_window_spec(block_size=32, head_size=32),
+        ),
+    ]
 
 
 def test_get_kv_cache_configs_attention_free():

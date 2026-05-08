@@ -61,7 +61,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode
 
 logger = init_logger(__name__)
 
@@ -449,7 +449,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             batch_size, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
         ):
             cache_dtype = self.cache_config.cache_dtype
-            if is_quantized_kv_cache(cache_dtype):
+            if self.kv_cache_spec.kv_quant_mode == KVQuantMode.NONE:
+                qkv_dtype = self.kv_cache_dtype
+            elif is_quantized_kv_cache(cache_dtype):
                 qkv_dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
                     cache_dtype
                 )
