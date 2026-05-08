@@ -14,8 +14,8 @@ with ``/v1``, so this versioned inference endpoint was reachable
 without an API key whenever ``--api-key`` was set.
 """
 
+import pytest
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from vllm.entrypoints.openai.server_utils import AuthenticationMiddleware
@@ -119,3 +119,39 @@ def test_unrelated_path_does_not_require_auth():
     client = _make_client()
     resp = client.get("/tokenize")
     assert resp.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "//v1/completions",
+        "///v1/completions",
+        "//inference/v1/generate",
+        "/inference//v1/generate",
+        "/inference///v1/generate",
+    ],
+)
+def test_multi_slash_paths_still_require_auth(path):
+    """Regression test: ``startswith("/v1")`` is bypassable by sending
+    ``//v1/completions`` (multiple leading slashes). ASGI servers like
+    uvicorn pass these through verbatim while the downstream router still
+    normalizes and matches them, so the middleware must normalize the path
+    *before* the prefix check.
+    """
+    client = _make_client()
+    resp = client.post(path)
+    assert resp.status_code == 401, (
+        f"{path} must require auth: multi-slash variants were a known "
+        "bypass vector for prefix-based middleware checks before this fix."
+    )
+
+
+def test_normalize_path_collapses_consecutive_slashes():
+    """Direct check on the path-normalization helper, independent of the
+    HTTP layer."""
+    norm = AuthenticationMiddleware._normalize_path
+    assert norm("/v1/completions") == "/v1/completions"
+    assert norm("//v1/completions") == "/v1/completions"
+    assert norm("///v1/completions") == "/v1/completions"
+    assert norm("/inference//v1/generate") == "/inference/v1/generate"
+    assert norm("/v1//foo//bar") == "/v1/foo/bar"
