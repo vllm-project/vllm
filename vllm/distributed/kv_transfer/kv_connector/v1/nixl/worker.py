@@ -18,7 +18,6 @@ import numpy as np
 import torch
 import zmq
 
-import vllm.distributed.nixl_utils as nixl_utils
 from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
@@ -60,6 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
     MambaConvSplitInfo,
     derive_mamba_conv_split,
 )
+from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -197,7 +197,7 @@ class NixlConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
-        nixl_wrapper_cls = nixl_utils.NixlWrapper
+        nixl_wrapper_cls = NixlWrapper
         if nixl_wrapper_cls is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
@@ -274,7 +274,6 @@ class NixlConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", 4
         )
-        nixl_agent_config = nixl_utils.nixl_agent_config
         if nixl_agent_config is None:
             config = None
         else:
