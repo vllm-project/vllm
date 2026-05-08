@@ -1409,7 +1409,7 @@ class rocm_aiter_ops:
     def is_hip_fp8bmm_enabled(cls) -> bool:
         from vllm.platforms.rocm import on_mi3xx
 
-        return cls._AITER_ENABLED and cls._HIP_FP8BMM_ENABLED and on_mi3xx()
+        return cls.is_linear_enabled() and on_mi3xx()
 
     @classmethod
     @if_aiter_supported
