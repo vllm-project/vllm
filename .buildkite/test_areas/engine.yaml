@@ -62,21 +62,23 @@ steps:
   optional: true
   num_devices: 2
   source_file_dependencies:
-    - vllm/attention/
     - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
     - vllm/engine/
-    - vllm/executor/
+    - vllm/envs.py
     - vllm/forward_context.py
     - vllm/inputs/
+    - vllm/logger.py
+    - vllm/logging_utils/
     - vllm/model_executor/
+    - vllm/multimodal/
     - vllm/platforms/
     - vllm/sampling_params.py
     - vllm/transformers_utils/
+    - vllm/triton_utils/
     - vllm/utils/
     - vllm/v1/
-    - vllm/worker/
     - tests/v1/e2e/spec_decode
   commands:
     # Only run tests that need exactly 2 GPUs
@@ -88,21 +90,23 @@ steps:
   optional: true
   num_devices: 4
   source_file_dependencies:
-    - vllm/attention/
     - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
     - vllm/engine/
-    - vllm/executor/
+    - vllm/envs.py
     - vllm/forward_context.py
     - vllm/inputs/
+    - vllm/logger.py
+    - vllm/logging_utils/
     - vllm/model_executor/
+    - vllm/multimodal/
     - vllm/platforms/
     - vllm/sampling_params.py
     - vllm/transformers_utils/
+    - vllm/triton_utils/
     - vllm/utils/
     - vllm/v1/
-    - vllm/worker/
     - tests/v1/e2e/spec_decode
   commands:
     # Only run tests that need 4 GPUs
