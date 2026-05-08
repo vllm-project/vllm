@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import operator
 from collections.abc import Callable
 from typing import Any
 
@@ -294,6 +293,75 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
 
+class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
+    """
+    Pattern matching ``rms_norm`` whose output feeds *two* distinct
+    ``rocm_aiter_group_fp8_quant`` consumers, replacing it with two
+    independent fused ``rms_norm_group_fp8_quant`` ops.
+
+    Repeating the rms_norm in the replacement is preferable to leaving
+    the fused 16-bit rms output materialized for two unfused quant
+    consumers, and matches what the previous manual graph surgery
+    achieved by cloning the rms_norm node.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        match_aiter_quant: bool = True,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+
+        super().__init__(epsilon, key, match_aiter_quant)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            result1, scale1 = self.quant_matcher(result_rms)
+            result2, scale2 = self.quant_matcher(result_rms)
+            return result1, scale1, result2, scale2
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            at1 = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                group_size=128,
+            )
+            at2 = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                group_size=128,
+            )
+
+            return at1[0], at1[1], at2[0], at2[1]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            # input, weight
+            [self.empty(5, 16), self.empty(16)],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses aiter rms_norm & vllm/aiter quant custom ops
@@ -310,8 +378,16 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         )
 
         # Make sure fused add patterns are before simple rms norm,
-        # as the latter is a subset of the former in torch ops
+        # as the latter is a subset of the former in torch ops.
+        # The DoubleQuant pattern handles 1 rms_norm -> 2 group_fp8_quant
+        # fan-out (e.g. DSv3.2) and must be registered before the single
+        # group-quant pattern so it matches first.
         for epsilon in [1e-5, 1e-6]:
+            # Fuse aiter rms_norm + 2x aiter group fp8 quant
+            DoubleAiterRMSFp8GroupQuantPattern(
+                epsilon, FP8_DTYPE, GroupShape(1, 128)
+            ).register(self.patterns)
+
             #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
             AiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
@@ -348,132 +424,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    @staticmethod
-    def _dedup_and_duplicate_for_fusion(graph: fx.Graph) -> tuple[int, int]:
-        """Two-stage graph transform to enable RMSNorm+Quant fusion.
-
-        Stage 1 — Dedup: when the same RMSNorm feeds multiple *identical*
-        quant ops (same target, same args), merge them to avoid redundant
-        computation and reduce fan-out so the fusion pattern can match.
-
-        Stage 2 — Duplicate: for remaining multi-consumer norms where
-        quant ops differ (can't dedup), clone the norm so each fusable
-        quant gets a dedicated 1-to-1 norm node.
-        """
-        _RMS = {
-            "vllm.rocm_aiter_rms_norm.default",
-            "vllm_ir.rms_norm.default",
-        }
-        _FUSABLE_QUANT = {
-            "vllm.rocm_aiter_group_fp8_quant.default",
-        }
-
-        def _quant_key(node: fx.Node) -> tuple:
-            return (
-                str(node.target),
-                tuple((a.name if isinstance(a, fx.Node) else a) for a in node.args),
-            )
-
-        def _find_getitems(quant_node: fx.Node) -> dict[int, fx.Node]:
-            gi: dict[int, fx.Node] = {}
-            for u in quant_node.users:
-                if (
-                    u.op == "call_function"
-                    and u.target is operator.getitem
-                    and isinstance(u.args[1], int)
-                ):
-                    gi[u.args[1]] = u
-            return gi
-
-        deduped = 0
-        duplicated = 0
-
-        for node in list(graph.nodes):
-            if node.op != "call_function" or str(node.target) not in _RMS:
-                continue
-
-            fusable = [
-                u
-                for u in node.users
-                if u.op == "call_function" and str(u.target) in _FUSABLE_QUANT
-            ]
-            if len(fusable) <= 1:
-                continue
-
-            groups: dict[tuple, list[fx.Node]] = {}
-            for q in fusable:
-                k = _quant_key(q)
-                groups.setdefault(k, []).append(q)
-
-            for _key, quants in groups.items():
-                if len(quants) <= 1:
-                    continue
-                keep = quants[0]
-                keep_gi = _find_getitems(keep)
-                for redundant in quants[1:]:
-                    red_gi = _find_getitems(redundant)
-                    for idx, red_getitem in red_gi.items():
-                        if idx not in keep_gi:
-                            # keep node lacks a getitem for this index —
-                            # create one so red_getitem's users can be
-                            # redirected before the node is erased.
-                            with graph.inserting_after(keep):
-                                new_gi = graph.call_function(
-                                    operator.getitem, (keep, idx)
-                                )
-                            keep_gi[idx] = new_gi
-                        red_getitem.replace_all_uses_with(keep_gi[idx])
-                    for idx in sorted(red_gi.keys(), reverse=True):
-                        graph.erase_node(red_gi[idx])
-                    graph.erase_node(redundant)
-                    deduped += 1
-
-        for node in list(graph.nodes):
-            if node.op != "call_function" or str(node.target) not in _RMS:
-                continue
-            if len(node.users) <= 1:
-                continue
-
-            fusable = [
-                u
-                for u in node.users
-                if u.op == "call_function" and str(u.target) in _FUSABLE_QUANT
-            ]
-            if not fusable:
-                continue
-
-            other = [u for u in node.users if u not in fusable]
-            to_clone = fusable if other else fusable[1:]
-            for qu in to_clone:
-                with graph.inserting_before(qu):
-                    c = graph.call_function(node.target, node.args, node.kwargs)
-                    c.meta = node.meta.copy()
-                    qu.replace_input_with(node, c)
-                    duplicated += 1
-
-        if deduped > 0 or duplicated > 0:
-            from torch._inductor.fx_passes.post_grad import (
-                stable_topological_sort,
-            )
-
-            stable_topological_sort(graph)
-            graph.lint()
-        return deduped, duplicated
-
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        deduped, duplicated = 0, 0
-        if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx950
-
-            if on_gfx950():
-                deduped, duplicated = self._dedup_and_duplicate_for_fusion(graph)
-        if deduped > 0 or duplicated > 0:
-            logger.debug(
-                "Pre-fusion: deduped %d redundant quants, duplicated %d norms",
-                deduped,
-                duplicated,
-            )
         self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
@@ -485,6 +437,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSNormDynamicQuantPattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
+            DoubleAiterRMSFp8GroupQuantPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 
