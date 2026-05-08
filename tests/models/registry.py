@@ -769,6 +769,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "LlamaNemotronVLForSequenceClassification": _HfExamplesInfo(
         "nvidia/llama-nemotron-rerank-vl-1b-v2", trust_remote_code=True
     ),
+    "DebertaV2ForSequenceClassification": _HfExamplesInfo(
+        "OpenAssistant/reward-model-deberta-v3-large-v2"
+    ),
     "ModernBertForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-reranker-modernbert-base"
     ),

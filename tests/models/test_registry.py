@@ -61,6 +61,7 @@ def test_registry_imports(model_arch):
         ("LlamaForCausalLM", False, False, "bi-encoder"),
         ("LlavaForConditionalGeneration", True, True, "bi-encoder"),
         ("BertForSequenceClassification", False, False, "cross-encoder"),
+        ("DebertaV2ForSequenceClassification", False, False, "cross-encoder"),
         ("RobertaForSequenceClassification", False, False, "cross-encoder"),
         ("XLMRobertaForSequenceClassification", False, False, "cross-encoder"),
         ("GteNewModel", False, False, "bi-encoder"),
