@@ -94,14 +94,18 @@ def _batch_view(
 def _populate_scratch(plan, hidden_size: int = HIDDEN_SIZE):
     """Simulate the forward pass populating scratch tensors.
 
-    Fills each scratch tensor with deterministic data so tests can
-    verify correct slicing.
+    Allocates a deterministic scratch tensor for every ``(layer, hook)``
+    in ``plan.gather_indices`` and stores it on the plan, mimicking what
+    :meth:`CaptureManager.on_hook` does inside the compiled forward
+    graph.  Tests can then call :meth:`dispatch_step_captures` and
+    assert the right rows reached each sink.
     """
-    for key, scratch in plan.scratch_gpu.items():
-        n_rows = scratch.shape[0]
-        # Fill with row index * 100 + col index pattern for easy debugging.
+    for key, idx in plan.gather_indices.items():
+        n_rows = idx.shape[0]
+        scratch = torch.zeros((n_rows, hidden_size), dtype=MODEL_DTYPE)
         for r in range(n_rows):
             scratch[r] = torch.arange(hidden_size, dtype=MODEL_DTYPE) + r * 100
+        plan.scratch_gpu[key] = scratch
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +139,9 @@ class TestSingleConsumerGlobalSpec:
         # Simulate forward pass.
         _populate_scratch(plan)
         mgr.dispatch_step_captures(plan)
+        # Dispatch is async; wait for the dispatch thread to fan the
+        # chunks out to the sink before asserting on call counts.
+        mgr._drain_dispatch_queue()
 
         # Sink should have received two chunks (one per layer).
         assert sink.submit_chunk.call_count == 2
@@ -196,6 +203,7 @@ class TestTwoConsumersOverlapping:
 
         _populate_scratch(plan)
         mgr.dispatch_step_captures(plan)
+        mgr._drain_dispatch_queue()
 
         # Both sinks received a chunk.
         assert sink0.submit_chunk.call_count == 1
@@ -327,6 +335,7 @@ class TestConsumerIsolation:
 
         # Should not raise.
         mgr.dispatch_step_captures(plan)
+        mgr._drain_dispatch_queue()
 
         # sink0 was called (and raised), but sink1 still received its chunk.
         assert sink0.submit_chunk.call_count == 1
