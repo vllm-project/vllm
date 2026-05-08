@@ -154,6 +154,26 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    kv_connector_prefetch_token_budget: int = Field(default=0, ge=0)
+    """Per-step prompt-token budget for early KV connector prefetch hints.
+
+    When positive, the scheduler asks the KV connector to start async
+    prefetch for waiting requests at the top of each schedule step (before
+    the running queue is processed). This lets connectors with disk- or
+    network-backed KV stores (e.g. LMCache) overlap their lookups with GPU
+    work that is still running, instead of stalling the GPU once the
+    waiting queue is finally polled. See GH issue #41784 for the motivating
+    trace.
+
+    The budget is summed by `request.num_tokens` of hinted requests in a
+    single step and bounds connector-side staging memory pressure (token
+    count is a closer proxy to that pressure than a fixed request count).
+    Hints already submitted in earlier steps are remembered and not
+    reissued, so a small per-step budget will steadily drain a backlog
+    across consecutive steps without re-doing work.
+
+    Default 0 disables the feature and preserves prior behavior."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

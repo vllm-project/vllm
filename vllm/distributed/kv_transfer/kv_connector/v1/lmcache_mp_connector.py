@@ -766,11 +766,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if request.status == RequestStatus.PREEMPTED:
             return 0, False
 
-        self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id,
-            token_ids=list(request.all_token_ids),
-            cache_salt=tracker.cache_salt,
-        )
+        self._maybe_submit_lookup_request(request, tracker)
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
         if ret is None:
@@ -798,6 +794,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
         return need_to_load, need_to_load > 0
+
+    def maybe_prefetch_request(self, request: "Request") -> bool:
+        if request.status != RequestStatus.WAITING or request.num_computed_tokens != 0:
+            return False
+
+        tracker = self._get_or_create_request_tracker(request)
+        self._maybe_submit_lookup_request(request, tracker)
+        return True
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -1176,6 +1180,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             new_tracker = LMCacheMPRequestTracker(request)
             self.request_trackers[request_id] = new_tracker
         return self.request_trackers[request_id]
+
+    def _maybe_submit_lookup_request(
+        self, request: "Request", tracker: LMCacheMPRequestTracker
+    ) -> None:
+        self.scheduler_adapter.maybe_submit_lookup_request(
+            request.request_id,
+            token_ids=list(request.all_token_ids),
+            cache_salt=tracker.cache_salt,
+        )
 
     def _cleanup_request_tracker(self, request_id: str) -> None:
         """

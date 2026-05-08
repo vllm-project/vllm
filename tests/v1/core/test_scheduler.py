@@ -24,6 +24,7 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
@@ -3834,6 +3835,170 @@ def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
         req_remote.request_id,
         req_tail.request_id,
     ]
+
+
+def _build_prefetch_scheduler(token_budget: int) -> Scheduler:
+    """Build a real scheduler with a mockable connector prefetch hook.
+
+    Uses the standard `create_scheduler` + MockKVConnector path to avoid
+    hand-stitching scheduler internals, then overrides
+    `kv_connector_prefetch_token_budget` and replaces
+    `connector.maybe_prefetch_request` with a Mock so call sites can be
+    asserted against. The real `get_num_new_matched_tokens` on
+    MockKVConnector remains intact, so we can also assert that the early
+    prefetch pass does NOT invoke it.
+    """
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    scheduler.kv_connector_prefetch_token_budget = token_budget
+    scheduler.connector.maybe_prefetch_request = Mock(return_value=True)
+    scheduler.connector.get_num_new_matched_tokens = Mock(
+        wraps=scheduler.connector.get_num_new_matched_tokens
+    )
+    return scheduler
+
+
+def _prefetch_call_args(scheduler: Scheduler) -> list[Request]:
+    return [
+        call.args[0]
+        for call in scheduler.connector.maybe_prefetch_request.call_args_list
+    ]
+
+
+def test_kv_connector_early_prefetch_disabled_by_default():
+    """Default token budget of 0 disables early prefetch entirely."""
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+    )
+    assert scheduler.kv_connector_prefetch_token_budget == 0
+    scheduler.connector.maybe_prefetch_request = Mock(return_value=True)
+
+    for request in create_requests(num_requests=3, num_tokens=10):
+        scheduler.add_request(request)
+
+    scheduler._early_prefetch_waiting_kv()
+    scheduler.connector.maybe_prefetch_request.assert_not_called()
+
+
+def test_kv_connector_early_prefetch_respects_token_budget():
+    """Cumulative `request.num_tokens` is bounded by the per-step budget."""
+    scheduler = _build_prefetch_scheduler(token_budget=25)
+    requests = create_requests(num_requests=3, num_tokens=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler._early_prefetch_waiting_kv()
+
+    # 10 + 10 = 20 <= 25; adding the third (30) would exceed the budget,
+    # so iteration stops and the third request is left for a later step.
+    assert _prefetch_call_args(scheduler) == [requests[0], requests[1]]
+    # The early pass must not invoke the regular matched-tokens API.
+    scheduler.connector.get_num_new_matched_tokens.assert_not_called()
+
+
+def test_kv_connector_early_prefetch_persists_across_steps():
+    """Already-prefetched ids are remembered across schedule steps so we
+    don't re-invoke the connector hook for the same request."""
+    scheduler = _build_prefetch_scheduler(token_budget=15)
+    requests = create_requests(num_requests=3, num_tokens=10)
+    for request in requests:
+        scheduler.add_request(request)
+
+    scheduler._early_prefetch_waiting_kv()
+    scheduler._early_prefetch_waiting_kv()
+
+    # Step 1: prefetch requests[0] (10 used; +10 would be 20 > 15 → stop).
+    # Step 2: requests[0] is already in the cache → skipped; requests[1]
+    # fits a fresh per-step budget of 15.
+    assert _prefetch_call_args(scheduler) == [requests[0], requests[1]]
+
+
+@pytest.mark.parametrize("pause_state", [PauseState.PAUSED_NEW, PauseState.PAUSED_ALL])
+def test_kv_connector_early_prefetch_skipped_when_paused(pause_state):
+    """Paused schedulers must not kick off any prefetch work."""
+    scheduler = _build_prefetch_scheduler(token_budget=1024)
+    for request in create_requests(num_requests=2, num_tokens=10):
+        scheduler.add_request(request)
+    scheduler._pause_state = pause_state
+
+    scheduler._early_prefetch_waiting_kv()
+    scheduler.connector.maybe_prefetch_request.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "skip_status",
+    [
+        RequestStatus.WAITING_FOR_REMOTE_KVS,
+        RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+        RequestStatus.PREEMPTED,
+    ],
+)
+def test_kv_connector_early_prefetch_skips_non_plain_waiting(skip_status):
+    """Only plain-WAITING requests with no computed tokens are prefetched."""
+    scheduler = _build_prefetch_scheduler(token_budget=1024)
+    skip, ok = create_requests(num_requests=2, num_tokens=10)
+    scheduler.add_request(skip)
+    scheduler.add_request(ok)
+    skip.status = skip_status
+
+    scheduler._early_prefetch_waiting_kv()
+    assert _prefetch_call_args(scheduler) == [ok]
+
+
+def test_kv_connector_early_prefetch_skips_partially_computed_request():
+    """Requests that already carry computed tokens are skipped."""
+    scheduler = _build_prefetch_scheduler(token_budget=1024)
+    partial, fresh = create_requests(num_requests=2, num_tokens=10)
+    scheduler.add_request(partial)
+    scheduler.add_request(fresh)
+    partial.num_computed_tokens = 4
+
+    scheduler._early_prefetch_waiting_kv()
+    assert _prefetch_call_args(scheduler) == [fresh]
+
+
+def test_kv_connector_early_prefetch_id_cleared_on_finish():
+    """Finishing/aborting a request must drop it from the prefetched set,
+    so reuse of the same id later is safe."""
+    scheduler = _build_prefetch_scheduler(token_budget=1024)
+    request = create_requests(num_requests=1, num_tokens=10)[0]
+    scheduler.add_request(request)
+
+    scheduler._early_prefetch_waiting_kv()
+    assert request.request_id in scheduler._kv_connector_prefetched_req_ids
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in scheduler._kv_connector_prefetched_req_ids
+
+
+def test_kv_connector_early_prefetch_oversized_head_preserves_fcfs():
+    """A head-of-queue request larger than the budget blocks subsequent
+    prefetches in the same step (FCFS — never bypass the head)."""
+    scheduler = _build_prefetch_scheduler(token_budget=15)
+    big = create_requests(num_requests=1, num_tokens=20, req_ids=["big"])[0]
+    small = create_requests(num_requests=1, num_tokens=10, req_ids=["small"])[0]
+    scheduler.add_request(big)
+    scheduler.add_request(small)
+
+    scheduler._early_prefetch_waiting_kv()
+    scheduler.connector.maybe_prefetch_request.assert_not_called()
+
+
+def test_kv_connector_early_prefetch_handles_negative_hook_return():
+    """A connector that declines to prefetch (returns False) must not
+    consume budget nor be marked as prefetched, so a later step can retry."""
+    scheduler = _build_prefetch_scheduler(token_budget=1024)
+    scheduler.connector.maybe_prefetch_request = Mock(return_value=False)
+    request = create_requests(num_requests=1, num_tokens=10)[0]
+    scheduler.add_request(request)
+
+    scheduler._early_prefetch_waiting_kv()
+    assert request.request_id not in scheduler._kv_connector_prefetched_req_ids
+
+    scheduler._early_prefetch_waiting_kv()
+    # Same request should be probed again on the next step.
+    assert scheduler.connector.maybe_prefetch_request.call_count == 2
 
 
 def test_fcfs_mixed_skipped_waiting_types_keep_order():

@@ -10,6 +10,8 @@ The class provides the following primitives:
         get_num_new_matched_tokens() - get number of new tokens
             that exist in the remote KV cache. Might be called multiple
             times for a given request and should be side-effect free.
+        maybe_prefetch_request() - optionally starts connector-side
+            prefetch work when a request is waiting to be scheduled.
         update_state_after_alloc() - update KVConnector state after
             temporary buffer alloc by the CacheManager.
         update_connector_output() - update KVConnector state after
@@ -445,6 +447,42 @@ class KVConnectorBase_V1(ABC):
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def maybe_prefetch_request(self, request: "Request") -> bool:
+        """
+        Optionally start connector-side prefetch work for a waiting request.
+
+        This is a best-effort hint invoked by the scheduler at the top of a
+        schedule step, before the running queue is processed, so connectors
+        with async lookups (e.g. disk-backed KV stores) can begin loading
+        staging data while the GPU is still busy with running requests. The
+        default implementation is a no-op for connectors that do not benefit
+        from early lookup.
+
+        Contract:
+          - Pure hint -- implementations MUST NOT allocate KV blocks, mutate
+            scheduler-visible request state, or change anything that the
+            regular scheduling path reads. Matching, allocation, and
+            metadata remain owned by `get_num_new_matched_tokens` /
+            `update_state_after_alloc` and friends.
+          - Idempotent -- the scheduler tracks ids it has already hinted and
+            will not call this repeatedly for the same request, but
+            implementations should still tolerate redundant calls (e.g.
+            after preempt/resume) without re-issuing duplicate work.
+          - Non-blocking -- callers expect this to return promptly.
+
+        Args:
+            request: The waiting request the connector may prefetch for.
+                The scheduler only invokes this for requests in plain
+                `WAITING` status with no computed tokens yet.
+
+        Returns:
+            True if prefetch work was actually submitted for this request,
+            otherwise False. The scheduler uses the return value only for
+            prefetch-budget accounting -- a `False` return leaves the budget
+            untouched and lets a later step retry the hint.
+        """
+        return False
 
     @abstractmethod
     def get_num_new_matched_tokens(

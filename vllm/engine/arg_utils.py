@@ -669,6 +669,10 @@ class EngineArgs:
 
     stream_interval: int = SchedulerConfig.stream_interval
 
+    kv_connector_prefetch_token_budget: int = (
+        SchedulerConfig.kv_connector_prefetch_token_budget
+    )
+
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
@@ -1363,6 +1367,10 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
+        scheduler_group.add_argument(
+            "--kv-connector-prefetch-token-budget",
+            **scheduler_kwargs["kv_connector_prefetch_token_budget"],
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1969,6 +1977,9 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            kv_connector_prefetch_token_budget=(
+                self.kv_connector_prefetch_token_budget
+            ),
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

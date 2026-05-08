@@ -163,6 +163,17 @@ class Scheduler(SchedulerInterface):
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+        # Per-step prompt-token budget for early KV connector prefetch hints.
+        # 0 (the default) disables the early-prefetch pass and preserves the
+        # pre-existing scheduling behavior.
+        self.kv_connector_prefetch_token_budget = (
+            self.scheduler_config.kv_connector_prefetch_token_budget
+        )
+        # Request ids for which a connector prefetch hint has already been
+        # submitted. Persists across schedule steps so we don't re-issue the
+        # hint for the same request, and is cleaned up by `_free_request`
+        # when the request finishes (including aborts).
+        self._kv_connector_prefetched_req_ids: set[str] = set()
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -307,6 +318,77 @@ class Scheduler(SchedulerInterface):
                 pass
         return num_new_tokens
 
+    def _early_prefetch_waiting_kv(self) -> None:
+        """Hint the KV connector to start async prefetch for waiting requests
+        before the running queue is scheduled.
+
+        Motivation (see GH issue #41784): when the running queue saturates the
+        per-step token budget, the waiting-queue scheduling loop never runs,
+        so connectors that perform async loads (e.g. LMCache disk reads) never
+        observe newly arrived requests until the running queue drains. By the
+        time the connector lookup is finally issued, the GPU is already idle
+        waiting for it, leaking hundreds of milliseconds per request and
+        cascading under load.
+
+        This pass walks the waiting queues and asks the connector to *start*
+        the lookup early via `KVConnectorBase_V1.maybe_prefetch_request`. The
+        regular scheduling path still owns matching, allocation, and metadata;
+        the hint is purely a "kick async work off sooner" primitive, which
+        keeps the scheduler / connector contract unchanged.
+
+        Bounding: prompt-token usage is summed per step against
+        `kv_connector_prefetch_token_budget` to bound in-flight prefetch
+        memory pressure on the connector (token budget is a closer proxy to
+        connector-side staging memory than a fixed request count). FCFS is
+        preserved -- if the head request would exceed the budget we stop
+        rather than skip it. Hints already submitted in earlier steps are
+        tracked in `_kv_connector_prefetched_req_ids` so we never repeat a
+        call for the same request.
+
+        No-ops when:
+          - no KV connector is configured;
+          - the scheduler is paused (PAUSED_NEW or PAUSED_ALL) -- in those
+            states no waiting request will be scheduled, so prefetching is
+            wasted work and risks premature eviction of the staged data;
+          - the prefetch token budget is 0 (the default).
+        """
+        if (
+            self.connector is None
+            or self._pause_state != PauseState.UNPAUSED
+            or self.kv_connector_prefetch_token_budget <= 0
+        ):
+            return
+
+        # TODO: Allow connectors to provide a capacity-based default budget,
+        # e.g. derived from CPU staging pool size, instead of requiring users
+        # to tune a fixed token budget.
+        tokens_used = 0
+        for queue in (self.waiting, self.skipped_waiting):
+            for request in queue:
+                if request.request_id in self._kv_connector_prefetched_req_ids:
+                    continue
+                # Only fresh waiting requests are eligible. Preempted or
+                # blocked-waiting (e.g. WAITING_FOR_REMOTE_KVS) entries have
+                # connector-side state already in flight or are mid-resume,
+                # and per-connector contracts (e.g. LMCache bails on
+                # PREEMPTED) make a prefetch hint either redundant or wrong.
+                if (
+                    request.status != RequestStatus.WAITING
+                    or request.num_computed_tokens != 0
+                ):
+                    continue
+
+                num_tokens = request.num_tokens
+                if tokens_used + num_tokens > self.kv_connector_prefetch_token_budget:
+                    # FCFS: stop on first ineligible request rather than
+                    # skipping past it. Subsequent steps will retry from the
+                    # same head once budget is available again.
+                    return
+
+                if self.connector.maybe_prefetch_request(request):
+                    self._kv_connector_prefetched_req_ids.add(request.request_id)
+                    tokens_used += num_tokens
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -341,6 +423,8 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
+
+        self._early_prefetch_waiting_kv()
 
         # First, schedule the RUNNING requests.
         req_index = 0
@@ -991,6 +1075,7 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        self._kv_connector_prefetched_req_ids.discard(session.request_id)
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
@@ -1752,6 +1837,7 @@ class Scheduler(SchedulerInterface):
     ) -> dict[str, Any] | None:
         assert request.is_finished()
 
+        self._kv_connector_prefetched_req_ids.discard(request.request_id)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
