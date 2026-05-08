@@ -61,6 +61,7 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -110,7 +111,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
         self.mode = get_moriio_mode()
-        self._defer_timeout = envs.VLLM_MORIIO_DEFER_TIMEOUT
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MoRIIOConnectorScheduler | None = (
                 MoRIIOConnectorScheduler(vllm_config, self.engine_id)
@@ -173,11 +173,9 @@ class MoRIIOConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def get_block_leak_reap_timeout(self) -> float | None:
-        # ibv_post_send failures under high concurrency can silently drop the
-        # finished_sending notification, leaving KV blocks permanently allocated
-        # on the prefill side. The reaper frees them after this idle period.
-        return self._defer_timeout
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
 
     ############################################################
     # Worker Side Methods
@@ -287,6 +285,13 @@ class MoRIIOConnectorScheduler:
             set_role(ROLE.CONSUMER)
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
+        # Deadlines for requests whose block freeing was deferred.
+        # Survives across scheduler steps. If the worker never reports
+        # finished_sending before the deadline, we inject them into
+        # connector_output.finished_sending so the scheduler frees the blocks to avoid
+        # hanging indefinitely waiting for a free notification that never comes.
+        self._deferred_send_deadlines: dict[ReqId, float] = {}
+        self._defer_timeout = envs.VLLM_MORIIO_DEFER_TIMEOUT
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
@@ -598,6 +603,9 @@ class MoRIIOConnectorScheduler:
                 time.perf_counter()
                 + MoRIIOConstants.VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT
             )
+            self._deferred_send_deadlines[request.request_id] = (
+                time.monotonic() + self._defer_timeout
+            )
 
         # Return KV transfer params forwarded verbatim to the decode instance by
         # the router.
@@ -608,6 +616,47 @@ class MoRIIOConnectorScheduler:
             remote_engine_id=self.engine_id,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             transfer_id=params["transfer_id"],
+        )
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        """Free KV blocks from sends that never received a completion signal.
+
+        Called every scheduler step. When a send is deferred (request_finished
+        returns True), blocks remain allocated until the worker reports
+        finished_sending. If that notification is lost (e.g. ibv_post_send
+        failure), blocks leak permanently. This method injects timed-out
+        entries into connector_output.finished_sending so the scheduler
+        frees them via the normal path.
+        """
+        if not self._deferred_send_deadlines:
+            return
+
+        # Remove entries the worker already reported as finished_sending, these will be
+        # freed anyways.
+        for req_id in connector_output.finished_sending or ():
+            self._deferred_send_deadlines.pop(req_id, None)
+
+        now = time.monotonic()
+        expired_reqs = [
+            req_id
+            for req_id, deadline in self._deferred_send_deadlines.items()
+            if now >= deadline
+        ]
+        if not expired_reqs:
+            return
+
+        if connector_output.finished_sending is None:
+            connector_output.finished_sending = set()
+        # Register the expired requests as finished so the scheduler frees their blocks.
+        for req_id in expired_reqs:
+            connector_output.finished_sending.add(req_id)
+            del self._deferred_send_deadlines[req_id]
+        logger.warning(
+            "Reaped %d deferred sends with no finished_sending notification "
+            "after %.0fs. This indicates lost async KV completion "
+            "notifications from the KV connector.",
+            len(expired_reqs),
+            self._defer_timeout,
         )
 
 

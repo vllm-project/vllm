@@ -610,24 +610,6 @@ class KVConnectorBase_V1(ABC):
 
         return None
 
-    def get_block_leak_reap_timeout(self) -> float | None:
-        """
-        Return the idle period (seconds) after which the scheduler should
-        reap KV cache blocks held by finished requests that never signalled
-        completion via get_finished().
-
-        Connectors that free blocks synchronously (request_finished returns
-        False) should return None to disable reaping entirely.  Connectors
-        that defer freeing asynchronously (request_finished returns True)
-        should return a positive timeout long enough to let normal completion
-        signals arrive before the reaper runs.
-
-        Returns:
-            float: idle seconds before reaping leaked blocks.
-            None: reaping is disabled (default).
-        """
-        return None
-
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None

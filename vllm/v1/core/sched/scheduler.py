@@ -177,15 +177,6 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
-        # Monotonic deadline after which _reap_leaked_kv_send_blocks runs.
-        # Reset to now+idle_threshold whenever active requests are present.
-        # None means the connector has disabled reaping (synchronous freeing).
-        self._kv_block_reap_timeout: float | None = (
-            self.connector.get_block_leak_reap_timeout()
-            if self.connector is not None
-            else None
-        )
-        self._kv_send_block_reap_deadline: float = 0.0
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -2081,42 +2072,6 @@ class Scheduler(SchedulerInterface):
                 logger.debug("Request %s no longer tracked, skipping send", req_id)
                 continue
             self._free_blocks(self.requests[req_id])
-
-        if self._kv_block_reap_timeout is not None:
-            self._reap_leaked_kv_send_blocks()
-
-    def _reap_leaked_kv_send_blocks(self) -> None:
-        """Free KV cache blocks for finished requests that never signalled
-        completion via get_finished().
-
-        Connectors that defer block freeing asynchronously (request_finished
-        returns True) may fail to deliver completion signals under certain
-        error conditions, leaving blocks permanently allocated.  This method
-        runs after the connector-specified idle period with no running requests
-        to sweep up any such leaks.
-        """
-        assert self._kv_block_reap_timeout is not None
-        now = time.monotonic()
-        if self.running:
-            self._kv_send_block_reap_deadline = now + self._kv_block_reap_timeout
-            return
-        if now < self._kv_send_block_reap_deadline:
-            return
-
-        leaked = [req for req in self.requests.values() if req.is_finished()]
-        if not leaked:
-            return
-
-        for req in leaked:
-            self._free_blocks(req)
-        logger.warning(
-            "Reaped %d finished requests with leaked KV send blocks "
-            "after %.0fs idle. This indicates lost async KV completion "
-            "notifications from the KV connector.",
-            len(leaked),
-            self._kv_block_reap_timeout,
-        )
-        self._kv_send_block_reap_deadline = now + self._kv_block_reap_timeout
 
     def _update_requests_with_invalid_blocks(
         self,
