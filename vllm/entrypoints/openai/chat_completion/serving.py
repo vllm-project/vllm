@@ -1097,6 +1097,11 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    routed_experts=(
+                        output.routed_experts.tolist()
+                        if output.routed_experts is not None
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
                 continue
@@ -1318,6 +1323,11 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
+                routed_experts=(
+                    output.routed_experts.tolist()
+                    if output.routed_experts is not None
+                    else None
+                ),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
@@ -1357,6 +1367,10 @@ class OpenAIServingChat(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
+        prompt_routed_experts = None
+        if final_res.prompt_routed_experts is not None:
+            prompt_routed_experts = final_res.prompt_routed_experts.tolist()
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
@@ -1369,6 +1383,7 @@ class OpenAIServingChat(OpenAIServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
+            prompt_routed_experts=prompt_routed_experts,
         )
 
         # Log complete response if output logging is enabled
