@@ -290,13 +290,21 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 
 @functools.cache
-def has_flashinfer_bf16_gemm() -> bool:
-    """Return `True` if FlashInfer BF16 dense GEMM is available."""
+def _get_flashinfer_bf16_mm() -> Any | None:
     if not has_flashinfer():
-        return False
+        return None
 
     mod = _get_submodule("flashinfer")
-    return callable(getattr(mod, "mm_bf16", None)) if mod else False
+    mm_bf16 = getattr(mod, "mm_bf16", None) if mod else None
+    if callable(mm_bf16) and hasattr(mm_bf16, "is_backend_supported"):
+        return mm_bf16
+    return None
+
+
+@functools.cache
+def has_flashinfer_bf16_gemm() -> bool:
+    """Return `True` if FlashInfer BF16 dense GEMM is available."""
+    return _get_flashinfer_bf16_mm() is not None
 
 
 @functools.cache
@@ -304,12 +312,11 @@ def get_flashinfer_bf16_supported_backends(
     compute_capability: int | None = None,
 ) -> tuple[str, ...]:
     """Return FlashInfer BF16 GEMM backends supported by this device."""
-    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
+    if not current_platform.is_cuda():
         return ()
 
-    mod = _get_submodule("flashinfer")
-    mm_bf16 = getattr(mod, "mm_bf16", None) if mod else None
-    if mm_bf16 is None or not hasattr(mm_bf16, "is_backend_supported"):
+    mm_bf16 = _get_flashinfer_bf16_mm()
+    if mm_bf16 is None:
         return ()
 
     if compute_capability is None:
@@ -329,14 +336,35 @@ def get_flashinfer_bf16_supported_backends(
     return tuple(supported_backends)
 
 
+@functools.cache
+def is_flashinfer_bf16_gemm_available(
+    backend: str = "auto",
+    has_bias: bool = False,
+    compute_capability: int | None = None,
+) -> bool:
+    """Return whether FlashInfer BF16 GEMM can run for this backend."""
+    supported_backends = get_flashinfer_bf16_supported_backends(compute_capability)
+    if has_bias:
+        supported_backends = tuple(
+            supported_backend
+            for supported_backend in supported_backends
+            if supported_backend not in FLASHINFER_BF16_GEMM_BACKENDS_WITHOUT_BIAS
+        )
+
+    if backend == "auto":
+        return bool(supported_backends)
+    return backend in supported_backends
+
+
 def is_flashinfer_bf16_backend_supported(
     backend: str,
     compute_capability: int | None = None,
 ) -> bool:
     """Return whether a FlashInfer BF16 GEMM backend is supported."""
-    if backend == "auto":
-        return bool(get_flashinfer_bf16_supported_backends(compute_capability))
-    return backend in get_flashinfer_bf16_supported_backends(compute_capability)
+    return is_flashinfer_bf16_gemm_available(
+        backend,
+        compute_capability=compute_capability,
+    )
 
 
 @functools.cache
@@ -1177,6 +1205,7 @@ __all__ = [
     "use_trtllm_attention",
     "has_flashinfer_bf16_gemm",
     "get_flashinfer_bf16_supported_backends",
+    "is_flashinfer_bf16_gemm_available",
     "is_flashinfer_bf16_backend_supported",
     "flashinfer_bf16_mm",
     "flashinfer_mxfp4_quantize",
