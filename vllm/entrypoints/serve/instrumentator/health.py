@@ -28,6 +28,26 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=200)
     try:
         await client.check_health()
+
+        # Handle snapshot trigger and check
+        if hasattr(client, "snapshot_manager") and client.snapshot_manager:
+            if client.snapshot_task is None:
+                # Trigger the snapshot in background
+                import asyncio
+
+                async def _run_snapshot():
+                    await asyncio.to_thread(client.snapshot_manager.run_snapshot)
+
+                client.snapshot_task = asyncio.create_task(_run_snapshot())
+                logger.info("Triggered snapshot from health check.")
+                return Response(status_code=503, content="Snapshot triggered")
+
+            elif not client.snapshot_task.done():
+                logger.info(
+                    "Snapshot is still running, returning 503 for health check."
+                )
+                return Response(status_code=503, content="Snapshot in progress")
+
         return Response(status_code=200)
     except EngineDeadError:
         return Response(status_code=503)

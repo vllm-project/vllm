@@ -14,6 +14,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.snapshot.manager import SnapshotManager
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -130,6 +131,18 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # Trigger snapshot if enabled
+        enable_snapshot = self.vllm_config.additional_config.get(
+            "enable_snapshot_post_startup", False
+        )
+        snapshot_provider = self.vllm_config.additional_config.get(
+            "snapshot_provider", None
+        )
+
+        if enable_snapshot:
+            self.snapshot_manager = SnapshotManager(snapshot_provider)
+            self.snapshot_manager.run_snapshot()
 
     @classmethod
     def from_vllm_config(
