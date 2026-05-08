@@ -242,8 +242,10 @@ class IndexerQMxFp4Kernel:
         q_bf16x2 = cute.make_rmem_tensor(_layout, Uint32)
 
         if in_bounds:
-            # we can't do cute.copy on the whole 2D tile directly because
-            # cute.recast_tensor() is wrong for 2D strided layout :(
+            # we can't do cute.copy() on the whole 2D tile directly because
+            # cute.copy() wants the 1st mode to be covered by the copy atom,
+            # and other modes as for loop. there is no fast way to
+            # "transpose" the tensor view.
             q_tile = cute.local_tile(
                 q[token_id, None, None],
                 tiler=(self.coarsen, 16),
