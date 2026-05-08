@@ -724,6 +724,12 @@ class Worker(WorkerBase):
         """Get encoder timing stats from model runner."""
         return self.model_runner.get_encoder_timing_stats()
 
+    def get_eplb_step_count(self) -> int:
+        eplb_state = getattr(self.model_runner, "eplb_state", None)
+        if eplb_state is None:
+            return 0
+        return eplb_state.total_steps
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.

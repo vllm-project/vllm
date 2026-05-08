@@ -295,6 +295,15 @@ class EplbState:
         """
         Open JSONL file handle for expert-load stats, if enabled.
         """
+        self.total_steps: int = 0
+        """
+        Monotonic counter of EPLB steps observed since server start.
+        Unlike ``expert_rearrangement_step``, this is NOT reset on
+        rearrangement, and counts both real and dummy forward passes
+        (``is_profile`` passes are excluded). Exposed via the
+        ``/eplb_step_count`` HTTP endpoint to help size
+        ``expert_load_stats_interval`` for a target benchmark.
+        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -837,6 +846,8 @@ class EplbState:
         if is_profile:
             self.rearrange(is_profile=True)
             return
+
+        self.total_steps += 1
 
         if is_dummy:
             # Do not record load metrics for dummy steps

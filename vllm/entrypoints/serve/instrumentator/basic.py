@@ -55,3 +55,15 @@ async def get_server_load_metrics(request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.get("/eplb_step_count")
+async def get_eplb_step_count(request: Request):
+    # Returns the monotonic count of EPLB steps observed since server
+    # start (excluding `is_profile` passes). Intended for sizing
+    # `eplb_config.expert_load_stats_interval`: curl before and after a
+    # benchmark and use the delta. All TP/DP ranks step in lockstep, so
+    # rank 0's value is reported.
+    client = engine_client(request)
+    counts = await client.collective_rpc("get_eplb_step_count")
+    return JSONResponse(content={"step_count": counts[0]})

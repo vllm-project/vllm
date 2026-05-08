@@ -3,15 +3,40 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Generate a static EPLB mapping from expert-load statistics."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import torch
+if TYPE_CHECKING:
+    import torch
 
-from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+# Heavy modules (`torch`, `DefaultEplbPolicy`) are populated by
+# `_lazy_imports()` after argument parsing so that `--help` / no-args
+# usage prints instantly.
+torch: Any = None
+DefaultEplbPolicy: Any = None
+
+
+def _lazy_imports() -> None:
+    global torch, DefaultEplbPolicy
+    t = time.strftime("%H:%M:%S")
+    sys.stderr.write(
+        f"\033[1;36m[generate_static_mapping {t}]\033[0m Importing torch …\n"
+    )
+    sys.stderr.flush()
+    import torch as _torch
+
+    from vllm.distributed.eplb.policy.default import (
+        DefaultEplbPolicy as _DefaultEplbPolicy,
+    )
+
+    torch = _torch
+    DefaultEplbPolicy = _DefaultEplbPolicy
 
 
 class _Parser(argparse.ArgumentParser):
@@ -195,11 +220,25 @@ def main() -> None:
     )
     parser.add_argument("--stats-path", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--num-redundant-experts", type=int, required=True)
+    parser.add_argument(
+        "--num-redundant-experts",
+        type=int,
+        default=0,
+        help="Number of redundant physical expert slots to add on top of the "
+        "logical experts. 0 = no redundancy (rebalance only). (default: %(default)s)",
+    )
     args = parser.parse_args()
 
     if args.num_redundant_experts < 0:
         parser.error("--num-redundant-experts must be non-negative.")
+
+    # Validate input paths BEFORE the heavy torch/vllm import — the user
+    # should learn about a typo'd --stats-path in milliseconds, not after
+    # waiting 10+ seconds for torch to load.
+    if not args.stats_path.is_file():
+        parser.error(f"--stats-path: file not found: {args.stats_path}")
+
+    _lazy_imports()
 
     meta, records = _load_jsonl(args.stats_path)
     num_ranks = int(meta["num_ranks"])
