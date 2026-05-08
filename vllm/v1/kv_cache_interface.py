@@ -151,6 +151,16 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.kv_quant_mode.is_nvfp4:
+            # Packed layout: fp4 data + fp8 block scales per head.
+            full_dim = nvfp4_kv_cache_full_dim(self.head_size)
+            return (
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * full_dim
+                * get_dtype_size(self.dtype)
+            )
         return (
             2
             * self.block_size
