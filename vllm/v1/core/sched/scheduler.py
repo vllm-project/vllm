@@ -301,10 +301,14 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.kv_connector_prefetch_token_budget
         )
         # Cache of per-request connector lookup results within a single
-        # schedule() call: req_id -> (ext_tokens, load_kv_async).
+        # schedule() call:
+        #   req_id -> (num_local_hits, ext_tokens, load_kv_async)
         # Populated by the early-prefetch pass and consumed by the
         # waiting-queue scheduling loop to avoid duplicate connector calls.
-        self._step_prefetch_cache: dict[str, tuple[int | None, bool]] = {}
+        # `num_local_hits` is the local prefix-cache hit count observed at
+        # probe time; the cached connector result is only safe to reuse
+        # when the local hit count seen in the main loop matches.
+        self._step_prefetch_cache: dict[str, tuple[int, int | None, bool]] = {}
 
     def _mamba_block_aligned_split(
         self,
@@ -385,8 +389,15 @@ class Scheduler(SchedulerInterface):
         budget = self.kv_connector_prefetch_token_budget
         if budget <= 0 or self.connector is None:
             return
-        if self._pause_state == PauseState.PAUSED_ALL:
+        # Skip prefetching whenever the scheduler is paused. In PAUSED_ALL
+        # nothing runs; in PAUSED_NEW no new (waiting-queue) requests will
+        # be scheduled, so prefetching for them is wasted work and may
+        # cause premature eviction of the prefetched data.
+        if self._pause_state != PauseState.UNPAUSED:
             return
+
+        kv_cache_manager = self.kv_cache_manager
+        enable_caching = kv_cache_manager.enable_caching
 
         prefetch_tokens_used = 0
         # Probe the regular waiting queue first, then any non-blocked
@@ -404,13 +415,33 @@ class Scheduler(SchedulerInterface):
                     continue
                 if self._is_blocked_waiting_status(request.status):
                     continue
+                # Compute the local prefix-cache hit length so the
+                # connector probe starts where the local cache ends.
+                # We call the coordinator directly (rather than
+                # `kv_cache_manager.get_computed_blocks`) to avoid
+                # recording prefix-cache stats during the prefetch pass
+                # and to skip materializing KVCacheBlocks objects that
+                # would be discarded.
+                if enable_caching and not request.skip_reading_prefix_cache:
+                    max_cache_hit_length = request.num_tokens - 1
+                    _, num_local_hits = (
+                        kv_cache_manager.coordinator.find_longest_cache_hit(
+                            request.block_hashes, max_cache_hit_length
+                        )
+                    )
+                else:
+                    num_local_hits = 0
                 # Fire the connector lookup. This is the side-effecting
                 # call that kicks off async loads for connectors that
                 # support them (e.g. LMCache async loading).
                 ext_tokens, load_kv_async = self.connector.get_num_new_matched_tokens(
-                    request, 0
+                    request, num_local_hits
                 )
-                self._step_prefetch_cache[req_id] = (ext_tokens, load_kv_async)
+                self._step_prefetch_cache[req_id] = (
+                    num_local_hits,
+                    ext_tokens,
+                    load_kv_async,
+                )
                 prefetch_tokens_used += request.num_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -692,13 +723,17 @@ class Scheduler(SchedulerInterface):
                     if self.connector is not None:
                         # Reuse the result from the early-prefetch pass if
                         # available, so we don't hit the connector twice in
-                        # the same schedule() call. The early-prefetch pass
-                        # always probes with num_computed_tokens=0 and we
-                        # are in the `request.num_computed_tokens == 0`
-                        # branch here, so the inputs match.
+                        # the same schedule() call. The cached result is
+                        # only safe to reuse when the local prefix-cache
+                        # hit count seen here matches the one observed at
+                        # probe time, since the connector was queried with
+                        # that offset.
                         cached = self._step_prefetch_cache.pop(request.request_id, None)
-                        if cached is not None and num_new_local_computed_tokens == 0:
-                            ext_tokens, load_kv_async = cached
+                        if (
+                            cached is not None
+                            and cached[0] == num_new_local_computed_tokens
+                        ):
+                            _, ext_tokens, load_kv_async = cached
                         else:
                             ext_tokens, load_kv_async = (
                                 self.connector.get_num_new_matched_tokens(
