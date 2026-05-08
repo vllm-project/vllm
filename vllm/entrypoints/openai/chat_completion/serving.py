@@ -502,9 +502,11 @@ class OpenAIServingChat(OpenAIServing):
                     prompt_text: str | None = None
                     if request.return_token_ids and res.prompt_token_ids is not None:
                         try:
-                            prompt_text = tokenizer.decode(
-                                list(res.prompt_token_ids),
-                                skip_special_tokens=False,
+                            prompt_text = (
+                                await self.renderer.get_async_tokenizer().decode(
+                                    list(res.prompt_token_ids),
+                                    skip_special_tokens=False,
+                                )
                             )
                         except Exception as exc:
                             logger.warning(
@@ -1382,7 +1384,7 @@ class OpenAIServingChat(OpenAIServing):
         if request.return_token_ids and final_res.prompt_token_ids is not None:
             try:
                 # Keep template markers / special tokens visible.
-                prompt_text = tokenizer.decode(
+                prompt_text = await self.renderer.get_async_tokenizer().decode(
                     list(final_res.prompt_token_ids),
                     skip_special_tokens=False,
                 )
