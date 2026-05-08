@@ -130,20 +130,11 @@ class SpeculatorsConfig(PretrainedConfig):
                 f"Missing 'speculative_tokens' in proposal method. Got: {first_method}"
             )
 
-        speculators_model_type = config_dict.get("speculators_model_type")
-
-        method = speculators_model_type
-        parallel_drafting = False
-        if speculators_model_type == "peagle":
-            method = "eagle3"
-            parallel_drafting = True
-
         # Build base vLLM speculative configuration
         result = {
-            "method": method,
+            "method": config_dict.get("speculators_model_type"),
             "num_speculative_tokens": num_speculative_tokens,
         }
-        if parallel_drafting:
-            result["parallel_drafting"] = parallel_drafting
-
+        if result["method"] == "peagle":
+            result.update({"method": "eagle3", "parallel_drafting": True})
         return result

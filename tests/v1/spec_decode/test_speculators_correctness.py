@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
+
 import pytest
 import torch
 
@@ -9,35 +11,73 @@ from vllm import LLM
 from vllm.config import SpeculativeConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 
-MODEL_PATH = "nm-testing/dflash-qwen3-8b-speculators"
 
-EXPECTED_GSM8K_ACCURACY = 0.885
-ACCURACY_RTOL = 0.03
-EXPECTED_ACCEPTANCE_LEN = 3.45
-ACCEPTANCE_LEN_RTOL = 0.15
+@dataclasses.dataclass
+class SpeculatorTestConfig:
+    model_path: str
+    method: str
+    display_name: str
+    expected_gsm8k_accuracy: float
+    accuracy_rtol: float
+    expected_acceptance_len: float
+    acceptance_len_rtol: float
+    expected_per_pos_acceptance_rates: tuple[float, ...]
+    per_pos_rtol: float
+    quantization: str | None = None
+    parallel_drafting: bool | None = None
 
-# Expected per-position acceptance rates (accepted_at_pos / num_drafts)
-# Based on GSM8K evaluation with Qwen3-8B dflash speculators.
-EXPECTED_PER_POS_ACCEPTANCE_RATES = [0.795, 0.611, 0.429, 0.282]
-PER_POS_RTOL = 0.15
+
+DFLASH_CONFIG = SpeculatorTestConfig(
+    model_path="nm-testing/dflash-qwen3-8b-speculators",
+    method="dflash",
+    display_name="DFlash",
+    expected_gsm8k_accuracy=0.885,
+    accuracy_rtol=0.03,
+    expected_acceptance_len=3.45,
+    acceptance_len_rtol=0.15,
+    expected_per_pos_acceptance_rates=(0.795, 0.611, 0.429, 0.282),
+    per_pos_rtol=0.15,
+    quantization="fp8",
+)
+
+PEAGLE_CONFIG = SpeculatorTestConfig(
+    model_path="nm-testing/qwen3-8b-peagle-speculators",
+    method="eagle3",
+    display_name="PEagle",
+    expected_gsm8k_accuracy=0.88,
+    accuracy_rtol=0.05,
+    expected_acceptance_len=2.27,
+    acceptance_len_rtol=0.20,
+    expected_per_pos_acceptance_rates=(0.66, 0.36, 0.18, 0.09),
+    per_pos_rtol=0.20,
+    parallel_drafting=True,
+)
+
+SPECULATOR_CONFIGS = [
+    pytest.param(DFLASH_CONFIG, id="dflash"),
+    pytest.param(PEAGLE_CONFIG, id="peagle"),
+]
 
 
-def compute_spec_decode_stats(
-    metrics,
-) -> dict:
-    """Extract all spec-decode metrics and compute derived stats."""
+def compute_spec_decode_stats(metrics) -> dict:
     name2metric = {m.name: m for m in metrics}
 
     n_drafts = name2metric["vllm:spec_decode_num_drafts"].value
     n_draft_tokens = name2metric["vllm:spec_decode_num_draft_tokens"].value
     n_accepted = name2metric["vllm:spec_decode_num_accepted_tokens"].value
 
-    per_pos_vec = name2metric["vllm:spec_decode_num_accepted_tokens_per_pos"].values
+    per_pos_vec = name2metric[
+        "vllm:spec_decode_num_accepted_tokens_per_pos"
+    ].values
 
     acceptance_len = 1 + (n_accepted / n_drafts) if n_drafts > 0 else 1.0
     draft_tokens_per_step = (n_draft_tokens / n_drafts) if n_drafts > 0 else 0
-    overall_acceptance_rate = (n_accepted / n_draft_tokens) if n_draft_tokens > 0 else 0
-    per_pos_rates = [v / n_drafts for v in per_pos_vec] if n_drafts > 0 else []
+    overall_acceptance_rate = (
+        (n_accepted / n_draft_tokens) if n_draft_tokens > 0 else 0
+    )
+    per_pos_rates = (
+        [v / n_drafts for v in per_pos_vec] if n_drafts > 0 else []
+    )
 
     return {
         "num_drafts": n_drafts,
@@ -52,14 +92,17 @@ def compute_spec_decode_stats(
 
 
 def print_spec_decode_stats(stats: dict) -> None:
-    """Print all spec-decode metrics and derived values."""
     print("\n===== Spec Decode Metrics =====")
     print(f"  num_drafts:              {stats['num_drafts']}")
     print(f"  num_draft_tokens:        {stats['num_draft_tokens']}")
     print(f"  num_accepted_tokens:     {stats['num_accepted_tokens']}")
     print(f"  draft_tokens_per_step:   {stats['draft_tokens_per_step']:.2f}")
-    print(f"  overall_acceptance_rate: {stats['overall_acceptance_rate']:.4f}")
-    print(f"  acceptance_len (1+acc/drafts): {stats['acceptance_len']:.4f}")
+    print(
+        f"  overall_acceptance_rate: {stats['overall_acceptance_rate']:.4f}"
+    )
+    print(
+        f"  acceptance_len (1+acc/drafts): {stats['acceptance_len']:.4f}"
+    )
     print("  per-position accepted tokens:", stats["per_pos_accepted"])
     print("  per-position acceptance rates:")
     for i, rate in enumerate(stats["per_pos_acceptance_rates"]):
@@ -67,25 +110,15 @@ def print_spec_decode_stats(stats: dict) -> None:
     print("===============================\n")
 
 
-def test_dflash_speculators_model(vllm_runner, example_prompts, monkeypatch):
-    """
-    Test DFlash speculators model properly initializes speculative decoding.
-
-    Verifies:
-    1. Speculative config is automatically initialized from speculators config
-    2. Method is detected as 'dflash'
-    3. The draft model path is correctly set
-    4. Speculative tokens count is valid (num_speculative_tokens=8)
-    5. Text generation works with speculative decoding enabled
-    """
+@pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
+def test_speculators_model(vllm_runner, example_prompts, monkeypatch, config):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    with vllm_runner(
-        MODEL_PATH,
-        dtype=torch.bfloat16,
-        enforce_eager=True,
-        quantization="fp8",
-    ) as vllm_model:
+    runner_kwargs = dict(dtype=torch.bfloat16, enforce_eager=True)
+    if config.quantization:
+        runner_kwargs["quantization"] = config.quantization
+
+    with vllm_runner(config.model_path, **runner_kwargs) as vllm_model:
         vllm_config = vllm_model.llm.llm_engine.vllm_config
 
         assert isinstance(vllm_config.speculative_config, SpeculativeConfig), (
@@ -93,40 +126,39 @@ def test_dflash_speculators_model(vllm_runner, example_prompts, monkeypatch):
         )
 
         spec_config = vllm_config.speculative_config
-        assert spec_config.method == "dflash", (
-            f"Expected method='dflash', got '{spec_config.method}'"
+        assert spec_config.method == config.method, (
+            f"Expected method='{config.method}', got '{spec_config.method}'"
         )
+        if config.parallel_drafting is not None:
+            assert spec_config.parallel_drafting is config.parallel_drafting, (
+                f"Expected parallel_drafting={config.parallel_drafting} "
+                f"for {config.display_name} model"
+            )
         assert spec_config.num_speculative_tokens > 0, (
             f"Expected positive speculative tokens, "
             f"got {spec_config.num_speculative_tokens}"
         )
-        assert spec_config.model == MODEL_PATH, (
-            f"Draft model should be {MODEL_PATH}, got {spec_config.model}"
+        assert spec_config.model == config.model_path, (
+            f"Draft model should be {config.model_path}, "
+            f"got {spec_config.model}"
         )
 
-        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens=20)
-        assert vllm_outputs, f"No outputs generated for speculators model {MODEL_PATH}"
+        vllm_outputs = vllm_model.generate_greedy(
+            example_prompts, max_tokens=20
+        )
+        assert vllm_outputs, (
+            f"No outputs generated for speculators model {config.model_path}"
+        )
 
 
 @pytest.mark.slow_test
 @large_gpu_mark(min_gb=40)
-def test_dflash_speculators_correctness(monkeypatch):
-    """
-    E2E correctness test for DFlash via the speculators auto-detect path.
-
-    Evaluates GSM8k accuracy to ensure the speculators-format model produces
-    correct outputs, and checks that acceptance length does not collapse under
-    batched inference (lm-eval style).
-
-    Observed per-position acceptance rates on GSM8K (1319 prompts):
-        pos 0: 0.795, pos 1: 0.611, pos 2: 0.429, pos 3: 0.282,
-        pos 4: 0.169, pos 5: 0.093, pos 6: 0.048, pos 7: 0.023
-    Observed mean AL: 3.45 (GSM8K dataset, max_num_seqs=128)
-    """
+@pytest.mark.parametrize("config", SPECULATOR_CONFIGS)
+def test_speculators_correctness(monkeypatch, config):
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     spec_llm = LLM(
-        model=MODEL_PATH,
+        model=config.model_path,
         trust_remote_code=True,
         max_model_len=4096,
         max_num_seqs=128,
@@ -137,9 +169,10 @@ def test_dflash_speculators_correctness(monkeypatch):
 
     results = evaluate_gsm8k_offline(spec_llm)
     accuracy = results["accuracy"]
-    accuracy_threshold = EXPECTED_GSM8K_ACCURACY * (1 - ACCURACY_RTOL)
+    accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
     assert accuracy >= accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"
+        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, "
+        f"got {accuracy:.3f}"
     )
 
     current_metrics = spec_llm.get_metrics()
@@ -147,19 +180,18 @@ def test_dflash_speculators_correctness(monkeypatch):
     print_spec_decode_stats(stats)
 
     acceptance_len = stats["acceptance_len"]
-    al_threshold = EXPECTED_ACCEPTANCE_LEN * (1 - ACCEPTANCE_LEN_RTOL)
+    al_threshold = config.expected_acceptance_len * (1 - config.acceptance_len_rtol)
     assert acceptance_len >= al_threshold, (
-        f"DFlash speculators acceptance length too low: "
+        f"{config.display_name} speculators acceptance length too low: "
         f"{acceptance_len:.2f} < {al_threshold:.2f}"
     )
 
-    # Check per-position acceptance rates for the first few positions.
     per_pos_rates = stats["per_pos_acceptance_rates"]
-    for i, expected_rate in enumerate(EXPECTED_PER_POS_ACCEPTANCE_RATES):
+    for i, expected_rate in enumerate(config.expected_per_pos_acceptance_rates):
         assert i < len(per_pos_rates), (
             f"Missing per-position acceptance rate for position {i}"
         )
-        threshold = expected_rate * (1 - PER_POS_RTOL)
+        threshold = expected_rate * (1 - config.per_pos_rtol)
         assert per_pos_rates[i] >= threshold, (
             f"Per-position acceptance rate at pos {i} too low: "
             f"{per_pos_rates[i]:.4f} < {threshold:.4f} "
