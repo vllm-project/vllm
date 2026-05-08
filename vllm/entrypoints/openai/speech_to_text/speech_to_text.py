@@ -5,7 +5,7 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable, Set
+from collections.abc import AsyncGenerator, Callable, Sequence, Set
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -49,7 +49,6 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -134,32 +133,32 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
-    def _get_transcription_stop_token_ids(self) -> list[int]:
-        config_eos_token_id = getattr(self.model_config.hf_config, "eos_token_id", None)
-        if not isinstance(config_eos_token_id, int):
+    def _get_generation_config_stop_token_ids(self) -> list[int]:
+        eos_token_ids = self.asr_config.generation_config.get("eos_token_id")
+        if eos_token_ids is None:
             return []
 
-        tokenizer = cached_tokenizer_from_config(self.model_config)
-        tokenizer_eos_token_id = (
-            None if tokenizer is None else getattr(tokenizer, "eos_token_id", None)
-        )
-        if tokenizer_eos_token_id == config_eos_token_id:
+        if isinstance(eos_token_ids, int):
+            eos_token_ids = [eos_token_ids]
+        elif isinstance(eos_token_ids, Sequence) and not isinstance(eos_token_ids, str):
+            eos_token_ids = list(eos_token_ids)
+        else:
             return []
 
-        return [config_eos_token_id]
+        tokenizer_eos_token_id = self.renderer.get_eos_token_id()
+        return [
+            eos_token_id
+            for eos_token_id in eos_token_ids
+            if isinstance(eos_token_id, int) and eos_token_id != tokenizer_eos_token_id
+        ]
 
-    @staticmethod
-    def _apply_transcription_stop_token_ids(
-        sampling_params: SamplingParams,
-        stop_token_ids: list[int],
+    def _update_transcription_sampling_params(
+        self, sampling_params: SamplingParams
     ) -> None:
-        if sampling_params.ignore_eos or not stop_token_ids:
-            return
-
-        all_stop_token_ids = set(sampling_params.stop_token_ids or [])
-        all_stop_token_ids.update(stop_token_ids)
-        sampling_params.stop_token_ids = sorted(all_stop_token_ids)
-        sampling_params._all_stop_token_ids.update(stop_token_ids)
+        sampling_params.update_from_generation_config(
+            self.asr_config.generation_config,
+            self.renderer.get_eos_token_id(),
+        )
 
     def _get_transcription_beam_search_error(
         self,
@@ -451,7 +450,7 @@ class OpenAISpeechToText(OpenAIServing):
                 "verbose_json format doesn't support streaming case"
             )
 
-        transcription_stop_token_ids = self._get_transcription_stop_token_ids()
+        transcription_stop_token_ids = self._get_generation_config_stop_token_ids()
         if request.use_beam_search:
             error_response = self._get_transcription_beam_search_error(
                 transcription_stop_token_ids
@@ -503,9 +502,7 @@ class OpenAISpeechToText(OpenAIServing):
                 max_tokens,
                 self.default_sampling_params,
             )
-            self._apply_transcription_stop_token_ids(
-                sampling_params, transcription_stop_token_ids
-            )
+            self._update_transcription_sampling_params(sampling_params)
 
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
