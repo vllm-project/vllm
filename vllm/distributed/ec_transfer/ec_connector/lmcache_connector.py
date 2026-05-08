@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from lmcache.integration.vllm.vllm_ec_adapter import LMCacheECConnectorImpl
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -21,6 +20,15 @@ if TYPE_CHECKING:
 class LMCacheECConnector(ECConnectorBase):
     def __init__(self, vllm_config: VllmConfig, role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
+        try:
+            from lmcache.integration.vllm.vllm_ec_adapter import (  # type: ignore[import-not-found]
+                LMCacheECConnectorImpl,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "LMCacheECConnector requires lmcache to be installed. "
+                "Please install lmcache to use the LMCache EC connector."
+            ) from e
         self._impl = LMCacheECConnectorImpl(
             vllm_config=vllm_config,
             role=role,
