@@ -41,6 +41,7 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
 )
 _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 1024
+_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2)
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
     64,
@@ -71,6 +72,38 @@ def _has_deepseek_v4_sparse_mla_backend(runner: "GPUModelRunner") -> bool:
 
 def _clamp_warmup_tokens(num_tokens: int, max_tokens: int) -> int:
     return max(0, min(num_tokens, max_tokens))
+
+
+def _is_deepseek_v4_mtp_spec_decode(runner: "GPUModelRunner") -> bool:
+    spec_config = getattr(runner, "speculative_config", None)
+    return (
+        getattr(spec_config, "method", None) == "mtp"
+        and getattr(runner, "num_spec_tokens", 0) > 0
+    )
+
+
+def _deepseek_v4_mtp_uniform_decode_warmup_requests(
+    runner: "GPUModelRunner",
+    max_tokens: int,
+    max_reqs: int,
+) -> tuple[int, ...]:
+    if not _is_deepseek_v4_mtp_spec_decode(runner):
+        return ()
+
+    query_len = getattr(
+        runner,
+        "uniform_decode_query_len",
+        1 + getattr(runner, "num_spec_tokens", 0),
+    )
+    if query_len <= 0:
+        return ()
+
+    max_warmup_reqs = min(max_reqs, max_tokens // query_len)
+    return tuple(
+        reqs
+        for reqs in _DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS
+        if reqs <= max_warmup_reqs
+    )
 
 
 def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
@@ -183,6 +216,131 @@ def _deepseek_v4_request_prep_warmup(worker: "Worker") -> None:
     torch.accelerator.synchronize()
 
 
+def _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
+    *,
+    device: torch.device,
+    num_reqs: int,
+    num_spec_tokens: int,
+    vocab_size: int,
+    block_size: int,
+    max_model_len: int,
+) -> None:
+    from vllm.v1.sample.logits_processor import LogitsProcessors
+    from vllm.v1.sample.metadata import SamplingMetadata
+    from vllm.v1.sample.rejection_sampler import rejection_sample
+    from vllm.v1.spec_decode.utils import (
+        eagle_prepare_inputs_padded_kernel,
+        eagle_prepare_next_token_padded_kernel,
+        eagle_step_update_slot_mapping_and_metadata,
+        next_power_of_2,
+    )
+
+    num_sampled_tokens = num_spec_tokens + 1
+    sampled_token_ids = torch.arange(
+        num_reqs * num_sampled_tokens, dtype=torch.int32, device=device
+    ).reshape(num_reqs, num_sampled_tokens)
+    sampled_token_ids.remainder_(vocab_size)
+    discard_request_mask = torch.zeros(num_reqs, dtype=torch.bool, device=device)
+    backup_next_token_ids = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+    next_token_ids = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    valid_sampled_tokens_count = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    eagle_prepare_next_token_padded_kernel[(num_reqs,)](
+        sampled_token_ids,
+        discard_request_mask,
+        backup_next_token_ids,
+        next_token_ids,
+        valid_sampled_tokens_count,
+        vocab_size,
+        num_sampled_tokens,
+        num_reqs,
+        sampled_token_ids.stride(0),
+        BLOCK_SIZE_TOKENS=next_power_of_2(num_sampled_tokens),
+    )
+
+    cu_num_draft_tokens = torch.arange(
+        num_spec_tokens,
+        num_reqs * num_spec_tokens + 1,
+        num_spec_tokens,
+        dtype=torch.int32,
+        device=device,
+    )
+    query_start_loc = torch.arange(
+        0,
+        (num_reqs + 1) * num_sampled_tokens,
+        num_sampled_tokens,
+        dtype=torch.int32,
+        device=device,
+    )
+    token_indices_to_sample = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    num_rejected_tokens = torch.empty(num_reqs, dtype=torch.int32, device=device)
+    eagle_prepare_inputs_padded_kernel[(num_reqs,)](
+        cu_num_draft_tokens,
+        valid_sampled_tokens_count,
+        query_start_loc,
+        token_indices_to_sample,
+        num_rejected_tokens,
+        num_reqs,
+    )
+
+    positions = torch.arange(num_reqs, dtype=torch.int64, device=device)
+    block_table_tensor = torch.zeros((num_reqs, 1), dtype=torch.int32, device=device)
+    seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
+    out_clamped_positions = torch.empty_like(positions)
+    out_slot_mapping = torch.empty(num_reqs, dtype=torch.int64, device=device)
+    eagle_step_update_slot_mapping_and_metadata(
+        positions,
+        block_table_tensor,
+        seq_lens,
+        block_size,
+        max_model_len,
+        out_clamped_positions,
+        out_slot_mapping,
+        input_batch_size=num_reqs,
+    )
+
+    total_draft_tokens = num_reqs * num_spec_tokens
+    draft_token_ids = torch.arange(total_draft_tokens, dtype=torch.int32, device=device)
+    draft_token_ids.remainder_(vocab_size)
+    draft_probs = torch.rand(
+        total_draft_tokens, vocab_size, dtype=torch.float32, device=device
+    )
+    draft_probs = draft_probs / draft_probs.sum(dim=-1, keepdim=True)
+    target_logits = torch.randn(
+        total_draft_tokens, vocab_size, dtype=torch.float32, device=device
+    )
+    bonus_token_ids = torch.zeros((num_reqs, 1), dtype=torch.int32, device=device)
+    sampling_metadata = SamplingMetadata(
+        temperature=torch.full((num_reqs,), 0.7, dtype=torch.float32, device=device),
+        all_greedy=False,
+        all_random=True,
+        top_p=None,
+        top_k=None,
+        generators={},
+        max_num_logprobs=None,
+        no_penalties=True,
+        prompt_token_ids=None,
+        frequency_penalties=torch.empty(0, device=device),
+        presence_penalties=torch.empty(0, device=device),
+        repetition_penalties=torch.empty(0, device=device),
+        output_token_ids=[[] for _ in range(num_reqs)],
+        allowed_token_ids_mask=None,
+        bad_words_token_ids={},
+        logitsprocs=LogitsProcessors(),
+        logprob_token_ids=None,
+        spec_token_ids=[[] for _ in range(num_reqs)],
+    )
+    rejection_sample(
+        draft_token_ids=draft_token_ids,
+        num_draft_tokens=[num_spec_tokens] * num_reqs,
+        max_spec_len=num_spec_tokens,
+        cu_num_draft_tokens=cu_num_draft_tokens,
+        draft_probs=draft_probs,
+        target_logits=target_logits,
+        bonus_token_ids=bonus_token_ids,
+        sampling_metadata=sampling_metadata,
+    )
+
+
 def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     if not envs.VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP:
         return
@@ -198,14 +356,21 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     prefill_tokens = _clamp_warmup_tokens(
         _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS, max_tokens
     )
-    if mixed_tokens <= 0 and prefill_tokens <= 0:
+    uniform_decode_reqs = _deepseek_v4_mtp_uniform_decode_warmup_requests(
+        runner,
+        max_tokens=max_tokens,
+        max_reqs=worker.scheduler_config.max_num_seqs,
+    )
+    if mixed_tokens <= 0 and prefill_tokens <= 0 and not uniform_decode_reqs:
         return
 
     logger.info(
         "Warming up DeepSeek V4 sparse MLA attention "
-        "for mixed tokens=%s and prefill tokens=%s.",
+        "for mixed tokens=%s, prefill tokens=%s, and MTP uniform decode "
+        "requests=%s.",
         mixed_tokens,
         prefill_tokens,
+        list(uniform_decode_reqs),
     )
     if mixed_tokens > 0:
         runner._dummy_run(
@@ -223,6 +388,35 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
             force_attention=True,
             create_single_prefill=True,
         )
+    query_len = getattr(runner, "uniform_decode_query_len", 0)
+    for num_reqs in uniform_decode_reqs:
+        runner._dummy_run(
+            num_tokens=num_reqs * query_len,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=True,
+        )
+
+    if uniform_decode_reqs and current_platform.is_cuda_alike():
+        vocab_size = runner.model_config.get_vocab_size()
+        block_size = getattr(runner.cache_config, "block_size", None) or 16
+        logger.info(
+            "Warming up DeepSeek V4 MTP spec-decode kernels for request "
+            "counts=%s and %d draft tokens.",
+            list(uniform_decode_reqs),
+            runner.num_spec_tokens,
+        )
+        for num_reqs in uniform_decode_reqs:
+            _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
+                device=runner.device,
+                num_reqs=num_reqs,
+                num_spec_tokens=runner.num_spec_tokens,
+                vocab_size=vocab_size,
+                block_size=block_size,
+                max_model_len=runner.max_model_len,
+            )
+        torch.accelerator.synchronize()
 
 
 def _flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
