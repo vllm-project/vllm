@@ -457,11 +457,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
             "leads to large differences.",
         )
 
-    # gate requires shared_experts (use_overlapped mode)
-    # TODO: also not sure this is true
-    if config.use_gate and not config.use_shared_experts:
-        return False, "gate requires shared_experts (use_overlapped mode)"
-
     # Skip modelopt_fp4 if not on B100+ (compute capability 10.0+)
     if (
         config.quantization == "modelopt_fp4"
