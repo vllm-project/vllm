@@ -292,9 +292,16 @@ class CpuPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        # TODO: CPU still sets block_size in check_and_update_config.
-        # Move that logic here so block_size is chosen by the backend.
-        pass
+        model_config = vllm_config.model_config
+        if model_config is None or not model_config.is_hybrid:
+            return
+
+        # reconcile attention and mamba page sizes
+        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        if backend_cls is None:
+            return
+
+        cls._align_hybrid_block_size(vllm_config, backend_cls)
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
