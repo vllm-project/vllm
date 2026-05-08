@@ -559,10 +559,6 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 class ParakeetForTDTConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        from vllm.transformers_utils.configs.parakeet_tdt import (
-            PARAKEET_TDT_EOS_TOKEN_ID,
-        )
-
         model_config = vllm_config.model_config
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         if scheduler_config is not None and scheduler_config.max_num_seqs != 1:
@@ -572,15 +568,6 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
                 "to keep decoding state correct."
             )
             scheduler_config.max_num_seqs = 1
-
-        hf_configs = (model_config.hf_config, model_config.hf_text_config)
-        seen_config_ids: set[int] = set()
-        for hf_config in hf_configs:
-            if id(hf_config) in seen_config_ids:
-                continue
-            seen_config_ids.add(id(hf_config))
-            if not isinstance(getattr(hf_config, "eos_token_id", None), int):
-                hf_config.eos_token_id = PARAKEET_TDT_EOS_TOKEN_ID
 
         if not model_config.enforce_eager:
             logger.warning_once(
