@@ -52,7 +52,11 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    CrossAttentionSpec,
+    KVCacheConfig,
+)
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -92,6 +96,10 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        self.has_cross_attention_encoder = any(
+            isinstance(group.kv_cache_spec, CrossAttentionSpec)
+            for group in kv_cache_config.kv_cache_groups
+        )
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -122,8 +130,9 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         if self.vllm_config.kv_transfer_config is not None:
-            assert not self.is_encoder_decoder, (
-                "Encoder-decoder models are not currently supported with KV connectors"
+            assert not self.has_cross_attention_encoder, (
+                "Cross-attention encoder models are not currently supported "
+                "with KV connectors"
             )
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config,
@@ -207,7 +216,7 @@ class Scheduler(SchedulerInterface):
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
         self.encoder_cache_manager = (
             EncoderDecoderCacheManager(cache_size=encoder_cache_size)
-            if self.is_encoder_decoder
+            if self.has_cross_attention_encoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
 
@@ -732,7 +741,7 @@ class Scheduler(SchedulerInterface):
                 # Determine if we need to allocate cross-attention blocks.
                 num_encoder_tokens = 0
                 if (
-                    self.is_encoder_decoder
+                    self.has_cross_attention_encoder
                     and request.has_encoder_inputs
                     and encoder_inputs_to_schedule
                 ):
@@ -1157,11 +1166,12 @@ class Scheduler(SchedulerInterface):
                 # The encoder input is not needed in this step.
                 break
 
-            if self.is_encoder_decoder and num_computed_tokens > 0:
-                assert start_pos == 0, (
-                    "Encoder input should be processed at the beginning of "
-                    "the sequence when encoder-decoder models are used."
-                )
+            if self.has_cross_attention_encoder and num_computed_tokens > 0:
+                if self.is_encoder_decoder:
+                    assert start_pos == 0, (
+                        "Encoder input should be processed at the beginning of "
+                        "the sequence when encoder-decoder models are used."
+                    )
                 # Encoder input has already been computed
                 # The calculation here is a bit different. We don't turn encoder
                 # output into tokens that get processed by the decoder and
@@ -1177,7 +1187,7 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if not self.is_encoder_decoder:
+            if not self.has_cross_attention_encoder:
                 # We are not using the encoder cache for encoder-decoder models,
                 # yet.
                 if item_identifier in mm_hashes_to_schedule:
@@ -1651,7 +1661,7 @@ class Scheduler(SchedulerInterface):
             mm_feature = request.mm_features[input_id]
             start_pos = mm_feature.mm_position.offset
             num_tokens = mm_feature.mm_position.length
-            if self.is_encoder_decoder and request.num_computed_tokens > 0:
+            if self.has_cross_attention_encoder and request.num_computed_tokens > 0:
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.

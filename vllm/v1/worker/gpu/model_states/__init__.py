@@ -18,6 +18,11 @@ def init_model_state(
 
         return WhisperModelState(vllm_config, model, encoder_cache, device)
 
+    if "MossVLForConditionalGeneration" in vllm_config.model_config.architectures:
+        from vllm.v1.worker.gpu.model_states.moss_vl import MossVLModelState
+
+        return MossVLModelState(vllm_config, model, encoder_cache, device)
+
     from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
     return DefaultModelState(vllm_config, model, encoder_cache, device)
