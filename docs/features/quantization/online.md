@@ -47,57 +47,40 @@ For fine-grained control, use a `quantization_config` dictionary.
 ```yaml
 quantization_config:
   linear:
-    weight: <quant-key-name>      # e.g. fp8_per_block_static
-    activation: <quant-key-name>  # e.g. fp8_per_block_dynamic
+    weight: <name>      # see QUANT_KEY_NAMES in vllm/config/quantization.py
+    activation: <name>
   moe:
-    weight: <quant-key-name>
-    activation: <quant-key-name>
+    weight: <name>
+    activation: <name>
   ignore: [<layer-name-or-regex>, ...]
 ```
 
-`linear` and `moe` are per-layer-kind specs. Each takes a `weight` and an
-`activation` key — both naming entries from the public `QUANT_KEY_NAMES`
-table (`mxfp8`, `mxfp4`, `fp8_per_tensor_static`, `fp8_per_block_static`,
-`fp8_per_block_dynamic`, `fp8_per_token`, `int8_per_channel_static`). Fields
-left out fall back to either the `--quantization` shorthand's defaults or, for
-already-quantized checkpoints, the value baked into the checkpoint.
+`linear` and `moe` accept a full `{weight, activation}` dict, or a bare
+string. A string resolves first against the `--quantization` shorthands
+(taking the matching layer-kind slot), then against `QUANT_KEY_NAMES` as a
+weight name. Unset fields fall back to the `--quantization` shorthand's
+defaults, or for already-quantized checkpoints to whatever the checkpoint
+declares.
 
-`linear` and `moe` also accept a bare string for compactness: an online
-shorthand name (e.g. `"fp8_per_block"`) pulls that shorthand's matching
-slot, otherwise the string is treated as a weight format name (shorthand for
-`{"weight": <name>}`).
-
-The CLI accepts the same shape as JSON via `--quantization-config`, or as
-dotted keys for individual fields. The two are equivalent:
+The CLI accepts the same shape as JSON or as dotted keys:
 
 ```bash
 vllm serve <model> --quantization-config '{"moe":{"activation":"mxfp8"}}'
 vllm serve <model> --quantization-config.moe.activation mxfp8
 ```
 
-The dotted form is the easier shape for shell quoting; nested keys merge into
-the same dict (e.g. `--quantization-config.linear.weight fp8_per_block_static`
-plus `--quantization-config.moe.activation mxfp8`).
-
 ### Activation overrides on already-quantized checkpoints
 
-`quantization_config` is also consumed by some checkpoint-quant paths to
-let you pick an activation format independently of the weights baked into
-the checkpoint. The headline case is gpt-oss MXFP4 weights, where you can
-opt into MXFP8 activations:
+For checkpoint-quantized models, `quantization_config` lets you pick an
+activation format independently of the baked-in weights. The supported
+overrides are checkpoint-specific; today this is wired up for MXFP4 MoE
+checkpoints (gpt-oss) where you can opt into FP8 activations:
 
 ```bash
-# Auto-detected MXFP4 weights from the checkpoint, MXFP8 activations on top.
-vllm serve openai/gpt-oss-20b \
-    --quantization-config.moe.activation mxfp8
-
-# Same, pinned to the FlashInfer CUTLASS backend.
-vllm serve openai/gpt-oss-20b \
-    --moe-backend flashinfer_cutlass \
-    --quantization-config.moe.activation mxfp8
+vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 ```
 
-Without an override, gpt-oss runs with BF16 activations (today's default).
+Combine with `--moe-backend` to pin a specific kernel family.
 
 ### Separate Schemes for Dense and MoE Layers
 

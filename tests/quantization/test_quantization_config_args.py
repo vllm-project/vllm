@@ -1,16 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pure-Python unit tests for the QuantizationConfigArgs parsing UX.
-
-These pin the externally-visible behavior of the config layer:
-  - string names resolve to QuantKey instances on `weight` and `activation`
-  - `linear`/`moe` accept either a QuantSpec, a QUANT_KEY_NAMES weight name,
-    or an _ONLINE_SHORTHANDS shorthand name
-  - `--quantization` shorthands desugar to QuantizationConfigArgs and merge
-    correctly with `quantization_config`
-
-No model is loaded; these are fast pydantic-only tests.
-"""
+"""Unit tests for QuantizationConfigArgs parsing."""
 
 import pytest
 

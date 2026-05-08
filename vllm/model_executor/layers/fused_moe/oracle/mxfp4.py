@@ -206,11 +206,10 @@ def backend_to_kernel_cls(
 
 
 def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
-    """Map user's moe_backend string to one or more candidate Mxfp4MoeBackends.
+    """Map a moe_backend string to its candidate Mxfp4MoeBackends.
 
-    Vendor families (e.g. ``flashinfer_trtllm``) return both their BF16 and
-    MXFP8 activation variants; the caller's ``activation_key`` filters down to
-    a single backend via each kernel's ``is_supported_config`` check.
+    Vendor families return all activation variants; the caller picks one
+    via ``activation_key`` and ``is_supported_config``.
     """
     mapping: dict[str, list[Mxfp4MoeBackend]] = {
         "deep_gemm": [Mxfp4MoeBackend.DEEPGEMM_MXFP4],
@@ -245,18 +244,8 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
 
 
 def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-
-    Both BF16-activation and MXFP8-activation variants are listed; each
-    kernel's ``is_supported_config`` filters by the requested
-    ``activation_key`` so the first compatible backend wins.
-    """
-    # Within each vendor family, list the BF16-activation backend before the
-    # MXFP8-activation one so that with no activation override the BF16 path
-    # wins (matching today's auto-mode default). When an activation override
-    # selects MXFP8, is_supported_config rejects the BF16 entry and the
-    # MXFP8 entry is picked next.
+    """Available backends in priority order, BF16-act variant before
+    activation-quantized variant within each vendor family."""
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
@@ -311,8 +300,7 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 
 def _user_moe_activation_override() -> QuantKey | None:
-    """Return the user's MoE activation override from QuantizationConfigArgs,
-    or None if unset."""
+    """User's MoE activation override from quantization_config, or None."""
     args = get_current_vllm_config().model_config.quantization_config
     if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
         return None
@@ -322,14 +310,8 @@ def _user_moe_activation_override() -> QuantKey | None:
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Combine the model's activation_key with the user's override.
-
-    The model's ``activation_key`` (passed by the caller, e.g. compressed-
-    tensors W4A8 sets ``kFp8StaticTensorSym``) wins when no user override is
-    present. The user override (``quantization_config.moe.activation``) wins
-    when the model didn't specify. If both disagree, raise — silent overrides
-    on already-quantized checkpoints are too easy to misuse.
-    """
+    """Combine the model-supplied activation key with the user override.
+    Raises on conflict (both set and disagreeing)."""
     user_override = _user_moe_activation_override()
     if user_override is None:
         return model_activation_key
@@ -357,8 +339,6 @@ def select_mxfp4_moe_backend(
 
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    # If activation_key is explicitly provided (e.g., W4A8) or the user
-    # supplied an override via quantization_config, use that.
     requested_activation_key = _resolve_activation_key(activation_key)
     device_capability = current_platform.get_device_capability()
     triton_kernels_supported = (
@@ -423,19 +403,9 @@ def select_mxfp4_moe_backend(
     def _filter_by_activation(
         backends: list[Mxfp4MoeBackend],
     ) -> list[Mxfp4MoeBackend]:
-        # The backend-to-kernel mapping isn't 1:1 (e.g. both TRTLLM_BF16 and
-        # TRTLLM_MXFP8 use the same experts class), so is_supported_config
-        # alone can't pick the right variant -- gate by the requested
-        # activation here.
-        #
-        # When the caller (model quant_config or user override) set a specific
-        # activation, accept only backends whose intrinsic activation matches.
-        # When no activation was requested, drop backends that demand a
-        # non-BF16 activation -- a BF16-default model shouldn't silently land
-        # on an MXFP8/FP8-act kernel just because it appears in the candidate
-        # list. The exception is when *every* candidate is non-BF16 (e.g.
-        # `--moe-backend flashinfer_trtllm_afp8`): the user explicitly picked
-        # an activation-quantized variant, so honor it.
+        """Pick variants matching ``requested_activation_key``; without one,
+        prefer BF16 if the list has any, else keep the list as-is so explicit
+        non-BF16 picks (e.g. the ``_afp8`` aliases) still land."""
         if requested_activation_key is not None:
             return [
                 b

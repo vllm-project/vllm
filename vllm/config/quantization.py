@@ -19,9 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
 )
 
-# Hand-curated mapping of user-facing names to QuantKey instances. Only entries
-# here are addressable from quantization_config; add a row when a new format
-# should be typeable.
+# User-facing names addressable from quantization_config.
 QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "fp8_per_tensor_static": kFp8StaticTensorSym,
     "fp8_per_tensor_dynamic": kFp8DynamicTensorSym,
@@ -79,16 +77,8 @@ class QuantSpec:
 class QuantizationConfigArgs:
     """User-facing quantization configuration.
 
-    `linear` and `moe` carry per-layer-kind weight/activation specs. Each may
-    be given as a ``QuantSpec`` (or dict) for full control, or as a bare
-    string. A string is resolved as an online shorthand from
-    ``_ONLINE_SHORTHANDS`` if known (using its corresponding linear/moe
-    slot), otherwise as a weight format name from ``QUANT_KEY_NAMES``
-    (shorthand for ``{"weight": <name>}``).
-
-    `ignore` lists layers to leave fully unquantized; supports exact names
-    and regex patterns prefixed with ``re:``, consistent with
-    compressed_tensors.
+    See `docs/features/quantization/online.md` for the schema and shorthand
+    string forms accepted on `linear` and `moe`.
     """
 
     linear: QuantSpec | None = None
@@ -117,13 +107,8 @@ class QuantizationConfigArgs:
         return QuantSpec(weight=_coerce_quant_key(v))
 
 
-# CLI shorthands: `--quantization fp8_per_block` desugars to a full
-# QuantizationConfigArgs at parse time. Keys here are the values accepted by
-# the `--quantization` flag.
-#
-# Shorthands set `weight` only; online method classes pick their activation
-# format internally. Activation overrides flow through `quantization_config`
-# explicitly.
+# CLI shorthands accepted by `--quantization`. Each desugars to a full
+# QuantizationConfigArgs; activation overrides go through quantization_config.
 _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "fp8_per_tensor": QuantizationConfigArgs(
         linear=QuantSpec(weight=kFp8StaticTensorSym),
@@ -144,8 +129,7 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
 }
 
 
-# Names accepted by `--quantization` for the online quant path. Includes
-# "online" as an alias meaning "use quantization_config without a shorthand".
+# Names accepted by `--quantization`; "online" means "use quantization_config".
 ONLINE_QUANT_SHORTHAND_NAMES: tuple[str, ...] = (
     *_ONLINE_SHORTHANDS.keys(),
     "online",
