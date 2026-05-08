@@ -4,17 +4,27 @@
 # It serves a sanity check for compilation and basic model usage.
 set -ex
 
+# Shared lock for Docker operations (build with Intel pull/cleanup)
+DOCKER_OPS_LOCK="/tmp/docker-pull.lock"
+
 image_name="xpu/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
-# Try building the docker image
-docker build -t "${image_name}" -f docker/Dockerfile.xpu .
+# Serialize cleanup + build under the same lock to avoid cross-job races.
+# Keep current commit tag out of deletion list.
+flock "${DOCKER_OPS_LOCK}" bash -c "
+  set -e
+  docker images 'xpu/vllm-ci' --format '{{.Repository}}:{{.Tag}}' \
+    | grep -v 'xpu/vllm-ci:${BUILDKITE_COMMIT}$' \
+    | xargs -r docker rmi 2>/dev/null || true
+  docker build -t '${image_name}' -f docker/Dockerfile.xpu .
+"
 
-# Setup cleanup
-remove_docker_container() {
+# Setup cleanup (remove container only, images cleaned before build)
+cleanup_xpu_artifacts() {
   docker rm -f "${container_name}" || true
 }
-trap remove_docker_container EXIT
+trap cleanup_xpu_artifacts EXIT
 
 # Run the image and test offline inference/tensor parallel
 docker run \
