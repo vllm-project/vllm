@@ -459,24 +459,28 @@ def _decode_grouped_att_m_fwd(
 ):
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
-    BLOCK = 32
     Lk = k_buffer.shape[-1]
     Lv = v_buffer.shape[-1]
 
-    # [TODO] work around shmem limit on MI3xx
-    if is_hip_ and Lk >= 576:
-        BLOCK = 16
-
-    if Lk == 576:
-        BLOCK_DMODEL = 512
-        BLOCK_DPE = 64
-    elif Lk == 288:
-        BLOCK_DMODEL = 256
-        BLOCK_DPE = 32
+    # Align tile dimensions with latent rank for MLA to avoid shape mismatch.
+    if is_mla:
+        if not is_hip_ and Lk == 576:
+            BLOCK_DMODEL = 512
+            BLOCK_DPE = 64
+        elif not is_hip_ and Lk == 288:
+            BLOCK_DMODEL = 256
+            BLOCK_DPE = 32
+        else:
+            BLOCK_DMODEL = triton.next_power_of_2(Lv)
+            BLOCK_DPE = triton.next_power_of_2(Lk - Lv) if Lk > Lv else 0
     else:
         BLOCK_DMODEL = triton.next_power_of_2(Lk)
         BLOCK_DPE = 0
     BLOCK_DV = triton.next_power_of_2(Lv)
+
+    BLOCK = 32
+    if is_hip_:
+        BLOCK = 16
 
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
