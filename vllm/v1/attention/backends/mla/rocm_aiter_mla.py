@@ -420,9 +420,6 @@ class AiterMLAHelper:
 
     @staticmethod
     def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
-        assert num_heads not in AiterMLAHelper._AITER_UNSUPPORTED_HEADS, (
-            f"unsupported head_num: {num_heads}"
-        )
         return (
             q
             if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
