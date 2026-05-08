@@ -10,7 +10,7 @@ import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import RemoteOpenAIServerCustom, create_new_process_for_each_test
+from tests.utils import RemoteOpenAIServerCustom
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
@@ -119,7 +119,7 @@ api_keyword_args = {
 }
 
 
-@create_new_process_for_each_test()
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
