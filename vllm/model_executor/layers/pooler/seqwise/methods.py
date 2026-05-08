@@ -68,21 +68,23 @@ class MeanPool(SequencePoolingMethod):
             "partial prefill not supported with MEAN pooling"
         )
 
-        prompt_lens = pooling_cursor.prompt_lens_cpu.to(
-            hidden_states.device, dtype=torch.int64, non_blocking=True
-        )
-
-        num_seqs = prompt_lens.numel()
+        prompt_lens_cpu = pooling_cursor.prompt_lens_cpu
+        num_seqs = prompt_lens_cpu.numel()
         hidden_size = hidden_states.shape[-1]
 
         if num_seqs == 0:
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
 
-        # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
+        # Build segment_ids on CPU so repeat_interleave doesn't need to sync
+        # GPU->CPU to learn its data-dependent output length, then upload
+        # non-blocking. eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
         segment_ids = torch.repeat_interleave(
-            torch.arange(num_seqs, device=hidden_states.device, dtype=torch.long),
-            prompt_lens,
+            torch.arange(num_seqs, dtype=torch.long),
+            prompt_lens_cpu,
+        ).to(hidden_states.device, non_blocking=True)
+        prompt_lens = prompt_lens_cpu.to(
+            hidden_states.device, dtype=torch.int64, non_blocking=True
         )
         segment_sums = torch.zeros(
             (num_seqs, hidden_size),
