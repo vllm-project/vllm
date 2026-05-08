@@ -117,13 +117,13 @@ QUANT_METHODS = [
 # Which quantization methods each backend supports.
 # fmt: off
 BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
-    "allgather_reducescatter":     {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
-    "mori":                        {None, "fp8", "modelopt_fp8"},
-    "flashinfer_nvlink_two_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
-    "flashinfer_nvlink_one_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
-    "deepep_low_latency":          {None, "fp8_blocked", "modelopt_fp4"},
+    "allgather_reducescatter":     {None,         "fp8", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
+    "mori":                        {None,         "fp8", "modelopt_fp8"},
+    "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
+    "flashinfer_nvlink_one_sided": {None,                                "modelopt_fp4"}, # noqa: E501
+    "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
-    "nixl_ep":                     {None, "fp8", "modelopt_fp8"},
+    "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
 }
 
 # Map from backend -> (DP/EP support, DP support, TP support, SP support)
