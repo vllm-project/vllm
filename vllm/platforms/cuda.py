@@ -172,7 +172,7 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
-    def device_id_to_physical_device_id(cls, device_id: int) -> "int | str":
+    def device_id_to_physical_device_id(cls, device_id: int) -> int | str:
         # MIG devices appear in CUDA_VISIBLE_DEVICES as UUID strings
         # (e.g. "MIG-377e0049-554c-540b-93c6-d0976f8426cb") rather than
         # integers. Return the raw string so callers can use
@@ -625,7 +625,7 @@ class CudaPlatformBase(Platform):
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
-def _nvml_device_handle(physical_device_id: "int | str"):
+def _nvml_device_handle(physical_device_id: int | str):
     """Get an NVML device handle for an int index or a UUID string (MIG)."""
     if isinstance(physical_device_id, str):
         return pynvml.nvmlDeviceGetHandleByUUID(physical_device_id)
@@ -704,7 +704,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
         return True
 
     @classmethod
-    def _get_physical_device_name(cls, device_id: "int | str" = 0) -> str:
+    def _get_physical_device_name(cls, device_id: int | str = 0) -> str:
         handle = _nvml_device_handle(device_id)
         return pynvml.nvmlDeviceGetName(handle)
 

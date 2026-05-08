@@ -89,7 +89,6 @@ def test_device_id_mixed_integer_and_mig_uuid():
     from vllm.platforms.cuda import CudaPlatform
 
     mig_uuid = "MIG-377e0049-554c-540b-93c6-d0976f8426cb"
-    with patch.dict("os.environ",
-                    {"CUDA_VISIBLE_DEVICES": f"0,{mig_uuid}"}):
+    with patch.dict("os.environ", {"CUDA_VISIBLE_DEVICES": f"0,{mig_uuid}"}):
         assert CudaPlatform.device_id_to_physical_device_id(0) == 0
         assert CudaPlatform.device_id_to_physical_device_id(1) == mig_uuid
