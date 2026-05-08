@@ -32,6 +32,8 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    return_intermediate_states: bool = False,
+    state_dtype: torch.dtype | None = None,
 ):
     g = chunk_local_cumsum(
         g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
@@ -67,6 +69,7 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
+        state_dtype=state_dtype,
     )
     o = chunk_fwd_o(
         q=q,
@@ -79,7 +82,15 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices,
     )
     if SUPPRESS_LEVEL < 3:
-        return g, o, A, final_state, None, None, None
+        return (
+            g,
+            o,
+            A,
+            final_state,
+            None,
+            h if return_intermediate_states else None,
+            None,
+        )
     elif SUPPRESS_LEVEL >= 3:
         return g, o, A, final_state, w, h, v_new
 
@@ -102,6 +113,8 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_indices: torch.Tensor | None = None,
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
+        return_intermediate_states: bool = False,
+        state_dtype: torch.dtype | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -119,10 +132,17 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
+            return_intermediate_states=return_intermediate_states,
+            state_dtype=state_dtype,
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        return o.to(q.dtype), final_state
+        intermediate_states = None
+        if return_intermediate_states:
+            assert h is not None
+            # Convert into chunk-major form, i.e. shape (num_total_chunks, H, V, K)
+            intermediate_states = h.reshape(-1, *h.shape[-3:])
+        return o.to(q.dtype), final_state, intermediate_states
 
 
 @torch.compiler.disable
@@ -139,6 +159,8 @@ def chunk_gated_delta_rule(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    return_intermediate_states: bool = False,
+    state_dtype: torch.dtype | None = None,
 ):
     r"""
     Args:
@@ -169,6 +191,10 @@ def chunk_gated_delta_rule(
             Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, V, K]` if `output_final_state=True` else `None`.
+        intermediate_states (Optional[torch.Tensor]):
+            When ``return_intermediate_states`` is ``True`` a tensor containing
+            the per-chunk state snapshots shaped ``[num_chunks_total, H, V, K]``.
+            Otherwise missing.
 
     Examples::
         >>> import torch
@@ -217,7 +243,7 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
-    o, final_state = ChunkGatedDeltaRuleFunction.apply(
+    o, final_state, intermediate_states = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
         v,
@@ -230,5 +256,10 @@ def chunk_gated_delta_rule(
         chunk_indices,
         chunk_offsets,
         use_qk_l2norm_in_kernel,
+        return_intermediate_states,
+        state_dtype,
     )
-    return o, final_state
+    if return_intermediate_states:
+        return o, final_state, intermediate_states
+    else:
+        return o, final_state

@@ -206,6 +206,7 @@ class Qwen3NextConfig(PretrainedConfig):
         linear_value_head_dim=128,
         linear_num_key_heads=16,
         linear_num_value_heads=32,
+        mamba_chunk_size=64,
         decoder_sparse_step=1,
         moe_intermediate_size=512,
         shared_expert_intermediate_size=512,
@@ -267,6 +268,8 @@ class Qwen3NextConfig(PretrainedConfig):
         self.linear_value_head_dim = linear_value_head_dim
         self.linear_num_key_heads = linear_num_key_heads
         self.linear_num_value_heads = linear_num_value_heads
+        # GDN kernel chunk size (64 is a constant in the FLA kernel)
+        self.mamba_chunk_size = mamba_chunk_size
 
         # MoE arguments
         self.decoder_sparse_step = decoder_sparse_step

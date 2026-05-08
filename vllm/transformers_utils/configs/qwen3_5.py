@@ -62,6 +62,7 @@ class Qwen3_5TextConfig(PretrainedConfig):
         linear_value_head_dim=128,
         linear_num_key_heads=16,
         linear_num_value_heads=32,
+        mamba_chunk_size=64,
         layer_types=None,
         pad_token_id=None,
         bos_token_id=None,
@@ -113,6 +114,8 @@ class Qwen3_5TextConfig(PretrainedConfig):
         self.linear_value_head_dim = linear_value_head_dim
         self.linear_num_key_heads = linear_num_key_heads
         self.linear_num_value_heads = linear_num_value_heads
+        # GDN kernel chunk size (64 is a constant in the FLA kernel)
+        self.mamba_chunk_size = mamba_chunk_size
         super().__init__(**kwargs)
         # Set these AFTER super().__init__() because transformers v4's
         # PretrainedConfig.__init__ has these as explicit params with different
