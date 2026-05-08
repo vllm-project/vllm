@@ -218,28 +218,51 @@ class Olmo3ReasoningParser(ReasoningParser):
           token is missing from generation.
     """
 
+    think_start: str = r"<think>"
+    think_end: str = r"</think>"
+    # </think> is split in 3 by the pre-tokenizer, first split can be tokenized
+    # with an optional leading space, so there are 2 possible tokenizations
+    think_end_first_split: list[str] = [r"Ġ</", r"</"]
+    think_end_rest_split: list[str] = [r"think", r">"]
+    # notice that the first think is optional; this allows template to
+    # work in cases when we hardcode a <think> at the beginning of the
+    # reasoning template.
+    reasoning_regex: re.Pattern = re.compile(
+        rf"^(?:{think_start})?(?P<reasoning>.*?)"
+        rf"{think_end}(?P<content>.*)$",
+        re.DOTALL,
+    )
+
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-
-        self.think_start = r"<think>"
-        self.think_end = r"</think>"
-
-        # notice that the first think is optional; this allows template to
-        # work in cases when we hardcode a <think> at the beginning of the
-        # reasoning template.
-        reasoning_expr = (
-            rf"^(?:{self.think_start})?(?P<reasoning>.*?)"
-            rf"{self.think_end}(?P<content>.*)$"
-        )
-        self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
-
         self.buffer = Olmo3ReasoningBuffer(
             think_start=self.think_start, think_end=self.think_end
         )
+        self.think_end_first_token_ids: list[int] = [
+            self.vocab[token] for token in self.think_end_first_split
+        ]
+        self.think_end_rest_token_ids: list[int] = [
+            self.vocab[token] for token in self.think_end_rest_split
+        ]
+
+    @property
+    def reasoning_start_str(self) -> str:
+        return self.think_start
+
+    @property
+    def reasoning_end_str(self) -> str:
+        return self.think_end
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        text = self.model_tokenizer.decode(input_ids)
-        return self.think_end in text
+        rest_ids = self.think_end_rest_token_ids
+        rest_len = len(rest_ids)
+        for i in range(len(input_ids) - rest_len, -1, -1):
+            if (
+                list(input_ids[i + 1 : i + 1 + rest_len]) == rest_ids
+                and input_ids[i] in self.think_end_first_token_ids
+            ):
+                return True
+        return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         # for Olmo 3 streaming reason parsing, the stream parse

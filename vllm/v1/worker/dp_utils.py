@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -29,7 +27,6 @@ def _get_device_and_group(parallel_config: ParallelConfig):
     if parallel_config.disable_nccl_for_dp_synchronization:
         logger.info_once(
             "Using CPU all reduce to synchronize DP padding between ranks.",
-            scope="local",
         )
         device = "cpu"
         group = get_dp_group().cpu_group
@@ -168,7 +165,6 @@ def coordinate_batch_across_dp(
     parallel_config: ParallelConfig,
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
-    num_scheduled_tokens_per_request: np.ndarray | None = None,
     cudagraph_mode: int = 0,
 ) -> tuple[bool, torch.Tensor | None, int]:
     """
@@ -183,8 +179,6 @@ def coordinate_batch_across_dp(
             TP, etc)
         uniform_decode: Only used if allow_microbatching is True. True if the batch
             only contains single token decodes
-        num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
-            number of tokens per request.
         cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
             DP padding is enabled when synced cudagraph mode across ranks is not NONE.
 
