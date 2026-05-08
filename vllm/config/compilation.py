@@ -2,18 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import importlib.metadata
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields
+from dataclasses import field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from packaging import version
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import Range, config, get_hash_factors, hash_factors
+from vllm.env_override import is_torch_equal_or_newer
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.math_utils import round_up
@@ -23,14 +22,8 @@ if TYPE_CHECKING:
     from vllm.platforms import Platform
     from vllm.v1.attention.backend import AttentionCGSupport
     from vllm.v1.kv_cache_interface import KVCacheConfig
-
-    @dataclass
-    class Range:
-        start: int
-        end: int
 else:
     VllmConfig = object
-    from vllm.config.utils import Range
 
 logger = init_logger(__name__)
 
@@ -39,10 +32,6 @@ def lazy_platform():
     from vllm.platforms import current_platform
 
     return current_platform
-
-
-def is_torch_equal_or_newer(target: str) -> bool:
-    return version.parse(importlib.metadata.version("torch")) >= version.parse(target)
 
 
 class CompilationMode(enum.IntEnum):
@@ -820,6 +809,17 @@ class CompilationConfig:
         config = TypeAdapter(CompilationConfig).dump_python(
             self, exclude=exclude, exclude_unset=True
         )
+        if config.get("backend") == "":
+            from vllm.platforms.interface import Platform
+
+            config["backend"] = Platform.simple_compile_backend
+
+        inductor_compile_config = config.get("inductor_compile_config")
+        if isinstance(inductor_compile_config, dict):
+            from vllm.platforms import is_cpu_platform
+
+            if not is_cpu_platform():
+                CompilationConfig._set_combo_kernel_defaults(inductor_compile_config)
 
         return str(config)
 
@@ -1014,18 +1014,22 @@ class CompilationConfig:
                 "non-negative (None = auto-infer)"
             )
 
-    def apply_platform_defaults(self, current_platform: "Platform"):
+    @staticmethod
+    def _set_combo_kernel_defaults(inductor_compile_config: dict[str, Any]) -> None:
         if (
             is_torch_equal_or_newer("2.9.0.dev")
-            and "combo_kernels" not in self.inductor_compile_config
-            and "benchmark_combo_kernel" not in self.inductor_compile_config
-            # (fixme @boyuan) combo kernel does not support cpu yet.
-            and not current_platform.is_cpu()
+            and "combo_kernels" not in inductor_compile_config
+            and "benchmark_combo_kernel" not in inductor_compile_config
         ):
             # use horizontal fusion, which is useful for fusing qk-norm and
             # qk-rope when query and key have different shapes.
-            self.inductor_compile_config["combo_kernels"] = True
-            self.inductor_compile_config["benchmark_combo_kernel"] = True
+            inductor_compile_config["combo_kernels"] = True
+            inductor_compile_config["benchmark_combo_kernel"] = True
+
+    def apply_platform_defaults(self, current_platform: "Platform"):
+        # (fixme @boyuan) combo kernel does not support cpu yet.
+        if not current_platform.is_cpu():
+            self._set_combo_kernel_defaults(self.inductor_compile_config)
 
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
@@ -1519,4 +1523,4 @@ class CompilationConfig:
         if self.compile_ranges_endpoints is None:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
-        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]
+        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]  # type: ignore[call-arg]

@@ -6,6 +6,7 @@ Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
 import importlib.metadata
+import os
 import sys
 from importlib.util import find_spec
 
@@ -21,7 +22,7 @@ def main():
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
-    from vllm.entrypoints.cli_setup import VLLM_SUBCMD_PARSER_EPILOG, cli_env_setup
+    from vllm.entrypoints.cli import VLLM_SUBCMD_PARSER_EPILOG
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
@@ -33,7 +34,9 @@ def main():
         vllm.entrypoints.cli.run_batch,
     ]
 
-    cli_env_setup(logger)
+    if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+        logger.debug("Setting VLLM_WORKER_MULTIPROC_METHOD to 'spawn'")
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     # If `--omni` arg is passed to the CLI, delegate to vLLM Omni's entrypoint handling
     if "--omni" in sys.argv:

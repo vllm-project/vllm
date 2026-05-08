@@ -6,8 +6,8 @@ import asyncio
 import importlib.metadata
 import typing
 
+from vllm.entrypoints.cli import VLLM_SUBCMD_PARSER_EPILOG, is_cli_subcommand
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.cli_setup import VLLM_SUBCMD_PARSER_EPILOG, is_cli_subcommand
 from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:

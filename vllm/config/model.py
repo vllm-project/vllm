@@ -25,6 +25,7 @@ from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -453,7 +454,6 @@ class ModelConfig:
             is_gguf,
             maybe_patch_hf_config_from_gguf,
         )
-        from vllm.transformers_utils.utils import maybe_model_redirect
 
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(

@@ -5,11 +5,11 @@ import argparse
 
 import uvloop
 
-from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.cli_setup import (
+from vllm.entrypoints.cli import (
     VLLM_SUBCMD_PARSER_EPILOG,
     is_cli_subcommand,
 )
+from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 

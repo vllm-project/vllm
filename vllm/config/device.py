@@ -11,12 +11,6 @@ from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     import torch
-else:
-
-    class _TorchNamespace:
-        device = Any
-
-    torch = _TorchNamespace()
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 

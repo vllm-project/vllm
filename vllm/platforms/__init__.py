@@ -3,6 +3,7 @@
 import logging
 import os
 import traceback
+from functools import cache
 from itertools import chain
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,23 @@ def vllm_version_matches_substr(substr: str) -> bool:
         )
         raise e
     return substr in vllm_version
+
+
+@cache
+def is_cpu_platform() -> bool:
+    """Cheap check for whether the selected platform is CPU."""
+    if cpu_platform_plugin() is None:
+        return False
+
+    platform_plugins = load_plugins_by_group(PLATFORM_PLUGINS_GROUP)
+    for func in platform_plugins.values():
+        try:
+            if func() is not None:
+                return False
+        except Exception:
+            pass
+
+    return True
 
 
 def tpu_platform_plugin() -> str | None:
@@ -300,6 +318,7 @@ __all__ = [
     "Platform",
     "PlatformEnum",
     "current_platform",
+    "is_cpu_platform",
     "CpuArchEnum",
     "_init_trace",
     "_is_amd_zen_cpu",

@@ -34,18 +34,6 @@ PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
-def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return (
-        kv_cache_dtype.startswith("fp8")
-        or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype == "nvfp4"
-    )
-
-
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype.endswith("per_token_head")
-
-
 @config
 class CacheConfig:
     """Configuration for the KV cache."""
@@ -258,6 +246,11 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+        from vllm.utils.torch_utils import (
+            is_quantized_kv_cache,
+            kv_cache_uses_per_token_head_scales,
+        )
+
         if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "

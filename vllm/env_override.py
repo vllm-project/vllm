@@ -128,11 +128,11 @@ def _installed_torch_version() -> version.Version:
     return version.parse(importlib.metadata.version("torch"))
 
 
-def _is_torch_equal_or_newer(target: str) -> bool:
+def is_torch_equal_or_newer(target: str) -> bool:
     return _installed_torch_version() >= version.parse(target)
 
 
-def _is_torch_equal(target: str) -> bool:
+def is_torch_equal(target: str) -> bool:
     assert target.count(".") == 2
     torch_version = _installed_torch_version()
     return torch_version >= version.parse(target) and (
@@ -140,7 +140,7 @@ def _is_torch_equal(target: str) -> bool:
     )
 
 
-def _apply_after_module_import(module_name: str, patch_fn: Callable[[], None]) -> None:
+def _patch_after_import(module_name: str, patch_fn: Callable[[], None]) -> None:
     import sys
 
     if module_name in sys.modules:
@@ -519,7 +519,7 @@ def _update_scheduler_patched(self) -> None:
 def _patch_get_raw_stream_if_needed():
     """Workaround for TorchInductor autotune get_raw_stream() bug."""
     # Only apply the patch for torch 2.9.0 or 2.9.1
-    if _is_torch_equal("2.9.0") or _is_torch_equal("2.9.1"):
+    if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
         import builtins
 
         import torch
@@ -534,7 +534,7 @@ def _patch_get_raw_stream_if_needed():
 
 _patch_get_raw_stream_if_needed()
 
-if _is_torch_equal("2.9.0"):
+if is_torch_equal("2.9.0"):
     import torch._inductor.config as inductor_config
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
@@ -580,7 +580,7 @@ def _apply_constrain_to_fx_strides_patch():
         return
     _constrain_to_fx_strides_patched = True
 
-    if not _is_torch_equal_or_newer("2.11.0.dev") or _is_torch_equal_or_newer(
+    if not is_torch_equal_or_newer("2.11.0.dev") or is_torch_equal_or_newer(
         "2.12.0.dev"
     ):
         return
@@ -652,10 +652,10 @@ def _apply_graph_capture_output_patch():
 
 
 def _patch_graph_capture_output_if_needed():
-    if not _is_torch_equal_or_newer("2.10.0") or _is_torch_equal_or_newer("2.12.0.dev"):
+    if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.12.0.dev"):
         return
 
-    _apply_after_module_import(
+    _patch_after_import(
         "torch._dynamo.convert_frame", _apply_graph_capture_output_patch
     )
 
@@ -699,7 +699,7 @@ def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
 
 def _patch_fxgraphcache_pickle_if_needed():
     """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
-    if not _is_torch_equal_or_newer("2.10.0") or _is_torch_equal_or_newer("2.11.0"):
+    if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
         return
 
     from torch._inductor.codecache import BypassFxGraphCache, FxGraphCachePickler
@@ -792,12 +792,10 @@ def _patch_cpp_indirect_assert_if_needed():
     None in sys.modules` depending on the import order on the runner
     (observed in vLLM CPU CI).
     """
-    if not _is_torch_equal_or_newer("2.11.0") or _is_torch_equal_or_newer("2.12.0.dev"):
+    if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
         return
 
-    _apply_after_module_import(
-        "torch._inductor.codegen.cpp", _apply_cpp_indirect_assert_patch
-    )
+    _patch_after_import("torch._inductor.codegen.cpp", _apply_cpp_indirect_assert_patch)
 
 
 _patch_cpp_indirect_assert_if_needed()

@@ -21,10 +21,9 @@ from vllm.entrypoints.constants import (
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.entrypoints.validate_chat_template import validate_chat_template
 from vllm.logger import init_logger
+from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.tool_parser_registry import BUILTIN_TOOL_PARSERS
 
 logger = init_logger(__name__)
 
@@ -187,7 +186,8 @@ class BaseFrontendArgs:
         frontend_kwargs["lora_modules"]["action"] = LoRAParserAction
 
         # Special case: Tool call parser shows built-in options.
-        parsers_str = ",".join(sorted(BUILTIN_TOOL_PARSERS))
+        valid_tool_parsers = list(ToolParserManager.list_registered())
+        parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
         )
@@ -375,6 +375,8 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
     if hasattr(args, "subparser") and args.subparser != "serve":
         return
+
+    from vllm.entrypoints.chat_utils import validate_chat_template
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)

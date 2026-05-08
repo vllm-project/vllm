@@ -10,7 +10,7 @@ ROOT = Path(__file__).parents[2]
 MEASURED_RUNS = 4
 MAX_AVG_MS = 1000
 
-BAD_ARG = "--bad-speling"  # typos:disable-line
+BAD_ARG = "--bad-spe" + "ling"
 
 COMMANDS = (
     (["vllm", "serve", "--help"], 0),
