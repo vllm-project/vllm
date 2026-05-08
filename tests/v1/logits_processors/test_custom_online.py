@@ -119,7 +119,6 @@ api_keyword_args = {
 }
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
     [MODEL_NAME],
