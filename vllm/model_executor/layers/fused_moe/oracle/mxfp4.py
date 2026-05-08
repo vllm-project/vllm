@@ -1421,6 +1421,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+        # TRTLLM kernel expects non-swizzled mxfp8 activation scales.
         return mxfp4_mxfp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
@@ -1430,8 +1431,10 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
             mx_alignment=256,
+            is_scale_swizzled=False,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8:
+        # CUTLASS kernel expects swizzled mxfp8 activation scales.
         return mxfp4_mxfp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
@@ -1440,6 +1443,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
+            is_scale_swizzled=True,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
         # W4A8: MXFP4 weights + static FP8 activations
