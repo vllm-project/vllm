@@ -155,6 +155,17 @@ LinearBackend = Literal[
 ]
 
 
+BF16LinearBackend = Literal[
+    "torch",
+    "auto",
+    "cudnn",
+    "cutlass",
+    "tgv",
+    "cublaslt",
+    "tinygemm",
+]
+
+
 @config
 class KernelConfig:
     """Configuration for kernel selection and warmup behavior."""
@@ -167,6 +178,18 @@ class KernelConfig:
 
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
+
+    bf16_linear_backend: BF16LinearBackend = "torch"
+    """Backend for unquantized BF16 GEMMs
+    Available options:
+    - "torch": Use torch.nn.functional.linear
+    - "auto": Call FlashInfer mm_bf16 and let the FlashInfer autotuner pick a backend
+    - "cudnn": Use FlashInfer cudnn backend
+    - "cutlass": Use FlashInfer cutlass backend
+    - "tgv": Use FlashInfer tgv backend
+    - "cublaslt": Use FlashInfer cublaslt backend
+    - "tinygemm": Use FlashInfer tinygemm backend
+    """
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
