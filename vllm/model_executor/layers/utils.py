@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import functools
 from collections.abc import Callable
 
 import torch
@@ -11,6 +12,10 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.flashinfer import (
+    flashinfer_bf16_mm,
+    get_flashinfer_bf16_supported_backends,
+)
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -102,6 +107,87 @@ def default_unquantized_gemm(
             return output
 
     return torch.nn.functional.linear(x, weight, bias)
+
+
+_BF16_BIAS_CAPABLE_BACKENDS = frozenset({"auto", "tgv", "tinygemm"})
+
+
+def cuda_flashinfer_bf16_gemm_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    backend: str,
+) -> torch.Tensor:
+    """Route an unquantized BF16 matmul through FlashInfer's ``mm_bf16``.
+
+    Falls back to ``torch.nn.functional.linear`` when the inputs do not
+    satisfy FlashInfer's contract (dtype, device, last-dim contiguity,
+    non-empty M, and a bias-capable backend when bias is supplied).
+    """
+    if x.dim() == 0 or weight.dim() != 2:
+        return torch.nn.functional.linear(x, weight, bias)
+    K = x.shape[-1]
+    M = x.numel() // K if K > 0 else 0
+    N = weight.shape[0]
+    bias_ok = bias is None or (
+        bias.dtype == torch.bfloat16
+        and bias.is_cuda
+        and bias.device == x.device
+        and bias.is_contiguous()
+        and bias.dim() == 1
+        and bias.shape[0] == N
+        and backend in _BF16_BIAS_CAPABLE_BACKENDS
+    )
+    if (
+        x.dtype != torch.bfloat16
+        or weight.dtype != torch.bfloat16
+        or not x.is_cuda
+        or not weight.is_cuda
+        or weight.device != x.device
+        or not x.is_contiguous()
+        or not weight.is_contiguous()
+        or M == 0
+        or N == 0
+        or K == 0
+        or not bias_ok
+    ):
+        logger.warning_once("Using default unquantized gemm (torch).")
+        return torch.nn.functional.linear(x, weight, bias)
+
+    # cuBLASLt/CUTLASS do not support fused bias in FlashInfer BF16 GEMM.
+    # When using auto with bias, we select between ("tgv", "tinygemm").
+    pdl = backend in ("tgv", "tinygemm") or (backend == "auto" and bias is not None)
+
+    x_2d = x.reshape(M, K)
+    out_2d = flashinfer_bf16_mm(x_2d, weight.t(), bias, backend=backend, pdl=pdl)
+    return out_2d.reshape(*x.shape[:-1], N)
+
+
+def cuda_flashinfer_bf16_gemm_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    backend: str,
+) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]), dtype=torch.bfloat16)
+
+
+def cuda_flashinfer_bf16_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    *,
+    backend: str,
+) -> torch.Tensor:
+    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(x, weight, bias, backend)
+
+
+direct_register_custom_op(
+    op_name="cuda_flashinfer_bf16_gemm",
+    op_func=cuda_flashinfer_bf16_gemm_impl,
+    fake_impl=cuda_flashinfer_bf16_gemm_fake,
+)
 
 
 def maybe_flashinfer_bf16_unquantized_gemm(
@@ -418,10 +504,54 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
+def _get_bf16_linear_backend() -> str:
+    """Read ``bf16_linear_backend`` from the active VllmConfig.
+
+    Returns ``"torch"`` (the default) when there is no active VllmConfig,
+    e.g. during unit tests that don't set up an engine.
+    """
+    try:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        supported_backends = get_flashinfer_bf16_supported_backends()
+
+    except (AssertionError, AttributeError, ImportError):
+        return "torch"
+
+    if vllm_config is None or vllm_config.kernel_config is None:
+        return "torch"
+
+    backend = vllm_config.kernel_config.bf16_linear_backend
+    if backend == "torch":
+        return "torch"
+
+    if not supported_backends:
+        return "torch"
+
+    if backend != "auto" and backend not in supported_backends:
+        logger.warning_once(
+            "bf16_linear_backend=%r is not in the installed FlashInfer's "
+            "mm_bf16 supported backends %s; falling back to torch.",
+            backend,
+            supported_backends,
+        )
+        return "torch"
+
+    return backend
+
+
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
-    else:
+
+    bf16_linear_backend = _get_bf16_linear_backend()
+    if bf16_linear_backend == "torch":
         return default_unquantized_gemm
+    else:
+        return functools.partial(
+            cuda_flashinfer_bf16_gemm,
+            backend=bf16_linear_backend,
+        )

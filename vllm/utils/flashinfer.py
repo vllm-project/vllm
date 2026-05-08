@@ -32,6 +32,7 @@ FLASHINFER_BF16_GEMM_BACKENDS = (
     "tinygemm",
 )
 FLASHINFER_BF16_GEMM_BACKENDS_WITHOUT_BIAS = ("cutlass", "cublaslt")
+FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA = ("cutlass", "tinygemm")
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
@@ -320,6 +321,12 @@ def get_flashinfer_bf16_supported_backends(
 
     supported_backends: list[str] = []
     for backend in FLASHINFER_BF16_GEMM_BACKENDS:
+        if (
+            backend in FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA
+            and not has_flashinfer_cubin()
+            and shutil.which("ninja") is None
+        ):
+            continue
         try:
             if mm_bf16.is_backend_supported(backend, compute_capability):
                 supported_backends.append(backend)
@@ -838,12 +845,12 @@ if has_flashinfer():
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
 
-
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None = None,
     backend: str = "auto",
+    pdl: bool | None = None,
 ) -> torch.Tensor:
     """Dense BF16 MM helper for FlashInfer kernels.
 
@@ -863,7 +870,10 @@ def flashinfer_bf16_mm(
         assert bias.dtype == torch.bfloat16
         assert bias.device == a.device
 
-    pdl = backend in ("tgv", "tinygemm") or (backend == "auto" and bias is not None)
+    if pdl is None:
+        pdl = backend in ("tgv", "tinygemm") or (
+            backend == "auto" and bias is not None
+        )
     return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl, backend)
 
 
@@ -942,7 +952,6 @@ def flashinfer_scaled_fp4_mm(
         block_size=block_size,
         use_nvfp4=use_nvfp4,
     )
-
 
 def flashinfer_scaled_fp4_mm_out(
     a: torch.Tensor,
@@ -1146,6 +1155,9 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 
 
 __all__ = [
+    "FLASHINFER_BF16_GEMM_BACKENDS",
+    "FLASHINFER_BF16_GEMM_BACKENDS_WITHOUT_BIAS",
+    "FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA",
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
