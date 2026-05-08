@@ -1403,6 +1403,41 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+@patch("vllm.config.speculative.ModelConfig")
+def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
+    """Regression test: MTP + runai_streamer should use model_weights (original
+    S3 URL) for the draft model, not model (local cache dir set by
+    pull_runai_model_from_obj_storage)."""
+    from unittest.mock import MagicMock
+
+    s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
+    local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
+
+    mock_draft = MagicMock()
+    mock_draft.model = local_cache
+    mock_draft.hf_config.model_type = "deepseek_mtp"
+    mock_draft.hf_config.n_predict = None
+    mock_draft.max_model_len = 4096
+    mock_model_config_cls.return_value = mock_draft
+
+    target_config = MagicMock()
+    target_config.model = local_cache
+    target_config.model_weights = s3_url
+    target_config.hf_text_config.model_type = "deepseek_v3"
+    target_config.quantization = None
+    target_config.max_model_len = 4096
+
+    SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    actual_model = mock_model_config_cls.call_args.kwargs["model"]
+    assert actual_model == s3_url
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
