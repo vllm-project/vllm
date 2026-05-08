@@ -9,7 +9,9 @@ Run `pytest tests/quantization/test_auto_round.py`.
 """
 
 import pytest
+import torch
 
+from vllm.model_executor import parameter as parameter_module
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinLinearMethod
 from vllm.model_executor.layers.quantization.inc import (
@@ -17,6 +19,7 @@ from vllm.model_executor.layers.quantization.inc import (
     INCGPTQRowParallelTailLinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils import marlin_utils
+from vllm.model_executor.parameter import RowvLLMParameter
 from vllm.platforms import current_platform
 
 MODELS = [
@@ -99,3 +102,73 @@ def test_inc_gptq_row_tail_fallback_still_precedes_marlin(monkeypatch):
     method = config.apply_gptq_quant_layer(layer, "model.layers.0.mlp.down_proj")
 
     assert isinstance(method, INCGPTQRowParallelTailLinearMethod)
+
+
+def test_inc_gptq_dense_misaligned_shape_does_not_use_row_tail_fallback(
+    monkeypatch,
+):
+    """The tail fallback is only for row-parallel shards.
+
+    Dense or column-parallel linears do not shard the input dimension, so using
+    the row-tail path would compute wrong g_idx offsets.
+    """
+    monkeypatch.setattr(
+        marlin_utils,
+        "check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    layer = _make_linear_base_stub(
+        input_size=192,
+        output_size=64,
+        input_size_per_partition=192,
+        output_size_per_partition=64,
+    )
+    config = INCConfig(weight_bits=4, group_size=128, sym=True)
+
+    method = config.apply_gptq_quant_layer(layer, "model.layers.0.mlp.down_proj")
+
+    assert isinstance(method, GPTQMarlinLinearMethod)
+
+
+@pytest.mark.parametrize("weight_bits", [2, 3, 4, 8])
+def test_inc_gptq_row_tail_fallback_supports_all_inc_bit_widths(weight_bits):
+    method = INCGPTQRowParallelTailLinearMethod(
+        weight_bits=weight_bits,
+        group_size=128,
+        sym=True,
+    )
+    assert method.weight_bits == weight_bits
+
+
+def test_inc_gptq_row_tail_fallback_registers_row_g_idx(monkeypatch):
+    method = INCGPTQRowParallelTailLinearMethod(
+        weight_bits=4,
+        group_size=128,
+        sym=True,
+    )
+    layer = torch.nn.Module()
+    layer.tp_rank = 1
+    monkeypatch.setattr(
+        parameter_module,
+        "get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        parameter_module,
+        "get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    method.create_weights(
+        layer,
+        input_size_per_partition=192,
+        output_partition_sizes=[64],
+        input_size=256,
+        output_size=64,
+        params_dtype=torch.float16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+
+    assert isinstance(layer.g_idx, RowvLLMParameter)
+    assert layer.g_idx.shape == (192,)
+    assert layer.g_idx[0].item() == 1

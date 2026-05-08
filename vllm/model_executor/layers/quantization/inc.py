@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
-from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
@@ -348,23 +347,25 @@ class INCConfig(QuantizationConfig):
             group_size,
             sym,
         )
-        if (
-            isinstance(layer, LinearBase)
-            and group_size > 0
-            and getattr(layer, "input_size_per_partition", layer.input_size)
-            % group_size
-            != 0
-        ):
-            # Gemma4 AutoRound row-parallel linears can produce TP shards that
-            # straddle a GPTQ group boundary. Fall back to a correctness-first
-            # path in that case instead of using Marlin/GPTQ kernels that
-            # assume group-aligned input shards.
-            return INCGPTQRowParallelTailLinearMethod(
-                weight_bits=weight_bits,
-                group_size=group_size,
-                sym=sym,
+        if isinstance(layer, LinearBase):
+            input_size_per_partition = getattr(
+                layer, "input_size_per_partition", layer.input_size
             )
-
+            is_row_parallel = input_size_per_partition != layer.input_size
+            if (
+                is_row_parallel
+                and group_size > 0
+                and input_size_per_partition % group_size != 0
+            ):
+                # Gemma4 AutoRound row-parallel linears can produce TP shards
+                # that straddle a GPTQ group boundary. Fall back to a
+                # correctness-first path in that case instead of using
+                # Marlin/GPTQ kernels that assume group-aligned input shards.
+                return INCGPTQRowParallelTailLinearMethod(
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    sym=sym,
+                )
         if backend == "auto" or "marlin" in backend:
             GPTQ_TYPE_MAP = {
                 (4, True): scalar_types.uint4b8,
@@ -733,8 +734,10 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.sym = sym
-        self.pack_factor = 32 // weight_bits
+        self.pack_factor = Fraction(32, weight_bits)
         self.weight_type = {
+            2: scalar_types.uint2b2,
+            3: scalar_types.uint3b4,
             4: scalar_types.uint4b8,
             8: scalar_types.uint8b128,
         }[weight_bits]
@@ -791,14 +794,19 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        shard_width = getattr(
-            layer, "input_size_per_partition", input_size_per_partition
+        is_row_parallel = input_size != input_size_per_partition
+        shard_offset = (
+            layer.tp_rank * input_size_per_partition if is_row_parallel else 0
         )
-        shard_offset = get_tensor_model_parallel_rank() * shard_width
-        g_idx = (
-            torch.arange(input_size_per_partition, dtype=torch.int32) + shard_offset
-        ) // self.group_size
-        layer.register_parameter("g_idx", Parameter(g_idx, requires_grad=False))
+        g_idx = RowvLLMParameter(
+            data=(
+                torch.arange(input_size_per_partition, dtype=torch.int32) + shard_offset
+            )
+            // self.group_size,
+            input_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("g_idx", g_idx)
         layer._inc_tail_dequant_weight = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -851,6 +859,7 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
         bias_2d = bias.to(torch.float32) if bias is not None else None
         output = F.linear(x_2d, self._get_dequantized_weight(layer), bias_2d)
         return output.to(x.dtype).reshape(out_shape)
+
 
 class INCARKLinearMethod(INCXPULinearBase):
     """XPU & CPU w4a16 linear method for INC quantization utilizing the ARK backend.
