@@ -396,7 +396,7 @@ class AiterMLAHelper:
     """
 
     _AITER_MIN_MLA_HEADS: Final = 16
-    _AITER_UNSUPPORTED_HEADS = [32]
+    _AITER_UNSUPPORTED_HEADS: ClassVar[tuple[int, ...]] = ()
 
     @staticmethod
     def check_num_heads_validity(num_heads: int):
