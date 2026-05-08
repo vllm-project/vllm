@@ -34,6 +34,7 @@ def chunk_gated_delta_rule_fwd(
     chunk_offsets: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
+    core_attn_out: torch.Tensor | None = None,
 ):
     g = chunk_local_cumsum(
         g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
@@ -81,6 +82,7 @@ def chunk_gated_delta_rule_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+        core_attn_out=core_attn_out,
     )
     if SUPPRESS_LEVEL < 3:
         return g, o, A, final_state, None, None, None
@@ -107,6 +109,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         ssm_state_indices: torch.Tensor | None = None,
         has_initial_state: torch.Tensor | None = None,
+        core_attn_out: torch.Tensor | None = None,
     ):
         # Manually ensure contiguity instead of using @input_guard.
         # We skip .contiguous() on initial_state when ssm_state_indices
@@ -153,9 +156,15 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
                 chunk_offsets=chunk_offsets,
                 ssm_state_indices=ssm_state_indices,
                 has_initial_state=has_initial_state,
+                core_attn_out=core_attn_out,
             )
             ctx.scale = scale
             ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+            if core_attn_out is not None:
+                assert not torch.is_grad_enabled(), (
+                    "core_attn_out buffer reuse is only supported for inference"
+                )
+                assert q.dtype == o.dtype, "Incompatible dtype for inplace computation"
             return o.to(q.dtype), final_state
 
 
@@ -175,6 +184,7 @@ def chunk_gated_delta_rule(
     use_qk_l2norm_in_kernel: bool = False,
     ssm_state_indices: torch.Tensor | None = None,
     has_initial_state: torch.Tensor | None = None,
+    core_attn_out: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -272,5 +282,6 @@ def chunk_gated_delta_rule(
         use_qk_l2norm_in_kernel,
         ssm_state_indices,
         has_initial_state,
+        core_attn_out,
     )
     return o, final_state
