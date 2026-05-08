@@ -335,6 +335,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def quant_method(self):
         return self.base_layer.quant_method
 
+    @property
+    def runner(self):
+        return self.base_layer.runner
+
     @classmethod
     def can_replace_layer(
         cls,

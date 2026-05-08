@@ -6,6 +6,7 @@ import types
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -79,6 +80,7 @@ class TritonPlaceholder(types.ModuleType):
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
         self.Config = self._dummy_decorator("Config")
+        self.cdiv = cdiv
         self.language = TritonLanguagePlaceholder()
 
     def _dummy_decorator(self, name):
