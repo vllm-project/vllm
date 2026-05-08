@@ -1002,6 +1002,31 @@ def test_chat_completion_request_n_parameter_default():
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
 
 
+def test_chat_completion_request_accepts_model_specific_reasoning_effort():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        reasoning_effort="max",
+    )
+
+    chat_params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert request.reasoning_effort == "max"
+    assert chat_params.chat_template_kwargs["reasoning_effort"] == "max"
+
+
+def test_chat_completion_request_rejects_unknown_reasoning_effort():
+    with pytest.raises(ValueError, match="Input should be"):
+        ChatCompletionRequest(
+            model="test-model",
+            messages=[{"role": "user", "content": "Hello"}],
+            reasoning_effort="extra_high",
+        )
+
+
 def test_chat_completion_request_n_parameter_various_values():
     """Test n parameter with various values."""
     for n_value in [1, 2, 5, 10]:
