@@ -437,6 +437,8 @@ class FusedMoE(PluggableLayer):
             else 1.0,
         )
 
+        print(f"MOE layer id = {self.layer_id}")
+
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
     # can safely swap out the quant_method. We should figure out a less
     # intrusive way to do this.

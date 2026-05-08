@@ -368,7 +368,7 @@ class ExpertMapManager:
         elif self._expert_mask is not None:
             device = self._expert_mask.device
         else:
-            raise RuntimeError("no device available")
+            raise AssertionError("_expert_map or _expert_mask must be present.")
 
         with device:
             self._calculate_expert_maps()
