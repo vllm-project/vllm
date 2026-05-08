@@ -44,8 +44,22 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with /v1 (e.g. /health).
+        2. The request path is not under one of ``AUTH_REQUIRED_PREFIXES``
+           (e.g. /health, /metrics).
     """
+
+    # Path prefixes that require API-key authentication.
+    #
+    # ``/v1`` covers the bulk of the OpenAI-compatible surface
+    # (/v1/completions, /v1/chat/completions, /v1/responses, /v1/realtime,
+    # /v1/load_lora_adapter, ...).
+    #
+    # ``/inference/v1`` covers the disaggregated-serving generate route at
+    # ``/inference/v1/generate``, which performs full token-in / token-out
+    # inference and was previously reachable without authentication because
+    # its path does not *start* with ``/v1`` even though it is a versioned
+    # inference endpoint.
+    AUTH_REQUIRED_PREFIXES: tuple[str, ...] = ("/v1", "/inference/v1")
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
@@ -68,6 +82,9 @@ class AuthenticationMiddleware:
 
         return token_match
 
+    def _requires_auth(self, url_path: str) -> bool:
+        return any(url_path.startswith(p) for p in self.AUTH_REQUIRED_PREFIXES)
+
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
         if (
             scope["type"] not in ("http", "websocket")
@@ -80,7 +97,7 @@ class AuthenticationMiddleware:
         url_path = URL(scope=scope).path.removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if self._requires_auth(url_path) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
