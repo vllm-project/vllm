@@ -44,7 +44,7 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
         IndexerQMxFp4Kernel.compile(head_dim, rope_dim, num_heads, rope_type, coarsen)
 
     # heuristic
-    coarsen = 1 if num_tokens < 256 else 4
+    coarsen = 1 if num_tokens < 512 else 4
     compiled = IndexerQMxFp4Kernel.compile(
         head_dim, rope_dim, num_heads, rope_type, coarsen
     )
