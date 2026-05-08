@@ -982,12 +982,9 @@ def _get_dflash_isolated_layer_names(
     if spec_config is None or spec_config.method != "dflash":
         return set()
 
-    try:
-        target_num_layers = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
-    except Exception:
-        return set()
+    target_num_layers = vllm_config.model_config.get_num_layers(
+        vllm_config.parallel_config
+    )
 
     isolated_layer_names: set[str] = set()
     for layer_name in layer_names:
