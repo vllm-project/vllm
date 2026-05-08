@@ -176,14 +176,10 @@ def _store_output_td(
 
 @triton.jit
 def kernel_unified_attention(
-    # Output destinations.  In 2D mode we write the final result into
-    # ``output_ptr``; in 3D mode we write per-segment partials into the
-    # three ``segm_*`` tensors and ``output_ptr`` is unused (callers may
-    # pass any non-null pointer).
+    # Output destination for the 2D path.  In 3D mode per-segment partials
+    # go to the ``segm_*`` tensors (see bottom of signature) and
+    # ``output_ptr`` is unused (callers may pass any non-null pointer).
     output_ptr,
-    segm_output_ptr,
-    segm_max_ptr,
-    segm_expsum_ptr,
     # Inputs
     query_ptr,
     key_cache_ptr,
@@ -193,10 +189,6 @@ def kernel_unified_attention(
     seq_lens_ptr,
     alibi_slopes_ptr,
     qq_bias_ptr,
-    # Per-(token, head) scale caches (used iff KV_QUANT_MODE in {2, 3}).
-    # For other modes callers may pass any non-null pointer.
-    k_scale_cache_ptr,
-    v_scale_cache_ptr,
     # Scalars
     scale,
     k_scale,
@@ -232,12 +224,6 @@ def kernel_unified_attention(
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
     stride_v_cache_3: tl.constexpr,  # int
-    stride_ks_blk: tl.int64,
-    stride_ks_slot: tl.int64,
-    stride_ks_head: tl.int64,
-    stride_vs_blk: tl.int64,
-    stride_vs_slot: tl.int64,
-    stride_vs_head: tl.int64,
     query_start_len_ptr,
     BLOCK_Q: tl.constexpr,
     num_seqs: tl.int32,
@@ -249,6 +235,23 @@ def kernel_unified_attention(
     # to ``[segm_idx, segm_idx+1) × tiles_per_segment`` and writes
     # per-segment partials, finalized by ``reduce_segments``.
     IS_3D: tl.constexpr,
+    # Parameters below default to None so Triton can skip materialising them
+    # on call sites where the corresponding constexpr branch is dead.
+    # Credit: @quinnlp identified this as a perf regression source in
+    # intel/intel-xpu-backend-for-triton#6758 (review comment r3204641104).
+    # Per-segment outputs: used in 3D mode; unused in 2D (IS_3D=False).
+    segm_output_ptr=None,
+    segm_max_ptr=None,
+    segm_expsum_ptr=None,
+    # Per-(token, head) scale caches: used iff KV_QUANT_MODE in {2, 3}.
+    k_scale_cache_ptr=None,
+    v_scale_cache_ptr=None,
+    stride_ks_blk: tl.int64 = None,
+    stride_ks_slot: tl.int64 = None,
+    stride_ks_head: tl.int64 = None,
+    stride_vs_blk: tl.int64 = None,
+    stride_vs_slot: tl.int64 = None,
+    stride_vs_head: tl.int64 = None,
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
     # FP8_PER_TOKEN_HEAD (3).
