@@ -56,10 +56,17 @@ def test_lowering_rms_norm(rms_provider, default_vllm_config):
         output_unlowered = compiled_unlowered_model(x)
 
     selected = lowering_pass.selected_impls["rms_norm"]
-    assert len(selected) == 3
-    assert selected["rms_norm"] == rms_provider
-    assert selected["rms_norm_1"] == rms_provider
-    assert selected["rms_norm_2"] == "native"
+    if rms_provider == "native":
+        # When the only resolved impl is native, the torch op wrap is
+        # bypassed during Dynamo tracing so Inductor can fuse the
+        # decomposition with surrounding ops. There are therefore no
+        # ``vllm_ir.rms_norm`` nodes for the lowering pass to rewrite.
+        assert len(selected) == 0
+    else:
+        assert len(selected) == 3
+        assert selected["rms_norm"] == rms_provider
+        assert selected["rms_norm_1"] == rms_provider
+        assert selected["rms_norm_2"] == "native"
 
     # Compiled function guards on global value, avoid recompilation
     with ir.enable_torch_wrap(True):

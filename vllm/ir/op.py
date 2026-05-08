@@ -267,6 +267,20 @@ class IrOp:
         if not _ENABLE_TORCH_WRAP:
             return self._inner_call(*args, **kwargs)
 
+        # When the only resolved implementation is the native (Python)
+        # decomposition, skip the torch custom op wrap so that Dynamo traces
+        # through the decomposition. This lets Inductor see the underlying
+        # primitive ops and fuse them with surrounding operations.
+        # Without this, the op stays as an opaque ``vllm_ir.<name>`` node in
+        # the FX graph and the post-grad lowering pass replaces it via
+        # ``replace_by_example``, which can prevent Inductor from fusing
+        # downstream ops (see issue #41804).
+        if (
+            len(self._priority_impls) == 1
+            and self._priority_impls[0].provider == "native"
+        ):
+            return self._inner_call(*args, **kwargs)
+
         return self.torch_op(*args, **kwargs)
 
     def get_priority(self) -> list[str]:
