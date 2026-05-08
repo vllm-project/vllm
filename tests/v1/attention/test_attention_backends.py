@@ -478,8 +478,13 @@ def _test_backend_correctness(
     # with test infrastructures
     for backend_name in backend_to_test:
         # KV cache is created in (num_blocks, 2, ...) layout.
+        # Backends still using (2, num_blocks, ...) need a transpose.
         kv_cache_for_backend = kv_cache
         reset_kv_cache_layout = False
+        if hasattr(backend_name, "get_class"):
+            backend_cls = backend_name.get_class()
+            if backend_cls.get_kv_cache_shape(1, 16, 1, 128)[0] != 1:
+                kv_cache_for_backend = kv_cache.transpose(0, 1)
 
         if backend_name == AttentionBackendEnum.FLASHINFER:
             # For FlashInfer default to HND layout and
