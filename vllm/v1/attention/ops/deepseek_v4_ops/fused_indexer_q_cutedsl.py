@@ -9,8 +9,8 @@ import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
-from cutlass._mlir.dialects import llvm
-from cutlass.cutlass_dsl import T, dsl_user_op
+from cutlass._mlir.dialects import llvm, vector
+from cutlass.cutlass_dsl import T, dsl_user_op, ir
 from quack.compile_utils import make_fake_tensor
 
 from vllm.vllm_flash_attn.cute import utils as cute_utils
@@ -75,7 +75,7 @@ def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
 
 
 @dsl_user_op
-def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
+def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
     out = llvm.inline_asm(
         llvm.StructType.get_literal([T.f32(), T.f32()]),
         [data.ir_value(loc=loc, ip=ip)],
@@ -84,10 +84,16 @@ def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float3
         has_side_effects=False,
         is_align_stack=False,
     )
-    return (
-        Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
-        Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
+    vec = vector.from_elements(
+        ir.VectorType.get([2], T.f32(), loc=loc),
+        [
+            llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip),
+            llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip),
+        ],
+        loc=loc,
+        ip=ip,
     )
+    return cute.TensorSSA(vec, 2, Float32)
 
 
 @dsl_user_op
@@ -232,10 +238,6 @@ class IndexerQMxFp4Kernel:
         in_bounds = must_in_bounds or (token_id < q.shape[0])
 
         cp_op = cute.nvgpu.CopyUniversalOp()
-        cp_u32x2 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=64)
-        cp_u32x4 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
-        cp_u32x8 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=256)
-        cp_f32x8 = cute.make_copy_atom(cp_op, Float32, num_bits_per_copy=256)
 
         _layout = cute.make_layout((self.coarsen, 8), stride=(8, 1))
         q_bf16x2 = cute.make_rmem_tensor(_layout, Uint32)
@@ -246,6 +248,7 @@ class IndexerQMxFp4Kernel:
                 tiler=(self.coarsen, 16),
                 coord=(head_tile_id, sublane),
             )
+            cp_u32x8 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=256)
             cute.copy(cp_u32x8, cute.recast_tensor(src, Uint32), q_bf16x2)
 
         # RoPE applies only to the trailing rope_dim values. We keep the rounded
@@ -267,6 +270,9 @@ class IndexerQMxFp4Kernel:
                 cos_sin_cache[pos, None], tiler=(8,), coord=(sin_id,)
             )
 
+            cp_f32x8 = cute.make_copy_atom(cp_op, Float32, num_bits_per_copy=256)
+            cp_u32x4 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
+
             if const_expr(self.cos_sin_dtype is Float32):
                 cute.copy(cp_f32x8, cos_src, cos_vals)
                 cute.copy(cp_f32x8, sin_src, sin_vals)
@@ -276,19 +282,18 @@ class IndexerQMxFp4Kernel:
                 cute.copy(cp_u32x4, cute.recast_tensor(cos_src, Uint32), cos_bf16x2)
                 cute.copy(cp_u32x4, cute.recast_tensor(sin_src, Uint32), sin_bf16x2)
 
+                cos_vals_view = cute.logical_divide(cos_vals, 2)  # (2, 4)
+                sin_vals_view = cute.logical_divide(sin_vals, 2)
+
                 for i in cutlass.range_constexpr(4):
-                    tmp_cos = _bf16x2_to_fp32(cos_bf16x2[i])
-                    tmp_sin = _bf16x2_to_fp32(sin_bf16x2[i])
-                    cos_vals[i * 2] = tmp_cos[0]
-                    cos_vals[i * 2 + 1] = tmp_cos[1]
-                    sin_vals[i * 2] = tmp_sin[0]
-                    sin_vals[i * 2 + 1] = tmp_sin[1]
+                    cos_vals_view[None, i].store(_bf16x2_to_fp32(cos_bf16x2[i]))
+                    sin_vals_view[None, i].store(_bf16x2_to_fp32(sin_bf16x2[i]))
 
             for i in cutlass.range_constexpr(self.coarsen):
                 for j in cutlass.range_constexpr(8):
-                    q0, q1 = _bf16x2_to_fp32(q_bf16x2[i, j])
-                    rot0 = q0 * cos_vals[j] - q1 * sin_vals[j]
-                    rot1 = q0 * sin_vals[j] + q1 * cos_vals[j]
+                    q_pair = _bf16x2_to_fp32(q_bf16x2[i, j])
+                    rot0 = q_pair[0] * cos_vals[j] - q_pair[1] * sin_vals[j]
+                    rot1 = q_pair[0] * sin_vals[j] + q_pair[1] * cos_vals[j]
                     # convert back to BF16 to match numerics
                     q_bf16x2[i, j] = _fp32x2_to_bf16x2(rot0, rot1)
 
@@ -307,10 +312,12 @@ class IndexerQMxFp4Kernel:
             for j in cutlass.range_constexpr(1, 8):
                 amax_bf16x2 = _bf16x2_max(amax_bf16x2, _bf16x2_abs(q_bf16x2[i, j]))
             amax_bf16x2 = cute_utils.warp_reduce(
-                amax_bf16x2, _bf16x2_max, width=MXFP4_BLOCK_SIZE // 16
+                amax_bf16x2,
+                _bf16x2_max,
+                width=MXFP4_BLOCK_SIZE // 16,
             )
-            amax0, amax1 = _bf16x2_to_fp32(amax_bf16x2)
-            amax = cute_utils.fmax(amax0, amax1)
+            amax_pair = _bf16x2_to_fp32(amax_bf16x2)
+            amax = cute_utils.fmax(amax_pair[0], amax_pair[1])
 
             if in_bounds:
                 # compute block scale with bit manipulation
@@ -348,11 +355,12 @@ class IndexerQMxFp4Kernel:
                 packed[1] = _fp32x8_to_fp4x8(vals, 8)
 
                 dst = q_fp4_tile[i, None]
+                cp_u32x2 = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=64)
                 cute.copy(cp_u32x2, packed, cute.recast_tensor(dst, Uint32))
 
         # Weight scaling is independent of the Q subwarp work. The first
         # num_tokens * num_heads logical threads cover one weight each.
-        if global_tid < num_token_heads:
+        if global_tid * 8 < num_token_heads:
             weight_token_id = global_tid // self.num_heads
             weight_head_id = global_tid % self.num_heads
             weights_out[weight_token_id, weight_head_id] = (
