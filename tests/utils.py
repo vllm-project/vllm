@@ -20,9 +20,9 @@ import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
-from multiprocessing import Process
+from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -125,6 +125,11 @@ ROCM_ENGINE_KWARGS: dict = (
     if current_platform.is_rocm()
     else {}
 )
+
+
+def requires_spawn_multiprocessing() -> bool:
+    """Whether this platform requires spawn instead of fork for test processes."""
+    return current_platform.is_rocm() or current_platform.is_xpu()
 
 
 class RemoteVLLMServer:
@@ -738,9 +743,11 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
-        self.proc: Process = Process(
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
+        ctx = get_context(method)
+        self.proc: Process = cast(Any, ctx).Process(  # type: ignore[assignment]
             target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
-        )  # type: ignore[assignment]
+        )
         self.proc.start()
 
     def __init__(
@@ -769,12 +776,21 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     def _poll(self) -> int | None:
         return self.proc.exitcode
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        self.proc.join(8)
+    def _terminate_process_tree(self) -> None:
+        pid = self.proc.pid
+
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self.proc.terminate()
+            print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
+
+        self.proc.join(15)
         if self.proc.is_alive():
-            # force kill if needed
+            print(
+                f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL"
+            )
             self.proc.kill()
+            self.proc.join(10)
 
 
 def _test_completion(
@@ -1511,16 +1527,6 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
     return wrapper
 
 
-def _format_subprocess_exit(returncode: int) -> str:
-    """Render a subprocess exit code, naming the signal for negative codes."""
-    if returncode >= 0:
-        return f"exit code {returncode}"
-    try:
-        return f"killed by {signal.Signals(-returncode).name} ({returncode})"
-    except ValueError:
-        return f"exit code {returncode}"
-
-
 # Set on the spawn-child interpreter so the wrapper short-circuits when the
 # child resolves `module.qualname` back to its own decorated form, instead of
 # launching another subprocess.
@@ -1541,12 +1547,6 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
     ``vllm.compilation.counter.compilation_counter``) into stale clones in
     the child, so increments performed by the production code in the child
     would never be observable to the test.
-
-    The child inherits the parent's stdout/stderr so its output (engine
-    cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
-    traceback is serialized to ``tb_file`` for structured re-raising. A
-    native crash leaves ``tb_file`` empty — the diagnostic is then only in
-    the inherited subprocess output.
     """
 
     @functools.wraps(f)
@@ -1597,20 +1597,23 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             result = subprocess.run(
                 [sys.executable, "-c", child_script],
                 input=payload,
+                capture_output=True,
                 env=env,
             )
 
             if result.returncode != 0:
+                # Prefer the child's traceback file; fall back to stderr if
+                # the child crashed before its except handler ran.
                 try:
                     with open(tb_file) as fp:
                         tb = fp.read()
                 except OSError:
                     tb = ""
                 if not tb:
-                    tb = "<no Python traceback; see subprocess output above>"
+                    tb = result.stderr.decode()
                 raise RuntimeError(
                     f"Test subprocess '{f.__name__}' failed "
-                    f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
+                    f"(exit code {result.returncode}):\n{tb}"
                 )
         finally:
             with contextlib.suppress(OSError):
@@ -1633,8 +1636,7 @@ def create_new_process_for_each_test(
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
-        method = "spawn" if use_spawn else "fork"
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
 
     assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
 
