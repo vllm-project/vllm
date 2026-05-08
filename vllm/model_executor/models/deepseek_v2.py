@@ -1261,13 +1261,9 @@ class DeepseekV2Model(nn.Module):
         self.use_mha = config.model_type == "deepseek" or all(
             dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
         )
-        self.num_redundant_experts = 0
-        for layer in self.layers:
-            if isinstance(layer, DeepseekV2DecoderLayer) and isinstance(
-                layer.mlp, DeepseekV2MoE
-            ):
-                self.num_redundant_experts = layer.mlp.n_redundant_experts
-                break
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
