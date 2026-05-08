@@ -499,6 +499,24 @@ class OpenAIServingChat(OpenAIServing):
                     # the role
                     role = self.get_chat_request_role(request)
 
+                    prompt_text: str | None = None
+                    if (
+                        request.return_token_ids
+                        and res.prompt_token_ids is not None
+                    ):
+                        try:
+                            prompt_text = tokenizer.decode(
+                                list(res.prompt_token_ids),
+                                skip_special_tokens=False,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to decode prompt_token_ids for "
+                                "streaming request %s: %s",
+                                request_id,
+                                exc,
+                            )
+
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
                     for i in range(num_choices):
@@ -524,6 +542,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
+                            prompt_text=prompt_text,
                         )
 
                         # if continuous usage stats are requested, add it
@@ -1362,6 +1381,21 @@ class OpenAIServingChat(OpenAIServing):
         if final_res.prompt_routed_experts is not None:
             prompt_routed_experts = final_res.prompt_routed_experts.tolist()
 
+        prompt_text: str | None = None
+        if request.return_token_ids and final_res.prompt_token_ids is not None:
+            try:
+                # Keep template markers / special tokens visible.
+                prompt_text = tokenizer.decode(
+                    list(final_res.prompt_token_ids),
+                    skip_special_tokens=False,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to decode prompt_token_ids for request %s: %s",
+                    request_id,
+                    exc,
+                )
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
@@ -1373,6 +1407,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
+            prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
             prompt_routed_experts=prompt_routed_experts,
         )
