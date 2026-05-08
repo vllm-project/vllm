@@ -62,6 +62,8 @@ def test_load_prompt_embeds(
 ):
     model_config = Mock(spec=ModelConfig)
     model_config.enable_prompt_embeds = True
+    model_config.get_hidden_size.return_value = hidden_size
+    model_config.dtype = dtype
 
     # construct arbitrary tensors of various dtypes, layouts, and sizes.
     # We need to check against different layouts to make sure that if a user
