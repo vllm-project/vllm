@@ -236,8 +236,13 @@ def _stg_vec(
     elif const_expr(st_type is Uint32):
         ptx_ty = "u32"
         constraint = "r"
+    elif const_expr(st_type is Int32):
+        ptx_ty = "s32"
+        constraint = "r"
     else:
-        raise TypeError(f"_stg_vec only supports Uint32 and Float32, got {st_type}")
+        raise TypeError(
+            f"_stg_vec only supports Uint32, Int32, and Float32, got {st_type}"
+        )
 
     # compute base pointer
     base_ptr = (
@@ -353,6 +358,10 @@ class DequantGatherKCacheKernel:
 
             # we don't do bounds check here to avoid warp divergence.
             # the last 4 threads will load and dequantize to garbage.
+            # due to our custom K cache layout and how we reconstruct
+            # the view, cute.autovec_copy() doesn't work without adding
+            # extensive alignment/divisibility hints. to keep the code
+            # compact, we will just issue ld PTX directly.
             k_block_offset = pos % self.block_size
             coord = (page_id, k_block_offset, lane_id * 16)
             data = _ldg_vec(k_data, coord, 4, "", Uint32)
@@ -376,8 +385,8 @@ class DequantGatherKCacheKernel:
                 coord = (page_id, k_block_offset, lane_id * 32 - self.fp8_dim)
                 dequant.store(_ldg_vec(k_data, coord, 8, "", Uint32))
 
-            coord = (req_id, offset + i, lane_id * 16)
-            _stg_vec(out, coord, dequant, 8)
+            dst = cute.local_tile(out, (1, 1, 16), (req_id, offset + i, lane_id))
+            cute.autovec_copy(dequant, cute.recast_tensor(dst, Uint32))
 
     @cache
     @staticmethod
