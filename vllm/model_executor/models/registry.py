@@ -89,7 +89,7 @@ _TEXT_GENERATION_MODELS = {
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
     "Cohere2ForCausalLM": ("commandr", "CohereForCausalLM"),
-    "CohereMoeForCausalLM": ("cohere_moe", "CohereMoeForCausalLM"),
+    "Cohere2MoeForCausalLM": ("cohere2_moe", "Cohere2MoeForCausalLM"),
     "CwmForCausalLM": ("llama", "LlamaForCausalLM"),
     "DbrxForCausalLM": ("dbrx", "DbrxForCausalLM"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),

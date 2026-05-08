@@ -238,7 +238,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
-    "CohereMoeForCausalLM": _HfExamplesInfo(
+    "Cohere2MoeForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
         trust_remote_code=True,
         is_available_online=False,

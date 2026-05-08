@@ -89,7 +89,7 @@ MODEL_TO_TAG_STYLE: dict[str, CohereTagStyle] = {
         json_tags=(COMMAND_A_JSON_TAG, COMMAND_A_PLUS_JSON_TAG),
         tools=COMMAND_A_TOOLS_TAG,
     ),
-    "CohereMoeForCausalLM": CohereTagStyle(
+    "Cohere2MoeForCausalLM": CohereTagStyle(
         json_tags=(COMMAND_A_JSON_TAG,),
         tools=COMMAND_A_TOOLS_TAG,
     ),

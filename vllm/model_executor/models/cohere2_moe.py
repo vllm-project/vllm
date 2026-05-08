@@ -53,7 +53,7 @@ def token_choice_with_bias(
     topk: int,
     renormalize: bool,
 ):
-    """Sigmoid -> top-k (-> renormalize) custom routing for CohereMoe."""
+    """Sigmoid -> top-k (-> renormalize) custom routing for Cohere2Moe."""
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
 
     scores = gating_output.float().sigmoid()
@@ -65,7 +65,7 @@ def token_choice_with_bias(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-class CohereMoeMLP(nn.Module):
+class Cohere2MoeMLP(nn.Module):
     """Cohere MLP used as shared experts in the MoE block."""
 
     def __init__(
@@ -107,7 +107,7 @@ class CohereMoeMLP(nn.Module):
         return x
 
 
-class CohereMoeAttention(nn.Module):
+class Cohere2MoeAttention(nn.Module):
     """Cohere MoE attention with sliding-window interleave."""
 
     def __init__(
@@ -195,8 +195,8 @@ class CohereMoeAttention(nn.Module):
         return output
 
 
-class CohereMoe(nn.Module):
-    """Tensor-parallel MoE block for CohereMoe with shared experts."""
+class Cohere2Moe(nn.Module):
+    """Tensor-parallel MoE block for Cohere2Moe with shared experts."""
 
     def __init__(
         self,
@@ -234,7 +234,7 @@ class CohereMoe(nn.Module):
         )
 
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
-            self.shared_experts = CohereMoeMLP(
+            self.shared_experts = Cohere2MoeMLP(
                 config=config,
                 intermediate_size=config.intermediate_size * config.num_shared_experts,
                 quant_config=quant_config,
@@ -276,7 +276,7 @@ class CohereMoe(nn.Module):
         return final_hidden_states.view(orig_shape)
 
 
-class CohereMoeDecoderLayer(nn.Module):
+class Cohere2MoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: CohereConfig,
@@ -288,13 +288,13 @@ class CohereMoeDecoderLayer(nn.Module):
         self.config = config
         self.hidden_size = config.hidden_size
 
-        self.self_attn = CohereMoeAttention(
+        self.self_attn = Cohere2MoeAttention(
             config,
             cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = CohereMoe(
+        self.mlp = Cohere2Moe(
             config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
         self.input_layernorm = LayerNorm(
@@ -320,8 +320,8 @@ class CohereMoeDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class CohereMoeModel(nn.Module):
-    """Transformer decoder for CohereMoe."""
+class Cohere2MoeModel(nn.Module):
+    """Transformer decoder for Cohere2Moe."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -339,7 +339,7 @@ class CohereMoeModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: CohereMoeDecoderLayer(
+            lambda prefix: Cohere2MoeDecoderLayer(
                 config, cache_config, quant_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
@@ -471,7 +471,7 @@ class CohereMoeModel(nn.Module):
         return loaded_params
 
 
-class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     is_text_generation_model = True
 
     packed_modules_mapping = {
@@ -498,7 +498,7 @@ class CohereMoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self.logits_processor = LogitsProcessor(
             self.unpadded_vocab_size, config.vocab_size, scale=self.logits_scale
         )
-        self.model = CohereMoeModel(
+        self.model = Cohere2MoeModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.make_empty_intermediate_tensors = (
