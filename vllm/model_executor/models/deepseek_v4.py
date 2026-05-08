@@ -143,6 +143,9 @@ class DeepseekV4FP8Config(Fp8Config):
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
 
+        # implicitly ignored layers for DSV4
+        self.ignored_layers += ["weights_proj", "fused_wkv_wgate"]
+
     @property
     def expert_dtype(self) -> str:
         if self._resolved_expert_dtype is None:

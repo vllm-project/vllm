@@ -16,6 +16,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import vllm.envs as envs
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.utils.deep_gemm import fp8_einsum
@@ -1139,11 +1140,13 @@ class DeepseekV4Indexer(nn.Module):
             hidden_size,
             self.n_head,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.weights_proj",
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
+        if not isinstance(self.weights_proj.quant_method, UnquantizedLinearMethod):
+            raise NotImplementedError("Quantization of `attn.indexer.weights_proj`")
 
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config

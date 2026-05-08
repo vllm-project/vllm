@@ -222,15 +222,15 @@ class DeepseekCompressor(nn.Module):
             [self.coff * self.head_dim, self.coff * self.head_dim],
             bias=False,
             return_bias=False,
-            quant_config=vllm_config.quant_config,
+            quant_config=None,
             disable_tp=True,
             prefix=f"{prefix}.fused_wkv_wgate",
         )
         self.norm = RMSNorm(self.head_dim, self.rms_norm_eps)
         if not isinstance(self.fused_wkv_wgate.quant_method, UnquantizedLinearMethod):
             raise NotImplementedError(
-                "Quantization of `wkv` and `wgate` is not supported due to accuracy "
-                "concerns. See #42001"
+                "Quantization of `indexer.compressor.wkv/wgate` is not supported "
+                "due to accuracy concerns. See #42001."
             )
 
         self.state_cache = CompressorStateCache(
