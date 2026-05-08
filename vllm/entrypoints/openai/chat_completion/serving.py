@@ -500,10 +500,7 @@ class OpenAIServingChat(OpenAIServing):
                     role = self.get_chat_request_role(request)
 
                     prompt_text: str | None = None
-                    if (
-                        request.return_token_ids
-                        and res.prompt_token_ids is not None
-                    ):
+                    if request.return_token_ids and res.prompt_token_ids is not None:
                         try:
                             prompt_text = tokenizer.decode(
                                 list(res.prompt_token_ids),
