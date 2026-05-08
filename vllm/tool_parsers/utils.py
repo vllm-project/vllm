@@ -308,20 +308,43 @@ def get_parameter_value(val: ast.expr) -> Any:
         raise UnexpectedAstError("Tool call arguments must be literals")
 
 
+def _ast_callable_dotted_name(node: ast.expr) -> str:
+    """Return the dotted name for a call target, walking ``ast.Attribute``
+    chains so ``a.b.c(...)`` becomes ``"a.b.c"``.
+
+    Raises:
+        UnexpectedAstError: If the chain does not bottom out in an
+            ``ast.Name`` (e.g. subscript or call expression as receiver).
+    """
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        raise UnexpectedAstError("Invalid tool call name")
+    parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
 def handle_single_tool(call: ast.Call) -> ToolCall:
     """Convert a single AST function call node into a ToolCall object.
 
+    Accepts both bare names (``foo(...)``) and dotted attribute chains
+    (``a.b.c(...)``); the resulting tool call ``name`` field preserves the
+    dotted form.
+
     Raises:
-        UnexpectedAstError: If the call node does not have a simple
-            function name (e.g. it's an attribute access or subscript).
+        UnexpectedAstError: If the call target is neither a simple name
+            nor a chain of attribute accesses bottoming out in a name.
     """
-    if not isinstance(call.func, ast.Name):
+    if not isinstance(call.func, (ast.Name, ast.Attribute)):
         logger.warning(
             "Tool call has non-simple function name: %s",
             ast.dump(call.func),
         )
         raise UnexpectedAstError("Invalid tool call name")
-    function_name = call.func.id
+    function_name = _ast_callable_dotted_name(call.func)
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = get_parameter_value(keyword.value)
@@ -403,7 +426,28 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     for char in reversed(bracket_stack):
         added_text += _CLOSING[char]
 
-    return text + added_text, added_text
+    candidate = text + added_text
+
+    # Streaming partial text can land in shapes the bracket-counting
+    # heuristics above don't catch. Two failure modes:
+    #   1. Mid-key inside a dict (`..., "k`) closes to `..., "k"}` — a
+    #      syntactically invalid mixed dict/set.
+    #   2. A bare string inside a dict (`{"k`) closes to `{"k"}` — valid
+    #      Python but a *set* literal, which downstream tool-call AST
+    #      handling rejects.
+    # Validate the candidate parses, has a body, and contains no Set
+    # nodes (pythonic tool calls always use dicts for `{...}`).
+    try:
+        module = ast.parse(candidate)
+    except SyntaxError:
+        return None
+    if not module.body:
+        return None
+    for node in ast.walk(module):
+        if isinstance(node, ast.Set):
+            return None
+
+    return candidate, added_text
 
 
 def compute_tool_delta(
