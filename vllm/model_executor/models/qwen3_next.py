@@ -166,8 +166,10 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=1,
-            shared_expert_gate=self.shared_expert_gate,
+            n_shared_experts=1 if self.shared_expert is None else None,
+            shared_expert_gate=self.shared_expert_gate
+            if self.shared_expert is None
+            else None,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
