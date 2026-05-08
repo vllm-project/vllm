@@ -136,7 +136,8 @@ def create_and_prepopulate_kv_cache(
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
-    # Create KV cache
+    # Create KV cache and populate in (2, num_blocks, ...) layout for easy
+    # flat indexing, then transpose to (num_blocks, 2, ...) layout.
     kv_cache = torch.zeros(
         2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
@@ -155,6 +156,9 @@ def create_and_prepopulate_kv_cache(
         # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
+    # Transpose to (num_blocks, 2, ...) layout
+    kv_cache = kv_cache.transpose(0, 1).contiguous()
+
     blocks_end = start_block_idx
 
     # Permute the context blocks (excluding block 0 which is null)
@@ -168,7 +172,7 @@ def create_and_prepopulate_kv_cache(
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
     # Add 1 to account for starting from block 1
     inv_perm[1:] = torch.argsort(perm) + 1
-    kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
+    kv_cache[1:blocks_end, ...] = kv_cache[perm, ...]
 
     # Construct the right block table
     # Start from block_id=1 since block_id=0 is considered the null block
@@ -473,18 +477,9 @@ def _test_backend_correctness(
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in backend_to_test:
-        # FlashAttentionm + FlexAttention:
-        #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer + Triton:
-        #   [num_blocks, 2, block_size, num_kv_heads, head_size]
-        # Select the appropriate KV cache format for each backend
+        # KV cache is created in (num_blocks, 2, ...) layout.
         kv_cache_for_backend = kv_cache
         reset_kv_cache_layout = False
-        if backend_name in (
-            AttentionBackendEnum.FLASHINFER,
-            AttentionBackendEnum.TRITON_ATTN,
-        ):
-            kv_cache_for_backend = kv_cache.transpose(0, 1)
 
         if backend_name == AttentionBackendEnum.FLASHINFER:
             # For FlashInfer default to HND layout and

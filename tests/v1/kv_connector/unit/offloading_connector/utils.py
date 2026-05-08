@@ -252,10 +252,10 @@ class RequestRunner:
             spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 # Shape follows FlashAttention layout:
-                # (2, num_blocks, block_size, num_kv_heads, head_size)
+                # Shape: (num_blocks, 2, block_size, num_kv_heads, head_size)
                 kv_caches[layer_name] = torch.empty(
-                    2,
                     num_gpu_blocks,
+                    2,
                     spec.block_size,
                     spec.num_kv_heads,
                     spec.head_size,
