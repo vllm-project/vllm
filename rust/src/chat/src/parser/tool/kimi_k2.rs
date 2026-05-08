@@ -4,7 +4,7 @@ use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
 
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{JsonObjectScanState, parse_buffered_event, safe_text_len, take_json_object};
 use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, parsing_failed};
 use crate::request::{ChatRequest, ChatTool};
 
@@ -16,12 +16,12 @@ const TOOL_CALL_ARGUMENT_START: &str = "<|tool_call_argument_begin|>";
 
 type KimiK2Input<'i> = Partial<&'i str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum KimiK2Mode {
     Text,
     ToolBlock,
     Header,
-    Arguments,
+    Arguments { json_scan: JsonObjectScanState },
     Done,
 }
 
@@ -86,7 +86,9 @@ impl KimiK2ToolParser {
             } => {
                 let tool_index = function_index;
                 self.active_tool_index = Some(tool_index);
-                self.mode = KimiK2Mode::Arguments;
+                self.mode = KimiK2Mode::Arguments {
+                    json_scan: JsonObjectScanState::default(),
+                };
                 result.calls.push(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
@@ -149,7 +151,7 @@ impl ToolParser for KimiK2ToolParser {
         let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_kimi_k2_event(input, self.mode)
+            parse_next_kimi_k2_event(input, &mut self.mode)
         })? {
             self.apply_event(event, &mut result)?;
             self.buffer.drain(..consumed_len);
@@ -161,10 +163,10 @@ impl ToolParser for KimiK2ToolParser {
     /// Flush buffered text and reset parser state.
     fn finish(&mut self) -> Result<ToolParseResult> {
         let mut result = ToolParseResult::default();
-        match self.mode {
+        match &self.mode {
             KimiK2Mode::Text => result.normal_text.push_str(&self.buffer),
             KimiK2Mode::ToolBlock | KimiK2Mode::Done => {}
-            KimiK2Mode::Header | KimiK2Mode::Arguments => {
+            KimiK2Mode::Header | KimiK2Mode::Arguments { .. } => {
                 return Err(parsing_failed!("incomplete Kimi K2 tool call"));
             }
         }
@@ -176,13 +178,13 @@ impl ToolParser for KimiK2ToolParser {
 /// Parse a Kimi K2 event for the current parser mode.
 fn parse_next_kimi_k2_event(
     input: &mut KimiK2Input<'_>,
-    mode: KimiK2Mode,
+    mode: &mut KimiK2Mode,
 ) -> ModalResult<KimiK2Event> {
     match mode {
         KimiK2Mode::Text => parse_text_event(input),
         KimiK2Mode::ToolBlock => parse_tool_block_event(input),
         KimiK2Mode::Header => tool_call_header_event(input),
-        KimiK2Mode::Arguments => parse_arguments_event(input),
+        KimiK2Mode::Arguments { json_scan } => parse_arguments_event(input, json_scan),
         KimiK2Mode::Done => ignored_rest_event(input),
     }
 }
@@ -198,8 +200,15 @@ fn parse_tool_block_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Even
 }
 
 /// Parse one event inside a Kimi K2 tool-call arguments payload.
-fn parse_arguments_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
-    alt((tool_call_end_event, argument_delta_event)).parse_next(input)
+fn parse_arguments_event(
+    input: &mut KimiK2Input<'_>,
+    json_scan: &mut JsonObjectScanState,
+) -> ModalResult<KimiK2Event> {
+    if json_scan.complete() {
+        tool_call_end_event(input)
+    } else {
+        argument_delta_event(input, json_scan)
+    }
 }
 
 /// Parse a Kimi K2 tool-calls section start marker.
@@ -244,8 +253,11 @@ fn tool_call_header_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Even
 }
 
 /// Parse a Kimi K2 raw JSON arguments delta.
-fn argument_delta_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
-    safe_text_len(input, TOOL_CALL_END).map(|len| KimiK2Event::Arguments { len })
+fn argument_delta_event(
+    input: &mut KimiK2Input<'_>,
+    json_scan: &mut JsonObjectScanState,
+) -> ModalResult<KimiK2Event> {
+    take_json_object(input, json_scan).map(|len| KimiK2Event::Arguments { len })
 }
 
 /// Parse a safe text run before the next Kimi K2 tool-calls section.
@@ -423,6 +435,41 @@ mod tests {
         assert_eq!(result.normal_text, "hello ");
         assert_eq!(result.calls.len(), 1);
         assert_eq!(result.calls[0].arguments, r#"{"location":"NYC"}"#);
+    }
+
+    #[test]
+    fn kimi_k2_keeps_end_marker_literal_inside_json_string() {
+        let mut parser = KimiK2ToolParser::new(&test_tools());
+        let arguments = format!(r#"{{"text":"literal {TOOL_CALL_END} inside"}}"#);
+        let input = build_tool_section(&[build_tool_call("echo", 0, &arguments)]);
+
+        let result = parser.parse_complete(&input).unwrap();
+
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(result.calls[0].arguments, arguments);
+    }
+
+    #[test]
+    fn kimi_k2_streaming_keeps_split_end_marker_literal_inside_json_string() {
+        let mut parser = KimiK2ToolParser::new(&test_tools());
+        let chunks = [
+            TOOL_CALLS_START,
+            TOOL_CALL_START,
+            "functions.echo:0",
+            TOOL_CALL_ARGUMENT_START,
+            r#"{"text":"literal <|tool"#,
+            r#"_call_end|> inside"}"#,
+            TOOL_CALL_END,
+            TOOL_CALLS_END,
+        ];
+
+        let result = collect_stream(&mut parser, &chunks);
+
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(
+            result.calls[0].arguments,
+            r#"{"text":"literal <|tool_call_end|> inside"}"#
+        );
     }
 
     #[test]

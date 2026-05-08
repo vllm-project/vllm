@@ -152,6 +152,18 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_v31_keeps_end_marker_literal_inside_json_string() {
+        let mut parser = DeepSeekV31ToolParser::new(&test_tools());
+        let arguments = format!(r#"{{"text":"literal {TOOL_CALL_END} inside"}}"#);
+        let input = tool_section(&[v31_tool_call("echo", &arguments)]);
+
+        let result = parser.parse_complete(&input).unwrap();
+
+        assert_eq!(result.calls.len(), 1);
+        assert_eq!(result.calls[0].arguments, arguments);
+    }
+
+    #[test]
     fn deepseek_v31_streaming_extracts_multiple_tool_calls() {
         let input = tool_section(&[
             v31_tool_call("get_weather", r#"{"location":"Shanghai"}"#),
