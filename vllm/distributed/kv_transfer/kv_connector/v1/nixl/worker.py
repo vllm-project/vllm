@@ -1391,7 +1391,8 @@ class NixlConnectorWorker:
         )
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
-        if not self._has_mamba:
+        # MLA models do not need to handle kv replication.
+        if not self.use_mla and not self._has_mamba:
             assert not (
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
