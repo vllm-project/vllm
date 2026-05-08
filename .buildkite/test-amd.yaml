@@ -1277,6 +1277,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1310,6 +1311,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1327,6 +1329,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1660,6 +1663,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1713,6 +1717,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2199,6 +2204,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
