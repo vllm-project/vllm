@@ -69,7 +69,7 @@ _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 
 
 _DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD: dict[int, int] = {
-    2048: 64,  # DeepSeek-V4-Flash
+    2048: 32,  # DeepSeek-V4-Flash
     3072: 64,  # DeepSeek-V4-Pro
 }
 
@@ -734,7 +734,6 @@ def _deepseek_v4_mega_moe_op(
             activation_clamp,
             fast_math,
         )
-
 
     overlap_token_threshold = _DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD.get(
         self.intermediate_size
