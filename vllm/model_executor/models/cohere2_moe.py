@@ -30,7 +30,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    row_parallel_weight_loader,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -65,6 +67,37 @@ def token_choice_with_bias(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+@torch.compile(backend=current_platform.simple_compile_backend)
+def rms_norm_func(hidden_states, weight, variance_epsilon):
+    input_dtype = hidden_states.dtype
+    hidden_states = hidden_states.to(torch.float32)
+    variance = hidden_states.pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
+    hidden_states = weight.to(torch.float32) * hidden_states
+    return hidden_states.to(input_dtype)
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, param_shape=None, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(param_shape))
+        self.variance_epsilon = eps
+        set_weight_attrs(self.weight, {"weight_loader": row_parallel_weight_loader})
+
+    def forward(self, hidden_states, residuals=None):
+        hidden_states = rms_norm_func(hidden_states, self.weight, self.variance_epsilon)
+        return hidden_states, residuals
+
+
+def select_norm_impl(config: CohereConfig) -> tuple[type[nn.Module], float]:
+    """Returns (norm_class, eps). Uses RMSNorm when config.rms_norm_eps is set,
+    otherwise falls back to LayerNorm with config.layer_norm_eps."""
+    rms_eps = getattr(config, "rms_norm_eps", None)
+    if rms_eps is not None:
+        return RMSNorm, rms_eps
+    return LayerNorm, config.layer_norm_eps
+
+
 class Cohere2MoeMLP(nn.Module):
     """Cohere MLP used as shared experts in the MoE block."""
 
@@ -73,6 +106,7 @@ class Cohere2MoeMLP(nn.Module):
         config: CohereConfig,
         intermediate_size: int | None = None,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = False,
         prefix: str = "",
     ):
         super().__init__()
@@ -95,7 +129,7 @@ class Cohere2MoeMLP(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=False,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
@@ -170,6 +204,19 @@ class Cohere2MoeAttention(nn.Module):
         ):
             self.sliding_window = config.sliding_window
 
+        # Prefix-dense layers (layer_idx < first_k_dense_replace) have full
+        # attention (no sliding window). When prefix_dense_sliding_window_pattern
+        # == 1, they keep RoPE even though they are not sliding-window layers.
+        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
+        prefix_dense_sliding_window_pattern = getattr(
+            config, "prefix_dense_sliding_window_pattern", 1
+        )
+        self.force_rope = bool(
+            first_k_dense_replace
+            and prefix_dense_sliding_window_pattern == 1
+            and self.layer_idx < first_k_dense_replace
+        )
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -188,7 +235,7 @@ class Cohere2MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if self.sliding_window:
+        if self.sliding_window or self.force_rope:
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -287,6 +334,7 @@ class Cohere2MoeDecoderLayer(nn.Module):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
+        self.layer_idx = extract_layer_index(prefix)
 
         self.self_attn = Cohere2MoeAttention(
             config,
@@ -294,12 +342,26 @@ class Cohere2MoeDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = Cohere2Moe(
-            config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
-        )
-        self.input_layernorm = LayerNorm(
-            param_shape=(config.hidden_size,), eps=config.layer_norm_eps
-        )
+
+        # Layers before first_k_dense_replace use a dense MLP instead of MoE.
+        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
+        if self.layer_idx < first_k_dense_replace:
+            self.mlp = Cohere2MoeMLP(
+                config=config,
+                intermediate_size=getattr(
+                    config, "prefix_dense_intermediate_size", config.intermediate_size
+                ),
+                quant_config=quant_config,
+                reduce_results=True,
+                prefix=f"{prefix}.mlp",
+            )
+        else:
+            self.mlp = Cohere2Moe(
+                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+            )
+
+        norm_cls, norm_eps = select_norm_impl(config)
+        self.input_layernorm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
 
     def forward(
         self,
@@ -344,9 +406,8 @@ class Cohere2MoeModel(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.norm = LayerNorm(
-            param_shape=(config.hidden_size,), eps=config.layer_norm_eps
-        )
+        norm_cls, norm_eps = select_norm_impl(config)
+        self.norm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
