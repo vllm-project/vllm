@@ -83,7 +83,7 @@ def register_predictable_model():
 
 
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path
+    predictable_llama_config_path, tmp_path, monkeypatch
 ):
     """Comprehensive test using a predictable dummy model with synthetic weights.
 
@@ -94,6 +94,12 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     3. Layer ordering is preserved correctly (non-sequential layer IDs)
     4. Multiple prompts of different lengths produce consistent layer values
     """
+    # Force fork so the engine worker inherits the autouse fixture's
+    # ModelRegistry.register_model("PredictableLlamaForCausalLM", ...).
+    # Spawn (the CI default) starts a fresh Python process that wouldn't
+    # see the registration.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+
     # Test with non-sequential layer ordering to verify correct association
     layer_ids = [5, 2, 10]
     num_layers = len(layer_ids)
