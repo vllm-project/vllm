@@ -112,16 +112,16 @@ def get_moe_quant_method(
                 "supported by Marlin MoE kernels. Falling back to "
                 "MoeWNA16 kernels."
             )
-            # Sync all dynamically overridden fields into the fallback
-            # config dict, since override_config() only updates the
-            # cloned GPTQMarlinConfig object, not its full_config dict.
-            fallback_config = deepcopy(cloned_config.full_config)
-            fallback_config["bits"] = cloned_config.weight_bits
-            fallback_config["group_size"] = cloned_config.group_size
-            fallback_config["sym"] = cloned_config.is_sym
-            fallback_config["desc_act"] = cloned_config.desc_act
+            # Sync dynamically overridden fields into full_config dict
+            # (override_config only updates the GPTQMarlinConfig object,
+            # not its full_config dict). Safe to mutate — cloned_config
+            # is already a deepcopy.
+            cloned_config.full_config["bits"] = cloned_config.weight_bits
+            cloned_config.full_config["group_size"] = cloned_config.group_size
+            cloned_config.full_config["sym"] = cloned_config.is_sym
+            cloned_config.full_config["desc_act"] = cloned_config.desc_act
             return MoeWNA16Config.from_config(
-                fallback_config
+                cloned_config.full_config
             ).get_quant_method(layer, prefix)
 
         return moe_method_cls(cloned_config, layer.moe_config)
