@@ -90,6 +90,14 @@ class TreeAttentionMetadata:
     num_prefills: int = 0
     num_decodes: int = 0
 
+    # Precomputed (on CPU in the builder) max_query_len and max_seq_len for
+    # the prefill-only and decode-only sub-batches. Used by the properties
+    # below to avoid a GPU->CPU sync via `.max().item()` on every forward.
+    max_query_len_prefill: int = 0
+    max_seq_len_prefill: int = 0
+    max_query_len_decode: int = 0
+    max_seq_len_decode: int = 0
+
     tree_attn_bias: torch.Tensor | None = None
 
     # Cached Prefill/decode metadata.
@@ -107,14 +115,13 @@ class TreeAttentionMetadata:
             return self._cached_prefill_metadata
 
         q_start_loc = self.query_start_loc[self.num_decodes :]
-        q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[self.num_decodes :]
         # Construct & cache prefill-phase attention metadata structure
         self._cached_prefill_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_prefill_tokens,
-            max_query_len=int(q_seqlens.max().item()),
+            max_query_len=self.max_query_len_prefill,
             query_start_loc=q_start_loc - q_start_loc[0],
-            max_seq_len=int(kv_seqlens.max().item()),
+            max_seq_len=self.max_seq_len_prefill,
             seq_lens=kv_seqlens,
             block_table=self.block_table[self.num_decodes :],
             slot_mapping=self.slot_mapping[self.num_decode_tokens :],
@@ -132,14 +139,13 @@ class TreeAttentionMetadata:
             return self._cached_decode_metadata
 
         q_start_loc = self.query_start_loc[: self.num_decodes + 1]
-        q_seqlens = torch.diff(q_start_loc)
         kv_seqlens = self.seq_lens[: self.num_decodes]
         # Construct & cache decode-phase attention metadata structure
         self._cached_decode_metadata = TreeAttentionMetadata(
             num_actual_tokens=self.num_decode_tokens,
-            max_query_len=int(q_seqlens.max().item()),
+            max_query_len=self.max_query_len_decode,
             query_start_loc=q_start_loc,
-            max_seq_len=int(kv_seqlens.max().item()),
+            max_seq_len=self.max_seq_len_decode,
             seq_lens=kv_seqlens,
             block_table=self.block_table[: self.num_decodes],
             slot_mapping=self.slot_mapping[: self.num_decode_tokens],
@@ -199,6 +205,42 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
+        # Precompute prefill/decode sub-batch max_query_len / max_seq_len on
+        # CPU so the prefill_metadata / decode_metadata properties don't need
+        # a GPU->CPU sync via `.max().item()` on every forward.
+        # Prefer `seq_lens_cpu_upper_bound` over the (deprecated)
+        # `seq_lens_cpu` property: the upper bound is precise for prefill
+        # rows and optimistic-but-safe for decode rows (workspace sizing
+        # from `max()` is fine with an over-estimate), and avoids the
+        # `seq_lens.to("cpu")` sync the property would fall through to in
+        # async-spec-decode mode. The draft-attention path (eagle
+        # speculator) doesn't populate it; fall back to the batch-wide
+        # `max_seq_len` as a safe upper bound for both sub-batches.
+        q_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        if num_prefills > 0:
+            q_seqlens_p = torch.diff(q_start_loc_cpu[num_decodes:])
+            max_query_len_prefill = int(q_seqlens_p.max())
+            max_seq_len_prefill = (
+                int(seq_lens_cpu[num_decodes:].max())
+                if seq_lens_cpu is not None
+                else max_seq_len
+            )
+        else:
+            max_query_len_prefill = 0
+            max_seq_len_prefill = 0
+        if num_decodes > 0:
+            q_seqlens_d = torch.diff(q_start_loc_cpu[: num_decodes + 1])
+            max_query_len_decode = int(q_seqlens_d.max())
+            max_seq_len_decode = (
+                int(seq_lens_cpu[:num_decodes].max())
+                if seq_lens_cpu is not None
+                else max_seq_len
+            )
+        else:
+            max_query_len_decode = 0
+            max_seq_len_decode = 0
+
         return TreeAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             num_prefill_tokens=num_prefill_tokens,
@@ -211,6 +253,10 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
             seq_lens=kv_seqlens,
             block_table=block_table,
             slot_mapping=slot_mapping,
+            max_query_len_prefill=max_query_len_prefill,
+            max_seq_len_prefill=max_seq_len_prefill,
+            max_query_len_decode=max_query_len_decode,
+            max_seq_len_decode=max_seq_len_decode,
             tree_attn_bias=self.tree_attn_bias,
         )
 

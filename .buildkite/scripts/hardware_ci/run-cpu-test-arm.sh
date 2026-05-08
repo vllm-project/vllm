@@ -31,6 +31,21 @@ function cpu_tests() {
     set -e
     pip list"
 
+  # Run kernel tests
+  docker exec cpu-test bash -c "
+    set -e
+    pytest -x -v -s tests/kernels/test_onednn.py
+    pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
+    pytest -x -v -s tests/kernels/core/test_cpu_activation.py
+    pytest -x -v -s tests/kernels/moe/test_moe.py -k test_cpu_fused_moe_basic"
+
+  # skip tests requiring model downloads if HF_TOKEN is not set
+  # due to rate-limits
+  if [ -z "$HF_TOKEN" ]; then
+    echo "Warning: HF_TOKEN is not set. Skipping tests that require model downloads."
+    return
+  fi
+
   # offline inference
   docker exec cpu-test bash -c "
     set -e
@@ -46,13 +61,6 @@ function cpu_tests() {
     set -e
     pytest -x -v -s tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
-  # Run kernel tests
-  docker exec cpu-test bash -c "
-    set -e
-    pytest -x -v -s tests/kernels/test_onednn.py
-    pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-    pytest -x -v -s tests/kernels/core/test_cpu_activation.py
-    pytest -x -v -s tests/kernels/moe/test_moe.py -k test_cpu_fused_moe_basic"
 
   # basic online serving
   docker exec cpu-test bash -c '
@@ -67,6 +75,21 @@ function cpu_tests() {
       --num-prompts 20 \
       --endpoint /v1/completions
     kill -s SIGTERM $server_pid &'
+
+  # smoke test for Gated DeltaNet
+  docker exec cpu-test bash -c '
+    set -e
+    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS vllm serve Qwen/Qwen3.5-0.8B --max-model-len 2048 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+      --backend vllm \
+      --dataset-name random \
+      --model Qwen/Qwen3.5-0.8B \
+      --num-prompts 20 \
+      --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
+
 }
 
 # All of CPU tests are expected to be finished less than 40 mins.
