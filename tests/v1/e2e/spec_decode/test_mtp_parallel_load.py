@@ -1,33 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Multi-parallelism weight-loading + basic correctness tests for DeepSeek MTP.
-
-The existing ``test_mtp_correctness[deepseek]`` covers TP=1 only. This file
-adds non-TP=1 coverage:
-  * TP=2, EP=2, EP=2 + EPLB via the inline ``LLM`` constructor.
-  * DP=2 via ``AsyncLLM`` (mirrors ``tests/v1/distributed/test_eagle_dp.py``,
-    since inline ``LLM(data_parallel_size>1)`` is rejected at
-    ``vllm/entrypoints/llm.py:333``).
-  * PP=2 statically skipped pending upstream support
-    (https://github.com/vllm-project/vllm/pull/38104).
-
-For each cell we build two engines at the same parallelism shape (one with
-the MTP drafter, one without), run greedy decode on the same prompt under
-``VLLM_BATCH_INVARIANT=1``, and assert the output token ids match exactly.
-For the inline cells we additionally check
-``vllm:spec_decode_num_drafts > 0`` from ``llm.get_metrics()`` so a
-silently-broken drafter that falls through to verifier-only decoding is not
-an automatic pass. ``AsyncLLM`` does not expose ``get_metrics()``, so the
-DP cell relies on the same exact-match guard upstream's eagle DP test uses.
-
-Random-weight checkpoint (``luccafong/deepseek_mtp_main_random``, 5+1
-layers, ~7.3 GB FP8) keeps the test fast and within a 2-GPU shape.
-
-Closes a coverage gap that allowed
-https://github.com/vllm-project/vllm/pull/29545 (TP+EP load-time crash) to
-land without an upstream regression gate before merge.
-"""
 
 import asyncio
 from contextlib import AsyncExitStack
@@ -147,10 +119,9 @@ def test_deepseek_mtp_load_inline(
     config: InlineConfig,
 ):
     """
-    Smoke-load the random DeepSeek-MTP-shaped checkpoint at non-trivial
-    parallelism using the inline ``LLM`` constructor. Assert (a) the spec
-    output matches the no-spec output exactly under greedy + batch-invariant,
-    and (b) the MTP drafter actually fired.
+    Verify MTP weight-loading and spec / no-spec exact-match equality
+    across non-TP=1 parallelism shapes via the inline ``LLM`` constructor,
+    and assert the MTP drafter actually fired.
     """
     if config.skip_reason is not None:
         pytest.skip(config.skip_reason)
@@ -197,13 +168,9 @@ def test_deepseek_mtp_load_inline(
 )
 async def test_deepseek_mtp_load_dp(monkeypatch: pytest.MonkeyPatch):
     """
-    Load the random DeepSeek-MTP-shaped checkpoint with data_parallel_size=2
-    via ``AsyncLLM`` (the only supported path for DP) and assert the spec
-    output matches the no-spec output exactly under greedy + batch-invariant.
-
-    Mirrors ``tests/v1/distributed/test_eagle_dp.py``. ``AsyncLLM`` does not
-    expose ``get_metrics()``, so the non-vacuity guard from the inline cells
-    is omitted here; output equality across spec / no-spec is the gate.
+    Verify MTP weight-loading and spec / no-spec exact-match equality
+    for DP=2 via ``AsyncLLM``. Output equality is the only gate, since
+    ``AsyncLLM`` does not expose ``get_metrics()``.
     """
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
