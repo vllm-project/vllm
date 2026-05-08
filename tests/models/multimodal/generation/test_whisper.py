@@ -12,7 +12,7 @@ from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
-from ....utils import multi_gpu_test
+from ....utils import create_new_process_for_each_test, multi_gpu_test
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
@@ -297,6 +297,7 @@ def test_models(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [200])
 @pytest.mark.parametrize("num_logprobs", [5])
+@create_new_process_for_each_test("spawn")
 def test_models_distributed(
     hf_runner,
     vllm_runner,
