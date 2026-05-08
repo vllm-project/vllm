@@ -19,6 +19,7 @@ from ..utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
     encode_pooling_output_float,
+    encode_pooling_output_float_or_ndarray,
     get_json_response_cls,
 )
 from .io_processor import EmbedIOProcessor
@@ -104,6 +105,40 @@ class ServingEmbedding(PoolingServing):
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> JSONResponse:
+        use_ndarray_response = (
+            encoding_format == "float"
+            and self.json_response_cls.__name__ == "ORJSONResponse"
+        )
+        if use_ndarray_response:
+            ndarray_items: list[dict[str, object]] = []
+            ndarray_num_tokens = 0
+
+            for idx, final_res in enumerate(final_res_batch):
+                item_dict = EmbeddingResponseData(
+                    index=idx,
+                    embedding=[],
+                ).model_dump()
+                item_dict["embedding"] = encode_pooling_output_float_or_ndarray(
+                    final_res
+                )
+                ndarray_items.append(item_dict)
+                ndarray_num_tokens += len(final_res.prompt_token_ids)
+
+            ndarray_usage = UsageInfo(
+                prompt_tokens=ndarray_num_tokens,
+                total_tokens=ndarray_num_tokens,
+            )
+            ndarray_response = EmbeddingResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                data=[],  # type: ignore[arg-type]
+                usage=ndarray_usage,
+            ).model_dump()
+            ndarray_response["data"] = ndarray_items
+
+            return self.json_response_cls(content=ndarray_response)
+
         encode_fn = cast(
             Callable[[PoolingRequestOutput], list[float] | str],
             (
