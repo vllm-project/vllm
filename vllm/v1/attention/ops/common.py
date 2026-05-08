@@ -121,6 +121,7 @@ def correct_attn_out(
         lses: Tensor of shape [ N, B, H ]
         cp_rank: Current rank in the context-parallel group
         ctx: Triton context to avoid recompilation
+        is_lse_base_on_e: Whether the lse is based on natural log (e) or log2.
 
     Returns:
         Tuple of (out, lse) with corrected attention and final log-sum-exp.
@@ -184,6 +185,7 @@ def _cp_lse_common(
     cp_group: GroupCoordinator,
     ctx: CPTritonContext | None = None,
     is_lse_base_on_e=True,
+    empty_req_mask: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -196,6 +198,9 @@ def _cp_lse_common(
         ctx = CPTritonContext()
 
     cp_attn_lse = cp_attn_lse.contiguous()
+    if empty_req_mask is not None:
+        cp_attn_lse.masked_fill_(empty_req_mask[:, None], -float("inf"))
+        cp_attn_out.masked_fill_(empty_req_mask[:, None, None], 0)
     lses = cp_group.all_gather(cp_attn_lse, dim=0).reshape(
         (cp_group.world_size,) + cp_attn_lse.shape
     )
@@ -216,13 +221,19 @@ def cp_lse_ag_out_rs(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e=True,
+    empty_req_mask: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
-        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        ctx=ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+        empty_req_mask=empty_req_mask,
     )
     out = cp_group.reduce_scatter(out, dim=1)
 
@@ -241,13 +252,19 @@ def cp_lse_ag_out_ar(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e=True,
+    empty_req_mask: torch.Tensor | None = None,
 ):
     """
     cp_attn_out: [ B, H, D ]
     cp_attn_lse: [ B, H ]
     """
     out, lse = _cp_lse_common(
-        cp_attn_out, cp_attn_lse, cp_group, ctx=ctx, is_lse_base_on_e=is_lse_base_on_e
+        cp_attn_out,
+        cp_attn_lse,
+        cp_group,
+        ctx=ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+        empty_req_mask=empty_req_mask,
     )
     out = cp_group.all_reduce(out)
 

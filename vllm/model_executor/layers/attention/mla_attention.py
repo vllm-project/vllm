@@ -265,6 +265,7 @@ from vllm.v1.attention.backends.mla.prefill import (
     get_mla_prefill_backend,
 )
 from vllm.v1.attention.backends.utils import (
+    expand_req_values_to_token,
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
@@ -485,11 +486,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_sparse = use_sparse
 
         _vllm_config = get_current_vllm_config_or_none()
-        self.dcp_a2a = (
+        dcp_a2a = (
             _vllm_config is not None
             and _vllm_config.parallel_config.decode_context_parallel_size > 1
             and _vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+
+        if dcp_a2a:
+            self._dcp_combine = functools.partial(
+                dcp_a2a_lse_reduce,
+                is_lse_base_on_e=True,
+            )
+        else:
+            self._dcp_combine = functools.partial(
+                cp_lse_ag_out_rs,
+                is_lse_base_on_e=True,
+            )
 
         # Initialize q/k/v range constants.
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
@@ -775,20 +787,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
-                if self.dcp_a2a:
-                    attn_out = dcp_a2a_lse_reduce(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=True,
-                    )
-                else:
-                    attn_out = cp_lse_ag_out_rs(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=True,
-                    )
+                assert attn_metadata.decode is not None
+                local_seq_lens_per_token = expand_req_values_to_token(
+                    attn_metadata.decode.seq_lens,
+                    attn_metadata.query_start_loc[: attn_metadata.num_decodes + 1],
+                    num_tokens=attn_out.shape[0],
+                )
+                attn_out = self._dcp_combine(
+                    attn_out,
+                    lse,
+                    get_dcp_group(),
+                    empty_req_mask=local_seq_lens_per_token.eq(0),
+                )
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
