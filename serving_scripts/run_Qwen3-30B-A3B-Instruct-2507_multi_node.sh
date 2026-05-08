@@ -2,16 +2,19 @@
 #SBATCH --job-name=vllm-host-qwen3-30b
 #SBATCH --nodes=2
 #SBATCH --partition=short
-#SBATCH --gres=gpu:h100:2
+#SBATCH --gres=gpu:h100:1
 #SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
 #SBATCH --time=01:00:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
+#SBATCH --mail-user=jason.miller@eng.ox.ac.uk
+#SBATCH --mail-type=BEGIN,END,FAIL
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-tp2-pp2-netdebug-2026-05-08-v5"
+SCRIPT_VERSION="arc-ray-ib-tp1-pp2-smoke-2026-05-08-v6"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
@@ -68,6 +71,23 @@ resolve_host_ip() {
   printf '%s' "${ip}"
 }
 
+resolve_node_ib_ip() {
+  local nodename="$1"
+  local ip=""
+
+  ip=$(
+    srun --nodelist="${nodename}" --nodes=1 --ntasks=1 \
+      --cpus-per-task="${SLURM_CPUS_PER_TASK:-1}" \
+      bash -lc '
+        ip -o -4 addr show scope global up \
+          | awk '"'"'$2 ~ /^ib/ {split($4,a,"/"); print a[1]; exit}'"'"'
+      ' 2>/dev/null || true
+  )
+
+  slurm_debug "resolve_node_ib_ip(${nodename}) -> ${ip:-<empty>}"
+  printf "%s" "${ip}"
+}
+
 interface_for_ip() {
   local target_ip="$1"
   ip -o -4 addr show 2>/dev/null | awk -v target="${target_ip}" '
@@ -120,18 +140,15 @@ configure_socket_ifnames() {
       nccl_iface=""
     fi
     export NCCL_SOCKET_IFNAME="${nccl_iface:-${iface}}"
-  elif [ -n "${NCCL_SOCKET_IFNAME:-}" ] && ! interface_has_ip "${NCCL_SOCKET_IFNAME}" "${target_ip}"; then
-    echo "Unsetting NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}; it does not own ${target_ip} on $(hostname)." >&2
-    unset NCCL_SOCKET_IFNAME
   fi
 
   echo "Socket interface for ${target_ip} on $(hostname): GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-<unset>}"
 }
 
-export HEAD_NODE_IP="$(resolve_host_ip "${HEAD_NODE}")"
+export HEAD_NODE_IP="$(resolve_node_ib_ip "${HEAD_NODE}")"
 if [ -z "${HEAD_NODE_IP}" ]; then
-  echo "Error: could not resolve an IPv4 address for head node ${HEAD_NODE}." >&2
-  echo "Ray cannot use ARC's link-local fe80:: hostname result as the cluster address." >&2
+  echo "Error: could not resolve an active IPoIB IPv4 address for head node ${HEAD_NODE}." >&2
+  echo "Expected an interface like ibp75s0 / ibp156s0 with a 10.18.x.x address." >&2
   exit 1
 fi
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
@@ -139,15 +156,18 @@ export VLLM_HOST_IP="${HEAD_NODE_IP}"
 echo "VLLM_HOST_IP=${VLLM_HOST_IP}"
 configure_socket_ifnames "${HEAD_NODE_IP}" 0
 
-# Debug/validation defaults for ARC multi-node NCCL. Keep these overrideable so
-# a production run can restore IB/RDMA once the socket path is proven stable.
-export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
+export NCCL_NET="${NCCL_NET:-IB}"
+export NCCL_IB_HCA="${NCCL_IB_HCA:-mlx5_0}"
+
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ib}"
 export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens,eno}"
+
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
-export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,ENV}"
-export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
-export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
+export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET}"
+
+export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-OFF}"
+export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-1}"
 
 export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
@@ -213,12 +233,12 @@ export VLLM_DEEP_GEMM_WARMUP="${VLLM_DEEP_GEMM_WARMUP:-skip}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
-GPUS_PER_NODE="${GPUS_PER_NODE:-2}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-1}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
-TP="${TP:-${GPUS_PER_NODE}}"
+TP="${TP:-1}"
 PP="${PP:-${NUM_NODES}}"
 EP="${EP:-1}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
@@ -226,7 +246,8 @@ echo "=== runtime knobs ==="
 echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
-echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
+echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_NET=${NCCL_NET} NCCL_IB_HCA=${NCCL_IB_HCA}"
+echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 echo "NCCL_DEBUG=${NCCL_DEBUG} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
 echo "SERVE_SCRIPT=${SERVE_SCRIPT}"
 if [ -n "${HF_TOKEN:-}" ]; then
@@ -266,10 +287,15 @@ RAY_HEAD_CMD="$(
   declare -f configure_socket_ifnames
 )
 source \"${VENV_DIR}/bin/activate\"
-unset GLOO_SOCKET_IFNAME NCCL_SOCKET_IFNAME
+unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
-configure_socket_ifnames \"${HEAD_NODE_IP}\"
-\"${RAY_BIN}\" start --block --head --node-ip-address=${HEAD_NODE_IP} --port=${RAY_PORT}"
+configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
+\"${RAY_BIN}\" start --block \\
+  --head \\
+  --node-ip-address=${HEAD_NODE_IP} \\
+  --port=${RAY_PORT} \\
+  --num-gpus=${GPUS_PER_NODE} \\
+  --num-cpus=${CPUS_PER_TASK}"
 srun \
   --nodelist "${HEAD_NODE}" \
   --nodes=1 \
@@ -286,7 +312,7 @@ if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
   echo "Starting worker nodes..."
   for WORKER in ${WORKER_NODES}; do
-    WORKER_IP="$(resolve_host_ip "${WORKER}")"
+    WORKER_IP="$(resolve_node_ib_ip "${WORKER}")"
     if [ -z "${WORKER_IP}" ]; then
       echo "Error: could not resolve IP for worker ${WORKER}." >&2
       exit 1
@@ -296,12 +322,16 @@ if [ -n "${WORKER_NODES}" ]; then
       declare -f interface_for_ip
       declare -f interface_has_ip
       declare -f configure_socket_ifnames
-    )
+)
 source \"${VENV_DIR}/bin/activate\"
-unset GLOO_SOCKET_IFNAME NCCL_SOCKET_IFNAME
+unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
-configure_socket_ifnames \"${WORKER_IP}\"
-\"${RAY_BIN}\" start --block --address=${HEAD_NODE_IP}:${RAY_PORT} --node-ip-address=${WORKER_IP}"
+configure_socket_ifnames \"${WORKER_IP}\" 0
+\"${RAY_BIN}\" start --block \\
+  --address=${HEAD_NODE_IP}:${RAY_PORT} \\
+  --node-ip-address=${WORKER_IP} \\
+  --num-gpus=${GPUS_PER_NODE} \\
+  --num-cpus=${CPUS_PER_TASK}"
     srun \
       --nodelist "${WORKER}" \
       --nodes=1 \
@@ -343,8 +373,6 @@ python -m vllm.entrypoints.openai.api_server \
   --tensor-parallel-size "${TP}" \
   --pipeline-parallel-size "${PP}" \
   --max-model-len "${MAX_MODEL_LEN}" \
-  --enable-expert-parallel \
-  --additional-config "{\"sharding\":{\"sharding_strategy\":{\"tensor_parallelism\":${TP},\"expert_parallelism\":${EP}}}}" \
   --enforce-eager \
   --disable-custom-all-reduce &
 SERVER_STEP_PID=$!
