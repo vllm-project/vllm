@@ -741,12 +741,12 @@ def register_linear_kernel(
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
 
 
-
 # ROCm chain (outermost → innermost → terminal):
-# WvSplitKrc -> aiter_triton -> WvSplitK -> LLMM1 -> F.linear
+# WvSplitKrc -> aiter_skinny -> WvSplitK -> LLMM1 -> aiter_tgemm -> F.linear
 _LLMM1Kernel = w16a16.make_predicated(
     name="w16a16_llmm1",
     predicate=vllm_c_w16a16._fits_llmm1,
+    fallback=aiter_w16a16.Kernel,
 )(vllm_c_w16a16.LLMM1Kernel)
 
 _WvSplitKKernel = w16a16.make_predicated(
@@ -759,7 +759,7 @@ _AiterKernel = w16a16.make_predicated(
     name="w16a16_aiter_triton",
     predicate=aiter_w16a16._fits_aiter_triton,
     fallback=_WvSplitKKernel,
-)(aiter_w16a16.Kernel)
+)(aiter_w16a16.SkinnyKernel)
 
 _WvSplitKrcKernel = w16a16.make_predicated(
     name="w16a16_wvsplkrc",
@@ -775,6 +775,7 @@ _POSSIBLE_W16A16_KERNELS: dict[PlatformEnum, list[type[w16a16.Kernel]]] = {
         _WvSplitKrcKernel,
         _WvSplitKKernel,
         _LLMM1Kernel,
+        aiter_w16a16.Kernel,
         w16a16.Kernel,
     ],
     PlatformEnum.CUDA: [triton_w16a16.Kernel, w16a16.Kernel],

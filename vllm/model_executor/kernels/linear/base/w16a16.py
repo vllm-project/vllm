@@ -78,8 +78,7 @@ class Kernel(common.Kernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        params = self._get_layer_params(layer)
-        return type(self).apply(x, params.processed_weight, bias)
+        return type(self).apply(x, layer.processed_weight, bias)
 
     @staticmethod
     def apply(
