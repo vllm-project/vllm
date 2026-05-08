@@ -215,9 +215,6 @@ class OffloadingManager(ABC):
         """
         Called by the scheduler when a request has finished.
 
-        Implementations may use this to kick off deferred transfers (e.g. the
-        last partial offloaded block) or to clean up per-request state.
-
         Args:
             req_context: the context object for the finished request.
         """
