@@ -14,9 +14,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-PARAKEET_TDT_EOS_TOKEN_ID = 3
-
-
 class VerifyAndUpdateConfig:
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -562,6 +559,10 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
 class ParakeetForTDTConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.transformers_utils.configs.parakeet_tdt import (
+            PARAKEET_TDT_EOS_TOKEN_ID,
+        )
+
         model_config = vllm_config.model_config
         scheduler_config = getattr(vllm_config, "scheduler_config", None)
         if scheduler_config is not None and scheduler_config.max_num_seqs != 1:
