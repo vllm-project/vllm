@@ -21,7 +21,12 @@ from vllm.model_executor.models.commandr import (
     LayerNorm,
 )
 
-from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix, process_eagle_weight
+from .utils import (
+    AutoWeightsLoader,
+    get_draft_quant_config,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 logger = init_logger(__name__)
 
@@ -232,9 +237,7 @@ class EagleCohereForCausalLM(CohereForCausalLM):
             ),
         )
 
-        loaded_weight_names = loader.load_weights(
-            map(_track_and_forward, weights)
-        )
+        loaded_weight_names = loader.load_weights(map(_track_and_forward, weights))
 
         # Embed tokens are tied with the target model and therefore not
         # present in the EAGLE checkpoint; mark them as loaded explicitly to
