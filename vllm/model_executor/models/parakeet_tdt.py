@@ -281,52 +281,31 @@ class ParakeetTDTJoint(nn.Module):
 
 
 class ParakeetTDTForcedDecoderState:
-    """Request-keyed token sequences produced by Parakeet's TDT decoder."""
+    """Token sequence produced by Parakeet's TDT decoder for one request."""
 
     def __init__(self, eos_token_id: int) -> None:
         self.eos_token_id = eos_token_id
-        self._sequences: dict[str, list[int]] = {}
+        self._sequence: list[int] = []
 
-    def set_sequences(
-        self,
-        request_ids: Sequence[str],
-        sequences: Sequence[Sequence[int]],
-    ) -> None:
-        for request_id, sequence in zip(request_ids, sequences):
-            self._sequences[request_id] = list(sequence)
-
-    def remove_sequences(self, request_ids: Iterable[str]) -> None:
-        for request_id in request_ids:
-            self._sequences.pop(request_id, None)
+    def set_sequence(self, sequence: Sequence[int]) -> None:
+        self._sequence = list(sequence)
 
     def get_forced_token_ids(
         self,
         *,
-        request_ids: Sequence[str],
-        request_indices: torch.Tensor | None,
         positions: torch.Tensor,
         device: torch.device,
     ) -> torch.Tensor:
+        if positions.ndim == 0:
+            positions = positions.reshape(1)
         if positions.ndim > 1:
             positions = positions[0]
 
         forced_token_ids: list[int] = []
-        for token_idx, position in enumerate(positions):
-            if request_indices is None:
-                request_index = token_idx
-            elif token_idx < request_indices.shape[0]:
-                request_index = int(request_indices[token_idx].item())
-            else:
-                request_index = -1
-
-            if 0 <= request_index < len(request_ids):
-                sequence = self._sequences.get(request_ids[request_index])
-            else:
-                sequence = None
-
+        for position in positions:
             seq_idx = int(position.item())
-            if sequence is not None and 0 <= seq_idx < len(sequence):
-                forced_token_ids.append(sequence[seq_idx])
+            if 0 <= seq_idx < len(self._sequence):
+                forced_token_ids.append(self._sequence[seq_idx])
             else:
                 forced_token_ids.append(self.eos_token_id)
 
@@ -375,7 +354,6 @@ class ParakeetTDTModel(nn.Module):
     ) -> torch.Tensor:
         return self.joint(encoder_state, decoder_state)
 
-    @torch.inference_mode()
     def greedy_decode(self, encoder_output: torch.Tensor) -> list[int]:
         cfg = self.config
         device = encoder_output.device
@@ -433,10 +411,10 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     supports_transcription_only = True
     supported_languages = PARAKEET_SUPPORTED_LANGUAGES
     no_space_languages: set[str] = set()
-    # The config hook marks this as a request-stateful decoder and enforces
-    # eager execution. Future V2 support should move this into a ParakeetModelState
-    # using ModelState.prepare_inputs() and prepare_dummy_inputs(), matching the
-    # Whisper model-state pattern.
+    # The config hook marks this as a single-request stateful decoder and
+    # enforces eager execution. Future V2 support should move this into a
+    # ParakeetModelState using ModelState.prepare_inputs() and
+    # prepare_dummy_inputs(), matching the Whisper model-state pattern.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "encoder.": "model.encoder.",
@@ -508,36 +486,32 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         encoder_outputs: list[torch.Tensor] | None = None,
-        request_ids: Sequence[str] | None = None,
-        request_indices: torch.Tensor | None = None,
-        encoder_request_ids: Sequence[str] | None = None,
-        finished_request_ids: Iterable[str] | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         del intermediate_tensors, kwargs
 
-        if finished_request_ids is not None:
-            self._forced_decoder_state.remove_sequences(finished_request_ids)
-
         if encoder_outputs:
-            sequences = [
-                self.model.greedy_decode(encoder_output)
-                for encoder_output in encoder_outputs
-            ]
-            if encoder_request_ids is not None:
-                sequence_request_ids = encoder_request_ids
-            elif request_ids is not None:
-                sequence_request_ids = request_ids[: len(sequences)]
-            else:
-                sequence_request_ids = [str(i) for i in range(len(sequences))]
-            self._forced_decoder_state.set_sequences(sequence_request_ids, sequences)
+            if len(encoder_outputs) != 1:
+                raise ValueError(
+                    "Parakeet TDT currently supports one active encoder output."
+                )
+            self._forced_decoder_state.set_sequence(
+                self.model.greedy_decode(encoder_outputs[0])
+            )
+
+        if input_ids is None:
+            raise ValueError("Parakeet TDT forward requires input_ids.")
 
         batch_size = input_ids.shape[0]
         device = input_ids.device
+        forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
+            positions=positions,
+            device=device,
+        )
 
         vocab_size = self.config.vocab_size
         logits = torch.full(
@@ -546,21 +520,6 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
             dtype=torch.float32,
             device=device,
         )
-
-        if request_ids is None:
-            forced_token_ids = torch.full(
-                (batch_size,),
-                self.config.eos_token_id,
-                dtype=torch.long,
-                device=device,
-            )
-        else:
-            forced_token_ids = self._forced_decoder_state.get_forced_token_ids(
-                request_ids=request_ids,
-                request_indices=request_indices,
-                positions=positions,
-                device=device,
-            )
 
         logits.scatter_(1, forced_token_ids.unsqueeze(1), 0.0)
 
@@ -619,12 +578,6 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
         for special_token in ("<blank>", "<|endoftext|>"):
             text = text.replace(special_token, "")
         return text.strip()
-
-    @classmethod
-    def post_process_streaming_output(cls, text: str) -> str:
-        for special_token in ("<blank>", "<|endoftext|>"):
-            text = text.replace(special_token, "")
-        return text
 
 
 __all__ = ["ParakeetForTDT", "ParakeetTDTForcedDecoderState"]
