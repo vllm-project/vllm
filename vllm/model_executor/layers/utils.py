@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import os
 from collections.abc import Callable
 
 import torch
@@ -177,6 +178,27 @@ def rocm_unquantized_gemm_impl(
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )
+
+    # Tiny scalar projection (e.g. Qwen MoE shared_expert_gate): hipBLASLt
+    # runs a 64x96x32 macro tile with a SplitK + post-pass even though the
+    # output is a single scalar. Replace with a fused elementwise-mul + reduce
+    # that emits one (Inductor-friendly) reduction kernel. Triggered for the
+    # 1x1xK shape only (40 MoE layers x 1 token = 40 calls/decode step on
+    # Qwen3-Next/Qwen3.5-MoE).
+    if (
+        os.environ.get("VLLM_DISABLE_TINY_DOT_GEMM", "0") != "1"
+        and envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and m == 1
+        and n == 1
+        and x.dtype in [torch.float16, torch.bfloat16]
+    ):
+        with record_function_or_nullcontext(f"DOT {n}x{m}x{k}"):
+            x_flat = x.reshape(-1)
+            w_flat = weight.reshape(-1)
+            out = (x_flat * w_flat).sum(dtype=x.dtype)
+            if bias is not None:
+                out = out + bias.reshape(-1)[0]
+            return out.reshape(*x.shape[:-1], 1)
 
     if not use_skinny:
         with record_function_or_nullcontext(f"BLAS {n}x{m}x{k}"):
