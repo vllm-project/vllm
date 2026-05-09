@@ -1875,6 +1875,16 @@ class LLM:
 
         return added_request_ids
 
+    def _maybe_pack_inline_steering(self, sp: SamplingParams) -> None:
+        """Pack inline steering vectors in the model dtype before submission."""
+        from vllm.config.steering_types import maybe_pack_inline_steering_for_request
+
+        try:
+            torch_dtype = self.llm_engine.model_config.dtype
+        except AttributeError:
+            return  # Engine not fully initialised — let the slow path handle it.
+        maybe_pack_inline_steering_for_request(sp, torch_dtype)
+
     def _add_request(
         self,
         prompt: EngineInput,
@@ -1885,6 +1895,7 @@ class LLM:
         if isinstance(params, SamplingParams):
             # We only care about the final output
             params.output_kind = RequestOutputKind.FINAL_ONLY
+            self._maybe_pack_inline_steering(params)
 
         request_id = str(next(self.request_counter))
 

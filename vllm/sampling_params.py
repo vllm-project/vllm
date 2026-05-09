@@ -330,6 +330,29 @@ class SamplingParams(
     """Phase-specific steering vectors added to base during decode only.
     Same format as ``steering_vectors``."""
 
+    _effective_prefill_steering_packed: (
+        dict[str, dict[int, np.ndarray]] | None
+    ) = None
+    """In-process pre-resolved + packed prefill-phase steering, in the
+    model's compute dtype.  Equivalent to
+    ``effective_prefill_steering`` cast to model dtype, but produced on
+    the client *before* the request crosses the multiprocessing boundary
+    so the wire format carries ``len(vec) * dtype.itemsize`` bytes per
+    (hook, layer) entry instead of msgpack-encoded float lists (~4.5×
+    reduction at bf16).  When non-empty, takes precedence over
+    ``steering_vectors`` / ``prefill_steering_vectors`` in
+    :meth:`SteeringModelRunnerMixin._resolve_request_steering` and short-
+    circuits the merge + resolve numpy work on the worker.
+
+    Underscore-prefixed so :class:`PydanticMsgspecMixin` excludes the
+    field from JSON / OpenAPI schema generation (``np.ndarray`` is not a
+    Pydantic-friendly type).  Internal field — never populated from the
+    public API; constructed by the request-preprocessing helpers in
+    :mod:`vllm.config.steering_types`."""
+
+    _effective_decode_steering_packed: dict[str, dict[int, np.ndarray]] | None = None
+    """Decode-phase counterpart of ``_effective_prefill_steering_packed``."""
+
     steering_module_ref: tuple[str, float] | None = None
     """Optional ``(module_name, scale)`` reference to a worker-side
     named steering module.  When set, the worker resolves the named
@@ -818,11 +841,18 @@ class SamplingParams(
     ) -> dict[str, dict[int, np.ndarray]] | None:
         """Resolved prefill steering: base + prefill-specific, pre-scaled.
 
-        Returns 1-D ``np.float64`` arrays per (hook, layer); the worker
-        converts to torch tensors when registering with
-        :class:`SteeringManager` and the float→float32 cast for hashing
-        happens once inside ``hash_steering_config``.
+        Returns 1-D ``np.ndarray`` per (hook, layer).  When the request
+        was packed by the client (``_effective_prefill_steering_packed``
+        is set) those arrays are already in the model's compute dtype;
+        otherwise a fresh resolve over the original list-of-floats
+        fields produces ``np.float64`` arrays.  ``hash_steering_config``
+        casts to ``float32`` at the SHA boundary in either case, so the
+        hash is stable within a deployment (cross-pipeline reuse — i.e.,
+        switching a workload between packed and unpacked — is a one-time
+        cache miss).
         """
+        if self._effective_prefill_steering_packed is not None:
+            return self._effective_prefill_steering_packed
         return resolve_effective_vectors(
             self.steering_vectors, self.prefill_steering_vectors
         )
@@ -832,6 +862,8 @@ class SamplingParams(
         self,
     ) -> dict[str, dict[int, np.ndarray]] | None:
         """Resolved decode steering: base + decode-specific, pre-scaled."""
+        if self._effective_decode_steering_packed is not None:
+            return self._effective_decode_steering_packed
         return resolve_effective_vectors(
             self.steering_vectors, self.decode_steering_vectors
         )

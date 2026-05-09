@@ -302,6 +302,24 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
+        # Pack inline steering vectors in the model dtype before the
+        # request crosses the IPC boundary.  Cuts msgpack-encoded
+        # float-list payloads to dtype-tagged raw bytes (~4.5× smaller
+        # at fp16, ~2.25× at fp32; bf16 falls back to fp32 because
+        # numpy lacks a native bf16 without ml_dtypes).  No-op for
+        # named-only requests and pooling params.
+        if not is_pooling:
+            from vllm.config.steering_types import (
+                maybe_pack_inline_steering_for_request,
+            )
+
+            try:
+                torch_dtype = self.vllm_config.model_config.dtype
+            except AttributeError:
+                torch_dtype = None
+            if torch_dtype is not None:
+                maybe_pack_inline_steering_for_request(params, torch_dtype)
+
         if (
             self.vllm_config.cache_config.kv_sharing_fast_prefill
             and not is_pooling
