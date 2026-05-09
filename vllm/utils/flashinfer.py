@@ -137,6 +137,28 @@ flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
+
+
+@functools.cache
+def get_fp8_blockscale_gemm_runner_sm90():
+    """Return a cached FlashInfer SM90 FP8 block-scale GEMM runner.
+
+    The runner provides ``fp8_quantize_1x128`` which uses TMA for per-token-
+    group FP8 quantization on Hopper (SM90).  Returns ``None`` when FlashInfer
+    is unavailable or the platform is not SM90.
+    """
+    if not has_flashinfer() or not current_platform.has_device_capability(90):
+        return None
+    try:
+        from flashinfer.gemm.gemm_base import (
+            get_fp8_blockscale_gemm_runner_sm90 as _get_runner,
+        )
+
+        return _get_runner()
+    except (ImportError, RuntimeError):
+        return None
+
+
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
@@ -871,4 +893,5 @@ __all__ = [
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
     "is_flashinfer_cudnn_fp8_prefill_attn_supported",
+    "get_fp8_blockscale_gemm_runner_sm90",
 ]

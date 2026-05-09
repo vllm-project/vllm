@@ -33,6 +33,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     transform_sf_into_required_layout,
 )
+from vllm.utils.flashinfer import get_fp8_blockscale_gemm_runner_sm90
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -492,6 +493,49 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
+def _flashinfer_sm90_per_token_group_quant_fp8(
+    x: torch.Tensor,
+    group_size: int,
+    column_major_scales: bool,
+    tma_aligned_scales: bool,
+    use_ue8m0: bool,
+    fp8_dtype: torch.dtype,
+    out_q: torch.Tensor | None,
+    x_s: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Attempt per-token-group FP8 quantization via FlashInfer SM90 TMA path.
+
+    Returns ``(x_q, x_s)`` on success or ``None`` when the preconditions
+    are not met.  The FlashInfer SM90 runner uses TMA for the quantize step
+    which can be significantly faster than the generic CUDA kernel.
+    """
+    if not (
+        column_major_scales
+        and tma_aligned_scales
+        and not use_ue8m0
+        and group_size == 128
+        and x.ndim == 2
+        and x.dtype == torch.bfloat16
+        and x.is_contiguous()
+    ):
+        return None
+
+    runner = get_fp8_blockscale_gemm_runner_sm90()
+    if runner is None:
+        return None
+
+    x_q = out_q
+    if x_q is None:
+        x_q = torch.empty_like(x, device=x.device, dtype=fp8_dtype)
+
+    try:
+        runner.fp8_quantize_1x128(x, x_q, x_s, False)
+    except RuntimeError:
+        return None
+
+    return x_q, x_s
+
+
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -557,6 +601,21 @@ def per_token_group_quant_fp8(
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+
+    # FlashInfer SM90 TMA fast path (Hopper, group_size=128, col-major,
+    # bf16 contiguous input).  Falls through to CUDA/Triton on mismatch.
+    flashinfer_result = _flashinfer_sm90_per_token_group_quant_fp8(
+        x,
+        group_size,
+        column_major_scales,
+        tma_aligned_scales,
+        use_ue8m0,
+        dtype,
+        out_q,
+        x_s,
+    )
+    if flashinfer_result is not None:
+        return flashinfer_result
 
     # prefer CUDA kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
