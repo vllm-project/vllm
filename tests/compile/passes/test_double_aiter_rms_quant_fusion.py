@@ -43,9 +43,7 @@ class _NoViewDoubleQuantModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight = torch.nn.Parameter(
-            torch.ones(HIDDEN_SIZE, dtype=torch.bfloat16)
-        )
+        self.weight = torch.nn.Parameter(torch.ones(HIDDEN_SIZE, dtype=torch.bfloat16))
 
     def forward(
         self, x: torch.Tensor
@@ -67,9 +65,7 @@ class _ViewDoubleQuantModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.weight = torch.nn.Parameter(
-            torch.ones(HIDDEN_SIZE, dtype=torch.bfloat16)
-        )
+        self.weight = torch.nn.Parameter(torch.ones(HIDDEN_SIZE, dtype=torch.bfloat16))
 
     def forward(
         self, x: torch.Tensor
