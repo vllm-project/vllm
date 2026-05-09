@@ -36,6 +36,8 @@ from vllm.utils.torch_utils import common_broadcastable_dtype
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
     check_gguf_file,
+    get_gguf_base_model_id,
+    get_gguf_file_path_from_hf,
     is_gguf,
     is_remote_gguf,
     split_remote_gguf,
@@ -65,6 +67,99 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+_MODELSCOPE_CONFIG_PROBE_IGNORE_PATTERNS = [
+    "*.bin",
+    "*.safetensors",
+    "*.pth",
+    "*.pt",
+    "*.h5",
+    "*.ckpt",
+    "*.zip",
+    "*.onnx",
+    "*.tar",
+    "*.gz",
+    "*.gguf",
+]
+
+
+def _ignore_gguf_files_for_modelscope_config_probe(
+    ignore_file_pattern: str | list[str] | None,
+) -> list[str]:
+    if ignore_file_pattern is None:
+        return list(_MODELSCOPE_CONFIG_PROBE_IGNORE_PATTERNS)
+
+    if isinstance(ignore_file_pattern, str):
+        patterns = [ignore_file_pattern]
+    else:
+        patterns = list(ignore_file_pattern)
+
+    if "*.gguf" not in patterns:
+        patterns.append("*.gguf")
+    return patterns
+
+
+def _localize_modelscope_remote_gguf_for_config(
+    model: str | Path,
+    revision: str | None,
+    kwargs: dict[str, Any],
+) -> str:
+    repo_id, quant_type = split_remote_gguf(model)
+    gguf_file = get_gguf_file_path_from_hf(
+        repo_id,
+        quant_type,
+        revision=revision,
+    )
+    kwargs["gguf_file"] = gguf_file
+
+    from modelscope.hub.snapshot_download import snapshot_download
+
+    return snapshot_download(
+        model_id=repo_id,
+        revision=revision,
+        local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        allow_patterns=gguf_file,
+    )
+
+
+def _ensure_transformers_can_check_gguf_version() -> None:
+    try:
+        from transformers.utils import import_utils as transformers_import_utils
+
+        package_mapping = getattr(
+            transformers_import_utils,
+            "PACKAGE_DISTRIBUTION_MAPPING",
+            None,
+        )
+        if isinstance(package_mapping, dict):
+            package_mapping.setdefault("gguf", ["gguf"])
+
+        is_gguf_available = getattr(
+            transformers_import_utils,
+            "is_gguf_available",
+            None,
+        )
+        if hasattr(is_gguf_available, "cache_clear"):
+            is_gguf_available.cache_clear()
+    except Exception:
+        logger.debug(
+            "Failed to patch Transformers GGUF version detection.",
+            exc_info=True,
+        )
+
+
+def _get_gguf_base_model_id_for_config(
+    model: str | Path,
+    kwargs: dict[str, Any],
+) -> str | None:
+    gguf_file = kwargs.get("gguf_file")
+    if gguf_file is None:
+        return None
+    gguf_path = Path(model) / str(gguf_file)
+    if not gguf_path.is_file():
+        return None
+    return get_gguf_base_model_id(gguf_path)
+
 
 if Version(version("transformers")) < Version("5.0.0"):
     logger.warning(
@@ -179,6 +274,8 @@ class HFConfigParser(ConfigParserBase):
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        if kwargs.get("gguf_file") is not None:
+            _ensure_transformers_can_check_gguf_version()
         trust_remote_code |= kwargs.get("trust_remote_code", False)
         kwargs = without_trust_remote_code(kwargs)
         config_dict, _ = PretrainedConfig.get_config_dict(
@@ -616,7 +713,13 @@ def maybe_override_with_speculators(
         gguf_model_repo = Path(model).parent
     elif is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
-        gguf_model_repo = Path(repo_id)
+        gguf_model_repo = repo_id
+        if envs.VLLM_USE_MODELSCOPE:
+            kwargs["ignore_file_pattern"] = (
+                _ignore_gguf_files_for_modelscope_config_probe(
+                    kwargs.get("ignore_file_pattern")
+                )
+            )
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
@@ -670,9 +773,16 @@ def get_config(
             model = Path(model).parent
         elif _is_remote_gguf:
             # Remote GGUF - extract repo_id from repo_id:quant_type format
-            # The actual GGUF file will be downloaded later by GGUFModelLoader
-            # Keep model as repo_id:quant_type for download, but use repo_id for config
-            model, _ = split_remote_gguf(model)
+            # Use repo_id for HF config lookup. ModelScope GGUF repos may not
+            # provide config.json, so localize the selected file for parsing.
+            if envs.VLLM_USE_MODELSCOPE:
+                model = _localize_modelscope_remote_gguf_for_config(
+                    model,
+                    revision,
+                    kwargs,
+                )
+            else:
+                model, _ = split_remote_gguf(model)
 
     if config_format == "auto":
         try:
@@ -684,8 +794,10 @@ def get_config(
                 model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
             ):
                 config_format = "mistral"
-            elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
+            elif (
+                (_is_gguf and not _is_remote_gguf)
+                or (_is_remote_gguf and kwargs.get("gguf_file") is not None)
+                or file_or_path_exists(model, HF_CONFIG_NAME, revision=revision)
             ):
                 config_format = "hf"
             # Remote GGUF models must have config.json in repo,
@@ -728,14 +840,39 @@ def get_config(
             raise ValueError(error_message) from e
 
     config_parser = get_config_parser(config_format)
-    config_dict, config = config_parser.parse(
-        model,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-        code_revision=code_revision,
-        hf_overrides=hf_overrides_kw or hf_overrides_fn,
-        **kwargs,
-    )
+    try:
+        config_dict, config = config_parser.parse(
+            model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            hf_overrides=hf_overrides_kw or hf_overrides_fn,
+            **kwargs,
+        )
+    except ValueError as e:
+        is_unsupported_gguf_arch = "GGUF model with architecture" in str(e)
+        base_model = (
+            _get_gguf_base_model_id_for_config(model, kwargs)
+            if _is_gguf and is_unsupported_gguf_arch
+            else None
+        )
+        if base_model is None:
+            raise
+        logger.info(
+            "Falling back to base model config %s for GGUF model %s.",
+            base_model,
+            model,
+        )
+        base_kwargs = {k: v for k, v in kwargs.items() if k != "gguf_file"}
+        config_dict, config = config_parser.parse(
+            base_model,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            code_revision=code_revision,
+            hf_overrides=hf_overrides_kw or hf_overrides_fn,
+            **base_kwargs,
+        )
+        config._vllm_gguf_base_model_id = base_model
 
     # Patching defaults for GGUF models
     if _is_gguf:

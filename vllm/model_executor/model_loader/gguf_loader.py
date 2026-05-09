@@ -100,6 +100,17 @@ class GGUFModelLoader(BaseModelLoader):
             logger.info("Discovered %d GGUF shard files", len(files))
         return files if files else [model_path]
 
+    @staticmethod
+    def _is_multimodal_model_config(model_config: ModelConfig) -> bool:
+        hf_config = model_config.hf_config
+        mm_config = getattr(model_config, "multimodal_config", None)
+        language_model_only = getattr(mm_config, "language_model_only", False)
+        return (
+            hasattr(hf_config, "vision_config")
+            and hf_config.vision_config is not None
+            and not language_model_only
+        )
+
     def _get_gguf_weights_map(self, model_config: ModelConfig):
         """
         GGUF uses this naming convention for their tensors from HF checkpoint:
@@ -116,9 +127,10 @@ class GGUFModelLoader(BaseModelLoader):
         # models, this returns config itself.
         text_config = config.get_text_config()
         model_type = config.model_type
-        is_multimodal = (
+        has_multimodal_wrapper = (
             hasattr(config, "vision_config") and config.vision_config is not None
         )
+        is_multimodal = self._is_multimodal_model_config(model_config)
         gguf_to_hf_name_map = {}
         sideload_params: list[re.Pattern] = []
         # hack: ggufs have a different name than transformers
@@ -149,6 +161,37 @@ class GGUFModelLoader(BaseModelLoader):
                     re.compile(
                         f"model\\.layers\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
+        if model_type == "qwen3_5_moe":
+            model_type = "qwen35moe"
+            # GGUF stores Qwen3.5-MoE expert gate/up weights as separate
+            # tensors, while the HF dummy model exposes a packed expert
+            # parameter. Map the GGUF tensors to per-expert HF names so the
+            # FusedMoE loader can place w1/w3 into the merged vLLM parameter.
+            hf_layer_prefix = (
+                "model.language_model.layers"
+                if has_multimodal_wrapper
+                else "model.layers"
+            )
+            for idx in range(text_config.num_hidden_layers):
+                hf_expert_prefix = f"{hf_layer_prefix}.{idx}.mlp.experts.0"
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                    f"{hf_expert_prefix}.down_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                    f"{hf_expert_prefix}.gate_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                    f"{hf_expert_prefix}.up_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                    f"{hf_layer_prefix}.{idx}.linear_attn.dt_bias"
+                )
+                sideload_params.append(
+                    re.compile(
+                        re.escape(f"{hf_layer_prefix}.{idx}")
+                        + r"\.mlp\.experts\.(gate_up_proj|down_proj)"
                     )
                 )
         if model_type in ("qwen2_moe", "qwen3_moe"):
@@ -207,7 +250,9 @@ class GGUFModelLoader(BaseModelLoader):
 
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
-            vision_num_layers = config.vision_config.num_hidden_layers
+            vision_num_layers = getattr(config.vision_config, "num_hidden_layers", None)
+            if vision_num_layers is None:
+                vision_num_layers = config.vision_config.depth
             vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
@@ -219,9 +264,10 @@ class GGUFModelLoader(BaseModelLoader):
         auto_cls = (
             AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
         )
+        dummy_config = config if is_multimodal else text_config
         with torch.device("meta"):
             dummy_model = auto_cls.from_config(
-                config, trust_remote_code=model_config.trust_remote_code
+                dummy_config, trust_remote_code=model_config.trust_remote_code
             )
 
         state_dict = dummy_model.state_dict()
@@ -313,14 +359,21 @@ class GGUFModelLoader(BaseModelLoader):
         unmapped_params = []
         for hf_name in state_dict:
             gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
+            target_hf_name = hf_name
+            if (
+                has_multimodal_wrapper
+                and not is_multimodal
+                and hf_name.startswith("model.")
+            ):
+                target_hf_name = "model.language_model." + hf_name[6:]
 
             # Track mapping success
             if gguf_name_with_suffix is not None:
-                gguf_to_hf_name_map[gguf_name_with_suffix] = hf_name
+                gguf_to_hf_name_map[gguf_name_with_suffix] = target_hf_name
                 logger.debug("Mapped GGUF %s → HF %s", gguf_name_with_suffix, hf_name)
-            elif hf_name not in gguf_to_hf_name_map.values():
+            elif target_hf_name not in gguf_to_hf_name_map.values():
                 # Parameter not in manual overrides either
-                unmapped_params.append(hf_name)
+                unmapped_params.append(target_hf_name)
 
         # All parameters (except those initialized by other means) must be mapped:
         # both vision/projector and backbone
@@ -349,7 +402,7 @@ class GGUFModelLoader(BaseModelLoader):
         weight_type_map = {}
         for f in gguf_files:
             weight_type_map.update(get_gguf_weight_type_map(f, gguf_to_hf_name_map))
-        is_multimodal = hasattr(model_config.hf_config, "vision_config")
+        is_multimodal = self._is_multimodal_model_config(model_config)
         if is_multimodal:
             mmproj_file = detect_gguf_multimodal(model_name_or_path)
             assert mmproj_file is not None, (
@@ -379,8 +432,7 @@ class GGUFModelLoader(BaseModelLoader):
         Yields:
             Tuples of (parameter_name, tensor) for all model weights
         """
-        hf_config = model_config.hf_config
-        is_multimodal = hasattr(hf_config, "vision_config")
+        is_multimodal = self._is_multimodal_model_config(model_config)
 
         if is_multimodal:
             # Load mm_proj (mm_encoder + projector) for multimodal weights
