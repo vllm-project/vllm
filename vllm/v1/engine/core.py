@@ -1665,8 +1665,25 @@ class EngineCoreProc(EngineCore):
 
         logger.info(f"[snapshot] [engine] " + "-"*20 + "start input and output thread" + "-"*20)
         self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
-        self.addresses.coordinator_input = re.sub(r"\d+\.\d+\.\d+\.\d+", data_parallel_master_ip, self.addresses.coordinator_input)
-        self.addresses.coordinator_output = re.sub(r"\d+\.\d+\.\d+\.\d+", data_parallel_master_ip, self.addresses.coordinator_output)
+        # coordinator_* only when DP Coordinator ZMQ is used; skip re.sub if unset or no new IP.
+        if (
+            self.addresses.coordinator_input is not None
+            and data_parallel_master_ip is not None
+        ):
+            self.addresses.coordinator_input = re.sub(
+                r"\d+\.\d+\.\d+\.\d+",
+                data_parallel_master_ip,
+                self.addresses.coordinator_input,
+            )
+        if (
+            self.addresses.coordinator_output is not None
+            and data_parallel_master_ip is not None
+        ):
+            self.addresses.coordinator_output = re.sub(
+                r"\d+\.\d+\.\d+\.\d+",
+                data_parallel_master_ip,
+                self.addresses.coordinator_output,
+            )
 
         ready_event = threading.Event()
         self.input_thread = threading.Thread(
@@ -1715,17 +1732,28 @@ class EngineCoreProc(EngineCore):
         logger.info(f"[snapshot] [engine] " + "-"*20 + "rebuild_group_resume" + "-"*20)
         self.collective_rpc("rebuild_group_resume")
 
-        # 销毁engine core的dp通信域
-        logger.info(f"[snapshot] [engine] " + "-"*20 + "rebuild engie core dp_group" + "-"*20)
-        stateless_destroy_torch_distributed_process_group(self.dp_group)
-        # Pre-snapshot ports are stale in the new environment.  Clear the
-        # list so get_next_dp_init_port() falls back to
-        # data_parallel_master_port — the only value guaranteed identical
-        # across all DP engine-core processes (even on different nodes),
-        # because it was set once in __post_init__ and serialized to every
-        # process.  This ensures both sides attempt the same port.
-        self.vllm_config.parallel_config._data_parallel_master_port_list.clear()
-        self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group()
+        # Stateless DP process group exists only for DPEngineCoreProc (DP>1).
+        # For data_parallel_size==1, EngineCoreProc._init_data_parallel is a no-op
+        # and never sets dp_group; skip destroy/re-init.
+        dp_group = getattr(self, "dp_group", None)
+        if dp_group is not None:
+            logger.info(
+                f"[snapshot] [engine] " + "-" * 20 + "rebuild engie core dp_group" + "-" * 20
+            )
+            stateless_destroy_torch_distributed_process_group(dp_group)
+            # Pre-snapshot ports are stale in the new environment.  Clear the
+            # list so get_next_dp_init_port() falls back to
+            # data_parallel_master_port — the only value guaranteed identical
+            # across all DP engine-core processes (even on different nodes),
+            # because it was set once in __post_init__ and serialized to every
+            # process.  This ensures both sides attempt the same port.
+            self.vllm_config.parallel_config._data_parallel_master_port_list.clear()
+            self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group()
+        else:
+            logger.info(
+                "[snapshot] [engine] skip engine-core dp_group rebuild "
+                "(data_parallel_size==1 or non-DPEngineCoreProc)"
+            )
 
         logger.info(f"[snapshot] [engine] " + "-"*20 + "re_load_weights" + "-"*20)
         self.collective_rpc("re_load_weights", args=(model_path, ))
