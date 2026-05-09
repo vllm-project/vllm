@@ -400,7 +400,8 @@ class Worker(WorkerBase):
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if (
-                current_platform.is_cuda()
+                envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+                and current_platform.is_cuda()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
