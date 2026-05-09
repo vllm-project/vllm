@@ -513,14 +513,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        self._img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            config.vision_config.image_size, config.vision_config.patch_size, config.understand_projector_stride
-            )
-
-        # Each pach will produce the same number of pixels 504
-        self.patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            504, config.vision_config.patch_size, config.understand_projector_stride
-            )
+        # Each patch will produce the same number of pixels 504
+        self.patch_output_tokens = 
         # NOTE: This behavior is consistent with the previous OOV handling,
         # but does not currently handle the start/stop toks around the
         # image features (<patch_start> <patch_end> <im_start> <im_end>)
@@ -718,7 +712,9 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         vllm_config: "VllmConfig",
     ) -> tuple[int, int]:
         # An image without patches
-        min_budget = self._img_output_tokens
+        min_budget = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
+        )
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len
@@ -736,8 +732,14 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             mm_kwargs: dict[str, Any],
     ) -> list[int]:
         num_patches = mm_kwargs.get("num_patches")
+        img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            )
+        patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            504, self.config.vision_config.patch_size, self.config.understand_projector_stride
+        )
         return [
-            self._img_output_tokens + num_patch * self.patch_output_tokens 
+            img_output_tokens + num_patch * patch_output_tokens 
             for num_patch in num_patches
         ]
     
@@ -806,6 +808,12 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         )
 
         # For pixel_value, the max input size is max_batch_size
+        img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
+        )
+        patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            504, self.config.vision_config.patch_size, self.config.understand_projector_stride
+        )
         dummy_pixel_values = torch.randn(
             max_batch_size, 3,\
             self.config.vision_config.image_size,
@@ -815,7 +823,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         # For patch_pixel_values, the edge case is one image with max number of patches
         max_num_patches = max(
           0,
-          (token_budget - self._img_output_tokens) // self.patch_output_tokens
+          (token_budget - img_output_tokens) // patch_output_tokens
         )
         dummy_patch_pixel_values = torch.randn(
             max_num_patches, 3,
@@ -895,8 +903,13 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         num_patches = mm_kwargs["num_patches"]
         hidden = output.shape[-1]
         bsz = len(indices)
-        img_out = self._img_output_tokens
-        patch_out = self.patch_output_tokens
+
+        img_out = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            )
+        patch_out = Step3VLForConditionalGeneration._compute_spatial_tokens(
+            504, self.config.vision_config.patch_size, self.config.understand_projector_stride
+        )
 
         # Valid portion: bsz images, actual_total_patches patches
         actual_np = [int(num_patches[idx]) for idx in indices]
