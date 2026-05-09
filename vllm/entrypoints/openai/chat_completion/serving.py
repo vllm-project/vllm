@@ -499,22 +499,10 @@ class OpenAIServingChat(OpenAIServing):
                     # the role
                     role = self.get_chat_request_role(request)
 
-                    prompt_text: str | None = None
-                    if request.return_token_ids and res.prompt_token_ids is not None:
-                        try:
-                            prompt_text = (
-                                await self.renderer.get_async_tokenizer().decode(
-                                    list(res.prompt_token_ids),
-                                    skip_special_tokens=False,
-                                )
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to decode prompt_token_ids for "
-                                "streaming request %s: %s",
-                                request_id,
-                                exc,
-                            )
+                    # ``res.prompt`` is the rendered chat-templated prompt
+                    # text already produced by the renderer, so no decoding
+                    # round-trip is needed here.
+                    prompt_text = res.prompt if request.return_prompt_text else None
 
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
@@ -1380,20 +1368,10 @@ class OpenAIServingChat(OpenAIServing):
         if final_res.prompt_routed_experts is not None:
             prompt_routed_experts = final_res.prompt_routed_experts.tolist()
 
-        prompt_text: str | None = None
-        if request.return_token_ids and final_res.prompt_token_ids is not None:
-            try:
-                # Keep template markers / special tokens visible.
-                prompt_text = await self.renderer.get_async_tokenizer().decode(
-                    list(final_res.prompt_token_ids),
-                    skip_special_tokens=False,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to decode prompt_token_ids for request %s: %s",
-                    request_id,
-                    exc,
-                )
+        # ``final_res.prompt`` is the rendered chat-templated prompt text
+        # already produced by the renderer, so no decoding round-trip is
+        # needed here.
+        prompt_text = final_res.prompt if request.return_prompt_text else None
 
         response = ChatCompletionResponse(
             id=request_id,
