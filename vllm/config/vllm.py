@@ -1261,6 +1261,10 @@ class VllmConfig:
                     "the `reasoning_start_str` and `reasoning_end_str`."
                 )
 
+        # Resolve kv_offloading-derived connector name into kv_transfer_config
+        # before the HMA check below, which inspects the connector class.
+        self._post_init_kv_transfer_config()
+
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
@@ -1374,9 +1378,6 @@ class VllmConfig:
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
-
-        # Handle the KV connector configs
-        self._post_init_kv_transfer_config()
 
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
