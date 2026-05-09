@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
 
 import torch
 
@@ -27,23 +26,28 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        if config.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
             return (
                 False,
                 "XPUFP8ScaledMM only support per-channel and per-tensor quantization",
             )
-        if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
+        if config.weight_quant_key.dtype not in {
+            torch.float8_e5m2,
+            torch.float8_e4m3fn,
+        }:
             return False, "XPUFP8ScaledMM only support FP8 weight dtype"
         return True, None
 
     def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+        self,
+        config: FP8ScaledMMLinearLayerConfig,
     ) -> None:
-        assert self.can_implement(c)[0]
+        assert self.can_implement(config)[0]
         assert self.is_supported()[0]
-        self.config = c
-        self.layer_param_names = layer_param_names
+        self.config = config
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         replace_parameter(layer, "weight", layer.weight.data.t())
@@ -53,6 +57,7 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale

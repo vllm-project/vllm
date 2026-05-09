@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import MarlinFP8ScaledMMLinearKernel
+from vllm.model_executor.kernels.linear.scaled_mm import MarlinFP8Kernels
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -384,7 +384,7 @@ class Fp8LinearMethod(LinearMethodBase):
             module_name=self.__class__.__name__,
         )
 
-        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8Kernels)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if self.use_marlin:
@@ -526,7 +526,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
-        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8Kernels)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

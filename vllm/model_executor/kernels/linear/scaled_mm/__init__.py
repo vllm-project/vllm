@@ -19,6 +19,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
+    MarlinFP8BlockScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
@@ -34,10 +35,15 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
+)
+
+# All Marlin FP8 kernel classes; use with `isinstance(x, MarlinFP8Kernels)`.
+MarlinFP8Kernels = (
+    MarlinFP8ScaledMMLinearKernel,
+    MarlinFP8BlockScaledMMLinearKernel,
 )
 
 __all__ = [
@@ -45,13 +51,13 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearKernel",
     "Int8ScaledMMLinearLayerConfig",
-    "ScaledMMLinearKernel",
     "ScaledMMLinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
     "CutlassInt8ScaledMMLinearKernel",
     "FlashInferFP8ScaledMMLinearKernel",
+    "MarlinFP8BlockScaledMMLinearKernel",
     "MarlinFP8ScaledMMLinearKernel",
     "ChannelWiseTorchFP8ScaledMMLinearKernel",
     "PerTensorTorchFP8ScaledMMLinearKernel",
@@ -60,4 +66,5 @@ __all__ = [
     "TritonInt8ScaledMMLinearKernel",
     "Fp8BlockScaledMMLinearKernel",
     "CPUFp8BlockScaledMMKernel",
+    "MarlinFP8Kernels",
 ]

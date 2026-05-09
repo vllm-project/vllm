@@ -13,7 +13,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import torch
 
@@ -101,7 +101,6 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
-    ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
@@ -126,6 +125,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
+    MarlinFP8BlockScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
@@ -187,13 +187,13 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
-    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
-        MarlinFP8ScaledMMLinearKernel,
+        MarlinFP8BlockScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.ROCM: [
@@ -276,9 +276,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     ],
 }
 
-# TODO make all kernels inherit from MMLinearKernel
-# then bound _KernelT only to MMLinearKernel
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
+_KernelT = TypeVar("_KernelT", bound=MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
@@ -369,74 +367,44 @@ def choose_scaled_mm_linear_kernel(
 def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
+    weight_shape: tuple[int, int],
     input_dtype: torch.dtype,
     out_dtype: torch.dtype,
-    weight_shape: tuple[int, int],
-    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    force_kernel: type[_KernelT] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
+        weight_shape=weight_shape,
         input_dtype=input_dtype,
         out_dtype=out_dtype,
-        weight_shape=weight_shape,
     )
 
-    if activation_quant_key.scale.group_shape.is_per_group():
-        kernel_type = choose_scaled_mm_linear_kernel(
+    possible_kernels = (
+        _POSSIBLE_FP8_BLOCK_KERNELS
+        if activation_quant_key.scale.group_shape.is_per_group()
+        else _POSSIBLE_FP8_KERNELS
+    )
+
+    kernel_type = cast(
+        type[FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel],
+        choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            possible_kernels=possible_kernels,
             force_kernel=force_kernel,
-        )
-        if module_name:
-            logger.info_once(
-                "Selected %s for %s",
-                kernel_type.__name__,
-                module_name,
-                scope="global",
-            )
+        ),
+    )
 
-        # TODO make scaled_mm kernels inherit from MMLinearKernel
-        # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
-        if issubclass(kernel_type, FP8ScaledMMLinearKernel):
-            return kernel_type(
-                scaled_mm_linear_kernel_config,
-                layer_param_names=[
-                    "weight",
-                    "weight_scale",
-                    "input_scale",
-                    "input_scale_ub",
-                ],
-            )
-
-        return kernel_type(
-            scaled_mm_linear_kernel_config,
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
         )
 
-    else:
-        kernel_type = choose_scaled_mm_linear_kernel(
-            config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
-            force_kernel=force_kernel,
-        )
-        if module_name:
-            logger.info_once(
-                "Selected %s for %s",
-                kernel_type.__name__,
-                module_name,
-                scope="global",
-            )
-
-        return kernel_type(
-            scaled_mm_linear_kernel_config,
-            layer_param_names=[
-                "weight",
-                "weight_scale",
-                "input_scale",
-                "input_scale_ub",
-            ],
-        )
+    return kernel_type(scaled_mm_linear_kernel_config)
 
 
 def init_int8_linear_kernel(
@@ -465,13 +433,6 @@ def init_int8_linear_kernel(
 
     return kernel_type(
         config,
-        layer_param_names=[
-            "weight",
-            "weight_scale",
-            "input_scale",
-            "input_zero_point",
-            "azp_adj",
-        ],
     )
 
 
@@ -601,7 +562,6 @@ def init_wfp8_a16_linear_kernel(
 
     return kernel_type(
         config,
-        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
     )
 
 

@@ -18,17 +18,17 @@ from vllm.platforms import current_platform
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
 )
-from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
 
 logger = init_logger(__name__)
 
 
-class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
+class AiterInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -54,8 +54,10 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not c.input_symmetric:
+    def can_implement(
+        cls, config: Int8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        if not config.input_symmetric:
             return False, "supports symmetric quantization only."
         return True, None
 
@@ -64,6 +66,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         """
         `AiterInt8ScaledMMLinearKernel` implements a fused version of
@@ -75,17 +78,18 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` also does not support
         ATIER block scaled GEMM and mix-precision GEMM.
         """
-        w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
+        params = self._get_layer_params(layer)
+        w_q, w_s = params.weight, params.weight_scale
+        i_s, i_zp = params.input_scale, params.input_zero_point
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
-        symmetric = azp_adj is None
+        symmetric = params.azp_adj is None
         assert symmetric, (
             "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
         )
         x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=symmetric)
-
         assert x_zp is None, (
             "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
         )
@@ -146,17 +150,19 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         is_ptpc = (
-            c.activation_quant_key.scale.group_shape.is_per_token()
-            and c.weight_quant_key.scale.group_shape.is_per_channel()
+            config.activation_quant_key.scale.group_shape.is_per_token()
+            and config.weight_quant_key.scale.group_shape.is_per_channel()
         )
-        if c.weight_shape is None:
+        if config.weight_shape is None:
             return False, "weight_shape is required for Aiter kernels"
-        N, K = c.weight_shape
+        N, K = config.weight_shape
         fp8_dtype = current_platform.fp8_dtype()
 
-        if c.out_dtype is not torch.bfloat16:
+        if config.out_dtype is not torch.bfloat16:
             return False, "requires bfloat16 output dtype."
 
         if not is_ptpc:
@@ -184,14 +190,13 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, *_ = self.layer_param_names
-        w, *_ = self._get_layer_params(layer)
+        params = self._get_layer_params(layer)
 
         replace_parameter(
             layer,
-            w_name,
+            params.WEIGHT,
             torch.nn.Parameter(
-                rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
+                rocm_aiter_ops.shuffle_weight(params.weight.t().contiguous()).data,
                 requires_grad=False,
             ),
         )
@@ -222,14 +227,16 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         is_ptpc = (
-            c.activation_quant_key.scale.group_shape.is_per_token()
-            and c.weight_quant_key.scale.group_shape.is_per_channel()
+            config.activation_quant_key.scale.group_shape.is_per_token()
+            and config.weight_quant_key.scale.group_shape.is_per_channel()
         )
-        if c.weight_shape is None:
+        if config.weight_shape is None:
             return False, "weight_shape is required for Aiter kernels"
-        N, K = c.weight_shape
+        N, K = config.weight_shape
         fp8_dtype = current_platform.fp8_dtype()
 
         if not is_ptpc:
@@ -249,13 +256,12 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, *_ = self.layer_param_names
-        w, *_ = self._get_layer_params(layer)
+        params = self._get_layer_params(layer)
 
         replace_parameter(
             layer,
-            w_name,
-            torch.nn.Parameter(w.t(), requires_grad=False),
+            params.WEIGHT,
+            torch.nn.Parameter(params.weight.t(), requires_grad=False),
         )
 
     def apply_scaled_mm(
