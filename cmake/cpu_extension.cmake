@@ -409,12 +409,15 @@ endif()
 
 if (ENABLE_X86_ISA)
     set(VLLM_EXT_SRC_SGL
+        "csrc/cpu/sgl-kernels/fla.cpp"
+        "csrc/cpu/sgl-kernels/conv.cpp"
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
+        "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp")
 
     set(VLLM_EXT_SRC_AVX512
