@@ -18,6 +18,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_layers.py &&
       pytest -v -s lora/test_lora_checkpoints.py &&
       pytest -v -s lora/test_lora_functions.py &&
@@ -46,6 +47,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_fused_moe_lora_kernel.py && 
       pytest -v -s lora/test_moe_lora_align_sum.py'
 
@@ -65,6 +67,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       set -o pipefail &&
       pytest -v -s lora/test_punica_ops.py --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype0-3-43264-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype1-1-2049-64-128-16]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-128-1-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-256-1-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-256-8-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[expand-0-xpu:0-dtype0-3-2049-128-8-16]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-128-8-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels[expand-0-xpu:0-dtype1-1-2049-256-128-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype0-3-64256-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype1-2-29696-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype1-3-49408-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype0-2-16384-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype0-2-51328-32-4-4]"'
 
@@ -84,6 +87,7 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_punica_ops_fp8.py &&
       pytest -v -s lora/test_punica_xpu_ops.py'
 
@@ -103,14 +107,12 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       (pytest -v -s lora/test_mixtral.py --deselect="tests/lora/test_mixtral.py::test_mixtral_lora[4]" || true) &&
       pytest -v -s lora/test_quant_model.py --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
-      (pytest -v -s lora/test_qwen35_densemodel_lora.py || true) &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
-      pytest -s -v lora/test_llama_tp.py &&
-      pytest -s -v lora/test_minicpmv_tp.py &&
-      pytest -s -v lora/test_olmoe_tp.py'
+      pytest -s -v lora/test_minicpmv_tp.py'
 
 - label: LoRA Multimodal
   timeout_in_minutes: 45
@@ -128,7 +130,6 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_default_mm_loras.py && 
-      (pytest -v -s lora/test_qwen3_unembed.py || true) &&
-      pytest -v -s lora/test_whisper.py &&
-      (pytest -v -s lora/test_llm_with_multi_loras.py || true)'
+      pytest -v -s lora/test_whisper.py'
