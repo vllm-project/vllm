@@ -212,7 +212,7 @@ steps:
 
 - label: Distributed Tests (2 GPUs)(B200)
   key: distributed-tests-2-gpus-b200
-  device: b200
+  device: b200-k8s
   optional: true
   working_dir: "/vllm-workspace/"
   num_devices: 2
