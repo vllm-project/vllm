@@ -228,13 +228,6 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 "and `VLLM_ROCM_USE_AITER_LINEAR=1`. ",
                 "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`. ",
             )
-
-        if not rocm_aiter_ops.is_hip_fp8bmm_enabled():
-            return (
-                False,
-                "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`. ",
-            )
         try:
             import aiter  # noqa: F401
         except Exception:
@@ -274,17 +267,27 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_name, *_ = self.layer_param_names
-        w, *_ = self._get_layer_params(layer)
+        w_name, w_s_name, *_ = self.layer_param_names
+        w, w_s, *_ = self._get_layer_params(layer)
 
+        # Pre-apply the transposes that used to live in
+        # _rocm_aiter_hipb_mm_fp8_impl so the kernel can consume B/Bs directly.
+        # The `.t()` on the shuffled weight is kept as a non-contiguous view —
+        # materializing it with `.contiguous()` would re-arrange the bytes and
+        # break the `bpreshuffle` layout.
+        shuffled_w = rocm_aiter_ops.shuffle_weight(w.t().contiguous())
         replace_parameter(
             layer,
             w_name,
-            torch.nn.Parameter(
-                rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
-                requires_grad=False,
-            ),
+            torch.nn.Parameter(shuffled_w.t(), requires_grad=False),
         )
+
+        if w_s.ndim > 1:
+            replace_parameter(
+                layer,
+                w_s_name,
+                torch.nn.Parameter(w_s.t().contiguous(), requires_grad=False),
+            )
 
     def apply_scaled_mm(
         self,
@@ -297,7 +300,7 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        output_shape[-1] = B.shape[0]
+        output_shape[-1] = B.shape[1]
         return rocm_aiter_ops.hipb_mm_fp8(A, B, As, Bs, bias, out_dtype).view(
             *output_shape
         )
