@@ -755,6 +755,11 @@ class EplbState:
                 logger.info(
                     "Saved EPLB cumulative logical load to %s.", save_path
                 )
+            # Recording-only mode: skip physical rearrangement so we capture
+            # the baseline on the unchanged topology and avoid NCCL p2p OOM
+            # from move_to_buffer (the apply path allocates large transfer
+            # buffers that don't fit alongside model weights + KV cache).
+            return None
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
