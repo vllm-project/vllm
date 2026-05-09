@@ -69,7 +69,16 @@ def register_steering_buffers(
     model's compute dtype (typically bf16) so the indexed gather in
     :func:`apply_steering` returns rows already aligned with the residual
     tensor and no dtype cast is required at the gather site.
+
+    When ``max_steering_configs == 0`` (steering disabled at the engine
+    level — ``vllm_config.steering_config is None``), this is a no-op.
+    No buffers are attached to ``module``, which causes
+    :func:`apply_layer_steering` to short-circuit so the steering
+    kernel never launches.  This keeps disabled-mode forwards free of
+    steering overhead.
     """
+    if max_steering_configs == 0:
+        return
     table_dtype = dtype if dtype is not None else torch.float32
     for hp in SteeringHookPoint:
         module.register_buffer(
@@ -123,12 +132,24 @@ def apply_layer_steering(
     """Apply the steering table for ``hook_point`` to ``hidden_states``.
 
     Capture consumers (when configured) see the pre-steering residual via
-    :func:`maybe_capture_residual`.
+    :func:`maybe_capture_residual`, which runs unconditionally — capture
+    is independent of whether steering is enabled.
+
+    When the layer has no steering table buffer registered (engine
+    started with ``enable_steering=False``, so
+    :func:`register_steering_buffers` was a no-op), this short-circuits
+    and returns ``hidden_states`` unchanged.  The ``hasattr`` check is
+    decided once at module ``__init__`` and is constant for the rest
+    of the layer's lifetime, so ``torch.compile`` traces it as a static
+    branch and the disabled path emits no steering kernel at all.
     """
     maybe_capture_residual(hidden_states, module.layer_idx, hook_point.value)
+    table_attr = HOOK_POINT_TABLE_ATTR[hook_point]
+    if not hasattr(module, table_attr):
+        return hidden_states
     return torch.ops.vllm.apply_steering(
         hidden_states,
-        getattr(module, HOOK_POINT_TABLE_ATTR[hook_point]),
+        getattr(module, table_attr),
         module.steering_index,
     )
 

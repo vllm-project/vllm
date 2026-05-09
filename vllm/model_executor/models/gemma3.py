@@ -42,9 +42,11 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.steering import (
-    HOOK_POINT_TABLE_ATTR,
     SteeringHookPoint,
     apply_layer_steering,
+    get_steering_buffer_dtype,
+    register_steering_buffers,
+    share_steering_index_across_layers,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -246,29 +248,27 @@ class Gemma3DecoderLayer(nn.Module):
         prefix: str = "",
         max_steering_tokens: int = 1,
         max_steering_configs: int = 0,
+        steering_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.layer_idx = extract_layer_index(prefix)
 
-        # Activation steering buffers — one vector + table pair per hook
-        # point.  All four are always allocated (the memory cost is
-        # trivial) so the forward path is unconditional.  Buffers are
-        # updated in-place by the model runner before each step; zero
-        # rows act as a no-op.  torch.compile lifts them as graph inputs,
-        # so no splitting op is needed.
-        for hp in SteeringHookPoint:
-            self.register_buffer(
-                HOOK_POINT_TABLE_ATTR[hp],
-                torch.zeros(max_steering_configs + 3, config.hidden_size),
-                persistent=False,
-            )
-        # Shared steering index mapping token positions to table rows.
-        # Placeholder — replaced by a shared tensor during model init.
-        self.register_buffer(
-            "steering_index",
-            torch.zeros(max_steering_tokens, dtype=torch.long),
-            persistent=False,
+        # Activation steering buffers — one table per hook point plus a
+        # shared index.  Delegates to ``register_steering_buffers`` so
+        # this model uses the same gating + dtype handling as every
+        # other steerable model: when the engine was started without
+        # ``enable_steering`` (``max_steering_configs == 0``), the
+        # helper is a no-op and no buffers are attached.  In that
+        # disabled mode ``apply_layer_steering`` short-circuits via a
+        # ``hasattr`` check that ``torch.compile`` traces as constant,
+        # so the steering kernel never launches.
+        register_steering_buffers(
+            self,
+            config.hidden_size,
+            max_steering_tokens=max_steering_tokens,
+            max_steering_configs=max_steering_configs,
+            dtype=steering_dtype,
         )
 
         self.self_attn = Gemma3Attention(
@@ -359,6 +359,7 @@ class Gemma3Model(nn.Module):
         max_steering_configs = (
             steering_config.max_steering_configs if steering_config else 0
         )
+        steering_dtype = get_steering_buffer_dtype(vllm_config)
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -375,16 +376,16 @@ class Gemma3Model(nn.Module):
                 prefix=prefix,
                 max_steering_tokens=max_tokens,
                 max_steering_configs=max_steering_configs,
+                steering_dtype=steering_dtype,
             ),
             prefix=f"{prefix}.layers",
         )
 
         # Share one steering_index backing tensor across all decoder layers
         # so the model runner updates it once and all layers see the change.
-        if self.layers:
-            shared_steering_index = self.layers[0].steering_index
-            for layer in self.layers[1:]:
-                layer.steering_index = shared_steering_index
+        # Helper handles disabled mode (layers without steering_index attr)
+        # via a ``hasattr`` skip.
+        share_steering_index_across_layers(self.layers)
 
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
