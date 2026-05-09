@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -404,10 +405,24 @@ def rotary_embedding(
     head_size: int,
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
+    rope_dim_offset: int = 0,
+    inverse: bool = False,
 ) -> None:
-    torch.ops._C.rotary_embedding(
-        positions, query, key, head_size, cos_sin_cache, is_neox
-    )
+    if rope_dim_offset == 0 and not inverse:
+        torch.ops._C.rotary_embedding(
+            positions, query, key, head_size, cos_sin_cache, is_neox
+        )
+    else:
+        torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox,
+            rope_dim_offset,
+            inverse,
+        )
 
 
 # layer norm ops
@@ -2435,23 +2450,6 @@ def moe_wna16_gemm(
     )
 
 
-def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
-    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
-
-
-if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
-
-    @register_fake("_moe_C::router_gemm_bf16_fp32")
-    def router_gemm_bf16_fp32_fake(
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.empty(
-            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
-        )
-
-
 def dsv3_router_gemm(
     hidden_states: torch.Tensor,
     router_weight: torch.Tensor,
@@ -2500,6 +2498,30 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+    )
+
+
+def topk_hash_softplus_sqrt(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.topk_softplus_sqrt(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        input_tokens,
+        hash_indices_table,
     )
 
 
@@ -3129,6 +3151,13 @@ if hasattr(torch.ops._C, "weight_packed_linear"):
         )
 
 
+class CPUQuantMethod(IntEnum):
+    UNQUANT = 0
+    INT8_W8A8 = 1
+    FP8_W8A16 = 2
+    INT4_W4A8 = 3
+
+
 if hasattr(torch.ops._C, "fused_experts_cpu"):
 
     @register_fake("_C::fused_experts_cpu")
@@ -3139,16 +3168,47 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         inplace: bool,
-        use_int8_w8a8: bool,
-        use_fp8_w8a16: bool,
+        moe_comp_method: CPUQuantMethod,
         w1_scale: torch.Tensor | None,
         w2_scale: torch.Tensor | None,
+        w1_zero: torch.Tensor | None,
+        w2_zero: torch.Tensor | None,
         block_size: list[int] | None,
-        a1_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
+
+
+def fused_experts_cpu(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    inplace: bool,
+    moe_comp_method: CPUQuantMethod,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_size: list[int] | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fused_experts_cpu(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        inplace,
+        moe_comp_method,
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_size,
+        is_vnni,
+    )
 
 
 if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
@@ -3167,6 +3227,11 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         return torch.empty((M, N), dtype=out_dtype)
 
 
+class CPUQuantAlgo(IntEnum):
+    AWQ = 0
+    GPTQ = 1
+
+
 if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
 
     @register_fake("_C::convert_weight_packed_scale_zp")
@@ -3174,12 +3239,27 @@ if hasattr(torch.ops._C, "convert_weight_packed_scale_zp"):
         qweight: torch.Tensor,
         qzeros: torch.Tensor,
         scales: torch.Tensor,
+        quant_method_4bit: CPUQuantAlgo,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return (
             torch.empty_like(qweight),
             torch.empty_like(qzeros),
             torch.empty_like(scales),
         )
+
+
+def convert_weight_packed_scale_zp(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    quant_method_4bit: CPUQuantAlgo,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return torch.ops._C.convert_weight_packed_scale_zp(
+        qweight,
+        qzeros,
+        scales,
+        quant_method_4bit,
+    )
 
 
 if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
@@ -3196,7 +3276,59 @@ if hasattr(torch.ops._C, "int4_scaled_mm_cpu"):
         return torch.empty((x.size(0), N), dtype=x.dtype, device=x.device)
 
 
-_supports_cpu_w4a8_int8 = bool(hasattr(torch.ops._C, "convert_weight_packed_scale_zp"))
+def int4_scaled_mm_cpu(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_zeros: torch.Tensor,
+    w_scales: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    x_shape = x.shape
+    x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
+
+    out = torch.ops._C.int4_scaled_mm_cpu(
+        x_2d,
+        w,
+        w_zeros,
+        w_scales,
+        bias,
+    )
+    out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+    return out
+
+
+if hasattr(torch.ops._C, "fp8_scaled_mm_cpu"):
+
+    @register_fake("_C::fp8_scaled_mm_cpu")
+    def fp8_scaled_mm_cpu_fake(
+        mat1: torch.Tensor,
+        mat2: torch.Tensor,
+        scales2: torch.Tensor,
+        block_size: list[int],
+        bias: torch.Tensor | None,
+        out_dtype: torch.dtype,
+        is_vnni: bool,
+    ) -> torch.Tensor:
+        M = mat1.size(0)
+        N = mat2.size(0)
+        return torch.empty((M, N), dtype=out_dtype, device=mat1.device)
+
+
+_supports_cpu_fp8_w8a16 = bool(hasattr(torch.ops._C, "fp8_scaled_mm_cpu"))
+
+
+def fp8_scaled_mm_cpu(
+    mat1: torch.Tensor,
+    mat2: torch.Tensor,
+    scales2: torch.Tensor,
+    block_size: list[int],
+    bias: torch.Tensor | None,
+    out_dtype: torch.dtype,
+    is_vnni: bool,
+) -> torch.Tensor:
+    return torch.ops._C.fp8_scaled_mm_cpu(
+        mat1, mat2, scales2, block_size, bias, out_dtype, is_vnni
+    )
 
 
 class CPUDNNLGEMMHandler:
@@ -3365,6 +3497,9 @@ def cpu_attn_reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     isa: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
@@ -3373,6 +3508,9 @@ def cpu_attn_reshape_and_cache(
         value_cache,
         slot_mapping,
         isa,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 
@@ -3391,6 +3529,9 @@ def cpu_attention_with_kv_cache(
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache(
         query,
@@ -3408,6 +3549,9 @@ def cpu_attention_with_kv_cache(
         softcap,
         scheduler_metadata,
         s_aux,
+        k_scale,
+        v_scale,
+        kv_cache_dtype,
     )
 
 

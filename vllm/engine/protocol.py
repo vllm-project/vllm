@@ -78,6 +78,7 @@ class EngineClient(ABC):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -237,6 +238,14 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
+    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """Start a new weight update."""
+        raise NotImplementedError
+
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
+        raise NotImplementedError
+
+    async def finish_weight_update(self) -> None:
+        """Finish the current weight update."""
         raise NotImplementedError

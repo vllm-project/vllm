@@ -144,13 +144,21 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         #  For CUDA platform please validate if the torch._scaled_mm supports
         #  rowwise scaled GEMM before using it
 
+        # torch._scaled_mm rowwise requires scale_a = (m, 1), scale_b = (1, n).
+        # CompressedTensors stores weight_scale as (n, 1), so `.t()` yields (1, n).
+        # ModelOpt FP8_PER_CHANNEL_PER_TOKEN stores it as 1-D (n,); reshape to
+        # (1, n) so both paths satisfy the rowwise contract.
+        scale_b = Bs.view(1, -1) if Bs.dim() == 1 else Bs.t()
+        if As.dim() == 1:
+            As = As.view(-1, 1)
+
         # Fused GEMM_DQ Rowwise GEMM
         output = torch._scaled_mm(
             A,
             B,
             out_dtype=out_dtype,
             scale_a=As,
-            scale_b=Bs.t(),
+            scale_b=scale_b,
             bias=bias,
         )
 
