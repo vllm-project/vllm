@@ -418,6 +418,7 @@ class SpecDecodeBaseProposer:
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,
+        target_inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
