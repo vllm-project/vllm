@@ -58,7 +58,9 @@ class DecodeBenchTestRunner:
 
         # Create worker-side connector
         self.worker_connector = DecodeBenchConnector(
-            vllm_config, KVConnectorRole.WORKER
+            vllm_config,
+            KVConnectorRole.WORKER,
+            self.scheduler.kv_cache_config,
         )
 
         # Create dummy KV caches for testing
