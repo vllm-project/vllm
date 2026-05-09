@@ -57,10 +57,9 @@ This starts the master in the background. Logs go to `scripts/mooncake/mooncake_
 Default ports:
 
 - RPC: 50051
-- HTTP metadata: 8080
 - Prometheus metrics: 9003
 
-See the script header for environment variables (`MC_RPC_PORT`, `MC_HTTP_PORT`, etc.) to customize ports and eviction settings. Mooncake master is launched cluster-wise, so we may get port conflict if someone else has already launched it. Typically we don't need to change this, and multiple users should be able to share the same master. One can freely change ports here, but also remember to update the `mooncake_config.json` for the client (vLLM) below.
+See the script header for environment variables (`MC_RPC_PORT`, `MC_METRICS_PORT`, etc.) to customize ports and eviction settings. Mooncake master is launched cluster-wise, so we may get port conflict if someone else has already launched it. Typically we don't need to change this, and multiple users should be able to share the same master. One can freely change ports here, but also remember to update the `mooncake_config.json` for the client (vLLM) below.
 
 ### Recommended Validation Flow
 
@@ -108,7 +107,7 @@ Edit `scripts/mooncake/mooncake_config.json`:
 
 ```json
 {
-  "metadata_server": "http://127.0.0.1:8080/metadata",
+  "metadata_server": "P2PHANDSHAKE",
   "master_server_address": "127.0.0.1:50051",
   "global_segment_size": "600GB",
   "local_buffer_size": "4GB",
@@ -118,12 +117,15 @@ Edit `scripts/mooncake/mooncake_config.json`:
 ```
 
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback but performs poorly.
+- `metadata_server`: Use `"P2PHANDSHAKE"` so Transfer Engine peer discovery does not require a separate metadata service.
 - Adjust `global_segment_size` and `local_buffer_size` based on available memory.
     - global_segment_size: Memory contributed to the distributed pool
     - local_buffer_size: Private buffer for this node's own operations
     - For now we use a single node so they don't differ much
     - **These sizes are per GPU (per rank), not for the entire node.** For example, with 4 GPUs and `global_segment_size` set to `80GB`, each rank allocates 80 GB of CPU memory, totaling 320 GB across the node.
 - Note: the benchmark script automatically updates `global_segment_size` and `local_buffer_size` to match `CPU_OFFLOAD_GIB`. The `CPU_OFFLOAD_GIB` and `DISK_OFFLOAD_GIB` env vars in the benchmark scripts are also per GPU (per rank).
+
+The local master helper does not start an embedded HTTP metadata server. Keep the default config and smoke-test example on `"P2PHANDSHAKE"` unless you intentionally run a separate metadata service and update the client config to match it.
 
 ### 3. Environment Setup (setup_vllm_env.sh)
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Start a local Mooncake master server for benchmarking.
 #
-# The master provides two services:
+# The master provides the Mooncake Store RPC service:
 #   - RPC (port 50051): object metadata, allocation, eviction
-#   - HTTP metadata (port 8080): transfer engine peer discovery
 #
 # Usage:
 #   bash start_mooncake_master.sh                          # foreground
@@ -15,7 +14,6 @@
 #
 # Environment variables (all optional):
 #   MC_RPC_PORT       - Master RPC port           (default: 50051)
-#   MC_HTTP_PORT      - HTTP metadata port         (default: 8080)
 #   MC_METRICS_PORT   - Prometheus metrics port    (default: 9003)
 #   MC_RPC_THREADS    - RPC worker threads         (default: 4)
 #   MC_LEASE_TTL      - KV lease TTL in ms         (default: 30000)
@@ -49,7 +47,6 @@ done
 
 # --- Master settings -------------------------------------------------------
 MC_RPC_PORT="${MC_RPC_PORT:-50051}"
-MC_HTTP_PORT="${MC_HTTP_PORT:-8080}"
 MC_METRICS_PORT="${MC_METRICS_PORT:-9003}"
 MC_RPC_THREADS="${MC_RPC_THREADS:-4}"
 MC_LEASE_TTL="${MC_LEASE_TTL:-30000}"
@@ -96,9 +93,6 @@ CMD=(
     -rpc_thread_num="$MC_RPC_THREADS"
     -rpc_address=0.0.0.0
     -rpc_enable_tcp_no_delay=true
-    -enable_http_metadata_server=true
-    -http_metadata_server_host=0.0.0.0
-    -http_metadata_server_port="$MC_HTTP_PORT"
     -enable_metric_reporting=true
     -metrics_port="$MC_METRICS_PORT"
     -default_kv_lease_ttl="$MC_LEASE_TTL"
@@ -118,7 +112,6 @@ fi
 # --- Start ------------------------------------------------------------------
 echo "Starting mooncake_master"
 echo "  RPC:      0.0.0.0:${MC_RPC_PORT}"
-echo "  HTTP:     0.0.0.0:${MC_HTTP_PORT}/metadata"
 echo "  Metrics:  0.0.0.0:${MC_METRICS_PORT}"
 if $OPT_OFFLOAD; then
     echo "  Offload:  ON"

@@ -8,7 +8,7 @@ store = MooncakeDistributedStore()
 # 2. Setup with all required parameters
 store.setup(
     "localhost",  # Your node's address
-    "http://localhost:8080/metadata",  # HTTP metadata server
+    "P2PHANDSHAKE",  # Transfer Engine peer discovery
     512 * 1024 * 1024,  # 512MB segment size
     128 * 1024 * 1024,  # 128MB local buffer
     "tcp",  # Use TCP (RDMA for high performance)
