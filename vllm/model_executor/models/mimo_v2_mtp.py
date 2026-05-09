@@ -40,17 +40,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import (
-    MultiModalEmbeddings,
-    SupportsMultiModal,
-    _require_is_multimodal,
-)
+from .interfaces import MultiModalEmbeddings, SupportsMultiModal, _require_is_multimodal
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
-from .utils import (
-    _merge_multimodal_embeddings,
-    maybe_prefix,
-    validate_num_mtp_layers,
-)
+from .utils import _merge_multimodal_embeddings, maybe_prefix, validate_num_mtp_layers
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
 # only the first layer and only one speculative token.

@@ -23,11 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import (
-    make_empty_intermediate_tensors_factory,
-    maybe_prefix,
-    validate_num_mtp_layers,
-)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
@@ -35,6 +30,11 @@ from .interfaces import SupportsPP
 from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
+)
+from .utils import (
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+    validate_num_mtp_layers,
 )
 
 

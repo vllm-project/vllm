@@ -40,11 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .llama import LlamaDecoderLayer
-from .utils import (
-    is_pp_missing_parameter,
-    maybe_prefix,
-    validate_num_mtp_layers,
-)
+from .utils import is_pp_missing_parameter, maybe_prefix, validate_num_mtp_layers
 
 
 class ErnieMultiTokenPredictorLayer(nn.Module):

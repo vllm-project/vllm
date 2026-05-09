@@ -47,11 +47,7 @@ from .glm4_moe_lite_mtp import (
     SharedHead,
 )
 from .interfaces import SupportsPP
-from .utils import (
-    is_pp_missing_parameter,
-    maybe_prefix,
-    validate_num_mtp_layers,
-)
+from .utils import is_pp_missing_parameter, maybe_prefix, validate_num_mtp_layers
 
 
 class GlmOcrMultiTokenPredictorLayer(nn.Module):

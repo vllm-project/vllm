@@ -37,18 +37,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_mtp import (
+from vllm.sequence import IntermediateTensors
+
+from .deepseek_mtp import (
     DeepSeekMultiTokenPredictor,
     DeepSeekMultiTokenPredictorLayer,
     SharedHead,
 )
-from vllm.model_executor.models.utils import (
-    maybe_prefix,
-    validate_num_mtp_layers,
-)
-from vllm.sequence import IntermediateTensors
-
 from .openpangu import OpenPanguDecoderLayer
+from .utils import maybe_prefix, validate_num_mtp_layers
 
 
 class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
