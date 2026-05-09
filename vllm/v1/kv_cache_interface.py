@@ -8,7 +8,7 @@ from collections import Counter
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -153,6 +153,12 @@ class AttentionSpec(KVCacheSpec):
     # process under multi-process executors. Tuples for hashability; empty
     # tuple means "not populated" (legacy callers that pre-date this field).
     supported_kernel_block_sizes: tuple = ()
+
+    # If True, newly-allocated blocks for this spec are zero-initialized
+    # before first use. Needed when the attention kernel may load partial
+    # blocks where unfilled slots could land on FP NaN bit patterns and
+    # propagate via ``0 * NaN = NaN`` in the softmax-weighted sum.
+    requires_zeroing: ClassVar[bool] = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -884,4 +890,8 @@ class KVCacheConfig:
 
     @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        return self.has_mamba_layers or any(
+            isinstance(g.kv_cache_spec, AttentionSpec)
+            and g.kv_cache_spec.requires_zeroing
+            for g in self.kv_cache_groups
+        )

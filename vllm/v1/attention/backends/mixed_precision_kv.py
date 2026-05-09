@@ -28,12 +28,40 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+from vllm.v1.core.single_type_kv_cache_manager import (
+    FirstNManager,
+    SlidingWindowManager,
+    spec_manager_map,
+)
 from vllm.v1.kv_cache_interface import FirstNSpec, KVCacheSpec, SlidingWindowSpec
 
 # Sentinel suffix appended to the parent attention layer prefix when
 # constructing the sibling cache. Used by FlashInferImpl to look the
 # sibling up via the static_forward_context.
 MIXED_KV_SUFFIX = ".mixed_kv"
+
+
+# Sibling-cache specs that opt into zero-init for newly-allocated blocks.
+# The trtllm-gen FMHA kernel can load partial blocks where unfilled slots
+# would carry FP NaN bit patterns from a previously-freed block; ``0 * NaN
+# = NaN`` then propagates through the softmax-weighted output. Zeroing on
+# allocation breaks that path. Both subclasses are pure markers — they
+# inherit storage and behavior from their parents and just flip the
+# ``requires_zeroing`` ClassVar.
+@dataclass(frozen=True, kw_only=True)
+class MixedKVSlidingWindowSpec(SlidingWindowSpec):
+    requires_zeroing: ClassVar[bool] = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class MixedKVFirstNSpec(FirstNSpec):
+    requires_zeroing: ClassVar[bool] = True
+
+
+# ``spec_manager_map`` is keyed by exact ``type``; the subclasses above need
+# explicit entries so the manager lookup picks the parent's manager class.
+spec_manager_map[MixedKVSlidingWindowSpec] = SlidingWindowManager
+spec_manager_map[MixedKVFirstNSpec] = FirstNManager
 
 
 def mixed_kv_layer_prefix(parent_prefix: str) -> str:
@@ -147,8 +175,13 @@ class MixedPrecisionKVCache(nn.Module, AttentionLayerBase):
         # The sibling page is rounded up to match the primary NVFP4 page
         # by ``unify_kv_cache_spec_page_size`` (which has visibility into
         # all specs and can pick a single ``target`` that satisfies the
-        # shared block pool's same-page requirement).
-        spec_cls = FirstNSpec if self.location == "first" else SlidingWindowSpec
+        # shared block pool's same-page requirement). Use the
+        # ``MixedKV*Spec`` subclasses so the allocator zero-inits new blocks
+        # (``requires_zeroing=True``) — guards against the trtllm-gen FMHA
+        # kernel loading FP NaN bit patterns from a previously-freed block.
+        spec_cls = (
+            MixedKVFirstNSpec if self.location == "first" else MixedKVSlidingWindowSpec
+        )
         return spec_cls(
             block_size=self.block_size,
             num_kv_heads=self.num_kv_heads,
