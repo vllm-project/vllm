@@ -673,6 +673,7 @@ class SpecDecodeBaseProposer:
         token_indices_to_sample: torch.Tensor | None,
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
+        target_inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
         if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
