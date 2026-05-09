@@ -11,9 +11,9 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
+    init_fp4_linear_kernel,
     init_fp8_linear_kernel,
     init_mxfp8_linear_kernel,
-    init_nvfp4_linear_kernel,
 )
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -1090,7 +1090,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-        self.kernel = init_nvfp4_linear_kernel()
+        self.kernel = init_fp4_linear_kernel(
+            group_size=self.quant_config.group_size,
+            is_checkpoint_fp4_serialized=self.quant_config.is_checkpoint_nvfp4_serialized,
+            out_dtype=None,
+            module_name="ModelOptNvFp4LinearMethod",
+        )
 
     def create_weights(
         self,

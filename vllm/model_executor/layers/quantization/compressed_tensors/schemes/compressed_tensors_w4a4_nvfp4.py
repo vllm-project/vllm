@@ -6,7 +6,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.kernels.linear import init_fp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -24,8 +24,13 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
-        self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
+        self.kernel = init_fp4_linear_kernel(
+            group_size=self.group_size,
+            is_checkpoint_fp4_serialized=True,
+            out_dtype=None,
+            module_name="CompressedTensorsW4A4Fp4",
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:
