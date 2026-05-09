@@ -107,10 +107,6 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
 
     monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", "flashinfer-cutlass")
 
-    model_info = HF_EXAMPLE_MODELS.find_hf_info(NVFP4_MODEL_ID)
-    model_info.check_transformers_version(on_fail="skip")
-    model_info.check_available_online(on_fail="skip")
-
     tp_size = 2
     if num_gpus_available < tp_size:
         pytest.skip(f"Need at least {tp_size} GPUs")
