@@ -230,6 +230,8 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
         k_s: torch.Tensor,  # [num_heads, L, head_dim]
         v_s: torch.Tensor,  # [num_heads, L, head_dim]
         rel_embeddings: torch.Tensor,  # [2*max_pos, hidden_size]
+        pos_key: torch.Tensor | None,  # [num_heads, head_dim, 2*att_span] or None
+        pos_query: torch.Tensor | None,  # [num_heads, head_dim, 2*att_span] or None
         L: int,
         device: torch.device,
     ) -> torch.Tensor:  # [L, all_head_size]
@@ -258,9 +260,7 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
 
         # --- c2p (content query → relative-position key) ----------------------
         if "c2p" in self.pos_att_type:
-            proj = self.key_proj if self.share_att_key else self.pos_key_proj
-            # pos_key: [num_heads, head_dim, 2*att_span]
-            pos_key = self._project_rel_emb(rel_embeddings, proj)
+            # pos_key: [num_heads, head_dim, 2*att_span] — precomputed outside loop
             # c2p_raw[h, q, r] = Q_q · PK_r
             c2p_raw = torch.matmul(q_s, pos_key) / self.scale  # [H, L, 2*att_span]
             c2p_idx = pos_idx.unsqueeze(0).expand(self.num_heads, -1, -1)  # [H, L, L]
@@ -268,20 +268,22 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
 
         # --- p2c (content key → relative-position query) ----------------------
         if "p2c" in self.pos_att_type:
-            proj = self.query_proj if self.share_att_key else self.pos_query_proj
-            # pos_query: [num_heads, head_dim, 2*att_span]
-            pos_query = self._project_rel_emb(rel_embeddings, proj)
+            # pos_query: [num_heads, head_dim, 2*att_span] — precomputed outside loop
             # p2c_raw[h, k, r] = K_k · PQ_r
             p2c_raw = torch.matmul(k_s, pos_query) / self.scale  # [H, L_k, 2*att_span]
             # Desired: result[h, q, k] = p2c_raw[h, k, pos_idx[q, k]]
-            # Expand p2c_raw along the query axis → [H, L_q, L_k, 2*att_span]
-            p2c_expanded = p2c_raw.unsqueeze(1).expand(-1, L, -1, -1)
-            p2c_idx_4d = (
-                pos_idx.unsqueeze(0).unsqueeze(-1).expand(self.num_heads, -1, -1, 1)
-            )
-            attn_scores = attn_scores + torch.gather(
-                p2c_expanded, dim=-1, index=p2c_idx_4d
-            ).squeeze(-1)
+            # Use advanced indexing instead of a 4D expand+gather to avoid creating
+            # a conceptually [H, L, L, 2*att_span] intermediate tensor.
+            h_range = torch.arange(self.num_heads, device=device)  # [H]
+            k_range = torch.arange(L, device=device)  # [L]
+            attn_scores = (
+                attn_scores
+                + p2c_raw[
+                    h_range[:, None, None],  # [H, 1,  1 ] → selects head
+                    k_range[None, None, :],  # [1,  1,  L ] → selects key token
+                    pos_idx[None],  # [1,  L,  L ] → selects position bucket
+                ]
+            )  # broadcasts to [H, L_q, L_k]
 
         # Softmax + weighted sum
         attn_probs = F.softmax(attn_scores, dim=-1)  # [H, L, L]
@@ -295,31 +297,52 @@ class DebertaV2DisentangledSelfAttention(nn.Module):
         hidden_states: torch.Tensor,  # [total_tokens, hidden_size]
         positions: torch.Tensor,  # [total_tokens] — resets to 0 at each sequence
         rel_embeddings: torch.Tensor,  # [2*max_pos, hidden_size]
+        seq_lens: list[int],  # CPU list — no GPU sync needed
     ) -> torch.Tensor:  # [total_tokens, all_head_size]
-        total_tokens = hidden_states.shape[0]
         device = hidden_states.device
 
         q, _ = self.query_proj(hidden_states)  # [total_tokens, all_head_size]
         k, _ = self.key_proj(hidden_states)
         v, _ = self.value_proj(hidden_states)
 
-        # Sequence boundaries: position resets to 0 at the start of each sequence
-        seq_starts = (positions == 0).nonzero(as_tuple=True)[0]
-        seq_ends = torch.cat([seq_starts[1:], positions.new_tensor([total_tokens])])
+        # Project rel_embeddings ONCE per forward pass — they are constant for the
+        # entire batch, so computing them inside the per-sequence loop is wasteful.
+        pos_key: torch.Tensor | None = None
+        if "c2p" in self.pos_att_type:
+            proj = self.key_proj if self.share_att_key else self.pos_key_proj
+            pos_key = self._project_rel_emb(rel_embeddings, proj)
 
+        pos_query: torch.Tensor | None = None
+        if "p2c" in self.pos_att_type:
+            proj = self.query_proj if self.share_att_key else self.pos_query_proj
+            pos_query = self._project_rel_emb(rel_embeddings, proj)
+
+        # seq_lens is a plain Python list (already on CPU) — no GPU→CPU sync here.
         outputs: list[torch.Tensor] = []
-        for start, end in zip(seq_starts.tolist(), seq_ends.tolist()):
-            L = end - start
-
+        offset = 0
+        for L in seq_lens:
             # [H, L, head_dim]
-            q_s = q[start:end].view(L, self.num_heads, self.head_dim).permute(1, 0, 2)
-            k_s = k[start:end].view(L, self.num_heads, self.head_dim).permute(1, 0, 2)
-            v_s = v[start:end].view(L, self.num_heads, self.head_dim).permute(1, 0, 2)
+            q_s = (
+                q[offset : offset + L]
+                .view(L, self.num_heads, self.head_dim)
+                .permute(1, 0, 2)
+            )
+            k_s = (
+                k[offset : offset + L]
+                .view(L, self.num_heads, self.head_dim)
+                .permute(1, 0, 2)
+            )
+            v_s = (
+                v[offset : offset + L]
+                .view(L, self.num_heads, self.head_dim)
+                .permute(1, 0, 2)
+            )
 
             ctx = self._compute_disentangled_attn(
-                q_s, k_s, v_s, rel_embeddings, L, device
+                q_s, k_s, v_s, rel_embeddings, pos_key, pos_query, L, device
             )  # [L, all_head_size]
             outputs.append(ctx)
+            offset += L
 
         return torch.cat(outputs, dim=0)  # [total_tokens, all_head_size]
 
@@ -365,8 +388,9 @@ class DebertaV2Attention(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         rel_embeddings: torch.Tensor,
+        seq_lens: list[int],
     ) -> torch.Tensor:
-        self_out = self.self(hidden_states, positions, rel_embeddings)
+        self_out = self.self(hidden_states, positions, rel_embeddings, seq_lens)
         return self.output(self_out, hidden_states)
 
 
@@ -430,8 +454,9 @@ class DebertaV2Layer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         rel_embeddings: torch.Tensor,
+        seq_lens: list[int],
     ) -> torch.Tensor:
-        attn_out = self.attention(hidden_states, positions, rel_embeddings)
+        attn_out = self.attention(hidden_states, positions, rel_embeddings, seq_lens)
         intermediate_out = self.intermediate(attn_out)
         return self.output(intermediate_out, attn_out)
 
@@ -477,10 +502,11 @@ class DebertaV2Encoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
+        seq_lens: list[int],
     ) -> torch.Tensor:
         rel_embeddings = self._get_rel_embeddings()
         for layer in self.layer:
-            hidden_states = layer(hidden_states, positions, rel_embeddings)
+            hidden_states = layer(hidden_states, positions, rel_embeddings, seq_lens)
         return hidden_states
 
 
@@ -528,7 +554,13 @@ class DebertaV2Model(nn.Module):
             hidden_states = self.embeddings(input_ids, positions, token_type_ids)
         else:
             hidden_states = inputs_embeds
-        return self.encoder(hidden_states, positions)
+        # Compute sequence boundaries ONCE here (one GPU→CPU sync total) so
+        # that every attention layer can iterate using a cheap Python list.
+        total_tokens = positions.shape[0]
+        seq_starts = (positions == 0).nonzero(as_tuple=True)[0]
+        seq_ends = torch.cat([seq_starts[1:], positions.new_tensor([total_tokens])])
+        seq_lens: list[int] = (seq_ends - seq_starts).tolist()
+        return self.encoder(hidden_states, positions, seq_lens)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
