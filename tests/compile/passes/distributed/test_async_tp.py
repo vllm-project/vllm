@@ -251,6 +251,7 @@ def test_async_tp_pass_replace(
     hidden_size: int,
     dtype: torch.dtype,
     dynamic: bool,
+    compile_test_llama_model_path: str,
 ):
     if (
         test_model
@@ -282,6 +283,7 @@ def test_async_tp_pass_replace(
                 hidden_size,
                 dtype,
                 dynamic,
+                compile_test_llama_model_path,
             ),
             nprocs=nprocs,
         )
@@ -314,6 +316,7 @@ def async_tp_pass_on_test_model(
     hidden_size: int,
     dtype: torch.dtype,
     dynamic: bool,
+    compile_test_llama_model_path: str,
 ):
     set_random_seed(0)
 
@@ -344,11 +347,12 @@ def async_tp_pass_on_test_model(
     )
     vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
 
-    # this is a fake model name to construct the model config
-    # in the vllm_config, it's not really used.
-    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
     vllm_config.model_config = ModelConfig(
-        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
+        model=compile_test_llama_model_path,
+        tokenizer=compile_test_llama_model_path,
+        dtype=dtype,
+        skip_tokenizer_init=True,
+        seed=42,
     )
 
     with set_current_vllm_config(vllm_config):

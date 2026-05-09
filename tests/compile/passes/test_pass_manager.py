@@ -11,7 +11,7 @@ from vllm.compilation.passes.inductor_pass import (
     pass_context,
 )
 from vllm.compilation.passes.pass_manager import PostGradPassManager
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.utils import Range
 
 
@@ -46,11 +46,13 @@ class ProperPass(InductorPass):
         CallableInductorPass(simple_callable, InductorPass.hash_source(__file__)),
     ],
 )
-def test_pass_manager_uuid(callable):
+def test_pass_manager_uuid(callable, make_compile_test_model_config):
     # Set the pass context as PassManager uuid uses it
     with pass_context(Range(start=1, end=8)):
         # Some passes need dtype to be set
-        config = VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
+        config = VllmConfig(
+            model_config=make_compile_test_model_config(dtype=torch.bfloat16)
+        )
 
         pass_manager = PostGradPassManager()
         pass_manager.configure(config)

@@ -20,7 +20,6 @@ from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
-    ModelConfig,
     PassConfig,
     VllmConfig,
     set_current_vllm_config,
@@ -132,6 +131,7 @@ def test_qk_norm_rope_fusion(
     enable_rope_custom_op,
     dtype,
     scattered_split,
+    make_compile_test_model_config,
 ):
     if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
         pytest.skip("fused_qk_norm_rope custom op not available")
@@ -147,7 +147,7 @@ def test_qk_norm_rope_fusion(
         custom_ops.append("+rotary_embedding")
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=make_compile_test_model_config(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,

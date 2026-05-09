@@ -20,7 +20,6 @@ from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
-    ModelConfig,
     PassConfig,
     VllmConfig,
     get_current_vllm_config,
@@ -274,14 +273,17 @@ MODELS_AND_DO_FUSION = {
     reason="Only test on cuda and rocm platform",
 )
 def test_fix_functionalization(
-    model_class: torch.nn.Module, do_fusion: bool, dtype: torch.dtype
+    model_class: torch.nn.Module,
+    do_fusion: bool,
+    dtype: torch.dtype,
+    make_compile_test_model_config,
 ):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=dtype),
+        model_config=make_compile_test_model_config(dtype=dtype),
         compilation_config=CompilationConfig(
             custom_ops=["all"],
             pass_config=PassConfig(

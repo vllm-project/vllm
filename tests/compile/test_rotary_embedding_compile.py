@@ -8,7 +8,6 @@ import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
-    ModelConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -39,7 +38,9 @@ class RotaryEmbeddingCompileModule(torch.nn.Module):
 
 
 @pytest.mark.skipif(current_platform.is_cpu(), reason="Requires GPU for torch.compile")
-def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
+def test_rotary_embedding_torch_compile_with_custom_op(
+    monkeypatch, make_compile_test_model_config
+):
     # Ensure env toggles take effect for this test only.
     # The bytecode hook is required to detect buffer mutation in compiled code,
     # and AOT compile bypasses that hook entirely.
@@ -53,7 +54,7 @@ def test_rotary_embedding_torch_compile_with_custom_op(monkeypatch):
     key = torch.randn(16, 32, device=device, dtype=torch.bfloat16)
 
     vllm_config = VllmConfig(
-        model_config=ModelConfig(dtype=torch.bfloat16),
+        model_config=make_compile_test_model_config(dtype=torch.bfloat16),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             backend="inductor",
