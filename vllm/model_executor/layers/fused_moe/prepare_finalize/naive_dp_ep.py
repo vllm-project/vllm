@@ -39,7 +39,8 @@ def _quantize_and_setup_dispatch(
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape,
-            is_fp4_scale_swizzled=False,
+            is_scale_swizzled=False,
+            mx_alignment=quant_config.mx_alignment,
         )
 
     # Skip gathering scales if we have static quantization
@@ -58,7 +59,7 @@ def _unwrap_scale_and_prepare_for_moe(
     assert scales is not None and len(scales) == 1
     a1q_scale = scales[0]
     # Apply swizzling after a2a if the MoE kernel needs it.
-    if quant_config.quant_dtype == "nvfp4" and quant_config.is_nvfp4_scale_swizzled:
+    if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
         assert a1q_scale is not None
         if a1q_scale.element_size() == 1:
             a1q_scale = a1q_scale.view(torch.uint8)
@@ -132,9 +133,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         )
 
         if scales is None:
+            assert len(res) == 3
             a1q, topk_weights, topk_ids = res
             a1q_scale = None
         else:
+            assert len(res) == 4
             a1q, topk_weights, topk_ids, scales = res
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 
@@ -217,9 +220,11 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         )
 
         if scales is None:
+            assert len(res) == 2
             a1q, router_logits = res
             a1q_scale = None
         else:
+            assert len(res) == 3
             a1q, router_logits, scales = res
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 

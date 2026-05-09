@@ -128,6 +128,12 @@ scaled_fp4_grouped_quantize = _lazy_import_wrapper(
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
+flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
+    "flashinfer", "cute_dsl_fused_moe_nvfp4"
+)
+flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
+    "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -202,6 +208,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
@@ -249,6 +256,15 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
+    """Return ``True`` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
 
 
 @functools.cache
@@ -699,6 +715,38 @@ def flashinfer_scaled_fp8_mm(
     return output
 
 
+def flashinfer_scaled_fp8_mm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
+    assert a.shape[1] == b.shape[0]
+    assert out.shape == (a.shape[0], b.shape[1])
+    assert scale_a.numel() == 1 and scale_b.numel() == 1
+    assert a.dtype == torch.float8_e4m3fn and b.dtype == torch.float8_e4m3fn
+    assert out.device.type == "cuda"
+    assert a.is_contiguous()
+
+    from flashinfer import bmm_fp8 as bmm_fp8_
+
+    bmm_fp8_(
+        a.unsqueeze(0),
+        # FlashInfer expects the weight in the same column-major view layout
+        # consumed by flashinfer_scaled_fp8_mm, so keep the transposed view.
+        b.unsqueeze(0),
+        scale_a,
+        scale_b,
+        out_dtype or out.dtype,
+        out.unsqueeze(0),
+        "auto",
+    )
+    return out
+
+
 def flashinfer_quant_nvfp4_8x4_sf_layout(
     a: torch.Tensor, a_global_sf: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -732,8 +780,9 @@ def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
 def should_use_flashinfer_for_blockscale_fp8_gemm(
     is_flashinfer_supported: bool,
     output_dtype: torch.dtype,
-    input: torch.Tensor,
-    weight: torch.Tensor,
+    input_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    weight_shape: tuple[int, int],
 ):
     if not is_flashinfer_supported:
         return False
@@ -744,18 +793,49 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
-    weight_dtype = weight.dtype
-    input_dtype = input.dtype
-
     should_use_flashinfer = (
         output_dtype == torch.bfloat16
         and input_dtype == torch.bfloat16
         and weight_dtype == torch.float8_e4m3fn
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_shape[0] % N_MULTIPLE == 0
+        and weight_shape[1] % K_MULTIPLE == 0
     )
 
     return should_use_flashinfer
+
+
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+
+
+@functools.cache
+def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
+    """Check if FP8 ViT attention is supported on this platform.
+
+    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    and cuDNN >= 9.17.1.
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
+    if not current_platform.has_device_capability(90):
+        return False
+
+    try:
+        supported = current_platform.get_supported_vit_attn_backends()
+        if AttentionBackendEnum.FLASHINFER not in supported:
+            return False
+    except (ImportError, AttributeError):
+        return False
+
+    try:
+        import torch.backends.cudnn as cudnn
+
+        if cudnn.is_available() and cudnn.version() < _MIN_CUDNN_FP8:
+            return False
+    except (ImportError, AttributeError):
+        pass
+
+    return True
 
 
 __all__ = [
@@ -767,6 +847,8 @@ __all__ = [
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
+    "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "autotune",
     "has_flashinfer_moe",
@@ -775,6 +857,7 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
@@ -782,8 +865,10 @@ __all__ = [
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
+    "flashinfer_scaled_fp8_mm_out",
     "flashinfer_quant_nvfp4_8x4_sf_layout",
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
+    "is_flashinfer_cudnn_fp8_prefill_attn_supported",
 ]

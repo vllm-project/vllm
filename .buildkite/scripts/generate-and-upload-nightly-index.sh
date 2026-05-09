@@ -9,21 +9,14 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
-DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
-PYTHON="${PYTHON_PROG:-python3}" # try to read from env var, otherwise use python3
+DEFAULT_VARIANT_ALIAS="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
-# detect if python3.12+ is available
-has_new_python=$($PYTHON -c "print(1 if __import__('sys').version_info >= (3,12) else 0)")
-if [[ "$has_new_python" -eq 0 ]]; then
-    # use new python from docker
-    docker pull python:3-slim
-    PYTHON="docker run --rm -v $(pwd):/app -w /app python:3-slim python3"
-fi
-
-echo "Using python interpreter: $PYTHON"
-echo "Python version: $($PYTHON --version)"
+# Select python3 (>= 3.12) -- local if available, else a docker fallback.
+# shellcheck source=lib/select-python.sh
+source .buildkite/scripts/lib/select-python.sh
+select_python
 
 # ======== generate and upload indices ========
 

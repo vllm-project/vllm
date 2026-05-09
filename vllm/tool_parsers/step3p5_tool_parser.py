@@ -1385,8 +1385,7 @@ class Step3p5ToolParser(ToolParser):
         # Reset tool call tracking arrays for new extraction
         self.prev_tool_call_arr = []
         self.streamed_args_for_tool = []
-        if request:
-            self.parser.set_tools(request.tools)
+        self.parser.set_tools(self.tools)
         result = self.parser.parse_single_streaming_chunks(model_output)
         if not result.tool_calls:
             return ExtractedToolCallInformation(
@@ -1457,8 +1456,7 @@ class Step3p5ToolParser(ToolParser):
             # Reset tool call tracking arrays for new streaming session
             self.prev_tool_call_arr = []
             self.streamed_args_for_tool = []
-            if request:
-                self.parser.set_tools(request.tools)
+            self.parser.set_tools(self.tools)
 
         # Model sometimes outputs separately causing delta_text to be empty.
         # If there were tool_calls before and all current tool_calls have ended,
