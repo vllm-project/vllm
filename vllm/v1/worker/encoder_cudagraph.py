@@ -400,13 +400,24 @@ class EncoderCudaGraphManager:
                     batch_mm_kwargs, token_budget, replay.buffers
                 )
                 assert output is not None
-                self._scatter_output_slices(
-                    output,
-                    batch_orig_indices,
-                    per_item_out_tokens,
-                    outputs_by_orig_idx,
-                    clone=True,
-                )
+                # Allow models to override scatter for CPU-side merge
+                # (e.g. Step3VL processes raw features and merges using
+                # num_patches outside the CUDA graph).
+                finalize = getattr(self.model,
+                                   "finalize_encoder_cudagraph_output", None)
+                if finalize is not None:
+                    out = finalize(output, batch_mm_kwargs,
+                                   batch_orig_indices, per_item_out_tokens)
+                    for i, idx in enumerate(batch_orig_indices):
+                        outputs_by_orig_idx[idx] = out[i]
+                else:
+                    self._scatter_output_slices(
+                        output,
+                        batch_orig_indices,
+                        per_item_out_tokens,
+                        outputs_by_orig_idx,
+                        clone=True,
+                    )
 
         # Return in original batch order (caller maps outputs to token positions)
         return [outputs_by_orig_idx[i] for i in range(num_items)]
