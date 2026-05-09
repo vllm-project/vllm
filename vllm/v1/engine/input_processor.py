@@ -52,6 +52,7 @@ class InputProcessor:
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
+        self.generation_config_fields.update(model_config.override_generation_config)
 
         self.renderer = renderer or renderer_from_config(vllm_config)
 
