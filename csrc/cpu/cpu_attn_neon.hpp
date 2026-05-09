@@ -248,8 +248,8 @@ class TileGemmNeonFMLA {
 }  // namespace
 
 // this is similar to "ISA::VEC" at the moment
-template <typename scalar_t, int64_t head_dim>
-class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::NEON, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
   using query_t = scalar_t;
   using q_buffer_t = float;
@@ -343,7 +343,8 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
       const int64_t head_num, const int64_t key_head_num_stride,
       const int64_t value_head_num_stride, const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
-      const int64_t block_size, const int64_t block_size_stride) {
+      const int64_t block_size, const int64_t block_size_stride,
+      const float /*k_inv*/ = 0.0f, const float /*v_inv*/ = 0.0f) {
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
       for (int64_t head_idx = 0; head_idx < head_num; ++head_idx) {
@@ -388,7 +389,7 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
 #ifdef ARM_BF16_SUPPORT
 // For BF16 on Arm, reuse the BFMMLA kernels with 32-token alignment.
 template <int64_t head_dim>
-class AttentionImpl<ISA::NEON, c10::BFloat16, head_dim>
+class AttentionImpl<ISA::NEON, c10::BFloat16, head_dim, c10::BFloat16>
     : public AttentionImplNEONBFMMLA<BLOCK_SIZE_ALIGNMENT, ISA::NEON,
                                      head_dim> {};
 #endif

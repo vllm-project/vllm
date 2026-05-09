@@ -125,6 +125,17 @@ class EmbedsPrompt(_PromptOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token embeddings, if available."""
 
+    prompt_token_ids: NotRequired[list[int]]
+    """Token IDs for mixed-mode inputs (chat completion with
+    `prompt_embeds` content parts). The tokens at positions where 
+    `prompt_is_token_ids` is `False` are placeholder tokens that 
+    get replaced by entries from `prompt_embeds` in the forward pass."""
+
+    prompt_is_token_ids: NotRequired[list[bool]]
+    """Per-position mask, `True` uses the real token ID, `False` uses
+    the corresponding entry from `prompt_embeds`. 
+    Must be the same length as `prompt_token_ids` when both are set."""
+
 
 DecoderOnlyPrompt: TypeAlias = (
     str | TextPrompt | list[int] | TokensPrompt | EmbedsPrompt

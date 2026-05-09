@@ -1,6 +1,7 @@
 #ifndef CPU_ATTN_AMX_HPP
 #define CPU_ATTN_AMX_HPP
 
+#include "cpu_attn_fp8.hpp"
 #include "cpu_attn_impl.hpp"
 
 namespace cpu_attention {
@@ -21,9 +22,10 @@ typedef struct __tile_config {
 // 2-2-4 pattern, for 16 < m <= 32
 // TILE 0, 1: load A matrix, row num should be 16, m - 16
 // TILE 2, 3: load B matrix, row num should be 16
-// TILE 4, 5, 6, 7: store results C matrix, row num should be 16, 16, m - 16, m
-// - 16
-template <typename kv_cache_t>
+// TILE 4, 5, 6, 7: store results C matrix, row num should be 16, 16,
+// m - 16, m - 16
+// q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
+template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm224 {
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -42,13 +44,56 @@ class TileGemm224 {
   }
 };
 
-template <>
-class TileGemm224<c10::BFloat16> {
+// Dequantize one FP8 tile (AMX_TILE_ROW_NUM rows x 32 cols) to BF16.
+template <typename kv_cache_t>
+FORCE_INLINE void deq_tile_amx(const uint8_t* src, c10::BFloat16* dst) {
+  for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
+    if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+      vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e4m3_tag{})
+          .save(dst + r * 32);
+    } else {
+      vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e5m2_tag{})
+          .save(dst + r * 32);
+    }
+  }
+}
+
+// For FP8: dequant src into scratch and return scratch.
+// For BF16: return src directly (scratch is unused; the compiler elides it).
+template <typename kv_cache_t>
+FORCE_INLINE const c10::BFloat16* prepare_b_tile(const kv_cache_t* src,
+                                                 c10::BFloat16* scratch) {
+  if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
+    deq_tile_amx<kv_cache_t>(reinterpret_cast<const uint8_t*>(src), scratch);
+    return scratch;
+  } else {
+    return reinterpret_cast<const c10::BFloat16*>(src);
+  }
+}
+
+// Handles both BF16 and FP8 KV cache (2-2-4 pattern).
+template <typename kv_cache_t>
+class TileGemm224<c10::BFloat16, kv_cache_t> {
+  static_assert(std::is_same_v<kv_cache_t, c10::BFloat16> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
+                "kv_cache_t must be BFloat16, Float8_e4m3fn, or Float8_e5m2");
+
+  static constexpr bool fp8_kv =
+      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+
+  static constexpr int64_t tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+  // BF16 path: scratch_elems=1 so the scratch array is eliminated by the
+  // compiler.
+  static constexpr int64_t scratch_elems = fp8_kv ? tile_elems : 1;
+
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 c10::BFloat16* __restrict__ a_tile,
-                                c10::BFloat16* __restrict__ b_tile,
+                                kv_cache_t* __restrict__ b_tile,
                                 float* __restrict__ c_tile, const int64_t lda,
                                 const int64_t ldb, const int64_t ldc,
                                 const int32_t block_size,
@@ -56,6 +101,7 @@ class TileGemm224<c10::BFloat16> {
                                 const bool accum_c) {
     const int32_t k_times =
         dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
+
     c10::BFloat16* __restrict__ a_tile_0 = a_tile;
     c10::BFloat16* __restrict__ a_tile_1 = a_tile + lda * AMX_TILE_ROW_NUM;
     const int64_t a_tile_stride = [&]() {
@@ -70,8 +116,8 @@ class TileGemm224<c10::BFloat16> {
       }
     }();
 
-    c10::BFloat16* __restrict__ b_tile_2 = b_tile;
-    c10::BFloat16* __restrict__ b_tile_3 = [&]() {
+    kv_cache_t* __restrict__ b_tile_2 = b_tile;
+    kv_cache_t* __restrict__ b_tile_3 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
         // k_cache is prepacked
         return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
@@ -106,11 +152,16 @@ class TileGemm224<c10::BFloat16> {
       _tile_zero(7);
     }
 
+    alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_3[scratch_elems];
     for (int32_t k = 0; k < k_times; ++k) {
+      const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
+      const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
+
       _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, b_tile_2, b_tile_stride);
+      _tile_stream_loadd(2, const_cast<c10::BFloat16*>(load_2), b_tile_stride);
       _tile_dpbf16ps(4, 0, 2);
-      _tile_stream_loadd(3, b_tile_3, b_tile_stride);
+      _tile_stream_loadd(3, const_cast<c10::BFloat16*>(load_3), b_tile_stride);
       _tile_dpbf16ps(5, 0, 3);
       _tile_loadd(1, a_tile_1, a_tile_stride);
       _tile_dpbf16ps(6, 1, 2);
@@ -154,13 +205,13 @@ class TileGemm224<c10::BFloat16> {
 };
 
 // 1-2-2 pattern, for 0 < m <= 16
-// TILE 0, (1): load A matrix, use extra 1 tile for prefetch, row num should be
-// m, m
-// TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row
-// num should be 16
-// TILE 6, 7, (6, 7): store results C matrix, row num should be
-// m
-template <typename kv_cache_t>
+// TILE 0, (1): load A matrix, use extra 1 tile for prefetch, row num should
+// be m, m
+// TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row num
+// should be 16
+// TILE 6, 7: store results C matrix, row num should be m
+// q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
+template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm122 {
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -179,13 +230,26 @@ class TileGemm122 {
   }
 };
 
-template <>
-class TileGemm122<c10::BFloat16> {
+// Handles both BF16 and FP8 KV cache (1-2-2 pattern).
+template <typename kv_cache_t>
+class TileGemm122<c10::BFloat16, kv_cache_t> {
+  static_assert(std::is_same_v<kv_cache_t, c10::BFloat16> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
+                "kv_cache_t must be BFloat16, Float8_e4m3fn, or Float8_e5m2");
+
+  static constexpr bool fp8_kv =
+      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+
+  static constexpr int64_t tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+  static constexpr int64_t scratch_elems = fp8_kv ? tile_elems : 1;
+
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 c10::BFloat16* __restrict__ a_tile,
-                                c10::BFloat16* __restrict__ b_tile,
+                                kv_cache_t* __restrict__ b_tile,
                                 float* __restrict__ c_tile, const int64_t lda,
                                 const int64_t ldb, const int64_t ldc,
                                 const int32_t block_size,
@@ -215,21 +279,19 @@ class TileGemm122<c10::BFloat16> {
       }
     }();
 
-    c10::BFloat16* __restrict__ b_tile_2 = b_tile;
-    c10::BFloat16* __restrict__ b_tile_3 = [&]() {
+    kv_cache_t* __restrict__ b_tile_2 = b_tile;
+    kv_cache_t* __restrict__ b_tile_3 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // k_cache is prepacked
         return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // v_cache is prepacked
         return b_tile + (block_size * AMX_TILE_ROW_BYTES / 4);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
-    c10::BFloat16* __restrict__ b_tile_4 =
+    kv_cache_t* __restrict__ b_tile_4 =
         b_tile_2 + AMX_TILE_BYTES / sizeof(c10::BFloat16);
-    c10::BFloat16* __restrict__ b_tile_5 =
+    kv_cache_t* __restrict__ b_tile_5 =
         b_tile_3 + AMX_TILE_BYTES / sizeof(c10::BFloat16);
     int64_t b_stride = AMX_TILE_ROW_BYTES;
 
@@ -250,16 +312,25 @@ class TileGemm122<c10::BFloat16> {
       _tile_zero(7);
     }
 
+    alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_3[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_4[scratch_elems];
+    alignas(64) c10::BFloat16 scratch_5[scratch_elems];
     for (int32_t k = 0; k < k_group_times; ++k) {
+      const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
+      const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
+      const c10::BFloat16* load_4 = prepare_b_tile(b_tile_4, scratch_4);
+      const c10::BFloat16* load_5 = prepare_b_tile(b_tile_5, scratch_5);
+
       _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, b_tile_2, b_stride);
+      _tile_stream_loadd(2, const_cast<c10::BFloat16*>(load_2), b_stride);
       _tile_dpbf16ps(6, 0, 2);
-      _tile_stream_loadd(3, b_tile_3, b_stride);
+      _tile_stream_loadd(3, const_cast<c10::BFloat16*>(load_3), b_stride);
       _tile_dpbf16ps(7, 0, 3);
       _tile_loadd(1, a_tile_1, a_tile_stride);
-      _tile_stream_loadd(4, b_tile_4, b_stride);
+      _tile_stream_loadd(4, const_cast<c10::BFloat16*>(load_4), b_stride);
       _tile_dpbf16ps(6, 1, 4);
-      _tile_stream_loadd(5, b_tile_5, b_stride);
+      _tile_stream_loadd(5, const_cast<c10::BFloat16*>(load_5), b_stride);
       _tile_dpbf16ps(7, 1, 5);
 
       // update ptrs
@@ -279,10 +350,13 @@ class TileGemm122<c10::BFloat16> {
     }
 
     if (has_tail) {
+      const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
+      const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
+
       _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, b_tile_2, b_stride);
+      _tile_stream_loadd(2, const_cast<c10::BFloat16*>(load_2), b_stride);
       _tile_dpbf16ps(6, 0, 2);
-      _tile_stream_loadd(3, b_tile_3, b_stride);
+      _tile_stream_loadd(3, const_cast<c10::BFloat16*>(load_3), b_stride);
       _tile_dpbf16ps(7, 0, 3);
     }
 
@@ -302,27 +376,34 @@ class TileGemm122<c10::BFloat16> {
     _tile_loadconfig(&config);
   }
 };
+
 }  // namespace
 
-template <typename scalar_t, int64_t head_dim>
-class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_scalar_t> {
+  static constexpr bool fp8_kv =
+      std::is_same_v<kv_cache_scalar_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_scalar_t, c10::Float8_e5m2>;
+
  public:
   using query_t = scalar_t;
   using q_buffer_t = scalar_t;
-  using kv_cache_t = scalar_t;
+  using kv_cache_t = kv_cache_scalar_t;
   using logits_buffer_t = float;
   using partial_output_buffer_t = float;
   using prob_buffer_t = scalar_t;
 
   constexpr static int64_t BlockSizeAlignment =
-      AMX_TILE_ROW_BYTES /
-      sizeof(kv_cache_t);  // KV token num unit of QK and PV phases
+      32;  // AMX_TILE_ROW_NUM = 16 tokens/tile; 32 = 2 tiles
   constexpr static int64_t HeadDimAlignment =
       2 * (AMX_TILE_ROW_BYTES / 4);  // headdim num unit of PV phase
   constexpr static int64_t MaxQHeadNumPerIteration = 32;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::AMX;
   constexpr static bool scale_on_logits = true;
+
+  float k_scale = 1.0f;
+  float v_scale = 1.0f;
 
  public:
   AttentionImpl() : current_q_head_num_(0) {
@@ -332,21 +413,50 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
 
   ~AttentionImpl() { _tile_release(); }
 
+  void init_from_input(const AttentionInput* input) {
+    if constexpr (fp8_kv) {
+      k_scale = input->k_scale_fp8;
+      v_scale = input->v_scale_fp8;
+    }
+  }
+
+  float get_output_v_scale() const noexcept {
+    if constexpr (fp8_kv) {
+      // AMX dequant places FP8 payload into a BF16 field (exponent bias 127).
+      // Correction = 2^(127 - FP8_bias): E4M3 bias=7 → 2^120, E5M2 bias=15 →
+      // 2^112.
+      constexpr float bias =
+          std::is_same_v<kv_cache_t, c10::Float8_e5m2> ? 0x1p112f : 0x1p120f;
+      return v_scale * bias;
+    }
+    return 1.0f;
+  }
+
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
+    if constexpr (fp8_kv) {
+      // Same bias correction as get_output_v_scale: AMX FP8→BF16 dequant
+      // shifts the exponent bias from FP8 to BF16 (127), so we multiply by
+      // 2^(127-FP8_bias) to recover the true value. E4M3: 2^120, E5M2: 2^112.
+      const float bias =
+          std::is_same_v<kv_cache_t, c10::Float8_e5m2> ? 0x1p112f : 0x1p120f;
+      scale *= k_scale * bias;
+    }
     if (q_head_num > AMX_TILE_ROW_NUM) {
       if (q_head_num != current_q_head_num_) {
         current_q_head_num_ = q_head_num;
-        TileGemm224<kv_cache_t>::init_tile_config(q_head_num, amx_tile_config_);
+        TileGemm224<q_buffer_t, kv_cache_t>::init_tile_config(q_head_num,
+                                                              amx_tile_config_);
       }
-      attention<TileGemm224<kv_cache_t>> attention_iteration;
+      attention<TileGemm224<q_buffer_t, kv_cache_t>> attention_iteration;
       attention_iteration(CPU_ATTENTION_PARAMS);
     } else {
       if (q_head_num != current_q_head_num_) {
         current_q_head_num_ = q_head_num;
-        TileGemm122<kv_cache_t>::init_tile_config(q_head_num, amx_tile_config_);
+        TileGemm122<q_buffer_t, kv_cache_t>::init_tile_config(q_head_num,
+                                                              amx_tile_config_);
       }
-      attention<TileGemm122<kv_cache_t>> attention_iteration;
+      attention<TileGemm122<q_buffer_t, kv_cache_t>> attention_iteration;
       attention_iteration(CPU_ATTENTION_PARAMS);
     }
   }
@@ -411,13 +521,26 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
   // reshape KV to AMX friendly layout
   static void reshape_and_cache(
       const scalar_t* __restrict__ key, const scalar_t* __restrict__ value,
-      scalar_t* __restrict__ key_cache, scalar_t* __restrict__ value_cache,
+      kv_cache_t* __restrict__ key_cache, kv_cache_t* __restrict__ value_cache,
       const int64_t* __restrict__ slot_mapping, const int64_t token_num,
       const int64_t key_token_num_stride, const int64_t value_token_num_stride,
       const int64_t head_num, const int64_t key_head_num_stride,
       const int64_t value_head_num_stride, const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
-      const int64_t block_size, const int64_t block_size_stride) {
+      const int64_t block_size, const int64_t block_size_stride,
+      const float k_inv = 0.0f, const float v_inv = 0.0f) {
+    if constexpr (fp8_kv) {
+      constexpr auto qfn = select_fp8_quant_fn<kv_cache_t>();
+      reshape_and_cache_fp8_amx_impl<scalar_t, qfn>(
+          key, value, reinterpret_cast<uint8_t*>(key_cache),
+          reinterpret_cast<uint8_t*>(value_cache), slot_mapping, token_num,
+          head_num, head_dim, block_size, key_token_num_stride,
+          key_head_num_stride, value_token_num_stride, value_head_num_stride,
+          num_blocks_stride, cache_head_num_stride, num_blocks_stride,
+          cache_head_num_stride, k_inv, v_inv);
+      return;
+    }
+
     // For AMX 2D tiles, size of each line is 64 bytes
     constexpr int64_t amx_tile_row_size = AMX_TILE_ROW_BYTES;
     // For AMX B matrix, N always is 16
@@ -425,6 +548,9 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
     constexpr int64_t amx_b_tile_k_size = amx_tile_row_size / sizeof(scalar_t);
     // For now suppose block_size is divisible by amx_tile_column_num
     TORCH_CHECK_EQ(block_size % amx_b_tile_k_size, 0);
+
+    scalar_t* __restrict__ kc = reinterpret_cast<scalar_t*>(key_cache);
+    scalar_t* __restrict__ vc = reinterpret_cast<scalar_t*>(value_cache);
 
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
@@ -453,8 +579,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
           constexpr int64_t quadword_num_per_group =
               token_num_per_group * quadword_num;
           int32_t* key_cache_start_ptr =
-              reinterpret_cast<int32_t*>(key_cache +
-                                         block_idx * num_blocks_stride +
+              reinterpret_cast<int32_t*>(kc + block_idx * num_blocks_stride +
                                          head_idx * cache_head_num_stride) +
               group_idx * quadword_num_per_group + group_offset;
 
@@ -483,7 +608,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
                                             token_idx * value_token_num_stride +
                                             head_idx * value_head_num_stride;
           scalar_t* value_cache_start_ptr =
-              value_cache + block_idx * num_blocks_stride +
+              vc + block_idx * num_blocks_stride +
               head_idx * cache_head_num_stride +
               sub_group_idx * token_num_per_sub_group * amx_b_tile_n_size +
               sub_group_offset;
