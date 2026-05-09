@@ -1168,6 +1168,7 @@ class SpecDecodeBaseProposer:
             # handle multimodality
             assert hasattr(target_model, "config")
             if self.get_model_name(target_model) in [
+                "Cohere2VisionForConditionalGeneration",
                 "Exaone4_5_ForConditionalGeneration",
                 "GlmOcrForConditionalGeneration",
                 "HunYuanVLForConditionalGeneration",
