@@ -9,8 +9,11 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_finalize.scale_layout import (
+    swizzle_scale_after_alltoall,
+    uses_flat_mxfp8_swizzled_scale,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes():
@@ -128,17 +131,20 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
-            # Apply scale interleaving only for CUTLASS (not TRT-LLM)
-            if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
-                a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
-                a1q_scale_recv = a1q_scale_recv.view(torch.uint8)
-                a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)
-            assert self.scale_elems_per_token > 0
-            a1q_scale_recv = a1q_scale_recv.view(-1, self.scale_elems_per_token)
+            a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
+            a1q_scale_recv = swizzle_scale_after_alltoall(
+                a1q_scale_recv,
+                quant_config,
+                a1q_recv.size(0),
+                a1q_recv.size(1),
+            )
+            if not uses_flat_mxfp8_swizzled_scale(quant_config):
+                assert self.scale_elems_per_token > 0
+                a1q_scale_recv = a1q_scale_recv.view(-1, self.scale_elems_per_token)
         else:
             a1q_recv, topk_ids_recv, topk_weights_recv = recv_payloads
+            a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
             a1q_scale_recv = None
-        a1q_recv = a1q_recv.view(-1, a1q_recv.shape[-1])
         topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
         topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
 
