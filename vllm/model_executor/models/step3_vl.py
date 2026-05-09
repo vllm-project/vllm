@@ -729,19 +729,22 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> int:
         return len(mm_kwargs.get("pixel_values", []))
     
-    def get_encoder_cudaraph_per_item_output_token(
+    def get_encoder_cudagraph_per_item_output_tokens(
             self,
             mm_kwargs: dict[str, Any],
     ) -> list[int]:
         num_patches = mm_kwargs.get("num_patches")
         img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
-            )
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
         patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            504, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            504, self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
         )
         return [
-            img_output_tokens + num_patch * patch_output_tokens 
+            img_output_tokens + num_patch * patch_output_tokens
             for num_patch in num_patches
         ]
     
