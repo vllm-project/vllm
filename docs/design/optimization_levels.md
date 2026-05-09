@@ -16,7 +16,7 @@ User-set flags take precedence over optimization level defaults.
 
 ```bash
 # CLI usage
-python -m vllm.entrypoints.api_server --model RedHatAI/Llama-3.2-1B-FP8 -O1
+vllm serve RedHatAI/Llama-3.2-1B-FP8 -O1
 
 # Python API usage
 from vllm.entrypoints.llm import LLM
