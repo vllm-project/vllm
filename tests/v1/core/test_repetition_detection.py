@@ -3,7 +3,11 @@
 import pytest
 
 from vllm.sampling_params import RepetitionDetectionParams, SamplingParams
-from vllm.v1.core.sched.utils import check_sequence_repetition, check_stop
+from vllm.v1.core.sched.utils import (
+    RollingHashState,
+    check_sequence_repetition,
+    check_stop,
+)
 from vllm.v1.request import Request, RequestStatus
 
 pytestmark = pytest.mark.cpu_test
@@ -106,6 +110,128 @@ class TestCheckSequenceRepetition:
             min_count=3,
         )
         assert check_sequence_repetition(token_ids, params)
+
+
+# ============================================================================
+# ROLLING-HASH ALGORITHM
+# ============================================================================
+
+
+class TestRollingHash:
+    """Tests for the rolling_hash algorithm and its incremental state."""
+
+    def test_matches_naive_on_shared_inputs(self):
+        """rolling_hash and naive must agree whenever both are enabled."""
+        cases = [
+            ([1, 2, 3, 1, 2, 3, 1, 2, 3], 5, 1, 3, True),
+            ([1, 2, 3, 1, 2, 3], 5, 1, 3, False),
+            ([1, 2] * 10, 5, 1, 4, True),
+            ([1, 2, 3, 4, 5, 6, 7, 8, 9], 5, 2, 2, False),
+            ([7] * 20, 5, 1, 5, True),
+        ]
+        for tokens, mx, mn, k, expected in cases:
+            naive = RepetitionDetectionParams(
+                max_pattern_size=mx, min_pattern_size=mn, min_count=k
+            )
+            rh = RepetitionDetectionParams(
+                max_pattern_size=mx,
+                min_pattern_size=mn,
+                min_count=k,
+                algorithm="rolling_hash",
+            )
+            assert check_sequence_repetition(tokens, naive) is expected
+            assert check_sequence_repetition(tokens, rh) is expected
+
+    def test_unbounded_detects_long_pattern(self):
+        """max_pattern_size=0 in rolling_hash mode catches long patterns
+        that the bounded naive scan would miss."""
+        pattern = list(range(50))  # length 50, beyond a typical naive cap
+        token_ids = pattern * 4
+        params = RepetitionDetectionParams(
+            max_pattern_size=0,
+            min_pattern_size=2,
+            min_count=3,
+            algorithm="rolling_hash",
+        )
+        assert check_sequence_repetition(token_ids, params)
+
+    def test_state_matches_recompute(self):
+        """Incremental state must produce the same result as a one-shot
+        recompute, step by step."""
+        params = RepetitionDetectionParams(
+            max_pattern_size=0,
+            min_pattern_size=1,
+            min_count=3,
+            algorithm="rolling_hash",
+        )
+        state = RollingHashState()
+        token_ids: list[int] = []
+        for tok in [1, 5, 9, 2, 7, 3, 4, 7, 3, 4, 7, 3, 4]:
+            token_ids.append(tok)
+            inc = check_sequence_repetition(token_ids, params, state=state)
+            recomp = check_sequence_repetition(token_ids, params)
+            assert inc == recomp
+            assert state.n == len(token_ids)
+
+    def test_state_handles_truncation(self):
+        """Speculative-decode rollback: when token_ids shrinks, state
+        drops trailing hashes so the next append is correct."""
+        params = RepetitionDetectionParams(
+            max_pattern_size=0,
+            min_pattern_size=2,
+            min_count=3,
+            algorithm="rolling_hash",
+        )
+        state = RollingHashState()
+        check_sequence_repetition([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], params, state=state)
+        assert state.n == 10
+        # Roll back 4 tokens then re-extend with a different tail.
+        replayed = [1, 2, 3, 4, 5, 6, 99, 99, 99, 99, 99, 99]
+        check_sequence_repetition(replayed[:6], params, state=state)
+        assert state.n == 6
+        inc = check_sequence_repetition(replayed, params, state=state)
+        recomp = check_sequence_repetition(replayed, params)
+        assert inc == recomp
+        assert inc  # all-99 tail triggers detection
+
+    def test_check_stop_attaches_state(self):
+        """check_stop lazily allocates RollingHashState on first call,
+        only for algorithm='rolling_hash'."""
+        rh_params = SamplingParams(
+            max_tokens=200,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=0,
+                min_pattern_size=2,
+                min_count=3,
+                algorithm="rolling_hash",
+            ),
+        )
+        rh_request = Request(
+            request_id="rh",
+            prompt_token_ids=[1, 2, 3],
+            sampling_params=rh_params,
+            pooling_params=None,
+        )
+        assert rh_request.repetition_hash_state is None
+        rh_request.append_output_token_ids([10, 11, 12])
+        assert not check_stop(rh_request, max_model_len=2048)
+        assert isinstance(rh_request.repetition_hash_state, RollingHashState)
+
+        naive_params = SamplingParams(
+            max_tokens=200,
+            repetition_detection=RepetitionDetectionParams(
+                max_pattern_size=4, min_pattern_size=2, min_count=3
+            ),
+        )
+        naive_request = Request(
+            request_id="naive",
+            prompt_token_ids=[1],
+            sampling_params=naive_params,
+            pooling_params=None,
+        )
+        naive_request.append_output_token_ids([5, 6, 7])
+        assert not check_stop(naive_request, max_model_len=2048)
+        assert naive_request.repetition_hash_state is None
 
 
 # ============================================================================

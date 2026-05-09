@@ -7,7 +7,7 @@ import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -117,30 +117,47 @@ class RepetitionDetectionParams:
 
     max_pattern_size: int = 0
     """Maximum size of N-gram pattern to detect for sequence repetition.
-    Set to 0 to disable. Must be used together with min_count."""
+    For ``algorithm="naive"`` (default), set to 0 to disable detection.
+    For ``algorithm="rolling_hash"``, set to 0 to remove the upper bound
+    (the effective cap becomes ``len(token_ids) // min_count``).
+    Must be used together with min_count."""
 
     min_pattern_size: int = 0
     """Minimum N-gram pattern size to check for sequence repetition.
     If set to 0, it defaults to 1.
-    Must be <= max_pattern_size."""
+    Must be <= max_pattern_size when max_pattern_size > 0."""
 
     min_count: int = 0
     """Minimum number of times an N-gram pattern must repeat to trigger
     detection. Must be >= 2. Example: 3 for detecting a phrase repeated
-    3 times. Must be used together with max_pattern_size."""
+    3 times. Detection is disabled when min_count < 2."""
+
+    algorithm: Literal["naive", "rolling_hash"] = "naive"
+    """Detection algorithm. One of:
+
+    - ``"naive"``: per-step iterates pattern lengths in
+      ``[min_pattern_size, max_pattern_size]`` with O(L*K) literal compares
+      per L. ``max_pattern_size=0`` disables detection.
+    - ``"rolling_hash"``: double polynomial rolling hash with two-stage
+      filtering. ``max_pattern_size=0`` removes the upper bound (capped only
+      by ``len(token_ids) // min_count``). Useful when long-range
+      repetitions need to be caught."""
 
     def __post_init__(self):
-        if (
-            self.max_pattern_size < 0
-            or self.min_pattern_size < 0
-            or self.min_pattern_size > self.max_pattern_size
-        ):
+        if self.max_pattern_size < 0 or self.min_pattern_size < 0 or self.min_count < 0:
             raise ValueError(
-                "max_pattern_size, min_pattern_size must be >=0, "
-                "with min_pattern_size <= max_pattern_size. "
-                "Set both to 0 to disable repetitive pattern detection."
+                "max_pattern_size, min_pattern_size, min_count must be >= 0."
             )
-        if self.max_pattern_size > 0 and self.min_count < 2:
+        if self.max_pattern_size > 0 and self.min_pattern_size > self.max_pattern_size:
+            raise ValueError(
+                "min_pattern_size must be <= max_pattern_size when "
+                "max_pattern_size > 0."
+            )
+        if (
+            self.algorithm == "naive"
+            and self.max_pattern_size > 0
+            and self.min_count < 2
+        ):
             raise ValueError(
                 "min_count must be >= 2 to detect repetitive patterns "
                 "in engine output. If you do not wish to detect repetitive "

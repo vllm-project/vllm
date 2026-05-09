@@ -27,6 +27,7 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+    from vllm.v1.core.sched.utils import RollingHashState
 
 
 @dataclass
@@ -181,6 +182,10 @@ class Request:
         self.resumable = resumable
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
+
+        # Lazy-initialized by check_stop when repetition_detection uses
+        # algorithm="rolling_hash"; remains None otherwise.
+        self.repetition_hash_state: RollingHashState | None = None
 
     @classmethod
     def from_engine_core_request(
