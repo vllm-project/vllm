@@ -4,6 +4,7 @@
 DeepseekV4 MLA Attention Layer
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -88,11 +89,26 @@ logger = init_logger(__name__)
 
 _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
+_FLASHINFER_FP8_LOG2E = 1.4426950408889634
+_DEFAULT_FLASHINFER_DSV4_FP8_SCALE = 1.0 / 32.0
 
 # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
 # workspace allocated at _forward_prefill (and the matching profile-time
 # reservation in attention_impl's dummy-run branch).
 PREFILL_CHUNK_SIZE = 4
+
+
+def _get_dsv4_flashinfer_fp8_scale(kind: str) -> float:
+    specific_name = f"VLLM_DSV4_FLASHINFER_FP8_{kind.upper()}_SCALE"
+    for env_name in (specific_name, "VLLM_DSV4_FLASHINFER_FP8_SCALE"):
+        value = os.environ.get(env_name)
+        if value is None:
+            continue
+        scale = float(value)
+        if scale <= 0.0:
+            raise ValueError(f"{env_name} must be positive, got {value!r}")
+        return scale
+    return _DEFAULT_FLASHINFER_DSV4_FP8_SCALE
 
 
 def _normalize_dsv4_kv_cache_dtype(
@@ -630,6 +646,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.rotary_emb.cos_sin_cache,
                 self.eps,
                 swa_metadata.block_size,
+                self.mla_attn._flashinfer_fp8_kv_scale,
             )
 
 
@@ -776,14 +793,37 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         self.kv_cache_dtype = kv_cache_dtype
+        fp8_q_scale = 1.0
+        fp8_kv_scale = 1.0
+        if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
+            fp8_q_scale = _get_dsv4_flashinfer_fp8_scale("q")
+            fp8_kv_scale = _get_dsv4_flashinfer_fp8_scale("kv")
+        self.register_buffer(
+            "_flashinfer_fp8_q_scale",
+            torch.tensor([fp8_q_scale], dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_flashinfer_fp8_q_scale_inv",
+            torch.tensor([1.0 / fp8_q_scale], dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_flashinfer_fp8_kv_scale",
+            torch.tensor([fp8_kv_scale], dtype=torch.float32),
+            persistent=False,
+        )
         self.register_buffer(
             "_flashinfer_fp8_bmm1_scale_log2",
-            torch.tensor([self.scale * 1.4426950408889634], dtype=torch.float32),
+            torch.tensor(
+                [self.scale * fp8_q_scale * fp8_kv_scale * _FLASHINFER_FP8_LOG2E],
+                dtype=torch.float32,
+            ),
             persistent=False,
         )
         self.register_buffer(
             "_flashinfer_fp8_bmm2_scale",
-            torch.ones(1, dtype=torch.float32),
+            torch.tensor([fp8_kv_scale], dtype=torch.float32),
             persistent=False,
         )
 
@@ -1072,7 +1112,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         bmm1_scale: float | torch.Tensor = self.scale
         bmm2_scale: float | torch.Tensor = 1.0
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
-            query = query.clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            query = (query * self._flashinfer_fp8_q_scale_inv).clamp(
+                -448.0, 448.0
+            ).to(torch.float8_e4m3fn)
             bmm1_scale = self._flashinfer_fp8_bmm1_scale_log2
             bmm2_scale = self._flashinfer_fp8_bmm2_scale
 
@@ -1166,6 +1208,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
+                    fp8_scale=self._flashinfer_fp8_kv_scale,
                 )
 
             # Gather SWA KV
@@ -1178,6 +1221,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
+                fp8_scale=self._flashinfer_fp8_kv_scale,
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache

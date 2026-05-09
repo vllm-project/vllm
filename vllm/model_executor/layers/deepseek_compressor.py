@@ -342,7 +342,8 @@ class DeepseekCompressor(nn.Module):
         # - position used: (positions // compress_ratio) * compress_ratio
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
-        kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+        k_cache_layer = self._static_forward_context[self.k_cache_prefix]
+        kv_cache = k_cache_layer.kv_cache
 
         if self.head_dim == 512 and kv_cache.dtype != torch.uint8:
             assert kv_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
@@ -368,6 +369,7 @@ class DeepseekCompressor(nn.Module):
                 kv_cache,
                 k_cache_metadata.slot_mapping,
                 kv_cache.shape[1],
+                k_cache_layer._flashinfer_fp8_kv_scale,
                 # constexprs
                 HEAD_SIZE=self.head_dim,
                 TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),

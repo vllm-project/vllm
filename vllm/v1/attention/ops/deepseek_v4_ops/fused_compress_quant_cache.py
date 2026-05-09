@@ -237,6 +237,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn_full_cache(
     k_cache_ptr,
     kv_slot_mapping_ptr,
     kv_cache_block_size,
+    fp8_scale_ptr,
     # ── constexprs ──
     HEAD_SIZE: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
@@ -333,7 +334,8 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn_full_cache(
     result = result.to(tl.bfloat16).to(tl.float32)
 
     if STORE_FP8:
-        result = tl.clamp(result, -448.0, 448.0)
+        fp8_scale = tl.load(fp8_scale_ptr)
+        result = tl.clamp(result / fp8_scale, -448.0, 448.0)
         tl.store(cache_row + block, result.to(tl.float8e4nv), mask=mask)
     else:
         tl.store(cache_row + block, result.to(tl.bfloat16), mask=mask)

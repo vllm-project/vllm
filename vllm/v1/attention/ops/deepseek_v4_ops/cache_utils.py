@@ -99,6 +99,7 @@ def _kv_rope_insert_full_cache_kernel(
     cache_stride0,
     cache_stride1,
     cache_block_size,
+    fp8_scale_ptr,
     HEAD_SIZE: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -134,7 +135,8 @@ def _kv_rope_insert_full_cache_kernel(
         + (pos_in_block * cache_stride1)
     )
     if STORE_FP8:
-        values = tl.clamp(values, -448.0, 448.0)
+        fp8_scale = tl.load(fp8_scale_ptr)
+        values = tl.clamp(values / fp8_scale, -448.0, 448.0)
         tl.store(cache_row + offsets, values.to(tl.float8e4nv), mask=mask)
     else:
         tl.store(cache_row + offsets, values.to(tl.bfloat16), mask=mask)
@@ -149,6 +151,7 @@ def qnorm_rope_and_insert_full_k_cache(
     cos_sin_cache: torch.Tensor,
     eps: float,
     cache_block_size: int,
+    fp8_scale: torch.Tensor,
 ) -> None:
     """Apply DeepSeek V4 Q RMSNorm/RoPE and insert full-width BF16/FP8 KV.
 
@@ -190,6 +193,7 @@ def qnorm_rope_and_insert_full_k_cache(
         k_cache.stride(0),
         k_cache.stride(1),
         cache_block_size,
+        fp8_scale,
         HEAD_SIZE=512,
         ROPE_HEAD_DIM=64,
         BLOCK_SIZE=512,
@@ -494,6 +498,7 @@ def _gather_full_k_cache_kernel(
     block_table_ptr,
     offset,
     gather_lens_ptr,
+    fp8_scale_ptr,
     max_blocks_per_seq: tl.constexpr,
     cache_block_size: tl.constexpr,
     output_dim: tl.constexpr,
@@ -527,7 +532,7 @@ def _gather_full_k_cache_kernel(
         )
         values = tl.load(cache_row + offsets, mask=mask, other=0.0)
         if STORE_FP8:
-            values = values.to(tl.float32)
+            values = values.to(tl.float32) * tl.load(fp8_scale_ptr)
 
         out_row = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
         tl.store(out_row + offsets, values.to(tl.bfloat16), mask=mask)
@@ -592,10 +597,13 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    fp8_scale: torch.Tensor | None = None,
 ) -> None:
     if k_cache.dtype != torch.uint8:
         assert k_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
         assert k_cache.dim() == 3 and k_cache.shape[-1] == 512
+        if k_cache.dtype == torch.float8_e4m3fn:
+            assert fp8_scale is not None
         num_reqs = seq_lens.shape[0]
         NUM_WORKERS = 128
         _gather_full_k_cache_kernel[(num_reqs, NUM_WORKERS)](
@@ -609,6 +617,7 @@ def dequantize_and_gather_k_cache(
             block_table,
             offset,
             gather_lens,
+            fp8_scale if fp8_scale is not None else k_cache,
             max_blocks_per_seq=block_table.shape[-1],
             cache_block_size=block_size,
             output_dim=512,

@@ -177,6 +177,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_DSV4_FLASHINFER_FP8_SCALE: float | None = None
+    VLLM_DSV4_FLASHINFER_FP8_Q_SCALE: float | None = None
+    VLLM_DSV4_FLASHINFER_FP8_KV_SCALE: float | None = None
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
@@ -287,6 +290,12 @@ def maybe_convert_int(value: str | None) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def maybe_convert_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def maybe_convert_bool(value: str | None) -> bool | None:
@@ -1318,6 +1327,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # Global and Q/KV-specific per-tensor scales for DeepSeek V4 FlashInfer
+    # sparse MLA FP8 cache/query tensors.
+    "VLLM_DSV4_FLASHINFER_FP8_SCALE": lambda: maybe_convert_float(
+        os.getenv("VLLM_DSV4_FLASHINFER_FP8_SCALE")
+    ),
+    "VLLM_DSV4_FLASHINFER_FP8_Q_SCALE": lambda: maybe_convert_float(
+        os.getenv("VLLM_DSV4_FLASHINFER_FP8_Q_SCALE")
+    ),
+    "VLLM_DSV4_FLASHINFER_FP8_KV_SCALE": lambda: maybe_convert_float(
+        os.getenv("VLLM_DSV4_FLASHINFER_FP8_KV_SCALE")
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
