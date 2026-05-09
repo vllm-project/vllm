@@ -31,7 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.sequence import IntermediateTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
@@ -608,7 +608,9 @@ class DebertaV2ContextPooler(SequencePoolingMethod):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class DebertaV2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
+class DebertaV2ForSequenceClassification(
+    nn.Module, SupportsCrossEncoding, SupportsQuant
+):
     """DeBERTa-v2/v3 cross-encoder reranker for vLLM.
 
     Supports any ``DebertaV2ForSequenceClassification`` checkpoint with
