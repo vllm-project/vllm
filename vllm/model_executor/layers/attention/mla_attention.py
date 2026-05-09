@@ -561,6 +561,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
+
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
@@ -1003,6 +1004,7 @@ def unified_mla_kv_cache_update(
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
+<<<<<<< HEAD
     """
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
@@ -1011,6 +1013,14 @@ def unified_mla_kv_cache_update(
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
+=======
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    path = layer.path_selector.select_path(attn_metadata)
+    if path == MLA_PATH_MHA_UNABSORBED and attn_metadata.num_prefills > 0:
+        raise NotImplementedError("Dynamic attention router requires accept_output_buffer")
+    else:
+        output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+>>>>>>> 4666cfb37 (feat: implement Dynamic Attention Router for DeepSeek-V3 MLA)
 
     # This needs to run even when we don't have metadata yet, so that the op
     # is correctly captured.
@@ -1074,6 +1084,7 @@ def unified_mla_attention_with_output(
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+<<<<<<< HEAD
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -1088,6 +1099,30 @@ def unified_mla_attention_with_output(
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
     )
+=======
+    path = layer.path_selector.select_path(attn_metadata)
+    if path == MLA_PATH_MHA_UNABSORBED and attn_metadata.num_prefills > 0:
+        layer.impl.forward_mha(
+            q,
+            kv_c_normed,
+            k_pe,
+            torch.tensor([], device=q.device, dtype=q.dtype),
+            attn_metadata,
+            layer._k_scale,
+            output=output,
+        )
+    else:
+        layer.forward_impl(
+            q,
+            kv_c_normed,
+            k_pe,
+            kv_cache,
+            attn_metadata,
+            output=output,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+        )
+>>>>>>> 4666cfb37 (feat: implement Dynamic Attention Router for DeepSeek-V3 MLA)
 
 
 def unified_mla_attention_with_output_fake(
