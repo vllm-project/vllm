@@ -23,20 +23,34 @@ from typing import Any
 
 import numpy as np
 
-# Per-layer entry: bare list (scale=1.0) or {"vector": [...], "scale": float}
+# Per-layer entry: bare list (scale=1.0) or {"vector": [...], "scale": float}.
+# This is the public, user-facing shape — the type alias is exposed as a
+# pydantic field type by request/response models in ``vllm.entrypoints``,
+# so it must remain a narrow, schema-generable union.  Internally,
+# :func:`merge_steering_specs` produces ``np.ndarray`` entries that are
+# re-fed into resolvers; :func:`normalize_layer_entry` handles that
+# transparently without widening this alias.
 SteeringLayerEntry = list[float] | dict[str, Any]
 
 # Full spec: {hook_point_name: {layer_idx: SteeringLayerEntry}}
 SteeringVectorSpec = dict[str, dict[int, SteeringLayerEntry]]
 
 
-def normalize_layer_entry(entry: SteeringLayerEntry) -> tuple[list[float], float]:
+def normalize_layer_entry(
+    entry: SteeringLayerEntry | np.ndarray,
+) -> tuple[list[float] | np.ndarray, float]:
     """Return ``(vector, scale)`` from a steering layer entry.
 
-    If *entry* is a bare ``list[float]``, returns ``(entry, 1.0)``.
-    If *entry* is ``{"vector": [...], "scale": float}``, returns
-    ``(entry["vector"], entry["scale"])``.
+    If *entry* is a bare ``list[float]`` or ``np.ndarray``, returns
+    ``(entry, 1.0)``.  If *entry* is ``{"vector": [...], "scale": float}``,
+    returns ``(entry["vector"], entry["scale"])``.
+
+    The ndarray case supports re-feeding the output of
+    :func:`merge_steering_specs` (which produces pre-scaled ``np.float64``
+    arrays) through downstream resolvers without converting back to lists.
     """
+    if isinstance(entry, np.ndarray):
+        return entry, 1.0
     if isinstance(entry, list):
         return entry, 1.0
     if isinstance(entry, dict):
@@ -55,7 +69,8 @@ def normalize_layer_entry(entry: SteeringLayerEntry) -> tuple[list[float], float
             )
         return entry["vector"], float(entry["scale"])
     raise TypeError(
-        f"SteeringLayerEntry must be a list or dict, got {type(entry).__name__}"
+        f"SteeringLayerEntry must be a list, dict, or ndarray, "
+        f"got {type(entry).__name__}"
     )
 
 

@@ -9,12 +9,15 @@ Covers:
 - Co-located scale application
 """
 
+import numpy as np
 import pytest
 
 from vllm.config.steering_types import (
     hash_steering_config,
+    merge_steering_specs,
     normalize_layer_entry,
     resolve_effective_vectors,
+    scale_steering_spec,
 )
 
 # -----------------------------------------------------------------------
@@ -86,6 +89,16 @@ class TestNormalizeLayerEntry:
     def test_invalid_type_raises(self):
         with pytest.raises(TypeError, match="SteeringLayerEntry must be"):
             normalize_layer_entry("not a list or dict")  # type: ignore[arg-type]
+
+    def test_ndarray_returns_scale_one(self):
+        """ndarray entries (produced by merge_steering_specs) pass through
+        as ``(arr, 1.0)`` so they can be re-fed into resolve_effective_vectors
+        / scale_steering_spec without conversion to list."""
+        arr = np.asarray([1.0, 2.0, 3.0], dtype=np.float64)
+        result_vec, result_scale = normalize_layer_entry(arr)
+        assert isinstance(result_vec, np.ndarray)
+        assert np.array_equal(result_vec, arr)
+        assert result_scale == 1.0
 
 
 # -----------------------------------------------------------------------
@@ -189,6 +202,80 @@ class TestResolveEffectiveVectors:
         phase = {"hp": {0: [1.0]}}
         with pytest.raises(ValueError, match="different lengths"):
             resolve_effective_vectors(base, phase)
+
+    def test_accepts_merge_specs_output(self):
+        """resolve_effective_vectors must accept the ndarray-valued entries
+        produced by merge_steering_specs (which is how the worker-side
+        named-module resolver feeds merged specs back through the resolver)."""
+        merged_base = merge_steering_specs({"hp": {0: [1.0, 2.0, 3.0]}}, None)
+        merged_phase = merge_steering_specs({"hp": {0: [10.0, 20.0, 30.0]}}, None)
+        # Sanity-check the intermediate shape that triggered the bug.
+        assert isinstance(merged_base["hp"][0], np.ndarray)
+        assert isinstance(merged_phase["hp"][0], np.ndarray)
+        result = resolve_effective_vectors(merged_base, merged_phase)
+        assert result is not None
+        assert result["hp"][0].tolist() == [11.0, 22.0, 33.0]
+
+
+# -----------------------------------------------------------------------
+# merge_steering_specs
+# -----------------------------------------------------------------------
+
+
+class TestMergeSteeringSpecs:
+    """Validate additive merge semantics and downstream-compat of outputs.
+
+    ``merge_steering_specs`` may produce ``np.ndarray``-valued entries (via
+    ``_scale_vector``).  Downstream consumers — ``resolve_effective_vectors``,
+    ``scale_steering_spec`` — must handle that shape.  These tests pin the
+    contract that callers (notably the worker-side named-module resolver
+    in ``SteeringModelRunnerMixin._resolve_request_steering_for_phase``) can
+    chain merge → resolve / merge → scale without intermediate conversion.
+    """
+
+    def test_both_none_returns_none(self):
+        assert merge_steering_specs(None, None) is None
+
+    def test_only_a_pass_through(self):
+        a = {"hp": {0: [1.0, 2.0]}}
+        result = merge_steering_specs(a, None)
+        assert result is not None
+        assert result["hp"][0].tolist() == [1.0, 2.0]
+
+    def test_only_b_pass_through(self):
+        b = {"hp": {0: [3.0, 4.0]}}
+        result = merge_steering_specs(None, b)
+        assert result is not None
+        assert result["hp"][0].tolist() == [3.0, 4.0]
+
+    def test_overlapping_entries_sum(self):
+        a = {"hp": {0: [1.0, 2.0]}}
+        b = {"hp": {0: [10.0, 20.0]}}
+        result = merge_steering_specs(a, b)
+        assert result is not None
+        assert result["hp"][0].tolist() == [11.0, 22.0]
+
+    def test_chained_merge_resolve(self):
+        """merge → merge → resolve, mirroring _resolve_request_steering_for_phase
+        when both module spec and inline spec are present on each tier."""
+        scaled_base = {"hp": {0: [1.0, 2.0]}}
+        inline_base = {"hp": {1: [5.0, 6.0]}}
+        merged_base = merge_steering_specs(scaled_base, inline_base)
+        result = resolve_effective_vectors(merged_base, None)
+        assert result is not None
+        assert result["hp"][0].tolist() == [1.0, 2.0]
+        assert result["hp"][1].tolist() == [5.0, 6.0]
+
+    def test_chained_merge_scale_spec(self):
+        """scale_steering_spec must accept ndarray entries from merge output."""
+        merged = merge_steering_specs({"hp": {0: [1.0, 2.0]}}, None)
+        scaled = scale_steering_spec(merged, 3.0)
+        assert scaled is not None
+        # scale_steering_spec wraps non-1.0 multipliers into the dict form.
+        entry = scaled["hp"][0]
+        assert isinstance(entry, dict)
+        assert np.array_equal(np.asarray(entry["vector"]), np.asarray([1.0, 2.0]))
+        assert entry["scale"] == 3.0
 
 
 # -----------------------------------------------------------------------
