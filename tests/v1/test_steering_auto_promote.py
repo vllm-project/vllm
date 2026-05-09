@@ -309,16 +309,54 @@ class TestSyncAutoPromote:
         assert rpc.calls == []
         assert sp.steering_module_ref is None
 
-    def test_already_packed_is_no_op(self):
-        # Simulate a request that already went through pack_effective_steering.
+    def test_already_packed_observes_for_two_strikes(self):
+        # An sp that already went through pack still participates in the
+        # two-strikes count: this is the [sp]*N shared-object case where
+        # request 0's pack call mutates sp before request 1's auto-promote
+        # runs.  First-sight on a packed sp must not register (no RPC) but
+        # MUST be recorded so the second sight can promote.
         sp = _fresh_sp()
         # Force the packed fields directly to simulate prior packing.
-        # We don't actually need real arrays — non-None is enough to bail.
         sp._effective_prefill_steering_packed = {}
         rpc = _RpcSpy()
         lru = SteeringAutoPromoteLRU(capacity=4)
         maybe_auto_promote_steering_modules(sp, rpc, lru)
+        # First sight on a packed sp: no broadcast, sp untouched.
         assert rpc.calls == []
+        assert sp.steering_module_ref is None
+        # The LRU must have recorded the sighting so a second observation
+        # promotes.
+        assert len(lru) == 1
+
+    def test_packed_sp_second_sight_promotes_and_clears_packed(self):
+        # The [sp]*N case: req 0 leaves sp packed; req 1 (same sp object,
+        # same hash key but observed afresh by another request flowing
+        # through ``LLM._add_request``) must register, install the
+        # module_ref, AND clear the packed fields so the wire payload
+        # doesn't double-ship.
+        rpc = _RpcSpy()
+        lru = SteeringAutoPromoteLRU(capacity=4)
+        sp = _fresh_sp()
+        # Simulate prior pass through pack: prime the cached hashes,
+        # set the packed sentinel, clear inline.
+        _ = sp.prefill_steering_config_hash
+        _ = sp.decode_steering_config_hash
+        sp._effective_prefill_steering_packed = {"post_mlp": {}}
+        sp._effective_decode_steering_packed = {"post_mlp": {}}
+        sp.steering_vectors = None
+        # First observation (simulating request 0 in a different sp with
+        # the same key): record sighting, no broadcast.
+        # Use a sibling sp for the first sighting so we don't mutate the
+        # shared one yet.
+        sp_seed = _fresh_sp()
+        maybe_auto_promote_steering_modules(sp_seed, rpc, lru)
+        assert rpc.calls == []
+        # Second observation against the packed sp: register + promote.
+        maybe_auto_promote_steering_modules(sp, rpc, lru)
+        assert sp.steering_module_ref is not None
+        assert sp._effective_prefill_steering_packed is None
+        assert sp._effective_decode_steering_packed is None
+        assert sum(1 for m, _ in rpc.calls if m == "register_steering_modules") == 1
 
     def test_idempotent_after_promotion(self):
         rpc = _RpcSpy()

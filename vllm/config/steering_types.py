@@ -677,18 +677,23 @@ def _auto_promote_prep(
     """
     if sp.steering_module_ref is not None:
         return None
-    if (
-        sp.steering_vectors is None
-        and sp.prefill_steering_vectors is None
-        and sp.decode_steering_vectors is None
-    ):
-        return None
-    if (
+    has_inline = (
+        sp.steering_vectors is not None
+        or sp.prefill_steering_vectors is not None
+        or sp.decode_steering_vectors is not None
+    )
+    has_packed = (
         sp._effective_prefill_steering_packed is not None
         or sp._effective_decode_steering_packed is not None
-    ):
+    )
+    if not has_inline and not has_packed:
         return None
 
+    # Read the cached_properties to compute the dedup key.  These are
+    # primed by ``maybe_pack_inline_steering_for_request`` against the
+    # original fp64 path, so when *sp* is already packed the
+    # ``effective_*_steering`` falls back to the packed dicts and the
+    # hash comes out bit-for-bit identical to the pre-pack value.
     h_prefill = sp.prefill_steering_config_hash
     h_decode = sp.decode_steering_config_hash
     key = (h_prefill, h_decode)
@@ -714,11 +719,28 @@ def _auto_promote_prep(
 
 
 def _auto_promote_apply(sp: SamplingParams, name: str) -> None:
-    """Final mutation step: clear inline fields, install the module ref."""
+    """Final mutation step: clear inline + packed fields, install module ref.
+
+    Both inline and packed fields are cleared because *sp* may have been
+    pre-packed by an earlier request in the same shared-``[sp]*N`` batch.
+    The cached_property values for ``effective_*_steering`` and
+    ``effective_*_steering_hash`` are left intact: ``hash_steering_config``
+    folds the new ``module_ref`` into the digest on first read, and the
+    worker-side resolver pulls vectors from the registered module name.
+    """
     sp.steering_module_ref = (name, 1.0)
     sp.steering_vectors = None
     sp.prefill_steering_vectors = None
     sp.decode_steering_vectors = None
+    sp._effective_prefill_steering_packed = None
+    sp._effective_decode_steering_packed = None
+    # Drop any cached resolved/hash values — they were keyed on the inline
+    # spec; the worker now resolves via the module name + new module_ref
+    # contribution to the hash.
+    sp.__dict__.pop("effective_prefill_steering", None)
+    sp.__dict__.pop("effective_decode_steering", None)
+    sp.__dict__.pop("prefill_steering_config_hash", None)
+    sp.__dict__.pop("decode_steering_config_hash", None)
 
 
 def maybe_auto_promote_steering_modules(
