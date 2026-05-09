@@ -151,3 +151,35 @@ def warmup_kernels(
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
     torch.accelerator.synchronize()
+
+
+@torch.inference_mode()
+def warmup_v1_slot_mapping_kernel(model_runner: Any) -> None:
+    """Warm up V1 slot mapping without running model-specific forward paths.
+
+    V1 request input preparation calls `BlockTable.compute_slot_mapping()`.
+    The legacy `_dummy_run()` path does not exercise this kernel, and synthetic
+    `execute_model()` warmups are not model-agnostic. Compile the slot mapping
+    kernel directly before the JIT monitor is enabled.
+    """
+    block_table = model_runner.input_batch.block_table
+
+    if not block_table.block_tables:
+        return
+
+    # Block 0 is the null block. Use block 1 only when it is available.
+    if model_runner.kv_cache_config.num_blocks <= 1:
+        return
+
+    device = model_runner.device
+    block_table.add_row(tuple([1] for _ in block_table.block_tables), 0)
+    block_table.commit_block_table(1)
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    positions = torch.zeros(1, dtype=torch.int64, device=device)
+
+    try:
+        block_table.compute_slot_mapping(1, query_start_loc, positions)
+        torch.accelerator.synchronize()
+    finally:
+        block_table.clear_row(0)
+        block_table.commit_block_table(1)

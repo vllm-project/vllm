@@ -64,7 +64,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import warmup_kernels, warmup_v1_slot_mapping_kernel
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -685,7 +685,12 @@ class Worker(WorkerBase):
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
-        elif get_pp_group().is_last_rank:
+        else:
+            # V1: Compile generic input preparation kernels that legacy
+            # _dummy_run does not cover before the JIT monitor is enabled.
+            warmup_v1_slot_mapping_kernel(self.model_runner)
+
+        if not self.use_v2_model_runner and get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.

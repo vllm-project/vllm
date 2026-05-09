@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.v1.worker.gpu.warmup as gpu_warmup
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -49,6 +50,105 @@ from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
+
+
+class _FakeV1WarmupBlockTable:
+    def __init__(self):
+        self.block_tables = [object(), object()]
+        self.calls = []
+
+    def add_row(self, block_ids, row_idx):
+        self.calls.append(("add_row", block_ids, row_idx))
+
+    def commit_block_table(self, num_reqs):
+        self.calls.append(("commit_block_table", num_reqs))
+
+    def compute_slot_mapping(self, num_reqs, query_start_loc, positions):
+        self.calls.append(
+            (
+                "compute_slot_mapping",
+                num_reqs,
+                query_start_loc.detach().cpu().tolist(),
+                positions.detach().cpu().tolist(),
+                query_start_loc.dtype,
+                positions.dtype,
+            )
+        )
+
+    def clear_row(self, row_idx):
+        self.calls.append(("clear_row", row_idx))
+
+
+def _make_v1_slot_mapping_warmup_runner_stub(block_table=None, num_blocks=12):
+    if block_table is None:
+        block_table = _FakeV1WarmupBlockTable()
+    return SimpleNamespace(
+        device=torch.device("cpu"),
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+        input_batch=SimpleNamespace(block_table=block_table),
+    )
+
+
+def test_v1_warmup_runs_slot_mapping_and_clears_temporary_row(monkeypatch):
+    monkeypatch.setattr(gpu_warmup.torch.accelerator, "synchronize", lambda: None)
+
+    block_table = _FakeV1WarmupBlockTable()
+    runner = _make_v1_slot_mapping_warmup_runner_stub(block_table)
+
+    gpu_warmup.warmup_v1_slot_mapping_kernel(runner)
+
+    assert block_table.calls == [
+        ("add_row", ([1], [1]), 0),
+        ("commit_block_table", 1),
+        (
+            "compute_slot_mapping",
+            1,
+            [0, 1],
+            [0],
+            torch.int32,
+            torch.int64,
+        ),
+        ("clear_row", 0),
+        ("commit_block_table", 1),
+    ]
+
+
+def test_v1_warmup_clears_row_on_slot_mapping_error(monkeypatch):
+    monkeypatch.setattr(gpu_warmup.torch.accelerator, "synchronize", lambda: None)
+
+    block_table = _FakeV1WarmupBlockTable()
+
+    def raise_on_compute(*args):
+        block_table.calls.append(("compute_slot_mapping_error",))
+        raise RuntimeError("test error")
+
+    monkeypatch.setattr(block_table, "compute_slot_mapping", raise_on_compute)
+    runner = _make_v1_slot_mapping_warmup_runner_stub(block_table)
+
+    with pytest.raises(RuntimeError, match="test error"):
+        gpu_warmup.warmup_v1_slot_mapping_kernel(runner)
+
+    assert block_table.calls == [
+        ("add_row", ([1], [1]), 0),
+        ("commit_block_table", 1),
+        ("compute_slot_mapping_error",),
+        ("clear_row", 0),
+        ("commit_block_table", 1),
+    ]
+
+
+def test_v1_warmup_skips_without_usable_kv_block(monkeypatch):
+    monkeypatch.setattr(gpu_warmup.torch.accelerator, "synchronize", lambda: None)
+
+    block_table = _FakeV1WarmupBlockTable()
+    runner = _make_v1_slot_mapping_warmup_runner_stub(
+        block_table,
+        num_blocks=1,
+    )
+
+    gpu_warmup.warmup_v1_slot_mapping_kernel(runner)
+
+    assert block_table.calls == []
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
