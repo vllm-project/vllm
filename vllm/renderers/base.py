@@ -112,6 +112,9 @@ class BaseRenderer(ABC, Generic[_T]):
                     config.model_config,
                     tokenizer=self.tokenizer,
                     cache=mm_processor_cache,
+                    max_num_batched_tokens_hint=(
+                        config.scheduler_config.max_num_batched_tokens
+                    ),
                 )
 
             if mm_processor_cache:
@@ -127,6 +130,9 @@ class BaseRenderer(ABC, Generic[_T]):
                         config.model_config,
                         tokenizer=self.tokenizer,
                         cache=ro_cache,
+                        max_num_batched_tokens_hint=(
+                            config.scheduler_config.max_num_batched_tokens
+                        ),
                     )
 
             # This is used to generate internal request ID for MM processing

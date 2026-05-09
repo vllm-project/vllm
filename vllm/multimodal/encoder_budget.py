@@ -59,7 +59,11 @@ class MultiModalBudget:
 
         with set_default_torch_num_threads():  # Avoid hang during startup
             cache = mm_registry.processor_only_cache_from_config(vllm_config)
-            processor = mm_registry.create_processor(model_config, cache=cache)
+            processor = mm_registry.create_processor(
+                model_config,
+                cache=cache,
+                max_num_batched_tokens_hint=scheduler_config.max_num_batched_tokens,
+            )
 
             self.cache = cache
             self.processor = processor

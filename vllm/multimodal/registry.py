@@ -177,11 +177,17 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         tokenizer: TokenizerLike | None = None,
+        *,
+        max_num_batched_tokens_hint: int | None = None,
     ) -> InputProcessingContext:
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
 
-        return InputProcessingContext(model_config, tokenizer)
+        return InputProcessingContext(
+            model_config,
+            tokenizer,
+            max_num_batched_tokens_hint=max_num_batched_tokens_hint,
+        )
 
     def _create_processing_info(
         self,
@@ -202,6 +208,7 @@ class MultiModalRegistry:
         *,
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
+        max_num_batched_tokens_hint: int | None = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
@@ -213,7 +220,11 @@ class MultiModalRegistry:
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
 
-        ctx = self._create_processing_ctx(model_config, tokenizer)
+        ctx = self._create_processing_ctx(
+            model_config,
+            tokenizer,
+            max_num_batched_tokens_hint=max_num_batched_tokens_hint,
+        )
 
         return factories.build_processor(ctx, cache=cache)
 

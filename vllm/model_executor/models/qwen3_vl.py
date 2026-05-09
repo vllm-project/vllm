@@ -910,14 +910,25 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             size = size | {"shortest_edge": override_min_pixels}
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
             size = size | {"longest_edge": override_max_pixels}
-        elif (
-            auto_max_pixels := self._get_auto_max_pixels_from_default_budget(
-                size=size,
-                patch_size=patch_size,
-                merge_size=merge_size,
-                mm_kwargs=mm_kwargs,
+        token_budget = self.ctx.max_num_batched_tokens_hint
+        if is_video and token_budget is not None:
+            # Qwen3 video processor constrains total t*h*w pixels. Convert
+            # token budget to that total-pixel unit by including temporal
+            # compression.
+            token_budget *= temporal_patch_size
+        if (
+            override_max_pixels is None
+            and (
+                auto_max_pixels := self._get_auto_max_pixels_from_batched_tokens(
+                    size=size,
+                    patch_size=patch_size,
+                    merge_size=merge_size,
+                    mm_kwargs=mm_kwargs,
+                    token_budget=token_budget,
+                )
             )
-        ) is not None:
+            is not None
+        ):
             size = size | {"longest_edge": auto_max_pixels}
 
         if do_resize:
@@ -968,12 +979,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             seq_len, mm_counts, max_frames_per_video=DUMMY_VIDEO_NUM_FRAMES
         )
 
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
+    def get_video_size_with_most_features(self) -> ImageSize:
         video_processor = self.get_video_processor()
+
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
 
         mm_kwargs = self.ctx.get_merged_mm_kwargs({})
         video_size = mm_kwargs.get("size", video_processor.size)
@@ -981,12 +993,35 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             "temporal_patch_size", video_processor.temporal_patch_size
         )
 
-        # video_max_pixels contains the temporal compression factor,
-        # so we divide by 2 to get the maximum number of image pixels.
         video_max_pixels = video_size["longest_edge"]
-        target_width, target_height = self.get_image_size_with_most_features(
+        token_budget = self.ctx.max_num_batched_tokens_hint
+        if token_budget is not None:
+            token_budget *= temporal_patch_size
+        if (
+            auto_max_pixels := self._get_auto_max_pixels_from_batched_tokens(
+                size=video_size,
+                patch_size=patch_size,
+                merge_size=merge_size,
+                mm_kwargs=mm_kwargs,
+                token_budget=token_budget,
+            )
+        ) is not None:
+            video_max_pixels = auto_max_pixels
+
+        # video_max_pixels contains the temporal compression factor,
+        # so we divide by temporal_patch_size to get image pixels.
+        return self.get_image_size_with_most_features(
             max_pixels=video_max_pixels // temporal_patch_size
         )
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        video_processor = self.get_video_processor()
+
+        target_width, target_height = self.get_video_size_with_most_features()
         num_video_soft_tokens = self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
@@ -1110,20 +1145,8 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         target_num_frames = max(target_num_frames, 2)
 
         video_processor = self.info.get_video_processor()
-
-        mm_kwargs = self.info.ctx.get_merged_mm_kwargs({})
-        video_size = mm_kwargs.get("size", video_processor.size)
-        temporal_patch_size = mm_kwargs.get(
-            "temporal_patch_size", video_processor.temporal_patch_size
-        )
-
-        # video_max_pixels contains the temporal compression factor,
-        # so we divide by 2 to get the maximum number of image pixels.
-        video_max_pixels = video_size["longest_edge"]
         target_video_width, target_video_height = (
-            self.info.get_image_size_with_most_features(
-                max_pixels=video_max_pixels // temporal_patch_size
-            )
+            self.info.get_video_size_with_most_features()
         )
         target_video_size, _ = self.info._get_vision_info(
             image_width=target_video_width,

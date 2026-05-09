@@ -120,14 +120,6 @@ class MultiModalConfig:
 
     For example, for Phi-3-Vision:
     `{"num_crops": 4}`."""
-    default_mm_token_budget: int | None = Field(default=None, init=False, repr=False)
-    """Internal default multimodal token budget derived from scheduler limits.
-
-    This is not a user-facing config option. Engine configuration sets it from
-    ``SchedulerConfig.max_num_batched_tokens`` so model-specific processors can
-    choose conservative default sizes when users did not explicitly configure
-    processor size kwargs.
-    """
     mm_processor_cache_gb: float = Field(default=4, ge=0)
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.

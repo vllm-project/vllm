@@ -1971,11 +1971,6 @@ class EngineArgs:
             stream_interval=self.stream_interval,
         )
 
-        if model_config.multimodal_config is not None:
-            model_config.multimodal_config.default_mm_token_budget = (
-                scheduler_config.max_num_batched_tokens
-            )
-
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(
                 "Default modality-specific LoRA(s) were provided for a "
