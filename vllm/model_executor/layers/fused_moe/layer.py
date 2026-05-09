@@ -246,6 +246,9 @@ class FusedMoE(PluggableLayer):
                                       not supported by the router (or the experts).
     """
 
+    # Auto-incrementing layer ID for routing replay buffer binding.
+    _next_moe_layer_id: int = 0
+
     # --8<-- [end:fused_moe]
 
     def __init__(
@@ -282,6 +285,7 @@ class FusedMoE(PluggableLayer):
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
+        shared_expert_gate: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         apply_routed_scale_to_output: bool = False,
@@ -289,6 +293,10 @@ class FusedMoE(PluggableLayer):
         hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
+
+        # Assign unique layer ID for routing replay buffer binding.
+        self.moe_layer_id = FusedMoE._next_moe_layer_id
+        FusedMoE._next_moe_layer_id += 1
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -363,6 +371,8 @@ class FusedMoE(PluggableLayer):
             if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
             else 0
         )
+        self.shared_expert_gate = shared_expert_gate
+
         if (
             not self.aiter_fmoe_shared_expert_enabled
             and self.num_fused_shared_experts != 0
@@ -538,9 +548,11 @@ class FusedMoE(PluggableLayer):
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
 
-        if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
+        if not self.moe_config.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA and ROCm for now"
+                "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
         if self.enable_eplb and not self.quant_method.supports_eplb:
@@ -599,6 +611,7 @@ class FusedMoE(PluggableLayer):
             router=self.router,
             gate=gate,
             shared_experts=shared_experts,
+            shared_expert_gate=self.shared_expert_gate,
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
             routed_input_transform=routed_input_transform,
@@ -1103,9 +1116,6 @@ class FusedMoE(PluggableLayer):
         return_success: bool = False,
     ) -> bool | None:
         quant_config_name = self.quant_config and self.quant_config.get_name()
-        if quant_config_name == "humming":
-            assert hasattr(self.quant_method, "weight_schema")
-            quant_config_name = self.quant_method.weight_schema.quant_method
         if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
