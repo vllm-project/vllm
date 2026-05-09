@@ -50,7 +50,7 @@ def _gemma_dual_rmsnorm_residual_kernel(
     scalar = tl.load(Scalar_ptr).to(tl.float32)
     out = (norm3 + r) * scalar
 
-    tl.store(Out_ptr + row * stride_o + cols, out.to(x1.dtype), mask=mask)
+    tl.store(Out_ptr + row * stride_o + cols, out.to(Out_ptr.dtype.element_ty), mask=mask)
 
 
 def gemma_dual_rmsnorm_residual_scalar(
