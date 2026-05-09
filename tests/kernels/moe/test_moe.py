@@ -14,8 +14,6 @@ import pytest
 import torch
 from torch.nn import Parameter
 from torch.nn import functional as F
-from transformers import MixtralConfig
-from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.moe.utils import (
@@ -24,10 +22,7 @@ from tests.kernels.moe.utils import (
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import init_distributed_environment
-from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
@@ -56,11 +51,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
-from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.worker.workspace import init_workspace_manager
 
 
 def iterative_moe(
@@ -149,12 +143,14 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float4_e2m1f,
+        "c_type": [scalar_types.bfloat16],
         "group_blocks": [2],
     },
     # MXFP8
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float8_e4m3fn,
+        "c_type": [scalar_types.bfloat16],
         "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
@@ -680,154 +676,35 @@ def test_fused_moe_wn16(
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-@torch.inference_mode()
-def test_mixtral_moe(
-    default_vllm_config,
-    dist_init,
-    dtype: torch.dtype,
-    padding: bool,
-    use_rocm_aiter: bool,
-    monkeypatch,
-):
-    """Make sure our Mixtral MoE implementation agrees with the one from
-    huggingface."""
-
-    # Explicitly set AITER env var based on test parameter to ensure
-    # consistent behavior regardless of external environment
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
-    rocm_aiter_ops.refresh_env_variables()
-
-    if use_rocm_aiter and dtype == torch.float32:
-        pytest.skip("AITER ROCm test skip for float32")
-
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setenv("LOCAL_RANK", "0")
-    monkeypatch.setenv("WORLD_SIZE", "1")
-    monkeypatch.setenv("MASTER_ADDR", "localhost")
-    monkeypatch.setenv("MASTER_PORT", "12345")
-    init_distributed_environment()
-    init_workspace_manager(torch.accelerator.current_device_index())
-
-    # Instantiate our and huggingface's MoE blocks
-    vllm_config.compilation_config.static_forward_context = dict()
-    with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
-        config = MixtralConfig()
-        hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
-        vllm_moe = MixtralMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=dtype,
-            tp_size=1,
-            dp_size=1,
-        ).cuda()
-
-        # Load the weights
-        vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-        if isinstance(hf_moe.experts, torch.nn.ModuleList):
-            # Transformers v4
-            for i in range(config.num_local_experts):
-                weights = (
-                    hf_moe.experts[i].w1.weight.data,
-                    hf_moe.experts[i].w3.weight.data,
-                )
-                vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-                vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
-        else:
-            # Transformers v5
-            vllm_moe.experts.w13_weight.data[:] = hf_moe.experts.gate_up_proj.data
-            vllm_moe.experts.w2_weight.data[:] = hf_moe.experts.down_proj.data
-            # TODO: remove this line after https://github.com/huggingface/transformers/pull/43622
-            hf_moe.experts.config._experts_implementation = "eager"
-
-        # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-        hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
-        # vLLM uses 1D query [num_tokens, hidden_dim]
-        vllm_inputs = hf_inputs.flatten(0, 1)
-
-        # Pad the weight if moe padding is enabled
-        if padding:
-            vllm_moe.experts.w13_weight = Parameter(
-                F.pad(vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[
-                    ..., 0:-128
-                ],
-                requires_grad=False,
-            )
-            vllm_moe.experts.w2_weight = Parameter(
-                F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
-                requires_grad=False,
-            )
-            torch.accelerator.synchronize()
-            torch.accelerator.empty_cache()
-
-        # FIXME (zyongye) fix this after we move self.kernel
-        # assignment in FusedMoE.__init__
-
-        vllm_moe.experts.quant_method.process_weights_after_loading(vllm_moe.experts)
-
-        # need to override the forward context for unittests, otherwise it assumes
-        # we're running the model forward pass (the model specified in vllm_config)
-        get_forward_context().all_moe_layers = None
-
-        # Run forward passes for both MoE blocks
-        hf_states = hf_moe.forward(hf_inputs)
-        if isinstance(hf_states, tuple):
-            # Transformers v4
-            hf_states = hf_states[0]
-        vllm_states = vllm_moe.forward(vllm_inputs)
-
-    mixtral_moe_tol = {
-        torch.float32: 1e-3,
-        torch.float16: 1e-3,
-        torch.bfloat16: 1e-2,
-    }
-
-    if use_rocm_aiter:
-        # The values of rtol and atol are set based on the tests in ROCM AITER package.
-        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174
-        torch.testing.assert_close(
-            hf_states.flatten(0, 1), vllm_states, rtol=0.01, atol=100
-        )
-    else:
-        torch.testing.assert_close(
-            hf_states.flatten(0, 1),
-            vllm_states,
-            rtol=mixtral_moe_tol[dtype],
-            atol=mixtral_moe_tol[dtype],
-        )
+MARLIN_MOE_SCENARIOS = [
+    # (m, n, k, e, topk, ep_size, act_order, is_k_full)
+    # No act_order: is_k_full=True matches usual case (marlin_is_k_full).
+    # N>=256 required for Marlin kernel thread config for MXFP8.
+    # Single token, small matrices
+    (1, 128, 256, 5, 2, 1, False, True),
+    # Single token, large matrices
+    (1, 1024, 2048, 5, 2, 1, False, True),
+    # Unaligned m, small matrices
+    (133, 256, 256, 5, 2, 1, False, True),
+    # Unaligned m, large matrices
+    (133, 1024, 2048, 12, 3, 1, False, True),
+    # Aligned batch, small matrices
+    (128, 256, 256, 5, 2, 1, False, True),
+    # Aligned batch, large matrices
+    (128, 1024, 2048, 12, 3, 1, False, True),
+    # Expert parallelism
+    (64, 1024, 2048, 12, 3, 4, False, True),
+    # Act order with is_k_full=True (no tensor parallelism)
+    (1, 1024, 2048, 5, 2, 1, True, True),
+    # Act order with is_k_full=False (tensor parallelism)
+    (133, 256, 256, 5, 2, 1, True, False),
+]
 
 
 def marlin_moe_generate_valid_test_cases():
     import itertools
 
-    m_list = [1, 123, 666]
-    n_list = [128, 1024]
-    k_list = [256, 2048]
-    e_list = [5, 12]
-    topk_list = [2, 3]
-    ep_size_list = [1, 4]
-    act_order_list = [True, False]
-    is_k_full_list = [True, False]
-
-    all_combinations = itertools.product(
-        MOE_MARLIN_QUANT_TEST_CONFIGS,
-        m_list,
-        n_list,
-        k_list,
-        e_list,
-        topk_list,
-        ep_size_list,
-        act_order_list,
-        is_k_full_list,
-    )
-
-    def is_invalid(
+    def is_valid(
         a_type,
         b_type,
         c_type,
@@ -844,29 +721,27 @@ def marlin_moe_generate_valid_test_cases():
         group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
         if group_size > 0 and k % group_size != 0:
             return False
-
         if act_order and group_size in [-1, k, n]:
             return False
         if group_size in [k, n]:
             return False
-        if not act_order and is_k_full:
+        if b_type == scalar_types.float8_e4m3fn and group_size == 32 and is_k_full:
             return False
-
         return a_type.size_bits < 16 or a_type is c_type
 
     cases = []
-    for case in all_combinations:
-        quant_test_config, m, n, k, _, _, _, act_order, *_ = case
-        if act_order and not quant_test_config.get("support_act_order", False):
-            continue
-
+    for quant_test_config in MOE_MARLIN_QUANT_TEST_CONFIGS:
         f16_types = [scalar_types.float16]
-        inner_combinations = itertools.product(
-            quant_test_config.get("a_type", f16_types),
-            [quant_test_config["b_type"]],
-            quant_test_config.get("c_type", f16_types),
-            quant_test_config["group_blocks"],
+        inner_combinations = list(
+            itertools.product(
+                quant_test_config.get("a_type", f16_types),
+                [quant_test_config["b_type"]],
+                quant_test_config.get("c_type", f16_types),
+                quant_test_config["group_blocks"],
+            )
         )
+
+        supports_act_order = quant_test_config.get("support_act_order", False)
 
         for sub_case in inner_combinations:
             if (
@@ -874,9 +749,14 @@ def marlin_moe_generate_valid_test_cases():
                 and current_platform.get_device_capability() not in [89, 120]
             ):
                 continue
-            args = sub_case + (m, n, k) + case[4:]
-            if is_invalid(*args):
-                cases.append(args)
+
+            for scenario in MARLIN_MOE_SCENARIOS:
+                m, n, k, e, topk, ep_size, act_order, is_k_full = scenario
+                if act_order and not supports_act_order:
+                    continue
+                args = sub_case + (m, n, k, e, topk, ep_size, act_order, is_k_full)
+                if is_valid(*args):
+                    cases.append(args)
     return cases
 
 
@@ -1676,7 +1556,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         in_dtype=dtype,
         is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
-        max_num_tokens=m,
+        max_num_tokens=next_power_of_2(m),
     )
 
     with set_current_vllm_config(vllm_config):

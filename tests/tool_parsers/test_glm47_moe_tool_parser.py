@@ -117,28 +117,24 @@ class TestGlm47ExtractToolCalls:
 
 
 def _reset(parser):
-    parser._buffer = ""
-    parser._in_tool_call = False
     parser.current_tool_name_sent = False
-    parser._current_tool_name = None
-    parser._pending_key = None
-    parser._streaming_string_value = False
     parser.prev_tool_call_arr = []
     parser.current_tool_id = -1
     parser.streamed_args_for_tool = []
     parser._tool_call_ids = []
-    parser._args_started = []
-    parser._args_closed = []
-    parser._seen_keys = []
+    parser._sent_content_idx = 0
 
 
 class TestGlm47Streaming:
     def test_no_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
-        for chunk in ["<tool_call>", "get_current_date", "</tool_call>"]:
+        chunks = ["<tool_call>", "get_current_date", "</tool_call>"]
+        current_text = ""
+        for chunk in chunks:
+            current_text += chunk
             glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
-                current_text="",
+                current_text=current_text,
                 delta_text=chunk,
                 previous_token_ids=[],
                 current_token_ids=[],
@@ -149,10 +145,7 @@ class TestGlm47Streaming:
 
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
-        # Split chunks so that the incremental string streaming path
-        # processes the value, its closing tag, and the tool-call closing
-        # tag in separate calls.
-        for chunk in [
+        chunks = [
             "<tool_call>",
             "get_weather\n",
             "<arg_key>city</arg_key>",
@@ -160,14 +153,18 @@ class TestGlm47Streaming:
             "Beijing",
             "</arg_value>",
             "</tool_call>",
-        ]:
+        ]
+        current_text = ""
+        for chunk in chunks:
+            current_text += chunk
             glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
-                current_text="",
+                current_text=current_text,
                 delta_text=chunk,
                 previous_token_ids=[],
                 current_token_ids=[],
                 delta_token_ids=[],
                 request=mock_request,
             )
-        assert glm47_tool_parser.prev_tool_call_arr[0]["arguments"]["city"] == "Beijing"
+        args = json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"])
+        assert args["city"] == "Beijing"
