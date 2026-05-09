@@ -911,6 +911,78 @@ def test_delimiter_preserved_transformers_5x(glm4_moe_tool_parser):
     assert adjusted_empty.skip_special_tokens is True
 
 
+def test_adjust_request_skips_schema_for_responses_named_function(
+    glm4_moe_tool_parser,
+):
+    """Regression: /v1/responses with named-function tool_choice arrives as
+    ``ToolChoiceFunction`` (Pydantic-parsed). The parent must short-circuit
+    structured-output injection for it just like it already does for the
+    Chat Completions ``ChatCompletionNamedToolChoiceParam`` form.
+
+    See vllm-project/vllm#41631."""
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+    request = ResponsesRequest(
+        input="What is the weather in Hanoi?",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get the current weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        ],
+        tool_choice={"type": "function", "name": "get_weather"},
+    )
+
+    adjusted = glm4_moe_tool_parser.adjust_request(request)
+
+    # No structured-output schema may be set — would otherwise force JSON
+    # output and break the XML extractor used by GLM-4 family parsers.
+    assert adjusted.text is None or adjusted.text.format is None
+    assert adjusted.structured_outputs is None
+    # Named-function tool_choice is preserved (still a ToolChoiceFunction).
+    assert adjusted.tool_choice is not None
+    assert getattr(adjusted.tool_choice, "type", None) == "function"
+    assert getattr(adjusted.tool_choice, "name", None) == "get_weather"
+    # Tool-call XML tokens must remain visible during decoding.
+    assert adjusted.skip_special_tokens is False
+
+
+def test_adjust_request_skips_schema_for_responses_required(glm4_moe_tool_parser):
+    """Regression: /v1/responses with ``tool_choice="required"`` must also
+    skip the grandparent's Hermes JSON-schema injection."""
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+    request = ResponsesRequest(
+        input="What is the weather in Hanoi?",
+        tools=[
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get the current weather for a city",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        ],
+        tool_choice="required",
+    )
+
+    adjusted = glm4_moe_tool_parser.adjust_request(request)
+
+    assert adjusted.text is None or adjusted.text.format is None
+    assert adjusted.structured_outputs is None
+    assert adjusted.tool_choice == "required"
+    assert adjusted.skip_special_tokens is False
+
+
 def test_unicode_characters_preserved(glm4_moe_tool_parser, mock_request):
     """Regression: Unicode chars must not be escaped to \\uXXXX (PR #30920)."""
     model_output = """<tool_call>send_message
