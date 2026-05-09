@@ -742,7 +742,7 @@ class Gemma4DecoderLayer(nn.Module):
             ):
                 return gemma_dual_rmsnorm_residual_scalar(
                     hidden_states_1,
-                    self.post_feedforward_layernorm_1.weight.data,
+                    self.post_feedforward_layernorm_1.weight,
                     hidden_states_2,
                     self.post_feedforward_layernorm_2.weight.data,
                     self.post_feedforward_layernorm.weight.data,
