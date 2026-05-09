@@ -215,6 +215,67 @@ When loading RGBA images (images with transparency), vLLM converts them to RGB f
     - This setting only affects RGBA images with transparency; RGB images are unchanged
     - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
 
+#### Moondream3 Prompt Recipes { #moondream3-prompt-recipes }
+
+`Moondream3ForCausalLM` supports two task-specific prompt formats:
+
+- `query`: ask a question about the image.
+- `caption`: generate a caption for the image.
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.assets.image import ImageAsset
+
+llm = LLM(
+    model="moondream/moondream3-preview",
+    tokenizer="moondream/starmie-v1",
+    trust_remote_code=True,
+    max_model_len=2048,
+    limit_mm_per_prompt={"image": 1},
+)
+
+image = ImageAsset("stop_sign").pil_image
+
+
+def make_query_prompt(question: str) -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        f"{question}<|md_reserved_2|>"
+    )
+
+
+def make_caption_prompt(length: str = "normal") -> str:
+    return (
+        "<|endoftext|><image><|md_reserved_0|>"
+        f"describe<|md_reserved_1|>{length}<|md_reserved_2|>"
+    )
+
+
+query_out = llm.generate(
+    {
+        "prompt": make_query_prompt("What is shown in this image?"),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=64, temperature=0),
+)[0].outputs[0].text
+
+caption_out = llm.generate(
+    {
+        "prompt": make_caption_prompt(),
+        "multi_modal_data": {"image": image},
+    },
+    SamplingParams(max_tokens=100, temperature=0),
+)[0].outputs[0].text
+
+print("query:", query_out)
+print("caption:", caption_out)
+```
+
+!!! note
+    The native Moondream3 model also has `detect` and `point` skills. Those
+    require custom coordinate decoding and are not exposed by this vLLM
+    implementation.
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
