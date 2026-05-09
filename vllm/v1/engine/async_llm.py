@@ -111,6 +111,13 @@ class AsyncLLM(EngineClient):
         self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
 
+        # Per-engine LRU mapping (prefill_hash, decode_hash) -> auto-named
+        # steering module name.  See ``LLM._maybe_auto_promote_steering``
+        # and ``maybe_auto_promote_steering_modules`` for the contract.
+        from vllm.config.steering_types import SteeringAutoPromoteLRU
+
+        self._steering_auto_promote_lru = SteeringAutoPromoteLRU(capacity=512)
+
         tracing_endpoint = self.observability_config.otlp_traces_endpoint
         if tracing_endpoint is not None:
             init_tracer("vllm.llm_engine", tracing_endpoint)
@@ -302,15 +309,21 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        # Pack inline steering vectors in the model dtype before the
-        # request crosses the IPC boundary.  Cuts msgpack-encoded
-        # float-list payloads to dtype-tagged raw bytes (~4.5× smaller
-        # at fp16, ~2.25× at fp32; bf16 falls back to fp32 because
-        # numpy lacks a native bf16 without ml_dtypes).  No-op for
-        # named-only requests and pooling params.
+        # Steering preprocessing: auto-promote inline → named (saves
+        # IPC bytes for repeated specs by holding the resolved spec
+        # worker-side under a hash-derived name), then pack any
+        # remaining inline vectors in the model dtype as a fallback.
+        # Both helpers no-op when not applicable.
         if not is_pooling:
             from vllm.config.steering_types import (
+                maybe_auto_promote_steering_modules_async,
                 maybe_pack_inline_steering_for_request,
+            )
+
+            await maybe_auto_promote_steering_modules_async(
+                params,
+                rpc_fn=self.collective_rpc,
+                registry_lru=self._steering_auto_promote_lru,
             )
 
             try:
