@@ -80,6 +80,24 @@ def init_weight_transfer_engine(base_url: str) -> None:
     response.raise_for_status()
 
 
+def start_weight_update(
+    base_url: str,
+    is_checkpoint_format: bool = True,
+) -> None:
+    """Start a weight update via HTTP endpoint."""
+    url = f"{base_url}/start_weight_update"
+    payload = {"is_checkpoint_format": is_checkpoint_format}
+    response = requests.post(url, json=payload, timeout=60)
+    response.raise_for_status()
+
+
+def finish_weight_update(base_url: str) -> None:
+    """Finish a weight update via HTTP endpoint."""
+    url = f"{base_url}/finish_weight_update"
+    response = requests.post(url, json={}, timeout=60)
+    response.raise_for_status()
+
+
 def pause_generation(base_url: str) -> None:
     """Pause generation via HTTP endpoint."""
     url = f"{base_url}/pause"
@@ -151,13 +169,17 @@ def main():
     # Pause generation before weight sync
     pause_generation(BASE_URL)
 
-    # Broadcast weights via IPC handles using HTTP mode
+    # Start weight update, broadcast via IPC, then finish
+    start_weight_update(BASE_URL, is_checkpoint_format=False)
+
     print("Broadcasting weights via CUDA IPC (HTTP)...")
     trainer_args = IPCTrainerSendWeightsArgs(mode="http", url=BASE_URL)
     IPCWeightTransferEngine.trainer_send_weights(
         iterator=train_model.named_parameters(),
         trainer_args=trainer_args,
     )
+
+    finish_weight_update(BASE_URL)
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)
