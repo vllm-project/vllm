@@ -183,18 +183,23 @@ def test_logging_level_uppercased(monkeypatch):
     assert envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
 
-def test_mm_hasher_case_insensitive_accept(monkeypatch):
-    # Pre-refactor: env_with_choices(case_sensitive=False) accepted the
-    # upper-case value but returned it unchanged. Preserved.
+def test_mm_hasher_case_insensitive_coerced(monkeypatch):
+    # Pre-refactor: env_with_choices(case_sensitive=False) accepted upper-case
+    # but returned the value unchanged. Now coerced to canonical lower-case.
+    # The only consumer (vllm/multimodal/hasher.py) already calls .lower(),
+    # so this is a behavior-equivalent normalization.
     monkeypatch.setenv("VLLM_MM_HASHER_ALGORITHM", "SHA256")
     envs = _reload_envs()
-    assert envs.VLLM_MM_HASHER_ALGORITHM == "SHA256"
+    assert envs.VLLM_MM_HASHER_ALGORITHM == "sha256"
 
 
-def test_float32_precision_case_insensitive_accept(monkeypatch):
+def test_float32_precision_case_insensitive_coerced(monkeypatch):
+    # Pre-refactor: returned the user-typed casing. torch.set_float32_matmul_precision
+    # is case-sensitive and silently warns + no-ops on upper-case input, so the
+    # old behavior was a latent miconfiguration. Coercing to lower-case fixes it.
     monkeypatch.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "HIGH")
     envs = _reload_envs()
-    assert envs.VLLM_FLOAT32_MATMUL_PRECISION == "HIGH"
+    assert envs.VLLM_FLOAT32_MATMUL_PRECISION == "high"
 
 
 def test_bool_widened_accepts_yes(monkeypatch):

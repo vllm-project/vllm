@@ -317,19 +317,14 @@ class MediaSettings(BaseSettings):
     max_audio_clip_filesize_mb: int = 25
     video_loader_backend: str = "opencv"
     media_connector: str = "http"
-    mm_hasher_algorithm: str = "blake3"
+    mm_hasher_algorithm: Literal["blake3", "sha256", "sha512"] = "blake3"
     object_storage_shm_buffer_name: str | None = None
     assets_cache_model_clean: bool = False
 
-    @field_validator("mm_hasher_algorithm", mode="after")
+    @field_validator("mm_hasher_algorithm", mode="before")
     @classmethod
-    def _check_mm_hasher(cls, v: str) -> str:
-        if v.lower() not in {"blake3", "sha256", "sha512"}:
-            raise ValueError(
-                f"Invalid value '{v}' for VLLM_MM_HASHER_ALGORITHM. "
-                f"Valid options: ['blake3', 'sha256', 'sha512']."
-            )
-        return v
+    def _lower_mm_hasher(cls, v: Any) -> Any:
+        return v.lower() if isinstance(v, str) else v
 
 
 class CpuSettings(BaseSettings):
@@ -458,18 +453,13 @@ class QuantSettings(BaseSettings):
     use_fbgemm: bool = False
     use_oink_ops: bool = False
     batch_invariant: bool = False
-    float32_matmul_precision: str = "highest"
+    float32_matmul_precision: Literal["highest", "high", "medium"] = "highest"
     use_triton_awq: bool = False
 
-    @field_validator("float32_matmul_precision", mode="after")
+    @field_validator("float32_matmul_precision", mode="before")
     @classmethod
-    def _check_float32(cls, v: str) -> str:
-        if v.lower() not in {"highest", "high", "medium"}:
-            raise ValueError(
-                f"Invalid value '{v}' for VLLM_FLOAT32_MATMUL_PRECISION. "
-                f"Valid options: ['highest', 'high', 'medium']."
-            )
-        return v
+    def _lower_float32(cls, v: Any) -> Any:
+        return v.lower() if isinstance(v, str) else v
 
     @field_validator("moe_routing_simulation_strategy", mode="after")
     @classmethod
