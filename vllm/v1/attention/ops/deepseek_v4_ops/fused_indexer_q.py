@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import has_cutedsl
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
@@ -342,30 +344,49 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        _fused_indexer_q_rope_mxfp4_kernel[(num_tokens, num_index_q_heads)](
-            positions,
-            index_q,
-            index_q.stride(0),
-            index_q.stride(1),
-            index_q_cos_sin_cache,
-            index_q_cos_sin_cache.stride(0),
-            index_q_cos_sin_cache.shape[-1] // 2,
-            index_q_packed,
-            index_q_packed.stride(0),
-            index_q_packed.stride(1),
-            index_q_scale,
-            index_q_scale.stride(0),
-            index_q_scale.stride(1),
-            index_q_head_dim,
-            MXFP4_BLOCK_SIZE,
-            index_weights,
-            index_weights.stride(0),
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_weights_out,
-            index_weights_out.stride(0),
-            num_warps=1,  # TODO: Tune this
-        )
+        if has_cutedsl():
+            # lazily import, otherwise some tests fail due to CUDA driver init failure.
+            from .fused_indexer_q_cutedsl import (
+                fused_indexer_q_rope_quant_mxfp4_cutedsl,
+            )
+
+            fused_indexer_q_rope_quant_mxfp4_cutedsl(
+                positions,
+                index_q,
+                index_q_cos_sin_cache,
+                index_weights,
+                index_weights_softmax_scale,
+                index_weights_head_scale,
+                index_q_packed,
+                index_q_scale,
+                index_weights_out,
+            )
+        else:
+            _fused_indexer_q_rope_mxfp4_kernel[(num_tokens, num_index_q_heads)](
+                positions,
+                index_q,
+                index_q.stride(0),
+                index_q.stride(1),
+                index_q_cos_sin_cache,
+                index_q_cos_sin_cache.stride(0),
+                index_q_cos_sin_cache.shape[-1] // 2,
+                index_q_packed,
+                index_q_packed.stride(0),
+                index_q_packed.stride(1),
+                index_q_scale,
+                index_q_scale.stride(0),
+                index_q_scale.stride(1),
+                index_q_head_dim,
+                MXFP4_BLOCK_SIZE,
+                index_weights,
+                index_weights.stride(0),
+                index_weights_softmax_scale,
+                index_weights_head_scale,
+                index_weights_out,
+                index_weights_out.stride(0),
+                num_warps=1,  # TODO: Tune this
+            )
+
         # Values stay uint8 (2 E2M1 nibbles per byte). Scales are 4 ue8m0
         # bytes per (token, head) reinterpreted as one int32, then squeezed
         # from (T, H, 1) to (T, H) to match DeepGEMM's expected q_sf rank
