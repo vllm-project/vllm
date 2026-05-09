@@ -56,6 +56,8 @@ class EngineCoreSentinel(BaseSentinel):
         )
         self.stop_busy_loop = threading.Event()
         self.busy_loop_paused = threading.Event()
+        self.worker_responsive = threading.Event()
+        self.worker_responsive.set()
         self.worker_cmd_socket = make_zmq_socket(
             ctx=self.ctx,
             path=worker_cmd_addr,
@@ -83,12 +85,7 @@ class EngineCoreSentinel(BaseSentinel):
     def engine(self) -> "EngineCoreProc":
         return self.host
 
-    def report_fault_events(self, engine_exception):
-        engine_status = (
-            EngineStatusType.PAUSED
-            if isinstance(engine_exception, EngineLoopPausedError)
-            else EngineStatusType.UNHEALTHY
-        )
+    def report_fault_events(self, engine_exception, engine_status: EngineStatusType):
         msg = FaultInfo.from_exception(
             engine_exception, self.engine_index, engine_status
         )
@@ -97,6 +94,16 @@ class EngineCoreSentinel(BaseSentinel):
 
     def handle_fault(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         return self._execute_cmd(ft_request)
+
+    def check_worker_responsive(self) -> bool:
+        # Check if workers are responsive. Should only be called in busy_loop thread.
+        try:
+            self.engine.model_executor.check_health()
+            return True
+        except Exception:
+            self.worker_responsive.clear()
+            logger.exception("Executor check_health() failed; worker may not recover.")
+            return False
 
     def pause(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         """Pause the busy loop of engine core safely."""
@@ -114,11 +121,15 @@ class EngineCoreSentinel(BaseSentinel):
             timeout=timeout,
         )
         remaining_timeout = max(0, deadline - time.monotonic())
-        success = self.busy_loop_paused.wait(remaining_timeout)
+        # Wait for the busy loop to acknowledge the pause signal and pause itself.
+        if success := self.busy_loop_paused.wait(remaining_timeout):
+            remaining_timeout = max(0, deadline - time.monotonic())
+            # Ensure the workers are responsive now.
+            success = self.worker_responsive.wait(remaining_timeout)
         return FaultToleranceResult(
             request_id=ft_request.request_id,
             success=success,
-            reason=None if success else "Busy loop did not pause within timeout.",
+            reason=None if success else "The engine did not pause within timeout.",
         )
 
     def _execute_command_on_workers(
@@ -135,25 +146,16 @@ class EngineCoreSentinel(BaseSentinel):
         pending = set(target_worker_sentinels)
         deadline = time.monotonic() + timeout
 
-        while pending:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-
+        while pending and (remaining := deadline - time.monotonic()) > 0:
             events = dict(self.worker_cmd_poller.poll(timeout=int(remaining * 1000)))
             if self.worker_cmd_socket not in events:
                 continue
 
             identity, _, msg = self.worker_cmd_socket.recv_multipart()
-
             res = msgspec.msgpack.decode(msg, type=FaultToleranceResult)
-
-            # Only consider responses that match the current request ID.
-            if identity not in pending or res.request_id != ft_request.request_id:
-                continue
-
-            results[identity] = res
-            pending.remove(identity)
+            if identity in pending and res.request_id == ft_request.request_id:
+                results[identity] = res
+                pending.remove(identity)
 
         # For any workers that did not respond within the timeout, mark them as failed.
         for identity in pending:
@@ -189,20 +191,31 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
         while True:
             try:
                 if self.enable_fault_tolerance:
-                    self.engine_core_sentinel.busy_loop_paused.clear()
+                    self.sentinel.busy_loop_paused.clear()
                 busy_loop_func(self)
             except SystemExit:
                 raise
-            except Exception as original_exc:
+            except Exception as e:
                 if self.enable_fault_tolerance:
                     logger.warning(
                         "[BusyLoopWrapper] EngineCore %s: %s\n Call Stack:\n%s",
-                        type(original_exc).__name__,
-                        original_exc,
-                        "".join(traceback.format_tb(original_exc.__traceback__)),
+                        type(e).__name__,
+                        e,
+                        "".join(traceback.format_tb(e.__traceback__)),
                     )
-                    self.engine_core_sentinel.busy_loop_paused.set()
-                    self.engine_core_sentinel.report_fault_events(original_exc)
+                    self.sentinel.busy_loop_paused.set()
+                    if isinstance(e, EngineLoopPausedError):
+                        # In async scheduling, treat worker state as temporarily HUNG
+                        # until health check completes.
+                        self.sentinel.worker_responsive.clear()
+                        self.sentinel.report_fault_events(e, EngineStatusType.HUNG)
+                        if self.sentinel.check_worker_responsive():
+                            self.sentinel.worker_responsive.set()
+                            self.sentinel.report_fault_events(
+                                e, EngineStatusType.PAUSED
+                            )
+                    else:
+                        self.sentinel.report_fault_events(e, EngineStatusType.UNHEALTHY)
                     logger.warning(
                         "[BusyLoopWrapper] Busy loop Suspended and "
                         "waiting for fault tolerance instructions.",
@@ -210,7 +223,7 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
                     # todo: Currently only wait a certain time before shutting
                     #  down the engine. Will implement fault tolerance methods
                     #  in the upcoming PRs.
-                    time.sleep(self.engine_core_sentinel.engine_recovery_timeout_sec)
+                    time.sleep(self.sentinel.engine_recovery_timeout_sec)
 
                 # Fault tolerance not enabled OR no instruction received
                 # before timeout. Re-raise the original exception

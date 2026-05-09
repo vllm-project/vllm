@@ -85,25 +85,6 @@ def client_sentinel(mock_parallel_config, mock_ft_addresses, mock_call_utility_a
 
 
 # -------------------------- Test Cases --------------------------
-def test_engine_status_wire_format_is_pinned():
-    expected = {
-        EngineStatusType.HEALTHY: (0, "healthy"),
-        EngineStatusType.DEAD: (1, "dead"),
-        EngineStatusType.UNHEALTHY: (2, "unhealthy"),
-        EngineStatusType.PAUSED: (3, "paused"),
-    }
-
-    missing = set(EngineStatusType) - set(expected)
-    assert not missing, (
-        "Add new EngineStatusType values to this pin table. "
-        f"Missing: {sorted(m.name for m in missing)}"
-    )
-
-    for member, (expected_int, expected_str) in expected.items():
-        assert int(member) == expected_int
-        assert member.name.lower() == expected_str
-
-
 @pytest.mark.asyncio
 async def test_client_sentinel_initialization(client_sentinel: ClientSentinel):
     """Test ClientSentinel initialization logic."""

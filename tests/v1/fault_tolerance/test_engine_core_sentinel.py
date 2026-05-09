@@ -10,6 +10,7 @@ import zmq
 from msgspec import msgpack
 
 from vllm.config import FaultToleranceConfig, ParallelConfig
+from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance import EngineCoreSentinel
 from vllm.v1.fault_tolerance.utils import FaultInfo
 from vllm.v1.utils import get_engine_client_zmq_addr
@@ -95,7 +96,9 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config
 
     try:
         time.sleep(0.1)
-        sentinel.report_fault_events(RuntimeError("test exception"))
+        sentinel.report_fault_events(
+            RuntimeError("test exception"), EngineStatusType.UNHEALTHY
+        )
         # Wait for the sentinel to forward the fault to the engine_fault socket.
         if not engine_fault_receiver.poll(timeout=5000):
             pytest.fail("Timeout waiting for engine fault message from sentinel")
@@ -110,3 +113,23 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config
         engine_fault_receiver.close(linger=0)
         sentinel.shutdown()
         ctx.term()
+
+
+def test_engine_status_wire_format_is_pinned():
+    expected = {
+        EngineStatusType.HEALTHY: (0, "healthy"),
+        EngineStatusType.DEAD: (1, "dead"),
+        EngineStatusType.UNHEALTHY: (2, "unhealthy"),
+        EngineStatusType.PAUSED: (3, "paused"),
+        EngineStatusType.HUNG: (4, "hung"),
+    }
+
+    missing = set(EngineStatusType) - set(expected)
+    assert not missing, (
+        "Add new EngineStatusType values to this pin table. "
+        f"Missing: {sorted(m.name for m in missing)}"
+    )
+
+    for member, (expected_int, expected_str) in expected.items():
+        assert int(member) == expected_int
+        assert member.name.lower() == expected_str

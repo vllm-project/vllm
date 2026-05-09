@@ -156,7 +156,7 @@ class ClientSentinel(BaseSentinel):
         target_engines = [
             self.engine_identities[i - self.start_rank]
             for i, status in self.engine_status_dict.items()
-            if status["status"] == "healthy"
+            if status["status"] in ["healthy", "hung"]
             and (exclude_engine_index is None or i not in exclude_engine_index)
         ]
         res = await self._execute_cmd_on_engines(ft_request, target_engines)

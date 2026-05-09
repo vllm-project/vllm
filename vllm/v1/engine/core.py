@@ -892,7 +892,7 @@ class EngineCoreProc(EngineCore):
                 engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
                 # The ZMQ address between engine_core_sentinel and worker_sentinel.
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
-                self.engine_core_sentinel = EngineCoreSentinel(
+                self.sentinel = EngineCoreSentinel(
                     parallel_config=vllm_config.parallel_config,
                     engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
@@ -1200,10 +1200,7 @@ class EngineCoreProc(EngineCore):
         raise SystemExit
 
     def _ensure_busy_loop_running(self):
-        if (
-            self.enable_fault_tolerance
-            and self.engine_core_sentinel.stop_busy_loop.is_set()
-        ):
+        if self.enable_fault_tolerance and self.sentinel.stop_busy_loop.is_set():
             raise EngineLoopPausedError("Engine busy loop is paused.")
         return True
 
@@ -1575,12 +1572,10 @@ class EngineCoreProc(EngineCore):
                     reuse_buffers.append(buffer)
 
     def handle_fault(self, call_id: int, client_index: int, args: dict):
-        """Call engine_core_sentinel to perform fault tolerance."""
+        """Call sentinel to perform fault tolerance."""
         uo = UtilityOutput(call_id=call_id)
         try:
-            ft_result = self.engine_core_sentinel.handle_fault(
-                FaultToleranceRequest(**args)
-            )
+            ft_result = self.sentinel.handle_fault(FaultToleranceRequest(**args))
             uo.result = UtilityResult(ft_result)
         except Exception as e:
             logger.exception("Call to handle_fault method failed")
@@ -1671,7 +1666,7 @@ class EngineCoreProc(EngineCore):
     def shutdown(self):
         super().shutdown()
         if self.enable_fault_tolerance:
-            self.engine_core_sentinel.shutdown()
+            self.sentinel.shutdown()
 
 
 class DPEngineCoreProc(EngineCoreProc):
