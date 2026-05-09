@@ -267,3 +267,12 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class EngineStatusType(enum.IntEnum):
+    # Cases where EngineCoreProc runs normally
+    HEALTHY = 0
+    # Cases where the EngineCoreProc process exits
+    DEAD = 1
+    # Cases where EngineCoreProc throws exceptions but does not exit
+    UNHEALTHY = 2
