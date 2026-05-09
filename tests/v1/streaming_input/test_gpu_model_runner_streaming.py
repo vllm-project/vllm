@@ -243,8 +243,6 @@ def _make_steering_runner():
     runner._steering_manager.register_config = Mock()
     runner._steering_manager.release_config = Mock()
     runner._req_steering_phase = {}
-    runner._pending_steering_transitions = []
-    runner._pending_steering_registrations = []
     return runner
 
 
@@ -458,9 +456,10 @@ def test_streaming_update_no_steering_manager():
     assert updated.decode_steering_config_hash == 444
 
 
-def test_streaming_update_deferred_registration():
-    """When register_config raises RuntimeError, the registration is deferred
-    and the phase is still tracked."""
+def test_streaming_update_capacity_error_propagates():
+    """When register_config raises RuntimeError under the strict-capacity
+    contract, the streaming refresh path must propagate the exception
+    rather than silently deferring it."""
     runner = _make_steering_runner()
     req_id = "steer_req_5"
 
@@ -479,21 +478,11 @@ def test_streaming_update_deferred_registration():
         effective_prefill=prefill_vectors,
     )
 
-    GPUModelRunner._update_streaming_request(runner, req_id, new_req_data)
+    with pytest.raises(RuntimeError, match="capacity full"):
+        GPUModelRunner._update_streaming_request(runner, req_id, new_req_data)
 
-    # Registration was attempted.
+    # Registration was attempted exactly once before the raise.
     runner._steering_manager.register_config.assert_called_once()
-
-    # Deferred entry appended.
-    assert len(runner._pending_steering_registrations) == 1
-    entry = runner._pending_steering_registrations[0]
-    assert entry[0] == req_id
-    assert entry[1] == 555
-    assert entry[2] is prefill_vectors
-    assert entry[3] == "prefill"
-
-    # Phase still set despite deferral.
-    assert runner._req_steering_phase[req_id] == "prefill"
 
 
 def test_streaming_update_decode_phase_no_hash_vector_mismatch():
@@ -542,8 +531,6 @@ def test_streaming_update_decode_phase_no_hash_vector_mismatch():
     mgr = SteeringManager(max_steering_configs=4)
     runner._steering_manager = mgr
     runner._req_steering_phase = {}
-    runner._pending_steering_transitions = []
-    runner._pending_steering_registrations = []
 
     req_id = "hash_mismatch_req"
 
@@ -638,6 +625,3 @@ def test_streaming_update_decode_phase_no_hash_vector_mismatch():
 
     # 7. Phase must be "prefill" (streaming re-adds start in prefill).
     assert runner._req_steering_phase[req_id] == "prefill"
-
-    # 8. No deferred registrations (capacity was not exhausted).
-    assert len(runner._pending_steering_registrations) == 0

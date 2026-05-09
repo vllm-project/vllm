@@ -74,12 +74,6 @@ class SteeringModelRunnerMixin:
     # attribute access is safe without ``hasattr`` guards.
     _steering_manager: SteeringManager | None = None
     _steerable_layers_cache: dict[int, nn.Module] | None = None
-    _pending_steering_transitions: list[
-        tuple[str, int, dict[str, dict[int, list[float]]], str]
-    ]
-    _pending_steering_registrations: list[
-        tuple[str, int, dict[str, dict[int, list[float]]], str]
-    ]
     _req_steering_phase: dict[str, str]
     _steering_index_dirty: bool
     # Worker-side mirror of the API server's named steering module
@@ -157,8 +151,6 @@ class SteeringModelRunnerMixin:
         self._locally_owned_layers = frozenset(steerable.keys())
         self._req_steering_phase = {}
         self._steering_index_dirty = False
-        self._pending_steering_transitions = []
-        self._pending_steering_registrations = []
         self._steering_module_registry = {}
 
         steering_config = getattr(self.vllm_config, "steering_config", None)
@@ -659,9 +651,8 @@ class SteeringModelRunnerMixin:
         """Update per-layer steering tables and the shared steering index.
 
         Each step:
-        1. Drain any deferred steering registrations
-        2. Populate each layer's per-hook steering_table from the manager
-        3. Build the steering_index mapping tokens to table rows
+        1. Populate each layer's per-hook steering_table from the manager
+        2. Build the steering_index mapping tokens to table rows
 
         The ``SteeringManager`` is constructed eagerly during model
         load by ``_init_steering_state``.  When steering is disabled
@@ -672,66 +663,6 @@ class SteeringModelRunnerMixin:
         """
         if self._steering_manager is None or not self._steerable_layers_cache:
             return
-
-        # Process deferred steering entries with a two-queue priority
-        # model.  Transitions (prefill→decode) are drained first because
-        # they represent in-flight requests that already consumed KV
-        # cache.  New-request registrations are only attempted once the
-        # transitions queue is empty.  Entries are dropped when the
-        # originating request has finished or changed phase, preventing
-        # row leaks.
-        if self._pending_steering_transitions:
-            still_transitions: list[
-                tuple[str, int, dict[str, dict[int, list[float]]], str]
-            ] = []
-            for (
-                d_req_id,
-                d_hash,
-                d_vecs,
-                d_phase,
-            ) in self._pending_steering_transitions:
-                if d_req_id not in self.requests:
-                    continue
-                if self._req_steering_phase.get(d_req_id) != d_phase:
-                    continue
-                try:
-                    self._steering_manager.register_config(
-                        d_hash,
-                        d_vecs,
-                        phase=d_phase,
-                        locally_owned_layers=self._locally_owned_layers,
-                    )
-                except RuntimeError:
-                    still_transitions.append((d_req_id, d_hash, d_vecs, d_phase))
-            self._pending_steering_transitions = still_transitions
-
-        if (
-            not self._pending_steering_transitions
-            and self._pending_steering_registrations
-        ):
-            still_pending: list[
-                tuple[str, int, dict[str, dict[int, list[float]]], str]
-            ] = []
-            for (
-                d_req_id,
-                d_hash,
-                d_vecs,
-                d_phase,
-            ) in self._pending_steering_registrations:
-                if d_req_id not in self.requests:
-                    continue
-                if self._req_steering_phase.get(d_req_id) != d_phase:
-                    continue
-                try:
-                    self._steering_manager.register_config(
-                        d_hash,
-                        d_vecs,
-                        phase=d_phase,
-                        locally_owned_layers=self._locally_owned_layers,
-                    )
-                except RuntimeError:
-                    still_pending.append((d_req_id, d_hash, d_vecs, d_phase))
-            self._pending_steering_registrations = still_pending
 
         # Short-circuit when no steering state is actually active. The model
         # runner allocates per-layer steering buffers (zero-initialized) and
@@ -899,11 +830,12 @@ class SteeringModelRunnerMixin:
         Releases the prefill config and registers the decode config
         so it is ready for the next step's table population.
 
-        If the steering table is at capacity, the decode registration
-        is deferred to ``_pending_steering_registrations`` and retried
-        on the next scheduler step.  The existing ``get_row_for_config``
-        fallback (returns row 2 for unregistered decode hashes) provides
-        graceful degradation during the deferral period.
+        Capacity for the decode row is reserved by the scheduler at
+        the same step the prefill is scheduled to complete (see the
+        ``will_complete`` branch in ``Scheduler._schedule_running``),
+        so ``register_config`` is expected to succeed.  If it raises,
+        that's a scheduler accounting bug and the exception
+        propagates.
         """
         mgr = self._steering_manager
         assert mgr is not None, (
@@ -919,30 +851,13 @@ class SteeringModelRunnerMixin:
                 sp = req_state.sampling_params
                 effective_decode = self._resolve_request_steering(sp, "decode")
                 if effective_decode:
-                    try:
-                        mgr.register_config(
-                            decode_hash,
-                            effective_decode,
-                            phase="decode",
-                            locally_owned_layers=self._locally_owned_layers,
-                        )
-                    except RuntimeError:
-                        self._pending_steering_transitions.append(
-                            (
-                                req_id,
-                                decode_hash,
-                                effective_decode,
-                                "decode",
-                            )
-                        )
-                        logger.warning(
-                            "Deferred decode steering config (hash=%d) "
-                            "-- capacity full, will retry next step",
-                            decode_hash,
-                        )
+                    mgr.register_config(
+                        decode_hash,
+                        effective_decode,
+                        phase="decode",
+                        locally_owned_layers=self._locally_owned_layers,
+                    )
 
-        # Update phase tracking regardless of whether decode
-        # registration succeeded or was deferred.
         self._req_steering_phase[req_id] = "decode"
 
     def _reset_steering_for_resumption(
@@ -957,9 +872,12 @@ class SteeringModelRunnerMixin:
         reset. If the request had transitioned to decode before preemption,
         its decode config is still registered and its phase is stale.
         This helper releases the stale decode config and re-registers the
-        prefill config (or defers it on capacity exhaustion).
+        prefill config.  The scheduler reserves the prefill row when it
+        re-admits the resumed request, so ``register_config`` is expected
+        to succeed; a ``RuntimeError`` here indicates a scheduler bug and
+        propagates.
         """
-        mgr = getattr(self, "_steering_manager", None)
+        mgr = self._steering_manager
         if mgr is None:
             return
         prev_phase = self._req_steering_phase.get(req_id)
@@ -972,16 +890,6 @@ class SteeringModelRunnerMixin:
         if req_state.decode_steering_config_hash != 0:
             mgr.release_config(req_state.decode_steering_config_hash, "decode")
 
-        # Drop any stale deferred entries for this request.
-        if self._pending_steering_transitions:
-            self._pending_steering_transitions = [
-                e for e in self._pending_steering_transitions if e[0] != req_id
-            ]
-        if self._pending_steering_registrations:
-            self._pending_steering_registrations = [
-                e for e in self._pending_steering_registrations if e[0] != req_id
-            ]
-
         self._req_steering_phase[req_id] = "prefill"
 
         sp = req_state.sampling_params
@@ -991,22 +899,12 @@ class SteeringModelRunnerMixin:
         effective_prefill = self._resolve_request_steering(sp, "prefill")
         if not effective_prefill:
             return
-        try:
-            mgr.register_config(
-                prefill_hash,
-                effective_prefill,
-                phase="prefill",
-                locally_owned_layers=self._locally_owned_layers,
-            )
-        except RuntimeError:
-            self._pending_steering_registrations.append(
-                (req_id, prefill_hash, effective_prefill, "prefill")
-            )
-            logger.warning(
-                "Deferred prefill steering config (hash=%d) on resumption "
-                "-- capacity full, will retry next step",
-                prefill_hash,
-            )
+        mgr.register_config(
+            prefill_hash,
+            effective_prefill,
+            phase="prefill",
+            locally_owned_layers=self._locally_owned_layers,
+        )
 
     # -----------------------------------------------------------------------
     # Hooks called from _update_states() / _update_streaming_request()
@@ -1017,13 +915,11 @@ class SteeringModelRunnerMixin:
     ) -> None:
         """Release the currently-active steering config for finished requests.
 
-        Also drops deferred entries for those requests before
-        ``self.requests`` is pruned, preventing row leaks.  Called
-        before finished request state is popped so
+        Called before finished request state is popped so
         ``prefill_steering_config_hash`` /
         ``decode_steering_config_hash`` are still accessible.
         """
-        mgr = getattr(self, "_steering_manager", None)
+        mgr = self._steering_manager
         if mgr is None:
             return
 
@@ -1039,24 +935,6 @@ class SteeringModelRunnerMixin:
                     if h != 0:
                         mgr.release_config(h, phase)
 
-        # Also remove any deferred steering entries for finished
-        # requests to prevent registering rows for dead requests.
-        # (The retry loop also checks, but this eagerly drops
-        # entries before self.requests is pruned below.)
-        finished = set(finished_req_ids)
-        if self._pending_steering_transitions:
-            self._pending_steering_transitions = [
-                entry
-                for entry in self._pending_steering_transitions
-                if entry[0] not in finished
-            ]
-        if self._pending_steering_registrations:
-            self._pending_steering_registrations = [
-                entry
-                for entry in self._pending_steering_registrations
-                if entry[0] not in finished
-            ]
-
     def _register_initial_steering_config(
         self,
         req_id: str,
@@ -1067,9 +945,11 @@ class SteeringModelRunnerMixin:
 
         Normally requests start in prefill, but a full prefix-cache hit
         (``num_computed >= num_prompt``) puts a request directly into
-        decode.  Handles capacity-exhaustion deferral.
+        decode.  The scheduler reserves the appropriate row at admission
+        time, so ``register_config`` is expected to succeed; a
+        ``RuntimeError`` here indicates a scheduler bug and propagates.
         """
-        mgr = getattr(self, "_steering_manager", None)
+        mgr = self._steering_manager
         if mgr is None or new_req_data.sampling_params is None:
             return
 
@@ -1078,56 +958,24 @@ class SteeringModelRunnerMixin:
             # Already past prefill — register decode config.
             effective_decode = self._resolve_request_steering(sp, "decode")
             if new_req_data.decode_steering_config_hash != 0 and effective_decode:
-                try:
-                    mgr.register_config(
-                        new_req_data.decode_steering_config_hash,
-                        effective_decode,
-                        phase="decode",
-                        locally_owned_layers=self._locally_owned_layers,
-                    )
-                except RuntimeError:
-                    self._pending_steering_registrations.append(
-                        (
-                            req_id,
-                            new_req_data.decode_steering_config_hash,
-                            effective_decode,
-                            "decode",
-                        )
-                    )
-                    logger.warning(
-                        "Deferred decode steering config "
-                        "(hash=%d) -- capacity full, "
-                        "will retry next step",
-                        new_req_data.decode_steering_config_hash,
-                    )
+                mgr.register_config(
+                    new_req_data.decode_steering_config_hash,
+                    effective_decode,
+                    phase="decode",
+                    locally_owned_layers=self._locally_owned_layers,
+                )
             self._req_steering_phase[req_id] = "decode"
         else:
             # Normal: start in prefill; decode registered
             # on transition in _update_steering_buffers.
             effective_prefill = self._resolve_request_steering(sp, "prefill")
             if new_req_data.prefill_steering_config_hash != 0 and effective_prefill:
-                try:
-                    mgr.register_config(
-                        new_req_data.prefill_steering_config_hash,
-                        effective_prefill,
-                        phase="prefill",
-                        locally_owned_layers=self._locally_owned_layers,
-                    )
-                except RuntimeError:
-                    self._pending_steering_registrations.append(
-                        (
-                            req_id,
-                            new_req_data.prefill_steering_config_hash,
-                            effective_prefill,
-                            "prefill",
-                        )
-                    )
-                    logger.warning(
-                        "Deferred prefill steering config "
-                        "(hash=%d) -- capacity full, "
-                        "will retry next step",
-                        new_req_data.prefill_steering_config_hash,
-                    )
+                mgr.register_config(
+                    new_req_data.prefill_steering_config_hash,
+                    effective_prefill,
+                    phase="prefill",
+                    locally_owned_layers=self._locally_owned_layers,
+                )
             self._req_steering_phase[req_id] = "prefill"
 
     def _refresh_streaming_steering(
@@ -1143,11 +991,15 @@ class SteeringModelRunnerMixin:
 
         Streaming re-adds go back through prefill, so we must:
         1. Release the old config (whatever phase we were tracking)
-        2. Purge stale deferred entries for this request
-        3. Register the new prefill config
-        4. Update phase tracking
+        2. Register the new prefill config
+        3. Update phase tracking
+
+        The scheduler reserves the prefill row when re-admitting the
+        streaming request, so ``register_config`` is expected to
+        succeed; a ``RuntimeError`` here indicates a scheduler bug and
+        propagates.
         """
-        mgr = getattr(self, "_steering_manager", None)
+        mgr = self._steering_manager
         if mgr is None:
             return
 
@@ -1159,20 +1011,6 @@ class SteeringModelRunnerMixin:
             elif old_phase == "decode" and old_decode_hash != 0:
                 mgr.release_config(old_decode_hash, "decode")
 
-        # Purge stale deferred entries for this request.
-        if self._pending_steering_transitions:
-            self._pending_steering_transitions = [
-                entry
-                for entry in self._pending_steering_transitions
-                if entry[0] != req_id
-            ]
-        if self._pending_steering_registrations:
-            self._pending_steering_registrations = [
-                entry
-                for entry in self._pending_steering_registrations
-                if entry[0] != req_id
-            ]
-
         # Register new prefill config (streaming re-adds start
         # in prefill).
         sp = new_req_data.sampling_params
@@ -1180,28 +1018,12 @@ class SteeringModelRunnerMixin:
             self._resolve_request_steering(sp, "prefill") if sp is not None else None
         )
         if new_prefill_hash != 0 and sp is not None and effective_prefill:
-            try:
-                mgr.register_config(
-                    new_prefill_hash,
-                    effective_prefill,
-                    phase="prefill",
-                    locally_owned_layers=self._locally_owned_layers,
-                )
-            except RuntimeError:
-                self._pending_steering_registrations.append(
-                    (
-                        req_id,
-                        new_prefill_hash,
-                        effective_prefill,
-                        "prefill",
-                    )
-                )
-                logger.warning(
-                    "Deferred prefill steering config "
-                    "(hash=%d) for streaming re-add -- "
-                    "capacity full, will retry next step",
-                    new_prefill_hash,
-                )
+            mgr.register_config(
+                new_prefill_hash,
+                effective_prefill,
+                phase="prefill",
+                locally_owned_layers=self._locally_owned_layers,
+            )
             self._req_steering_phase[req_id] = "prefill"
         elif new_prefill_hash == 0 and new_decode_hash == 0:
             # No steering for this request anymore.
