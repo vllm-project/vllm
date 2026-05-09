@@ -19,9 +19,12 @@ Where ``scale(entry)`` means: if entry is a bare list, scale=1.0; if entry is
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from vllm.sampling_params import SamplingParams
 
 # Per-layer entry: bare list (scale=1.0) or {"vector": [...], "scale": float}.
 # This is the public, user-facing shape — the type alias is exposed as a
@@ -158,6 +161,105 @@ def resolve_effective_vectors(
         if hook_result:
             result[hook] = hook_result
 
+    return result if result else None
+
+
+def _torch_dtype_to_pack_dtype(torch_dtype: object) -> np.dtype:
+    """Pick the numpy dtype to pack steering vectors as for *torch_dtype*.
+
+    Maps the model's compute dtype to a numpy dtype for the wire-format
+    packing path.  Numpy lacks a native ``bfloat16`` (without the
+    optional ``ml_dtypes`` package), so bf16 models fall back to
+    ``float32`` — still a ~2.25× IPC reduction over msgpack-encoded
+    Python float lists.
+    """
+    name = getattr(torch_dtype, "__str__", lambda: "")().rsplit(".", 1)[-1]
+    if name == "float16":
+        return np.dtype(np.float16)
+    if name == "float64":
+        return np.dtype(np.float64)
+    if name in ("bfloat16",):
+        return np.dtype(np.float32)
+    return np.dtype(np.float32)
+
+
+def pack_effective_steering(
+    spec_base: SteeringVectorSpec | None,
+    spec_phase: SteeringVectorSpec | None,
+    dtype: np.dtype | str,
+) -> dict[str, dict[int, np.ndarray]] | None:
+    """Resolve and pack inline steering specs in one shot.
+
+    Equivalent to ``resolve_effective_vectors(spec_base, spec_phase)``
+    cast to *dtype*, but does the cast inline so we never allocate the
+    intermediate float64 arrays purely for the cast-then-discard.
+    Used by the LLM client (and HTTP server) to build the
+    ``effective_*_steering_packed`` fields on :class:`SamplingParams`
+    before request submission.
+
+    Returns ``None`` when both inputs are ``None`` / empty.
+    """
+    if not spec_base and not spec_phase:
+        return None
+    np_dtype = np.dtype(dtype)
+    resolved = resolve_effective_vectors(spec_base, spec_phase)
+    if resolved is None:
+        return None
+    out: dict[str, dict[int, np.ndarray]] = {}
+    for hook, layer_dict in resolved.items():
+        out[hook] = {
+            layer_idx: arr.astype(np_dtype, copy=False)
+            for layer_idx, arr in layer_dict.items()
+        }
+    return out
+
+
+def pack_steering_for_dtype(
+    spec: SteeringVectorSpec | None,
+    dtype: np.dtype | str,
+) -> dict[str, dict[int, np.ndarray]] | None:
+    """Pre-bake a :class:`SteeringVectorSpec` into model-dtype ``ndarray`` form.
+
+    Converts every per-layer entry — bare-list or ``{"vector", "scale"}``
+    dict — into a 1-D ``np.ndarray`` in *dtype* with the inner ``scale``
+    already applied.  Returned shape:
+    ``{hook: {layer_idx: ndarray[dtype]}}``.
+
+    Used by the inline-vectors fast path: the LLM client (or HTTP server)
+    converts user-supplied list-of-floats into this packed form before
+    serializing into the request body, so the wire payload carries
+    ``len(vec) * dtype.itemsize`` bytes per layer instead of
+    ``len(vec) * 9`` bytes (msgpack-encoded floats).  The downstream
+    resolver (:func:`resolve_effective_vectors` and
+    :func:`merge_steering_specs`) already accepts ``ndarray`` entries
+    transparently, so packed inputs flow through without further
+    conversion.
+
+    Returns ``None`` if *spec* is ``None`` or empty.
+    """
+    if not spec:
+        return None
+    np_dtype = np.dtype(dtype)
+    result: dict[str, dict[int, np.ndarray]] = {}
+    for hook, layer_dict in spec.items():
+        if not layer_dict:
+            continue
+        packed: dict[int, np.ndarray] = {}
+        for layer_idx, entry in layer_dict.items():
+            vec, scale = normalize_layer_entry(entry)
+            arr = np.asarray(vec, dtype=np_dtype)
+            if scale != 1.0:
+                # Cast the scale to the target dtype so the multiply
+                # stays in-place (avoiding an fp32 promotion that the
+                # caller would only have to cast back).
+                arr = arr * np_dtype.type(scale)
+                # ``arr * scalar`` on a non-fp32 ndarray sometimes
+                # returns a higher-precision result; force it back.
+                if arr.dtype != np_dtype:
+                    arr = arr.astype(np_dtype, copy=False)
+            packed[layer_idx] = arr
+        if packed:
+            result[hook] = packed
     return result if result else None
 
 
@@ -317,3 +419,67 @@ def hash_steering_config(
         h.update(name.encode("utf-8"))
         h.update(np.float64(scale).tobytes())
     return int(h.hexdigest()[:16], 16) & 0x7FFFFFFFFFFFFFFF
+
+
+def maybe_pack_inline_steering_for_request(
+    sp: SamplingParams,
+    torch_dtype: object,
+) -> None:
+    """Pre-resolve + pack inline steering vectors on *sp* in-place.
+
+    Shared between :class:`vllm.entrypoints.LLM` (sync path) and
+    :class:`vllm.v1.engine.async_llm.AsyncLLM` (HTTP path), called just
+    before the request crosses the multiprocessing boundary.  See
+    :meth:`SamplingParams._effective_prefill_steering_packed` for the
+    contract.
+
+    No-ops when:
+
+    - all inline tier fields are ``None`` (named-only or no-steering);
+    - packed fields are already set (idempotency for callers that
+      pre-packed).
+
+    Mutates *sp* by:
+    1. Reading ``prefill_steering_config_hash`` and
+       ``decode_steering_config_hash`` to fix the hash against the
+       original fp64-resolved values (preserves prefix-cache reuse).
+    2. Setting ``effective_*_steering_packed`` to the model-dtype
+       ``ndarray`` form of the resolved per-phase specs.
+    3. Clearing ``steering_vectors`` / ``prefill_steering_vectors`` /
+       ``decode_steering_vectors`` so the wire payload doesn't carry
+       both forms.
+    4. Stashing the packed dicts as the cached values for the
+       ``effective_*_steering`` cached_properties so worker-side reads
+       return them directly without re-resolving.
+    """
+    if (
+        sp.steering_vectors is None
+        and sp.prefill_steering_vectors is None
+        and sp.decode_steering_vectors is None
+    ):
+        return
+    if (
+        sp._effective_prefill_steering_packed is not None
+        or sp._effective_decode_steering_packed is not None
+    ):
+        return
+
+    np_dtype = _torch_dtype_to_pack_dtype(torch_dtype)
+
+    # Prime the hash cached_properties against the original fp64 path
+    # so a packed and an unpacked submission of the same logical request
+    # share a prefix-cache hash.
+    _ = sp.prefill_steering_config_hash
+    _ = sp.decode_steering_config_hash
+
+    sp._effective_prefill_steering_packed = pack_effective_steering(
+        sp.steering_vectors, sp.prefill_steering_vectors, np_dtype
+    )
+    sp._effective_decode_steering_packed = pack_effective_steering(
+        sp.steering_vectors, sp.decode_steering_vectors, np_dtype
+    )
+    sp.steering_vectors = None
+    sp.prefill_steering_vectors = None
+    sp.decode_steering_vectors = None
+    sp.__dict__["effective_prefill_steering"] = sp._effective_prefill_steering_packed
+    sp.__dict__["effective_decode_steering"] = sp._effective_decode_steering_packed
