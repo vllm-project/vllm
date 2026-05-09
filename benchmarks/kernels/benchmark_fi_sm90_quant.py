@@ -93,8 +93,7 @@ def _run_comparison(
     }
 
     if "FI_SM90" in timings and "CUDA" in timings:
-        result["fi_vs_cuda_ratio"] = timings["FI_SM90"] / timings["CUDA"]
-        result["fi_vs_cuda_pct"] = (result["fi_vs_cuda_ratio"] - 1) * 100
+        result["speedup"] = timings["CUDA"] / timings["FI_SM90"]
         correct = (q_fi is not None and torch.equal(q_fi, q_cuda)
                    and torch.allclose(s_fi, s_cuda, atol=0, rtol=0))
         result["correct"] = correct
@@ -126,7 +125,7 @@ if __name__ == "__main__":
     results: list[dict[str, Any]] = []
     header = (
         f"{'Shape':>14} | {'FI_SM90 (ms)':>13} | {'CUDA (ms)':>13} | "
-        f"{'FI/CUDA':>9} | {'Correct':>8}"
+        f"{'Speedup':>9} | {'Correct':>8}"
     )
     print(header)
     print("-" * len(header))
@@ -141,7 +140,7 @@ if __name__ == "__main__":
             shape_s = f"({num_tokens}, {hidden_dim})"
             fi_s = f"{r['fi_ms']:10.3f} ms" if r.get("fi_ms") else "       n/a   "
             cu_s = f"{r['cuda_ms']:10.3f} ms" if r.get("cuda_ms") else "       n/a   "
-            ratio_s = f"{r['fi_vs_cuda_ratio']:6.3f}x" if "fi_vs_cuda_ratio" in r else "    -"
+            ratio_s = f"{r['speedup']:6.3f}x" if "speedup" in r else "    -"
             cor_s = "OK" if r.get("correct") else ("MISMATCH" if r.get("correct") is False else "-")
             print(f"{shape_s:>14} | {fi_s:>13} | {cu_s:>13} | {ratio_s:>9} | {cor_s:>8}")
 
