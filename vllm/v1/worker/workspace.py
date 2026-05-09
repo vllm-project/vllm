@@ -31,7 +31,8 @@ _manager: "WorkspaceManager | None" = None
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages one workspace buffer per active ubatch slot.
+    Manages workspace buffers per active ubatch slot and CUDA graph
+    runtime mode.
     Can be locked to prevent further growth during execution.
     """
 
@@ -39,9 +40,10 @@ class WorkspaceManager:
         self._device = device
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
+        self._num_runtime_modes = 3
         self._current_workspaces: list[torch.Tensor | None] = [
             None
-        ] * self._num_ubatches
+        ] * (self._num_ubatches * self._num_runtime_modes)
         self._locked: bool = False
 
     @staticmethod
@@ -125,8 +127,8 @@ class WorkspaceManager:
         Returns:
             The current workspace tensor.
         """
-        ubatch_id = dbo_current_ubatch_id()
-        current_workspace = self._current_workspaces[ubatch_id]
+        ubatch_id, workspace_idx = self._get_workspace_index()
+        current_workspace = self._current_workspaces[workspace_idx]
         current_size = self._workspace_size_bytes(current_workspace)
 
         if current_size < required_bytes:
@@ -165,7 +167,7 @@ class WorkspaceManager:
             # ubatches resize lazily on their next get_simultaneous call.
             # Resizing all ubatches here would orphan the other ubatch's
             # old tensor when it still holds views into it (DBO leak).
-            self._current_workspaces[ubatch_id] = None
+            self._current_workspaces[workspace_idx] = None
             del current_workspace
             # Release the freed segment back to CUDA so the caching
             # allocator can reuse the GPU memory for the larger
@@ -173,22 +175,40 @@ class WorkspaceManager:
             # dead segment in reserved memory which can cause higher peak
             # memory usage.
             torch.accelerator.empty_cache()
-            self._current_workspaces[ubatch_id] = torch.empty(
+            self._current_workspaces[workspace_idx] = torch.empty(
                 (required_bytes,), dtype=torch.uint8, device=self._device
             )
-            current_workspace = self._current_workspaces[ubatch_id]
+            current_workspace = self._current_workspaces[workspace_idx]
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
                     "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "
-                    "%.2f MB (ubatch %d)",
+                    "%.2f MB (ubatch %d, workspace slot %d)",
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
                     ubatch_id,
+                    workspace_idx,
                 )
 
         return current_workspace
+
+    def _get_workspace_index(self) -> tuple[int, int]:
+        """Return the ubatch id and workspace slot for the current forward."""
+        ubatch_id = dbo_current_ubatch_id()
+        mode_offset = 0
+
+        from vllm.forward_context import (
+            get_forward_context,
+            is_forward_context_available,
+        )
+
+        if is_forward_context_available():
+            cudagraph_runtime_mode = get_forward_context().cudagraph_runtime_mode
+            if cudagraph_runtime_mode.is_valid_runtime_mode():
+                mode_offset = int(cudagraph_runtime_mode.value)
+
+        return ubatch_id, ubatch_id * self._num_runtime_modes + mode_offset
 
 
 def is_workspace_manager_initialized() -> bool:
