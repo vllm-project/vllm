@@ -493,14 +493,29 @@ def maybe_pack_inline_steering_for_request(
 
 
 class SteeringAutoPromoteLRU:
-    """Per-engine LRU mapping ``(prefill_hash, decode_hash) → name``.
+    """Per-engine LRU tracking which inline specs have been seen.
 
-    When a unique inline spec is observed for the first time, the
-    auto-promote helper registers it on the worker as a named module
-    under a deterministic name and stashes the mapping here.  Subsequent
-    requests with the same hash skip the broadcast and reuse the name.
-    Eviction returns the dropped ``(key, name)`` so the caller can issue
-    ``unregister_steering_modules`` against the worker.
+    Two-strikes promotion: on first sight of a ``(prefill_hash,
+    decode_hash)`` pair we mark it as seen but do **not** broadcast
+    ``register_steering_modules`` — the request flows through the
+    inline-pack path normally.  On the second sight we register the
+    spec under a hash-derived name and start promoting subsequent
+    requests with that hash to use ``steering_module_ref``.
+
+    This avoids regressing genuinely-unique-per-request workloads
+    (research sweeps where every spec is fresh) which otherwise pay an
+    extra synchronous ``collective_rpc`` per request for no benefit —
+    auto-promote would only ever miss the cache.
+
+    Entry states:
+
+    - present with ``name=None``: seen once (no broadcast yet)
+    - present with ``name="_auto_..."``: registered worker-side; subsequent
+      requests should ship a ``steering_module_ref``
+
+    Eviction returns ``(key, name_or_None)`` so callers can issue a
+    paired ``unregister_steering_modules`` against the worker — but only
+    when the evicted entry was actually registered (``name is not None``).
 
     Capacity caps the worker-side memory footprint of cached resolved
     specs.  Default 512 entries × ~520 KB of bf16 vectors = ~260 MB
@@ -511,29 +526,61 @@ class SteeringAutoPromoteLRU:
         if capacity < 1:
             raise ValueError(f"LRU capacity must be >= 1, got {capacity}")
         self._capacity = capacity
-        self._items: OrderedDict[tuple[int, int], str] = OrderedDict()
+        # Value: name once registered, None on first sight.
+        self._items: OrderedDict[tuple[int, int], str | None] = OrderedDict()
 
-    def get(self, key: tuple[int, int]) -> str | None:
-        name = self._items.get(key)
-        if name is None:
-            return None
-        # Refresh recency.
+    def observe(
+        self, key: tuple[int, int]
+    ) -> tuple[str, str | None, tuple[tuple[int, int], str | None] | None]:
+        """Record that *key* was seen and return ``(status, name, evicted)``.
+
+        ``status`` is one of:
+
+        - ``"first"``: never seen before; caller should fall through to
+          inline-pack and skip the broadcast.  ``name`` is always
+          ``None``.  ``evicted`` may carry the LRU's overflow.
+        - ``"second"``: seen once previously without registration; this
+          is the trigger to register a named module.  ``name`` is
+          ``None`` (the caller picks the name and records it via
+          :meth:`mark_registered`).  ``evicted`` is ``None``.
+        - ``"registered"``: previously registered.  ``name`` is the
+          stored module name.  ``evicted`` is ``None``.
+        """
+        existing = self._items.get(key, ...)
+        if existing is ...:
+            evicted = self._put_new(key, None)
+            return "first", None, evicted
+        # Refresh recency on any hit.
         self._items.move_to_end(key)
-        return name
+        if existing is None:
+            return "second", None, None
+        return "registered", existing, None
 
-    def put(
-        self, key: tuple[int, int], name: str
-    ) -> tuple[tuple[int, int], str] | None:
-        """Insert *(key, name)*; evict + return the LRU entry on overflow."""
-        if key in self._items:
-            self._items.move_to_end(key)
-            return None
-        evicted: tuple[tuple[int, int], str] | None = None
+    def mark_registered(self, key: tuple[int, int], name: str) -> None:
+        """Promote the existing entry from "seen" to "registered"."""
+        if key not in self._items:
+            raise KeyError(key)
+        self._items[key] = name
+        self._items.move_to_end(key)
+
+    def _put_new(
+        self, key: tuple[int, int], name: str | None
+    ) -> tuple[tuple[int, int], str | None] | None:
+        evicted: tuple[tuple[int, int], str | None] | None = None
         if len(self._items) >= self._capacity:
             evicted_key, evicted_name = self._items.popitem(last=False)
             evicted = (evicted_key, evicted_name)
         self._items[key] = name
         return evicted
+
+    def get(self, key: tuple[int, int]) -> str | None:
+        """Read-only lookup of a registered name (returns ``None`` for
+        unregistered or absent entries).  Used by tests."""
+        existing = self._items.get(key)
+        if existing is None:
+            return None
+        self._items.move_to_end(key)
+        return existing
 
     def __contains__(self, key: tuple[int, int]) -> bool:
         return key in self._items
@@ -599,26 +646,34 @@ def _auto_promote_prep(
     registry_lru: SteeringAutoPromoteLRU,
 ) -> (
     tuple[
-        str,
+        str | None,
         dict[str, dict[str, dict[int, list[float]]]] | None,
-        tuple[tuple[int, int], str] | None,
+        tuple[tuple[int, int], str | None] | None,
     ]
     | None
 ):
-    """Shared eligibility + cache lookup for auto-promote.
+    """Shared eligibility + two-strikes cache lookup for auto-promote.
 
-    Returns ``None`` when *sp* is not eligible for promotion (either has
-    a module ref already, has no inline vectors, or already has packed
-    fields).  Otherwise returns ``(name, payload, evicted)`` where:
+    Returns ``None`` when:
+    - *sp* is ineligible (already named, no inline vectors, already packed); or
+    - this is a first sight with no eviction that needs cleanup — fall through
+      to inline-pack so unique-per-request workloads don't pay a wasted RPC.
 
-    - ``name``: the auto-generated module name to attach to *sp*.
-    - ``payload``: the broadcast payload to send via
-      ``register_steering_modules`` — ``None`` indicates a cache hit
-      (no broadcast needed).
-    - ``evicted``: an LRU entry to unregister, or ``None``.
+    Otherwise returns ``(name_or_None, payload, evicted)`` where:
 
-    Pure / sync — does no IO.  Caller is responsible for issuing the
-    broadcast(s) and finally mutating *sp* via :func:`_auto_promote_apply`.
+    - ``name_or_None``: ``None`` when the only action is to issue an
+      ``unregister_steering_modules`` for an evicted registered entry
+      (first-sight observation that displaced a registered LRU tail).  When
+      not ``None``, this is the module name the caller installs on *sp*.
+    - ``payload``: the broadcast payload for ``register_steering_modules`` —
+      ``None`` on a registered cache hit and on first-sight-with-eviction.
+    - ``evicted``: an LRU eviction tuple ``(key, prior_name)`` where
+      ``prior_name`` may be ``None`` for evictions of unregistered
+      first-sight entries.  Caller skips the unregister RPC when
+      ``prior_name`` is ``None``.
+
+    Pure / sync — does no IO.  Caller issues the broadcast(s) and
+    optionally mutates *sp* via :func:`_auto_promote_apply`.
     """
     if sp.steering_module_ref is not None:
         return None
@@ -638,15 +693,23 @@ def _auto_promote_prep(
     h_decode = sp.decode_steering_config_hash
     key = (h_prefill, h_decode)
 
-    cached_name = registry_lru.get(key)
-    if cached_name is not None:
-        return cached_name, None, None
+    status, name, evicted = registry_lru.observe(key)
 
+    if status == "first":
+        # Don't promote *sp*, but if we evicted a *registered* entry from
+        # the LRU tail we still need to tell the worker to drop it.
+        if evicted is not None and evicted[1] is not None:
+            return None, None, evicted
+        return None
+    if status == "registered":
+        assert name is not None
+        return name, None, None
+    # status == "second": this is the moment to register.
     name = f"_auto_{h_prefill:016x}_{h_decode:016x}"
     payload = _build_named_payload_from_resolved(sp)
     if not payload:
         return None
-    evicted = registry_lru.put(key, name)
+    registry_lru.mark_registered(key, name)
     return name, payload, evicted
 
 
@@ -685,17 +748,20 @@ def maybe_auto_promote_steering_modules(
         return
     name, payload, evicted = prep
     if payload is not None:
+        assert name is not None
         rpc_fn(
             "register_steering_modules",
             kwargs={"modules": {name: payload}, "replace": False},
         )
     if evicted is not None:
         _, evicted_name = evicted
-        rpc_fn(
-            "unregister_steering_modules",
-            kwargs={"names": [evicted_name]},
-        )
-    _auto_promote_apply(sp, name)
+        if evicted_name is not None:
+            rpc_fn(
+                "unregister_steering_modules",
+                kwargs={"names": [evicted_name]},
+            )
+    if name is not None:
+        _auto_promote_apply(sp, name)
 
 
 async def maybe_auto_promote_steering_modules_async(
@@ -714,14 +780,17 @@ async def maybe_auto_promote_steering_modules_async(
         return
     name, payload, evicted = prep
     if payload is not None:
+        assert name is not None
         await rpc_fn(
             "register_steering_modules",
             kwargs={"modules": {name: payload}, "replace": False},
         )
     if evicted is not None:
         _, evicted_name = evicted
-        await rpc_fn(
-            "unregister_steering_modules",
-            kwargs={"names": [evicted_name]},
-        )
-    _auto_promote_apply(sp, name)
+        if evicted_name is not None:
+            await rpc_fn(
+                "unregister_steering_modules",
+                kwargs={"names": [evicted_name]},
+            )
+    if name is not None:
+        _auto_promote_apply(sp, name)
