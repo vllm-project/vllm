@@ -318,7 +318,7 @@ VLM_TEST_SETTINGS = {
         max_tokens=64,
         marks=[
             pytest.mark.skip(
-                "Aria needs to update for latest transformers, "
+                reason="Aria needs to update for latest transformers, "
                 "must have a vision_processor.py."
                 "An issue has been filed:"
                 "https://huggingface.co/rhymes-ai/Aria/discussions/23"
@@ -478,7 +478,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForCausalLM,
         marks=[
             pytest.mark.skip(
-                "The code for this model has a bug."
+                reason="The code for this model has a bug."
                 "Please see the issue here:"
                 "https://huggingface.co/zai-org/glm-4v-9b/discussions/46."
             ),
@@ -522,7 +522,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
         video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
-        max_model_len=2048,
+        max_model_len=1024,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
         num_logprobs=10,
@@ -530,8 +530,8 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         marks=[
             pytest.mark.skip(
-                "This test fails on both AMD and NV"
-                "hardware. Please see the issue:"
+                reason="This test fails on both AMD and NV"
+                "hardware. please see the issue:"
                 "https://github.com/vllm-project/vllm/issues/42016"
             ),
             large_gpu_mark(min_gb=32),
