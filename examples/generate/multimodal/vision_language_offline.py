@@ -2527,8 +2527,9 @@ model_example_map = {
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,
     "qwen3_vl": run_qwen3_vl,
-    "qwen3_5": run_qwen3_5,
     "qwen3_vl_moe": run_qwen3_vl_moe,
+    "qwen3_5": run_qwen3_5,
+    "qwen3_5_moe": run_qwen3_5_moe,
     "rvl": run_r_vl,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
@@ -2833,7 +2834,7 @@ def main(args):
     # even when all prompts are identical when running batch inference.
     sampling_params = (
         SamplingParams(
-            temperature=0.2, max_tokens=200, stop_token_ids=req_data.stop_token_ids
+            temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
         )
         if req_data.sampling_params is None
         else req_data.sampling_params
