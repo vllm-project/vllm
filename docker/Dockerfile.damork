@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1.7
+# SPDX-License-Identifier: Apache-2.0
+
+# Damork/vLLM deployment image.
+#
+# Build:
+#   docker build -f docker/Dockerfile.damork -t damork-vllm:0.1 .
+#
+# Run:
+#   docker run --gpus all --ipc=host --shm-size=8g -p 8000:8000 damork-vllm:0.1
+
+ARG BASE_IMAGE=runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
+FROM ${BASE_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    VLLM_USE_PRECOMPILED=1 \
+    VLLM_USE_FLASHINFER_SAMPLER=0 \
+    VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    DAMORK_MODEL=PWLabs/Qwen3.5-0.8B \
+    DAMORK_SERVED_MODEL_NAME=damork \
+    DAMORK_HOST=0.0.0.0 \
+    DAMORK_PORT=8000 \
+    DAMORK_MAX_MODEL_LEN=2048 \
+    DAMORK_GPU_MEMORY_UTILIZATION=0.85 \
+    PATH=/opt/damork-vllm/bin:${PATH}
+
+WORKDIR /workspace/vllm-ProxWeb
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        ffmpeg \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/damork-vllm \
+    && python -m pip install --upgrade pip uv
+
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --editable . --torch-backend=auto
+
+COPY docker/damork-entrypoint.sh /usr/local/bin/damork-entrypoint
+RUN sed -i 's/\r$//' /usr/local/bin/damork-entrypoint \
+    && chmod +x /usr/local/bin/damork-entrypoint
+
+EXPOSE 8000
+
+ENTRYPOINT ["damork-entrypoint"]
