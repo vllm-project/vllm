@@ -36,9 +36,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
-from .mooncake_store_data import MooncakeStoreConnectorMetadata
-from .mooncake_store_scheduler import MooncakeStoreScheduler
-from .mooncake_store_worker import LookupKeyServer, MooncakeStoreWorker
+from .data import MooncakeStoreConnectorMetadata
+from .scheduler import MooncakeStoreScheduler
+from .worker import MooncakeStoreWorker
 
 logger = init_logger(__name__)
 
@@ -108,8 +108,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
             self.connector_scheduler = MooncakeStoreScheduler(vllm_config)
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config)
-            if vllm_config.parallel_config.rank == 0:
-                self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
     # ============================================================
     # Scheduler-side methods

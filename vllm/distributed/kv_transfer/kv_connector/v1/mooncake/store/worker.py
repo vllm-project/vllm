@@ -22,6 +22,7 @@ import regex as re
 import torch
 import zmq
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_dcp_group,
@@ -33,19 +34,16 @@ from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     get_mooncake_dp_engine_index,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.mooncake_store_data import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
     ReqMeta,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.mooncake_store_scheduler import (  # noqa: E501
-    get_zmq_rpc_path_lookup,
-)
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, make_zmq_socket
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.serial_utils import MsgpackDecoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 logger = init_logger(__name__)
 
@@ -589,6 +587,11 @@ class MooncakeStoreWorker:
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
 
+        # Start lookup server on rank 0 for scheduler-side prefix queries
+        self.lookup_server: LookupKeyServer | None = None
+        if vllm_config.parallel_config.rank == 0:
+            self.lookup_server = LookupKeyServer(self, vllm_config)
+
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
 
@@ -926,3 +929,49 @@ class LookupKeyServer:
         self.socket.close(linger=0)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
+
+
+# ============================================================
+# Lookup Key Client
+# ============================================================
+
+
+class LookupKeyClient:
+    """ZMQ client for querying prefix cache hits from worker."""
+
+    def __init__(self, vllm_config: VllmConfig):
+        self.encoder = MsgpackEncoder()
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        socket_path = get_zmq_rpc_path_lookup(vllm_config)
+        self.socket = make_zmq_socket(
+            self.ctx,
+            socket_path,
+            zmq.REQ,  # type: ignore[attr-defined]
+            bind=False,
+        )
+
+    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+        hash_strs = [h.hex() for h in block_hashes]
+        hash_frames = self.encoder.encode(hash_strs)
+        token_len_bytes = token_len.to_bytes(4, byteorder="big")
+        all_frames = [token_len_bytes] + list(hash_frames)
+        self.socket.send_multipart(all_frames, copy=False)
+        resp = self.socket.recv()
+        result = int.from_bytes(resp, "big")
+        return result
+
+    def close(self):
+        self.socket.close(linger=0)
+
+
+def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
+    """Construct IPC path for ZMQ lookup socket."""
+    dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
+    base_url = envs.VLLM_RPC_BASE_PATH
+    rpc_port = 0
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    if "lookup_rpc_port" in extra_config:
+        rpc_port = extra_config["lookup_rpc_port"]
+    uid = os.getuid()
+    logger.debug("Base URL: %s, RPC Port: %s, UID: %s", base_url, rpc_port, uid)
+    return f"ipc://{base_url}/lookup_rpc_port_{rpc_port}_uid{uid}_dp_rank{dp_rank}"
