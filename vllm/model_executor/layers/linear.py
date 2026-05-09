@@ -60,6 +60,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptFp8PbWoLinearMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
+    "ModelOptNvFp4W4A16LinearMethod",
     "HummingLinearMethod",
 ]
 
@@ -213,6 +214,9 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
+            if layer.weight.ndim != 2:
+                # this is not a linear layer
+                return
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
@@ -268,10 +272,13 @@ class LinearBase(PluggableLayer):
         self.quant_config = quant_config
         self.prefix = prefix
         self.allow_fp8_block_shape_mismatch = False
+        self.quant_method: QuantizeMethodBase
         if quant_config is None:
-            self.quant_method: QuantizeMethodBase | None = UnquantizedLinearMethod()
+            self.quant_method = UnquantizedLinearMethod()
+        elif quant_method := quant_config.get_quant_method(self, prefix=prefix):
+            self.quant_method = quant_method
         else:
-            self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+            raise ValueError("All linear layers should support quant method.")
         self.return_bias = return_bias
         self.disable_tp = disable_tp
         self.tp_rank = get_tensor_model_parallel_rank() if not disable_tp else 0
@@ -335,8 +342,6 @@ class ReplicatedLinear(LinearBase):
             disable_tp=disable_tp,
         )
 
-        # All the linear layer supports quant method.
-        assert self.quant_method is not None
         self.quant_method.create_weights(
             self,
             self.input_size,
@@ -389,7 +394,6 @@ class ReplicatedLinear(LinearBase):
         x: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         bias = self.bias if not self.skip_bias_add else None
-        assert self.quant_method is not None
 
         output = self.quant_method.apply(self, x, bias)
 
@@ -474,7 +478,6 @@ class ColumnParallelLinear(LinearBase):
         self._maybe_allow_fp8_block_shape_mismatch()
         self.gather_output = gather_output
 
-        assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -583,7 +586,6 @@ class ColumnParallelLinear(LinearBase):
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
-        assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
 
         if self.gather_output and self.tp_size > 1:
@@ -1463,7 +1465,6 @@ class RowParallelLinear(LinearBase):
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
 
-        assert self.quant_method is not None
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,
@@ -1553,7 +1554,6 @@ class RowParallelLinear(LinearBase):
             input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
-        assert self.quant_method is not None
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias

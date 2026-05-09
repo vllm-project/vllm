@@ -469,3 +469,8 @@ def has_mori() -> bool:
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")
+
+
+def has_cutedsl() -> bool:
+    """Whether the optional `cutelass` package is available."""
+    return _has_module("cutlass")
