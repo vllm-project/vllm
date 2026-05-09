@@ -67,7 +67,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         marks=[pytest.mark.core_model],
     ),
     "qwen3_5": VitCudagraphTestConfig(
-        model="/shared/models/modelscope/models/Qwen/Qwen3___5-9B",
+        model="Qwen/Qwen3.5-0.8B",
         image_prompt=qwen_vl_chat_template(
             "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
         ),
