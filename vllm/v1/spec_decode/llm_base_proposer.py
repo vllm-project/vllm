@@ -520,20 +520,6 @@ class SpecDecodeBaseProposer:
             # (which read via _get_positions) use the correct values.
             self.positions[:batch_size] = positions
 
-        if any(isinstance(md, TreeAttentionMetadata) for md in per_group_attn_metadata):
-            # Draft using tree attention - requires full logits for top-k
-            logits = self.model.compute_logits(sample_hidden_states)
-            draft_token_ids_list = self.propose_tree(
-                batch_size=batch_size,
-                logits=logits,
-                positions=positions,
-                hidden_states=hidden_states,
-                common_attn_metadata=common_attn_metadata,
-                slot_mappings=slot_mappings,
-            )
-            # [batch_size, num_tree_tokens]
-            return torch.cat(draft_token_ids_list, dim=1)
-
         draft_token_ids, draft_probs = self._sample_draft_tokens(
             sample_hidden_states, sampling_metadata
         )
