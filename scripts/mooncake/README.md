@@ -62,6 +62,46 @@ Default ports:
 
 See the script header for environment variables (`MC_RPC_PORT`, `MC_HTTP_PORT`, etc.) to customize ports and eviction settings. Mooncake master is launched cluster-wise, so we may get port conflict if someone else has already launched it. Typically we don't need to change this, and multiple users should be able to share the same master. One can freely change ports here, but also remember to update the `mooncake_config.json` for the client (vLLM) below.
 
+### Recommended Validation Flow
+
+Validate Mooncake from the bottom up before interpreting vLLM or SGLang results:
+
+1. Start the Mooncake master and confirm it stays in `serving` state.
+2. Watch active RDMA/RoCE NIC bandwidth while traffic is running.
+3. Run the standalone Mooncake smoke test and confirm put/get succeeds.
+4. Run a standalone Mooncake put/get benchmark and record operations per second plus approximate bandwidth.
+5. Only after Mooncake itself looks healthy, run the vLLM or SGLang integration benchmark.
+
+### RDMA/RoCE Bandwidth Checks
+
+Mooncake deployment validation should include real-time network checks, not only process liveness. First confirm the mapping between RDMA devices and Linux netdevs:
+
+```bash
+rdma link show
+```
+
+Then monitor NIC traffic with a short refresh interval, for example:
+
+```bash
+sar -n DEV 2 | grep -E 'IFACE|gpu[0-9]+rdma|roce|mlx'
+```
+
+For a more dedicated local helper, read the counters under `/sys/class/infiniband/*/ports/*/counters/` every 2 seconds, calculate the delta, and report per-RNIC bandwidth. The goal is to quickly answer how much RX/TX bandwidth each RDMA NIC is carrying.
+
+### Standalone Mooncake Benchmark Expectations
+
+Before connecting Mooncake to vLLM or SGLang, run Mooncake by itself. The goal is not final serving throughput; the goal is to verify that Mooncake Store, RDMA, and metadata discovery are healthy.
+
+At minimum, record:
+
+- Successful `put` operations per second.
+- Successful `get` operations per second.
+- Value or object size.
+- Approximate bandwidth, using `ops_per_second * value_size`.
+- Failure codes and failure ratio, especially metadata misses, RDMA timeouts, or resource-allocation failures.
+
+Once standalone Mooncake is stable, framework-level benchmark failures are much easier to interpret.
+
 ### 2. Configure Mooncake
 
 Edit `scripts/mooncake/mooncake_config.json`:
