@@ -110,6 +110,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+    CPUFp8BlockScaledMMKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
@@ -186,17 +187,21 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
-    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
+        MarlinFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.ROCM: [
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.CPU: [
+        CPUFp8BlockScaledMMKernel,
     ],
 }
 
@@ -392,6 +397,19 @@ def init_fp8_linear_kernel(
                 scope="global",
             )
 
+        # TODO make scaled_mm kernels inherit from MMLinearKernel
+        # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
+        if issubclass(kernel_type, FP8ScaledMMLinearKernel):
+            return kernel_type(
+                scaled_mm_linear_kernel_config,
+                layer_param_names=[
+                    "weight",
+                    "weight_scale",
+                    "input_scale",
+                    "input_scale_ub",
+                ],
+            )
+
         return kernel_type(
             scaled_mm_linear_kernel_config,
         )
@@ -399,7 +417,7 @@ def init_fp8_linear_kernel(
     else:
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[misc]
+            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
             force_kernel=force_kernel,
         )
         if module_name:

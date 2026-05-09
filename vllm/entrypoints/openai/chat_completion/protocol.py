@@ -11,7 +11,7 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, PrivateAttr, model_validator
+from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -92,12 +92,16 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    routed_experts: list[list[list[int]]] | None = None  # [gen_len, num_layers, top_k]
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"chatcmpl-{random_uuid()}")
     object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
+    prompt_routed_experts: list[list[list[int]]] | None = (
+        None  # [prompt_len, num_layers, top_k]
+    )
     model: str
     choices: list[ChatCompletionResponseChoice]
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] | None = None
@@ -129,6 +133,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    # Set only on the final chunk of a stream to mirror non-streaming responses
+    # without the per-chunk serialization overhead.
+    system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
 
@@ -136,6 +143,20 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
 class ChatCompletionToolsParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
+    defer_loading: bool | None = None
+
+    @model_validator(mode="after")
+    def _propagate_defer_loading(self) -> "ChatCompletionToolsParam":
+        if self.defer_loading is not None and self.function.defer_loading is None:
+            self.function.defer_loading = self.defer_loading
+        return self
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.defer_loading is None:
+            data.pop("defer_loading", None)
+        return data
 
 
 class ChatCompletionNamedFunction(OpenAIBaseModel):
@@ -179,7 +200,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
         | ChatCompletionNamedToolChoiceParam
         | None
     ) = "none"
-    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+    reasoning_effort: (
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
+    ) = Field(
+        default=None,
+        description=(
+            "Constrains effort on reasoning for reasoning models. "
+            "Currently supported values are none, minimal, low, medium, "
+            "high, xhigh, and max. Reducing reasoning effort can result in "
+            "faster responses and fewer tokens used on reasoning in a response. "
+            "Note that 'max' is specific to the DeepSeek V4 series and is not "
+            "part of the standard OpenAI API specification."
+        ),
+    )
     thinking_token_budget: int | None = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True

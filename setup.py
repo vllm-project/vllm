@@ -927,7 +927,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
+        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+        if VLLM_TARGET_DEVICE == "cpu":
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
@@ -1085,14 +1087,18 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch"],
+        "zen": [
+            "zentorch-weekly==5.2.1.dev20260408"
+        ],  # Zentorch has weekly releases. This pulls the known-good version.
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
         "instanttensor": ["instanttensor >= 0.1.5"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
+            "av",
             "scipy",
+            "soundfile",
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
@@ -1103,7 +1109,7 @@ setup(
         #   - .buildkite/test-amd.yaml
         "helion": ["helion==1.0.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",
