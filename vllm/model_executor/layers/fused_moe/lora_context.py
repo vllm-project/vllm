@@ -42,3 +42,10 @@ class MoELoRAContext:
     # Whether VLLM_TUNED_CONFIG_FOLDER is set; selects get_lora_op_configs vs
     # try_get_optimal_moe_lora_config for Triton kernel tile configs.
     use_tuned_config: bool
+
+    # Per-rank token→LoRA mapping after EP dispatch. Set by
+    # FusedMoEPrepareAndFinalizeModular.prepare() when EP+LoRA is active, read
+    # by LoRAExpertsMixin helpers in place of punica_wrapper's global mapping.
+    # None means no dispatch happened (non-EP path), in which case callers
+    # fall back to punica_wrapper.token_mapping_meta.
+    local_token_lora_mapping: torch.Tensor | None = None
