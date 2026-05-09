@@ -4,6 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
@@ -77,30 +78,6 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
-    write_stats_path: str | None = None
-    """
-    When set to a file path, EPLB logs expert-load statistics as JSONL.
-    These records can be used to generate an offline static EPLB mapping.
-    """
-    write_stats_interval: int = Field(default=16, gt=0)
-    """
-    Interval (in EPLB steps) for writing expert-load statistics when
-    `write_stats_path` is set. Each write triggers a CPU sync and
-    disk I/O, so a small value (e.g. 1) materially impacts throughput.
-    """
-    read_stats_path: str | None = None
-    """
-    Path to a JSONL file with EPLB expert-load statistics (the format
-    written when `write_stats_path` is set). When provided, vLLM
-    aggregates the recorded loads at startup, runs the EPLB policy once
-    against the live deploy topology, and applies the resulting
-    physical-to-logical mapping before warmup.
-    """
-    enable_online: bool = False
-    """
-    Enable online (during-inference) EPLB rearrangement based on observed
-    expert load.
-    """
     use_async: bool = False
     """
     Whether to use non-blocking EPLB.
@@ -119,12 +96,29 @@ class EPLBConfig:
     - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
     """
 
+    save_path: Path | None = None
+    """If set, save the cumulative per-logical-expert load tensor to this file
+    at every rearrange step. The file is overwritten in place. The resulting
+    file is suitable for loading via `load_path` in a subsequent run with a
+    different EP topology."""
+
+    load_path: Path | None = None
+    """If set, load a per-logical-expert load tensor from this file at startup,
+    run the EPLB policy once against the live deploy topology, and apply the
+    resulting physical-to-logical mapping before warmup. Online rearrangement
+    is disabled for the rest of the run (mapping stays static)."""
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
+        if self.save_path is not None and self.load_path is not None:
+            raise ValueError(
+                "save_path and load_path cannot both be set: a run is either "
+                "recording stats or replaying them."
+            )
         return self
 
 

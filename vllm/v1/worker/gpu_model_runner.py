@@ -3096,6 +3096,8 @@ class GPUModelRunner(
         """
         if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
             return
+        if self.eplb_state is None:
+            return
 
         assert self.eplb_state is not None
         model = self.get_model()
@@ -3106,23 +3108,6 @@ class GPUModelRunner(
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
 
-    def eplb_apply_pending_initial_mapping(self) -> None:
-        """One-shot startup hook: move expert weights to the offline mapping
-        layout. Must be called AFTER profile_run / KV-cache sizing and
-        BEFORE warmup / cudagraph capture, so the all_gather buffer does
-        not bloat the peak-memory profiling result and the captured graphs
-        observe the rearranged weights.
-        """
-        if not self.parallel_config.enable_eplb or self.eep_eplb_suppressed:
-            return
-        if self.eplb_state is None:
-            return
-        from vllm.distributed.parallel_state import get_ep_group
-
-        self.eplb_state.apply_pending_initial_mapping_rearrange(
-            get_ep_group().device_group
-        )
-
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,
@@ -3130,12 +3115,6 @@ class GPUModelRunner(
     ) -> None:
         model = self.get_model()
         assert is_mixture_of_experts(model)
-
-        # Release I/O held by the previous state (e.g. expert-load-stats
-        # file descriptor) before dropping the reference, otherwise FDs
-        # leak across elastic EP scale changes.
-        if self.eplb_state is not None:
-            self.eplb_state.close()
 
         self.eplb_state = EplbState.from_mapping(
             model=model,
@@ -4911,6 +4890,16 @@ class GPUModelRunner(
         self.requires_sequential_video_encoding = hasattr(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
+
+        if (
+            is_mixture_of_experts(self.model)
+            and self.parallel_config.enable_eplb
+            and not load_dummy_weights
+            and self.eplb_state is not None
+            and self.parallel_config.eplb_config.load_path is not None
+        ):
+            self.eplb_state.rearrange(load_initial=True)
+            self.eplb_state = None
 
         if (
             is_mixture_of_experts(self.model)

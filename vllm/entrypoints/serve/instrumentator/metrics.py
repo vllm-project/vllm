@@ -33,7 +33,6 @@ def attach_router(app: FastAPI):
             "/ping",
             "/version",
             "/server_info",
-            "/eplb_step_count",
         ],
         registry=registry,
     ).add().instrument(app).expose(app, response_class=PrometheusResponse)

@@ -139,7 +139,7 @@ While MoE models are typically trained so that each expert receives a similar nu
 
 Enable EPLB with the `--enable-eplb` flag.
 
-`--enable-eplb` only turns on the EPLB subsystem; expert rearrangement is opt-in. Set `enable_online=true` in `--eplb-config` to periodically rebalance during inference, set `read_stats_path` to compute an initial mapping from previously collected stats and apply it at startup, or both. With `--enable-eplb` alone, EPLB only collects stats (and writes them to `write_stats_path` if set).
+When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
 ### EPLB Parameters
 
@@ -150,21 +150,17 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `write_stats_path` | Path to write expert-load statistics as JSONL for offline mapping generation | `null` |
-| `write_stats_interval` | Interval (in EPLB steps) for writing stats when `write_stats_path` is set; smaller values cost throughput | `16` |
-| `read_stats_path` | Path to a JSONL file with EPLB expert-load statistics. When set, vLLM aggregates the recorded loads at startup, runs the EPLB policy once against the live deploy topology, and applies the resulting mapping before warmup | `null` |
-| `enable_online` | Enable online (during-inference) EPLB rearrangement based on observed expert load | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`,  or `null` (auto) | `null` |
 
-For example, online EPLB with redundant experts:
+For example:
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
   --enable-eplb \
-  --eplb-config '{"enable_online":true,"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+  --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
 
 ??? tip "Prefer individual arguments instead of JSON?"
@@ -172,7 +168,6 @@ vllm serve Qwen/Qwen3-30B-A3B \
     ```bash
     vllm serve Qwen/Qwen3-30B-A3B \
             --enable-eplb \
-            --eplb-config.enable_online true \
             --eplb-config.window_size 1000 \
             --eplb-config.step_interval 3000 \
             --eplb-config.num_redundant_experts 2 \
@@ -201,41 +196,11 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --tensor-parallel-size 1 \       # Tensor parallelism
     --data-parallel-size 8 \         # Data parallelism
     --enable-expert-parallel \       # Enable EP
-    --enable-eplb \                  # Enable EPLB subsystem
-    --eplb-config '{"enable_online":true,"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
+    --enable-eplb \                  # Enable load balancer
+    --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
 
 For multi-node deployment, add these EPLB flags to each node's command. We recommend setting `--eplb-config '{"num_redundant_experts":32}'` to 32 in large scale use cases so the most popular experts are always available.
-
-### Offline EPLB Mapping
-
-For stable workloads, you can collect expert-load statistics once and reuse them to derive an EPLB mapping at startup. This avoids online expert rearrangement during serving while still using redundant expert slots.
-
-First collect stats (no rearrangement, just stats):
-
-```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-  --enable-eplb \
-  --eplb-config '{"write_stats_path":"eplb_stats.jsonl"}'
-```
-
-Then start the server with `read_stats_path` pointing at the collected JSONL. vLLM aggregates the recorded loads, runs the EPLB policy once against the live deploy topology, and applies the resulting mapping before warmup. The stats file is topology-agnostic, so the same JSONL can be reused for deploys with different EP sizes.
-
-```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-  --enable-eplb \
-  --eplb-config '{"read_stats_path":"eplb_stats.jsonl","num_redundant_experts":32}'
-```
-
-To apply the startup mapping *and* keep online EPLB running on top, additionally set `enable_online`:
-
-```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-  --enable-eplb \
-  --eplb-config '{"enable_online":true,"read_stats_path":"eplb_stats.jsonl","num_redundant_experts":32}'
-```
-
-`read_stats_path` and `enable_online` are independent: with `--enable-eplb` alone (no path, `enable_online=false`), EPLB runs as a stats-only subsystem and never rearranges experts.
 
 ## Advanced Configuration
 
