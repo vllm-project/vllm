@@ -1462,14 +1462,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         )
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
-        """
-        Start a new weight update.
-
-        Args:
-            is_checkpoint_format: Whether incoming weights are in checkpoint
-                format (need layerwise processing) or kernel format (direct
-                copy).
-        """
+        """Start a new weight update."""
         self.llm_engine.collective_rpc(
             "start_weight_update",
             kwargs={"is_checkpoint_format": is_checkpoint_format},
@@ -1491,9 +1484,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin):
         )
 
     def finish_weight_update(self) -> None:
-        """
-        Finish the current weight update.
-        """
+        """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
 
     def __repr__(self) -> str:
