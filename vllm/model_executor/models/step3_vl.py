@@ -917,7 +917,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         )
 
         # Valid portion: bsz images, actual_total_patches patches
-        actual_np = [int(num_patches[idx]) for idx in indices]
+        actual_np = [int(np) for np in num_patches]
         total_patches = sum(actual_np)
         img_tokens = bsz * img_out
         patch_tokens = total_patches * patch_out
