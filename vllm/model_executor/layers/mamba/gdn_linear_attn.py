@@ -637,7 +637,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         return mixed_qkv_out, z_out, b_out, a_out
 
-    @torch.compile(fullgraph=True)
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
