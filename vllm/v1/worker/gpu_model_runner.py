@@ -4230,15 +4230,6 @@ class GPUModelRunner(
                 <= self.effective_drafter_max_model_len
             )
 
-            # Skip speculative decoding for DeepSeek-V4 MTP models with batch size > 1
-            # to avoid shared memory broadcast deadlock (issue #41402)
-            mtp_deadlock_avoidance = (
-                hasattr(self.get_model(), "get_mtp_target_hidden_states")
-                and self.input_batch.num_reqs > 1
-                and self.parallel_config.tensor_parallel_size > 1
-            )
-            if mtp_deadlock_avoidance:
-                input_fits_in_drafter = False
             use_gpu_toks = (
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
@@ -4838,6 +4829,20 @@ class GPUModelRunner(
                             spec_config.draft_model_config,
                         )
                         eplb_models += 1
+
+                if (
+                    hasattr(self, "drafter")
+                    and hasattr(self.get_model(), "get_mtp_target_hidden_states")
+                    and self.parallel_config.tensor_parallel_size > 1
+                ):
+                    raise ValueError(
+                        "DeepSeek-V4 MTP speculative decoding with "
+                        "tensor_parallel_size > 1 is not yet supported due to "
+                        "an NCCL synchronization issue "
+                        "(https://github.com/vllm-project/vllm/issues/41402). "
+                        "Either disable speculative decoding or set "
+                        "tensor_parallel_size=1."
+                    )
 
                 if self.use_aux_hidden_state_outputs:
                     if not supports_eagle3(self.get_model()):
