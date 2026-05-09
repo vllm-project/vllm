@@ -1865,7 +1865,7 @@ def has_module_attribute(module_name, attribute_name):
 
 def get_attn_backend_list_based_on_platform() -> list[str]:
     if current_platform.is_cuda():
-        return ["FLASH_ATTN", "TRITON_ATTN", "TREE_ATTN"]
+        return ["FLASH_ATTN", "TRITON_ATTN"]
     elif current_platform.is_rocm():
         attn_backend_list = ["TRITON_ATTN"]
         try:
