@@ -6360,6 +6360,17 @@ class GPUModelRunner(
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
+                # In pipeline-parallel setups with custom layer
+                # partitions, ``kv_cache_group_spec.layer_names``
+                # contains the global layer names (across all PP
+                # ranks) but ``layers`` is the rank-local dict of
+                # layers actually instantiated on this worker. Skip
+                # layers not owned by the current rank — they will be
+                # set up on the rank that does own them. Without this
+                # guard we KeyError on the next line for any layer
+                # that lives on another PP rank.
+                if layer_name not in layers:
+                    continue
                 attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
