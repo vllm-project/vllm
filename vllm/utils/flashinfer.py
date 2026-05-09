@@ -71,6 +71,14 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     )
 
 
+def _missing_dsv4_sparse_mla(*_: Any, **__: Any) -> NoReturn:
+    raise RuntimeError(
+        "flashinfer.mla.trtllm_batch_decode_sparse_mla_dsv4 is not available. "
+        "Install a FlashInfer build that includes DeepSeek V4 sparse MLA "
+        "TRTLLM-GEN support."
+    )
+
+
 def _get_submodule(module_name: str) -> Any | None:
     """Safely import a submodule and return it, or None if not available."""
     try:
@@ -136,6 +144,11 @@ flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
 )
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
+)
+flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
+    "flashinfer.mla",
+    "trtllm_batch_decode_sparse_mla_dsv4",
+    fallback_fn=_missing_dsv4_sparse_mla,
 )
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
@@ -891,6 +904,7 @@ __all__ = [
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
+    "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",

@@ -1541,7 +1541,11 @@ def _get_kv_cache_groups_uniform_groups(
     for sm_spec in swa_mla_specs:
         sm_page_sizes = sm_spec.get_page_sizes()
         layers_per_size: dict[int, list[str]] = defaultdict(list)
-        assert max(sm_page_sizes) <= max(all_page_sizes)
+        if max(sm_page_sizes) > max(all_page_sizes):
+            raise AssertionError(
+                "DeepseekV4 SWA page size exceeds full-MLA page sizes: "
+                f"swa={sorted(sm_page_sizes)}, full={sorted(all_page_sizes)}"
+            )
 
         # Unify page size by padding layers' page_size to the nearest larger page_size.
         # Compute candidate (nearest larger page_size) for each unique page size.

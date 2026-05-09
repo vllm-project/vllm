@@ -172,6 +172,19 @@ class DeepseekV4FP8Config(Fp8Config):
 
     @property
     def is_scale_e8m0(self) -> bool:
+        try:
+            hf_config = get_current_vllm_config().model_config.hf_config
+        except Exception:
+            hf_config = None
+
+        scale_fmt = getattr(hf_config, "scale_fmt", None)
+        if scale_fmt is None and hf_config is not None:
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            if isinstance(quantization_config, dict):
+                scale_fmt = quantization_config.get("scale_fmt")
+        if scale_fmt is not None:
+            return scale_fmt == "ue8m0"
+
         # FP4 checkpoints store FP8 linear scales as e8m0fnu; FP8 expert
         # checkpoints (Flash-Base) store them as float32.
         return self.expert_dtype == "fp4"

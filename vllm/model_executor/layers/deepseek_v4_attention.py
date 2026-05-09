@@ -27,8 +27,13 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
+    qnorm_rope_and_insert_full_k_cache,
 )
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    rocm_forward_decode_fallback,
+    rocm_inv_rope_einsum,
+    rocm_sparse_attn_prefill,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -55,10 +60,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
 )
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     DeepseekV4FlashMLASparseBackend,
@@ -79,10 +86,58 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
+_FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+_flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
+
 # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
 # workspace allocated at _forward_prefill (and the matching profile-time
 # reservation in attention_impl's dummy-run branch).
 PREFILL_CHUNK_SIZE = 4
+
+
+def _normalize_dsv4_kv_cache_dtype(
+    cache_config: CacheConfig | None,
+) -> str:
+    kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        assert cache_config is not None
+        cache_config.cache_dtype = "fp8_ds_mla"
+        return "fp8_ds_mla"
+    return kv_cache_dtype
+
+
+def _dsv4_kv_cache_torch_dtype(
+    kv_cache_dtype: str,
+    vllm_config: VllmConfig,
+) -> torch.dtype:
+    if kv_cache_dtype == "fp8_ds_mla":
+        return torch.uint8
+    if kv_cache_dtype == "fp8_inc":
+        return torch.float8_e4m3fn
+    if kv_cache_dtype == "bfloat16":
+        return torch.bfloat16
+    if kv_cache_dtype == "auto":
+        dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype, vllm_config.model_config)
+        if dtype == torch.bfloat16:
+            return dtype
+    raise ValueError(
+        "DeepSeek V4 FlashInfer sparse MLA supports only BF16 or per-tensor "
+        f"FP8 E4M3 KV cache; got kv_cache_dtype={kv_cache_dtype}. Use "
+        "`bfloat16`/`auto` for BF16, `fp8_inc` for per-tensor FP8, or "
+        "`fp8`/`fp8_ds_mla` for the legacy UE8M0 FlashMLA path."
+    )
+
+
+def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
+    workspace = _flashinfer_dsv4_workspace_by_device.get(device)
+    if workspace is None:
+        workspace = torch.zeros(
+            _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
+            dtype=torch.uint8,
+            device=device,
+        )
+        _flashinfer_dsv4_workspace_by_device[device] = workspace
+    return workspace
 
 
 @dataclass
@@ -230,10 +285,16 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.ln_events = [torch.cuda.Event() for _ in range(4)]
 
         assert cache_config is not None, "DeepseekV4 attention requires cache_config"
+        kv_cache_dtype = _normalize_dsv4_kv_cache_dtype(cache_config)
+        kv_cache_torch_dtype = _dsv4_kv_cache_torch_dtype(
+            kv_cache_dtype, mla_modules.vllm_config
+        )
+        if kv_cache_dtype == "fp8_ds_mla":
+            logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
-            dtype=torch.uint8,
+            dtype=kv_cache_torch_dtype,
             prefix=f"{prefix}.swa_cache",
             cache_config=cache_config,
         )
@@ -278,6 +339,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 rotate=True,
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.mla_attn.prefix,
+                # Legacy FlashMLA state/KV pages need 576B alignment. The
+                # FlashInfer BF16/per-tensor FP8 path shares state pages with
+                # contiguous C4 KV pages, so padding would break page matching.
+                state_cache_alignment=(
+                    576 if self.mla_attn.kv_cache_dtype == "fp8_ds_mla" else None
+                ),
             )
 
     def forward(
@@ -535,22 +602,35 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
-        swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
 
         # Horizontally fused:
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
-        #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
+        #   KV side: GPT-J RoPE + paged cache insert. The uint8 cache keeps the
+        #   legacy UE8M0 layout; BF16/FP8 caches store the full 512-wide vector.
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            q,
-            kv,
-            swa_kv_cache_2d,
-            swa_metadata.slot_mapping,
-            positions.to(torch.int64),
-            self.rotary_emb.cos_sin_cache,
-            self.eps,
-            swa_metadata.block_size,
-        )
+        if swa_kv_cache.dtype == torch.uint8:
+            swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
+            torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+                q,
+                kv,
+                swa_kv_cache_2d,
+                swa_metadata.slot_mapping,
+                positions.to(torch.int64),
+                self.rotary_emb.cos_sin_cache,
+                self.eps,
+                swa_metadata.block_size,
+            )
+        else:
+            qnorm_rope_and_insert_full_k_cache(
+                q,
+                kv,
+                swa_kv_cache,
+                swa_metadata.slot_mapping,
+                positions.to(torch.int64),
+                self.rotary_emb.cos_sin_cache,
+                self.eps,
+                swa_metadata.block_size,
+            )
 
 
 def deepseek_v4_attention(
@@ -687,27 +767,13 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
-        # DeepseekV4 only supports fp8 kv-cache format for now.
-        kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "fp8"
-
-        assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 only supports fp8 kv-cache format for now, "
-            f"got {kv_cache_dtype}"
-        )
         assert issubclass(self.get_attn_backend(), FlashMLASparseBackend), (
-            "Only FlashMLA Sparse Attention backend is supported for DeepseekV4 for now"
+            "DeepseekV4 requires the sparse MLA metadata/cache backend"
         )
-        # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
-        # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
-        if (
-            issubclass(self.get_attn_backend(), FlashMLASparseBackend)
-            and kv_cache_dtype.startswith("fp8")
-            and kv_cache_dtype != "fp8_ds_mla"
-        ):
-            assert cache_config is not None
-            cache_config.cache_dtype = "fp8_ds_mla"
-            kv_cache_dtype = "fp8_ds_mla"
-            logger.info_once("Using DeepSeek's fp8_ds_mla KV cache format.")
+        kv_cache_dtype = _normalize_dsv4_kv_cache_dtype(cache_config)
+        self.kv_cache_torch_dtype = _dsv4_kv_cache_torch_dtype(
+            kv_cache_dtype, vllm_config
+        )
 
         self.kv_cache_dtype = kv_cache_dtype
 
@@ -738,10 +804,14 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.uint8,
+            dtype=self.kv_cache_torch_dtype,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            # FlashMLA's legacy fp8_ds_mla layout needs 576B page alignment.
+            # FlashInfer DSV4 BF16/per-tensor FP8 sparse decode treats the KV
+            # pool as a flat contiguous token array, so padding would skew
+            # physical sparse indices after the first page.
+            alignment=576 if self.kv_cache_dtype == "fp8_ds_mla" else None,
             model_version="deepseek_v4",
         )
 
@@ -849,6 +919,38 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
 
+        if current_platform.is_rocm():
+            rocm_forward_decode_fallback(
+                q=q,
+                kv_cache=kv_cache,
+                swa_k_cache=self.swa_cache_layer.kv_cache,
+                swa_only=swa_only,
+                topk_indices=topk_indices,
+                topk_lens=topk_lens,
+                swa_indices=swa_indices,
+                swa_lens=swa_lens,
+                attn_sink=self.attn_sink,
+                scale=self.scale,
+                head_dim=self.head_dim,
+                nope_head_dim=self.nope_head_dim,
+                rope_head_dim=self.rope_head_dim,
+                output=output,
+            )
+            return
+
+        if self.kv_cache_torch_dtype != torch.uint8:
+            self._forward_decode_flashinfer(
+                q=q,
+                kv_cache=kv_cache,
+                swa_metadata=swa_metadata,
+                swa_only=swa_only,
+                topk_indices=topk_indices,
+                topk_lens=topk_lens,
+                swa_indices=swa_indices,
+                output=output,
+            )
+            return
+
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
         # q arrives pre-padded to self.padded_heads by the outer wrapper.
@@ -901,6 +1003,92 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
+        )
+
+    def _forward_decode_flashinfer(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor | None,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        swa_only: bool,
+        topk_indices: torch.Tensor | None,
+        topk_lens: torch.Tensor | None,
+        swa_indices: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        assert self.kv_cache_torch_dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        num_decodes = swa_metadata.num_decodes
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        assert swa_metadata.seq_lens is not None
+        assert swa_metadata.query_start_loc is not None
+        assert swa_metadata.query_start_loc_cpu is not None
+
+        swa_indices_2d = swa_indices.view(num_decode_tokens, -1).contiguous()
+        if swa_indices_2d.shape[-1] != self.window_size:
+            raise ValueError(
+                f"DeepSeek V4 FlashInfer path expects {self.window_size} SWA "
+                f"indices, got {swa_indices_2d.shape[-1]}"
+            )
+
+        if swa_only:
+            compressed_kv_cache = self.swa_cache_layer.kv_cache
+            compressed_indices = torch.full(
+                (num_decode_tokens, 4),
+                -1,
+                dtype=torch.int32,
+                device=q.device,
+            )
+            sparse_topk_lens = torch.full(
+                (num_decode_tokens,),
+                self.window_size,
+                dtype=torch.int32,
+                device=q.device,
+            )
+        else:
+            assert kv_cache is not None
+            assert topk_indices is not None
+            assert topk_lens is not None
+            compressed_kv_cache = kv_cache
+            compressed_indices = topk_indices.view(num_decode_tokens, -1).contiguous()
+            sparse_topk_lens = (topk_lens + self.window_size).to(torch.int32)
+
+        sparse_indices = torch.cat((swa_indices_2d, compressed_indices), dim=-1)
+        if sparse_indices.shape[-1] % 4 != 0:
+            pad = 4 - sparse_indices.shape[-1] % 4
+            sparse_indices = F.pad(sparse_indices, (0, pad), value=-1)
+        sparse_indices = sparse_indices.contiguous()
+
+        query_start_loc = swa_metadata.query_start_loc[: num_decodes + 1]
+        query_start_loc_cpu = swa_metadata.query_start_loc_cpu[: num_decodes + 1]
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        max_q_len = int(query_lens_cpu.max().item())
+
+        seq_lens = swa_metadata.seq_lens[:num_decodes].to(torch.int32)
+        query = q.contiguous()
+        bmm1_scale: float | torch.Tensor = self.scale
+        bmm2_scale: float | torch.Tensor = 1.0
+        if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
+            query = query.clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
+            bmm1_scale = torch.tensor(
+                [self.scale], dtype=torch.float32, device=q.device
+            )
+            bmm2_scale = torch.ones(1, dtype=torch.float32, device=q.device)
+
+        flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
+            query=query,
+            swa_kv_cache=self.swa_cache_layer.kv_cache,
+            workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
+            sparse_indices=sparse_indices,
+            compressed_kv_cache=compressed_kv_cache,
+            sparse_topk_lens=sparse_topk_lens.contiguous(),
+            seq_lens=seq_lens.contiguous(),
+            out=output,
+            bmm1_scale=bmm1_scale,
+            bmm2_scale=bmm2_scale,
+            sinks=self.attn_sink,
+            kv_layout="HND",
+            cum_seq_lens_q=query_start_loc.contiguous(),
+            max_q_len=max_q_len,
         )
 
     def _forward_prefill(

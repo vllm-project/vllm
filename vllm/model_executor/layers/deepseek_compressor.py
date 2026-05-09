@@ -27,6 +27,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _fused_kv_compress_norm_rope_insert_sparse_attn,
+    _fused_kv_compress_norm_rope_insert_sparse_attn_full_cache,
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
     MXFP4_BLOCK_SIZE,
@@ -129,11 +130,13 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         dtype: torch.dtype,
         compress_ratio: int,
         prefix: str,
+        alignment: int | None = 576,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.dtype = dtype
         self.prefix = prefix
+        self.alignment = alignment
         self.kv_cache = torch.tensor([])
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -165,7 +168,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=self.alignment,
         )
 
     def forward(self): ...
@@ -185,6 +188,7 @@ class DeepseekCompressor(nn.Module):
         prefix: str = "",
         k_cache_prefix="",
         use_fp4_cache: bool = False,
+        state_cache_alignment: int | None = 576,
     ):
         super().__init__()
         self.compress_ratio = compress_ratio
@@ -232,6 +236,7 @@ class DeepseekCompressor(nn.Module):
             dtype=state_dtype,
             compress_ratio=compress_ratio,
             prefix=f"{prefix}.state_cache",
+            alignment=state_cache_alignment,
         )
 
         # Save reference to static_forward_context for forward-time KV cache lookup.
@@ -338,6 +343,45 @@ class DeepseekCompressor(nn.Module):
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+
+        if self.head_dim == 512 and kv_cache.dtype != torch.uint8:
+            assert kv_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+            _fused_kv_compress_norm_rope_insert_sparse_attn_full_cache[(num_actual,)](
+                # state cache
+                state_cache,
+                state_cache.stride(0),
+                state_cache.stride(1),
+                # metadata
+                token_to_req_indices,
+                positions,
+                slot_mapping,
+                block_table,
+                block_table.stride(0),
+                block_size,
+                # RMSNorm
+                self.norm.weight,
+                self.rms_norm_eps,
+                # RoPE
+                cos_sin_cache,
+                cos_sin_cache.stride(0),
+                # KV cache
+                kv_cache,
+                k_cache_metadata.slot_mapping,
+                kv_cache.shape[1],
+                # constexprs
+                HEAD_SIZE=self.head_dim,
+                TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),
+                STATE_WIDTH=state_width,
+                COMPRESS_RATIO=self.compress_ratio,
+                OVERLAP=self.overlap,
+                ROPE_HEAD_DIM=self.rope_head_dim,
+                KV_BLOCK_STRIDE=kv_cache.stride(0),
+                KV_TOKEN_STRIDE=kv_cache.stride(1),
+                STORE_FP8=kv_cache.dtype == torch.float8_e4m3fn,
+                num_warps=self._num_warps,
+                **pdl_kwargs,
+            )
+            return
 
         self._fused_kernel[(num_actual,)](
             # state cache

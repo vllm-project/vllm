@@ -21,6 +21,184 @@ from vllm.utils.import_utils import has_cutedsl
 
 
 @triton.jit
+def _apply_gptj_rope_512(
+    values,
+    position,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    HEAD_SIZE: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    NUM_PAIRS: tl.constexpr = BLOCK_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = (HEAD_SIZE - ROPE_HEAD_DIM) // 2
+    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
+
+    pairs = tl.reshape(values, (NUM_PAIRS, 2))
+    even, odd = tl.split(pairs)
+
+    pair_idx = tl.arange(0, NUM_PAIRS)
+    rope_pair_local = pair_idx - NOPE_PAIRS
+    is_rope_pair = rope_pair_local >= 0
+    cs_idx = tl.maximum(rope_pair_local, 0)
+
+    cache_base = cos_sin_cache_ptr + position * cos_sin_stride
+    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
+    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
+
+    new_even = tl.where(is_rope_pair, even * cos_v - odd * sin_v, even)
+    new_odd = tl.where(is_rope_pair, odd * cos_v + even * sin_v, odd)
+    return tl.interleave(new_even, new_odd)
+
+
+@triton.jit
+def _qnorm_rope_kernel(
+    q_ptr,
+    q_stride0,
+    q_stride1,
+    positions_ptr,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    eps,
+    HEAD_SIZE: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < HEAD_SIZE
+
+    q_row = q_ptr + token_idx * q_stride0 + head_idx * q_stride1
+    values = tl.load(q_row + offsets, mask=mask, other=0.0).to(tl.float32)
+    variance = tl.sum(values * values, axis=0) / HEAD_SIZE
+    values *= tl.rsqrt(variance + eps)
+
+    position = tl.load(positions_ptr + token_idx)
+    values = _apply_gptj_rope_512(
+        values,
+        position,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        HEAD_SIZE,
+        ROPE_HEAD_DIM,
+        BLOCK_SIZE,
+    )
+    tl.store(q_row + offsets, values.to(tl.bfloat16), mask=mask)
+
+
+@triton.jit
+def _kv_rope_insert_full_cache_kernel(
+    kv_ptr,
+    kv_stride0,
+    slot_mapping_ptr,
+    positions_ptr,
+    cos_sin_cache_ptr,
+    cos_sin_stride,
+    k_cache_ptr,
+    cache_stride0,
+    cache_stride1,
+    cache_block_size,
+    HEAD_SIZE: tl.constexpr,
+    ROPE_HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    STORE_FP8: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    slot_idx = tl.load(slot_mapping_ptr + token_idx)
+    if slot_idx < 0:
+        return
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < HEAD_SIZE
+    values = tl.load(
+        kv_ptr + token_idx * kv_stride0 + offsets, mask=mask, other=0.0
+    ).to(tl.float32)
+
+    position = tl.load(positions_ptr + token_idx)
+    values = _apply_gptj_rope_512(
+        values,
+        position,
+        cos_sin_cache_ptr,
+        cos_sin_stride,
+        HEAD_SIZE,
+        ROPE_HEAD_DIM,
+        BLOCK_SIZE,
+    )
+
+    block_idx = slot_idx // cache_block_size
+    pos_in_block = slot_idx % cache_block_size
+    cache_row = (
+        k_cache_ptr
+        + block_idx.to(tl.int64) * cache_stride0
+        + (pos_in_block * cache_stride1)
+    )
+    if STORE_FP8:
+        values = tl.clamp(values, -448.0, 448.0)
+        tl.store(cache_row + offsets, values.to(tl.float8e4nv), mask=mask)
+    else:
+        tl.store(cache_row + offsets, values.to(tl.bfloat16), mask=mask)
+
+
+def qnorm_rope_and_insert_full_k_cache(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    eps: float,
+    cache_block_size: int,
+) -> None:
+    """Apply DeepSeek V4 Q RMSNorm/RoPE and insert full-width BF16/FP8 KV.
+
+    This path is for FlashInfer's DeepSeek V4 sparse MLA launcher, which accepts
+    full 512-wide BF16 or per-tensor FP8 E4M3 KV pools. The existing 584-byte
+    UE8M0 cache path remains handled by the CUDA fused op.
+    """
+    assert q.dim() == 3 and q.shape[-1] == 512
+    assert kv.dim() == 2 and kv.shape[-1] == 512
+    assert q.dtype == torch.bfloat16
+    assert kv.dtype == torch.bfloat16
+    assert k_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+    assert cos_sin_cache.dtype == torch.float32
+
+    num_tokens_full, num_heads, _ = q.shape
+    _qnorm_rope_kernel[(num_tokens_full, num_heads)](
+        q,
+        q.stride(0),
+        q.stride(1),
+        positions,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        eps,
+        HEAD_SIZE=512,
+        ROPE_HEAD_DIM=64,
+        BLOCK_SIZE=512,
+        num_warps=8,
+    )
+
+    num_tokens_insert = slot_mapping.shape[0]
+    _kv_rope_insert_full_cache_kernel[(num_tokens_insert,)](
+        kv,
+        kv.stride(0),
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        k_cache,
+        k_cache.stride(0),
+        k_cache.stride(1),
+        cache_block_size,
+        HEAD_SIZE=512,
+        ROPE_HEAD_DIM=64,
+        BLOCK_SIZE=512,
+        STORE_FP8=k_cache.dtype == torch.float8_e4m3fn,
+        num_warps=8,
+    )
+
+
+@triton.jit
 def quantize_and_insert_k_kernel(
     # Input tensors
     k_ptr,  # [num_tokens, 512] bf16
@@ -304,6 +482,57 @@ def _dequantize_and_gather_k_kernel(
             tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
+@triton.jit
+def _gather_full_k_cache_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    k_cache_stride0,
+    k_cache_stride1,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    output_dim: tl.constexpr,
+    STORE_FP8: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < output_dim
+    for i in range(worker_id, gather_len, num_workers):
+        pos = start_pos + i
+        block_in_seq = pos // cache_block_size
+        pos_in_block = pos % cache_block_size
+        block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)
+
+        cache_row = (
+            k_cache_ptr
+            + physical_block_idx.to(tl.int64) * k_cache_stride0
+            + pos_in_block * k_cache_stride1
+        )
+        values = tl.load(cache_row + offsets, mask=mask, other=0.0)
+        if STORE_FP8:
+            values = values.to(tl.float32)
+
+        out_row = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        tl.store(out_row + offsets, values.to(tl.bfloat16), mask=mask)
+
+
 def dequantize_and_gather_k_cache_triton(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -364,6 +593,31 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
 ) -> None:
+    if k_cache.dtype != torch.uint8:
+        assert k_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+        assert k_cache.dim() == 3 and k_cache.shape[-1] == 512
+        num_reqs = seq_lens.shape[0]
+        NUM_WORKERS = 128
+        _gather_full_k_cache_kernel[(num_reqs, NUM_WORKERS)](
+            out,
+            out.stride(0),
+            out.stride(1),
+            k_cache,
+            k_cache.stride(0),
+            k_cache.stride(1),
+            seq_lens,
+            block_table,
+            offset,
+            gather_lens,
+            max_blocks_per_seq=block_table.shape[-1],
+            cache_block_size=block_size,
+            output_dim=512,
+            STORE_FP8=k_cache.dtype == torch.float8_e4m3fn,
+            BLOCK_SIZE=512,
+            num_warps=8,
+        )
+        return
+
     if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from .dequant_gather_k_cutedsl import dequantize_and_gather_k_cache_cutedsl

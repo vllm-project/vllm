@@ -73,7 +73,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # determines the SWA block size of 64 tokens per block.
         # TODO(yifan): make SWA block size automatically determined and configurable.
         self.block_size = 64
-        assert self.dtype == torch.uint8
+        assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return SlidingWindowMLASpec(
@@ -83,7 +83,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            # The legacy fp8_ds_mla FlashMLA layout needs 576B alignment.
+            # FlashInfer DSV4 BF16/per-tensor FP8 reads sparse indices as
+            # flat token offsets, so those cache pages must remain contiguous.
+            alignment=576 if self.cache_config.cache_dtype == "fp8_ds_mla" else None,
             model_version="deepseek_v4",
         )
 

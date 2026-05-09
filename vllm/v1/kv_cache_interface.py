@@ -482,10 +482,11 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.model_version == "deepseek_v4":
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
+        if self.model_version == "deepseek_v4" and self.cache_dtype_str == "fp8_ds_mla":
+            # DeepseekV4 legacy UE8M0 layout:
+            # 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
             return self.storage_block_size * 584
-        assert self.model_version is None, (
+        assert self.model_version in (None, "deepseek_v4"), (
             f"Unsupported model version: {self.model_version}"
         )
         return (

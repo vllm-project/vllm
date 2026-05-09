@@ -63,6 +63,8 @@ else:
     from transformers import AutoConfig
 
 MISTRAL_CONFIG_NAME = "params.json"
+DEEPSEEK_V4_INFERENCE_CONFIG_NAME = "inference/config.json"
+DEEPSEEK_V4_GLOBAL_INFERENCE_FIELDS = ("expert_dtype", "scale_fmt")
 
 logger = init_logger(__name__)
 
@@ -82,6 +84,40 @@ class LazyConfigDict(dict):
         import vllm.transformers_utils.configs as configs
 
         return getattr(configs, value)
+
+
+def _maybe_apply_deepseek_v4_inference_config(
+    config: PretrainedConfig,
+    model: str,
+    revision: str | None,
+) -> None:
+    """Promote DeepSeek V4 inference config fields into hf_config."""
+    if getattr(config, "model_type", None) != "deepseek_v4":
+        return
+    if not file_or_path_exists(model, DEEPSEEK_V4_INFERENCE_CONFIG_NAME, revision):
+        return
+
+    inference_config = get_hf_file_to_dict(
+        DEEPSEEK_V4_INFERENCE_CONFIG_NAME, model, revision
+    )
+    updates = {
+        key: inference_config[key]
+        for key in DEEPSEEK_V4_GLOBAL_INFERENCE_FIELDS
+        if key in inference_config and not hasattr(config, key)
+    }
+    if "scale_fmt" not in updates and not hasattr(config, "scale_fmt"):
+        quantization_config = getattr(config, "quantization_config", None)
+        if isinstance(quantization_config, dict):
+            scale_fmt = quantization_config.get("scale_fmt")
+            if scale_fmt is not None:
+                updates["scale_fmt"] = scale_fmt
+
+    if updates:
+        config.update(updates)
+        logger.info_once(
+            "Applied DeepSeek V4 inference globals to hf_config: %s",
+            tuple(sorted(updates)),
+        )
 
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
@@ -814,6 +850,8 @@ def get_config(
                     ),
                     scale_fmt,
                 )
+
+    _maybe_apply_deepseek_v4_inference_config(config, model, revision)
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
