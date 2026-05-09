@@ -386,11 +386,6 @@ def _run_eagle_correctness(
     Compare the outputs of an original LLM and a speculative LLM
     which should be the same when using eagle speculative decoding.
     """
-    if attn_backend == "TREE_ATTN":
-        pytest.skip(
-            "TREE_ATTN is flaky in the test disable for now until it can be "
-            "resolved (see https://github.com/vllm-project/vllm/issues/22922)"
-        )
     if model_impl == "transformers":
         import transformers
         from packaging.version import Version
