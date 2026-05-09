@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -939,6 +940,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         return "mamba2"
 
 
+@eager_break_during_capture
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,

@@ -5,6 +5,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -41,6 +42,7 @@ from .quantization.base_config import QuantizationConfig
 logger = init_logger(__name__)
 
 
+@eager_break_during_capture
 def kda_attention(
     q_proj_states: torch.Tensor,
     k_proj_states: torch.Tensor,

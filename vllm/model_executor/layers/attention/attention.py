@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -660,6 +661,7 @@ def get_attention_context(
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
 
 
+@eager_break_during_capture
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -702,6 +704,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,

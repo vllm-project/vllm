@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
+    VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -626,6 +627,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # https://github.com/pytorch/pytorch/issues/174502
     "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
         os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
+    ),
+    # Experimental: replace vLLM's piecewise cudagraph (which relies on
+    # Dynamo/FX graph splitting at attention) with a breakable cudagraph
+    # capture/replay system. When enabled, splitting_ops is forced to []
+    # and a single FULL cudagraph wrapper captures the model forward,
+    # using runtime stream-capture breaks in attention/kv-cache ops.
+    "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
+        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
     ),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').

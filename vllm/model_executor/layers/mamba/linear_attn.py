@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -461,6 +462,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         output[:num_actual_tokens], _ = self.out_proj(hidden)
 
 
+@eager_break_during_capture
 def linear_attention(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
