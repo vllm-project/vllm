@@ -500,8 +500,6 @@ class OpenAIServingChat(OpenAIServing):
                     role = self.get_chat_request_role(request)
 
                     # ``res.prompt`` is the rendered chat-templated prompt
-                    # text already produced by the renderer, so no decoding
-                    # round-trip is needed here.
                     prompt_text = res.prompt if request.return_prompt_text else None
 
                     # NOTE num_choices defaults to 1 so this usually executes
@@ -1369,8 +1367,6 @@ class OpenAIServingChat(OpenAIServing):
             prompt_routed_experts = final_res.prompt_routed_experts.tolist()
 
         # ``final_res.prompt`` is the rendered chat-templated prompt text
-        # already produced by the renderer, so no decoding round-trip is
-        # needed here.
         prompt_text = final_res.prompt if request.return_prompt_text else None
 
         response = ChatCompletionResponse(
