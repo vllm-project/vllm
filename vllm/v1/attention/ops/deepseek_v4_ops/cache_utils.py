@@ -21,6 +21,50 @@ from vllm.utils.import_utils import has_cutedsl
 
 
 @triton.jit
+def _fp8_per_tensor_quant_kernel(
+    input_ptr,
+    output_ptr,
+    scale_inv_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < n_elements
+
+    values = tl.load(input_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
+    scale_inv = tl.load(scale_inv_ptr)
+    values = tl.clamp(values * scale_inv, -448.0, 448.0)
+    tl.store(output_ptr + offsets, values.to(tl.float8e4nv), mask=mask)
+
+
+def fp8_per_tensor_quant(
+    input_tensor: torch.Tensor,
+    scale_inv: torch.Tensor,
+) -> torch.Tensor:
+    assert input_tensor.dtype == torch.bfloat16
+    assert scale_inv.dtype == torch.float32 and scale_inv.numel() == 1
+
+    input_tensor = input_tensor.contiguous()
+    output = torch.empty_like(input_tensor, dtype=torch.float8_e4m3fn)
+    n_elements = input_tensor.numel()
+    if n_elements == 0:
+        return output
+
+    block_size = 1024
+    grid = (triton.cdiv(n_elements, block_size),)
+    _fp8_per_tensor_quant_kernel[grid](
+        input_tensor,
+        output,
+        scale_inv,
+        n_elements,
+        BLOCK_SIZE=block_size,
+        num_warps=4,
+    )
+    return output
+
+
+@triton.jit
 def _apply_gptj_rope_512(
     values,
     position,

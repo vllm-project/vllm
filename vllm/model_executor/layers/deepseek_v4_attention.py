@@ -25,6 +25,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
+    fp8_per_tensor_quant,
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
@@ -89,7 +90,6 @@ logger = init_logger(__name__)
 
 _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
-_FLASHINFER_FP8_LOG2E = 1.4426950408889634
 _DEFAULT_FLASHINFER_DSV4_FP8_SCALE = 1.0 / 32.0
 
 # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
@@ -813,19 +813,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             torch.tensor([fp8_kv_scale], dtype=torch.float32),
             persistent=False,
         )
-        self.register_buffer(
-            "_flashinfer_fp8_bmm1_scale_log2",
-            torch.tensor(
-                [self.scale * fp8_q_scale * fp8_kv_scale * _FLASHINFER_FP8_LOG2E],
-                dtype=torch.float32,
-            ),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_flashinfer_fp8_bmm2_scale",
-            torch.tensor([fp8_kv_scale], dtype=torch.float32),
-            persistent=False,
-        )
+        self._flashinfer_fp8_bmm1_scale = self.scale * fp8_q_scale * fp8_kv_scale
+        self._flashinfer_fp8_bmm2_scale = fp8_kv_scale
 
         # Register with compilation context for metadata lookup
         compilation_config = vllm_config.compilation_config
@@ -1108,15 +1097,15 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         max_q_len = int(query_lens_cpu.max().item())
 
         seq_lens = swa_metadata.seq_lens[:num_decodes].to(torch.int32)
-        query = q.contiguous()
+        query = q
         bmm1_scale: float | torch.Tensor = self.scale
         bmm2_scale: float | torch.Tensor = 1.0
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
-            query = (query * self._flashinfer_fp8_q_scale_inv).clamp(
-                -448.0, 448.0
-            ).to(torch.float8_e4m3fn)
-            bmm1_scale = self._flashinfer_fp8_bmm1_scale_log2
+            query = fp8_per_tensor_quant(query, self._flashinfer_fp8_q_scale_inv)
+            bmm1_scale = self._flashinfer_fp8_bmm1_scale
             bmm2_scale = self._flashinfer_fp8_bmm2_scale
+        else:
+            query = query.contiguous()
 
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4_raw(
             query=query,
