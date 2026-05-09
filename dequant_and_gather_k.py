@@ -8,7 +8,7 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import BFloat16, Float32, Int32, Uint8, Uint32
+from cutlass import BFloat16, Int32, Uint8, Uint32
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
 from cutlass.cutlass_dsl import T, dsl_user_op
@@ -91,8 +91,8 @@ class DequantGatherKCacheKernel:
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
 
-        self.u32_ld_size = 4
-        self.threads_per_tok = self.head_dim // (self.u32_ld_size * 4)
+        self.cp_bytes = 16
+        self.threads_per_tok = self.head_dim // self.cp_bytes
 
     @cute.jit
     def __call__(
@@ -170,8 +170,7 @@ class DequantGatherKCacheKernel:
             gather_len = gather_lens[req_id]
         start_pos = seq_len - gather_len
 
-        u32_ld_size = self.u32_ld_size
-        fp8_elems = cutlass.const_expr(u32_ld_size * 4)
+        cp_bytes = self.cp_bytes
 
         # at each position, we have 448 FP8 values + 64 BF16 values.
         # to make our lives easier, we will use 16B loads for FP8,
@@ -182,11 +181,9 @@ class DequantGatherKCacheKernel:
         # the last 4 threads do 32B loads = 64 BF16 values.
         # then the whole warp do 32B stores = 512 BF16 values.
         cp_op = cute.nvgpu.CopyUniversalOp()
-        cp_fp8_atom = cute.make_copy_atom(
-            cp_op, Uint32, num_bits_per_copy=u32_ld_size * 32
-        )
+        cp_fp8_atom = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=cp_bytes * 8)
         cp_bf16_atom = cute.make_copy_atom(
-            cp_op, Uint32, num_bits_per_copy=u32_ld_size * 64
+            cp_op, Uint32, num_bits_per_copy=cp_bytes * 8 * 2
         )
 
         for i in range(
@@ -204,15 +201,15 @@ class DequantGatherKCacheKernel:
             # extensive alignment/divisibility hints. to keep the code
             # compact, we will just issue ld PTX directly.
             k_block_offset = pos % self.block_size
-            data = cute.make_rmem_tensor((u32_ld_size,), Uint32)
+            data = cute.make_rmem_tensor((cp_bytes // 4,), Uint32)
             src = cute.local_tile(
                 k_fp8[page_id, k_block_offset, None],
-                tiler=(u32_ld_size * 4,),
+                tiler=(cp_bytes,),
                 coord=(sublane_id,),
             )
             cute.copy(cp_fp8_atom, cute.recast_tensor(src, Uint32), data)
             scale = k_scale[
-                page_id, k_block_offset, sublane_id * fp8_elems // self.group_size
+                page_id, k_block_offset, sublane_id * cp_bytes // self.group_size
             ]
 
             # convert to bf16x2 via bit manipulation
@@ -220,8 +217,8 @@ class DequantGatherKCacheKernel:
             scale_bf16x2 = (scale_u32 << Uint32(23)) | (scale_u32 << Uint32(7))
 
             # cvt.rn.scaled::n2::ue8m0.bf16x2.e4m3x2 requires PTX 9.2 (CUDA 13.2)
-            dequant = cute.make_rmem_tensor(u32_ld_size * 2, Uint32)
-            for j in cutlass.range_constexpr(u32_ld_size):
+            dequant = cute.make_rmem_tensor(cp_bytes // 4 * 2, Uint32)
+            for j in cutlass.range_constexpr(cp_bytes // 4):
                 tmp = _fp8x4_to_bf16x4(data[j])
 
                 # bf16 multiply is safe
@@ -229,18 +226,18 @@ class DequantGatherKCacheKernel:
                 dequant[j * 2 + 1] = _bf16x2_mul(tmp[1], scale_bf16x2)
 
             # the last 4 threads load BF16 data
-            fp8_threads = cutlass.const_expr(self.fp8_dim // fp8_elems)
+            fp8_threads = cutlass.const_expr(self.fp8_dim // cp_bytes)
             if sublane_id >= fp8_threads:
                 src_ = cute.local_tile(
                     k_bf16[page_id, k_block_offset, None],
-                    tiler=(u32_ld_size * 4,),
+                    tiler=(cp_bytes,),
                     coord=(sublane_id - fp8_threads,),
                 )
                 cute.copy(cp_bf16_atom, cute.recast_tensor(src_, Uint32), dequant)
 
             dst = cute.local_tile(
                 out[req_id, offset + i, None],
-                tiler=(fp8_elems,),
+                tiler=(cp_bytes,),
                 coord=(sublane_id,),
             )
             cute.copy(cp_bf16_atom, dequant, cute.recast_tensor(dst, Uint32))
