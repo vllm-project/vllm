@@ -79,9 +79,6 @@ def select_int8_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
-    if config.is_lora_enabled:
-        return Int8MoeBackend.TRITON, backend_to_kernel_cls(Int8MoeBackend.TRITON)[0]
-
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     activation_format = (
