@@ -89,6 +89,23 @@ class SteeringModelRunnerMixin:
             SteeringVectorSpec | None,
         ],
     ]
+    # Pre-resolved spec cache for the named-module fast path.  Each entry
+    # stores ``(resolved_prefill, resolved_decode)``: the output of
+    # :func:`resolve_effective_vectors` applied to the module's
+    # ``(base, phase)`` specs at registration time.  The hot path in
+    # :meth:`_resolve_request_steering` skips the per-request merge +
+    # resolve work (~37 ms/generate at 3 hooks on gemma-3-4b-it) when a
+    # request references a name with no inline overrides; ``scale!=1.0``
+    # is handled by an in-place ``arr * scale`` over the cached arrays.
+    # Populated alongside ``_steering_module_registry`` and invalidated
+    # together.
+    _steering_module_resolved_cache: dict[
+        str,
+        tuple[
+            dict[str, dict[int, "np.ndarray"]] | None,
+            dict[str, dict[int, "np.ndarray"]] | None,
+        ],
+    ]
     # Set of layer indices physically owned by this worker.  Under PP,
     # this is a contiguous subset of ``[0, num_layers)``; under single-
     # worker and under TP (which replicates all layers per rank), it
@@ -152,6 +169,7 @@ class SteeringModelRunnerMixin:
         self._req_steering_phase = {}
         self._steering_index_dirty = False
         self._steering_module_registry = {}
+        self._steering_module_resolved_cache = {}
 
         steering_config = getattr(self.vllm_config, "steering_config", None)
         if steering_config is None or not steerable:
@@ -550,13 +568,21 @@ class SteeringModelRunnerMixin:
         """
         if replace:
             self._steering_module_registry.clear()
+            self._steering_module_resolved_cache.clear()
         for name, payload in modules.items():
             if not isinstance(payload, dict):
                 raise SteeringVectorError(
                     f"Steering module '{name}' broadcast payload is not a dict"
                 )
-            self._steering_module_registry[name] = self._module_payload_to_specs(
-                payload
+            specs = self._module_payload_to_specs(payload)
+            self._steering_module_registry[name] = specs
+            # Pre-resolve once at registration so the per-request hot path
+            # in ``_resolve_request_steering`` can skip the merge + resolve
+            # numpy work entirely when there are no inline overrides.
+            base_spec, prefill_spec, decode_spec = specs
+            self._steering_module_resolved_cache[name] = (
+                resolve_effective_vectors(base_spec, prefill_spec),
+                resolve_effective_vectors(base_spec, decode_spec),
             )
         if modules:
             logger.debug(
@@ -569,6 +595,7 @@ class SteeringModelRunnerMixin:
         """Drop the listed names from the worker-side registry."""
         for name in names:
             self._steering_module_registry.pop(name, None)
+            self._steering_module_resolved_cache.pop(name, None)
         if names:
             logger.debug(
                 "Worker unregistered %d steering module(s)",
@@ -626,17 +653,42 @@ class SteeringModelRunnerMixin:
                 "module was unregistered after the request was scheduled."
             )
 
+        inline_phase_spec = (
+            sp.prefill_steering_vectors
+            if phase == "prefill"
+            else sp.decode_steering_vectors
+        )
+
+        # Fast path: no inline overrides on either tier.  Use the
+        # pre-resolved cache populated at registration time and skip the
+        # per-request merge + resolve numpy work.  Profiling on
+        # gemma-3-4b-it (3 active hooks) showed this path eliminates
+        # ~37 ms/generate of host-side stalls — see
+        # docs/features/sae_steering.md "Named-module fast path" for
+        # the decomposition.
+        if sp.steering_vectors is None and inline_phase_spec is None:
+            cached = self._steering_module_resolved_cache.get(name)
+            if cached is not None:
+                resolved = cached[0] if phase == "prefill" else cached[1]
+                if resolved is None:
+                    return None
+                if scale == 1.0:
+                    return resolved
+                # Scaled fast path: one numpy multiply per (hook, layer)
+                # array vs. the full merge_steering_specs +
+                # resolve_effective_vectors machinery.
+                return {
+                    hook: {layer: arr * scale for layer, arr in layer_dict.items()}
+                    for hook, layer_dict in resolved.items()
+                }
+
+        # Slow path: inline overrides force a per-request merge + resolve.
         base_spec, prefill_spec, decode_spec = module_specs
         scaled_base = scale_steering_spec(base_spec, scale)
         phase_module_spec = (
             scale_steering_spec(prefill_spec, scale)
             if phase == "prefill"
             else scale_steering_spec(decode_spec, scale)
-        )
-        inline_phase_spec = (
-            sp.prefill_steering_vectors
-            if phase == "prefill"
-            else sp.decode_steering_vectors
         )
 
         merged_base = merge_steering_specs(scaled_base, sp.steering_vectors)
