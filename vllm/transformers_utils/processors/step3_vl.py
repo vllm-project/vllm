@@ -286,11 +286,9 @@ class Step3VLImageProcessor:
 
     def __call__(
         self,
-        images: Image.Image | list[Image.Image] | None = None,
+        images: Image.Image | list[Image.Image],
         return_tensors: str | TensorType | None = None,
     ) -> BatchFeature:
-        if images is None:
-            images = []
         if not isinstance(images, list):
             images = [images]
 

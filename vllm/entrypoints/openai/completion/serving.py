@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.engine.serving import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -82,7 +82,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
+    ) -> list[EngineInput] | ErrorResponse:
         """
         Validate the model and preprocess a completion request.
 
@@ -90,8 +90,7 @@ class OpenAIServingCompletion(OpenAIServing):
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
-            A list of engine_prompts on success,
-            or an ErrorResponse on failure.
+            A list of engine_inputs on success, or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -128,7 +127,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if isinstance(result, ErrorResponse):
             return result
 
-        engine_prompts = result
+        engine_inputs = result
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -145,13 +144,14 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
-        for i, engine_prompt in enumerate(engine_prompts):
+        for i, engine_input in enumerate(engine_inputs):
             max_tokens = get_max_tokens(
                 max_model_len,
                 request.max_tokens,
-                self._extract_prompt_len(engine_prompt),
+                self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
 
             sampling_params: SamplingParams | BeamSearchParams
@@ -169,7 +169,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -182,7 +182,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
-                    prompt=engine_prompt,
+                    prompt=engine_input,
                     request_id=request_id,
                     params=sampling_params,
                     lora_request=lora_request,
@@ -190,7 +190,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 )
             else:
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_input,
                     sampling_params,
                     request_id_item,
                     lora_request=lora_request,
@@ -204,7 +204,7 @@ class OpenAIServingCompletion(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         model_name = self.models.model_name(lora_request)
-        num_prompts = len(engine_prompts)
+        num_prompts = len(engine_inputs)
 
         # Streaming response
         tokenizer = self.renderer.tokenizer
@@ -212,7 +212,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if request.stream:
             return self.completion_stream_generator(
                 request,
-                engine_prompts,
+                engine_inputs,
                 result_generator,
                 request_id,
                 created_time,
@@ -235,8 +235,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    engine_prompt = engine_prompts[i]
-                    final_res.prompt = self._extract_prompt_text(engine_prompt)
+                    final_res.prompt = self._extract_prompt_text(engine_inputs[i])
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
@@ -268,7 +267,7 @@ class OpenAIServingCompletion(OpenAIServing):
     async def completion_stream_generator(
         self,
         request: CompletionRequest,
-        engine_prompts: list[ProcessorInputs],
+        engine_inputs: list[EngineInput],
         result_generator: AsyncIterator[tuple[int, RequestOutput]],
         request_id: str,
         created_time: int,
@@ -301,8 +300,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 prompt_text = res.prompt
                 if prompt_text is None:
-                    engine_prompt = engine_prompts[prompt_idx]
-                    prompt_text = self._extract_prompt_text(engine_prompt)
+                    engine_input = engine_inputs[prompt_idx]
+                    prompt_text = self._extract_prompt_text(engine_input)
 
                 # Prompt details are excluded from later streamed outputs
                 if prompt_token_ids is not None:
@@ -385,6 +384,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
+                        object="text_completion",
                         created=created_time,
                         model=model_name,
                         choices=[
@@ -403,6 +403,14 @@ class OpenAIServingCompletion(OpenAIServing):
                             )
                         ],
                     )
+                    # Stamp on terminal chunk only when no trailing usage chunk
+                    # will follow (that one is the true final message).
+                    if (
+                        not include_usage
+                        and self.system_fingerprint is not None
+                        and finish_reason is not None
+                    ):
+                        chunk.system_fingerprint = self.system_fingerprint
                     if include_continuous_usage:
                         prompt_tokens = num_prompt_tokens[prompt_idx]
                         completion_tokens = previous_num_tokens[i]
@@ -412,7 +420,7 @@ class OpenAIServingCompletion(OpenAIServing):
                             total_tokens=prompt_tokens + completion_tokens,
                         )
 
-                    response_json = chunk.model_dump_json(exclude_unset=False)
+                    response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
 
             total_prompt_tokens = sum(num_prompt_tokens)
@@ -435,6 +443,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     model=model_name,
                     choices=[],
                     usage=final_usage_info,
+                    system_fingerprint=self.system_fingerprint,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True
@@ -533,6 +542,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    routed_experts=(
+                        output.routed_experts.tolist()
+                        if output.routed_experts is not None
+                        else None
+                    ),
                 )
                 choices.append(choice_data)
 
@@ -556,15 +570,22 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        prompt_routed_experts = None
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            pre = final_res_batch[0].prompt_routed_experts
+            if pre is not None:
+                prompt_routed_experts = pre.tolist()
+
         return CompletionResponse(
             id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
             usage=usage,
+            system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
+            prompt_routed_experts=prompt_routed_experts,
         )
 
     def _create_completion_logprobs(

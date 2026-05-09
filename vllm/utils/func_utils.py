@@ -8,9 +8,8 @@ This is similar in concept to the `functools` module.
 
 import inspect
 import threading
-import warnings
 from collections.abc import Callable, Mapping
-from functools import lru_cache, partial, wraps
+from functools import lru_cache
 from typing import Any, TypeVar
 
 from typing_extensions import ParamSpec
@@ -45,92 +44,15 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
-def deprecate_args(
-    start_index: int,
-    is_deprecated: bool | Callable[[], bool] = True,
-    additional_message: str | None = None,
-) -> Callable[[F], F]:
-    if not callable(is_deprecated):
-        is_deprecated = partial(identity, is_deprecated)
-
-    def wrapper(fn: F) -> F:
-        params = inspect.signature(fn).parameters
-        pos_types = (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        pos_kws = [kw for kw, param in params.items() if param.kind in pos_types]
-
-        @wraps(fn)
-        def inner(*args, **kwargs):
-            if is_deprecated():
-                deprecated_args = pos_kws[start_index : len(args)]
-                if deprecated_args:
-                    msg = (
-                        f"The positional arguments {deprecated_args} are "
-                        "deprecated and will be removed in a future update."
-                    )
-                    if additional_message is not None:
-                        msg += f" {additional_message}"
-
-                    warnings.warn(
-                        DeprecationWarning(msg),
-                        stacklevel=3,  # The inner function takes up one level
-                    )
-
-            return fn(*args, **kwargs)
-
-        return inner  # type: ignore
-
-    return wrapper
-
-
-def deprecate_kwargs(
-    *kws: str,
-    is_deprecated: bool | Callable[[], bool] = True,
-    additional_message: str | None = None,
-) -> Callable[[F], F]:
-    deprecated_kws = set(kws)
-
-    if not callable(is_deprecated):
-        is_deprecated = partial(identity, is_deprecated)
-
-    def wrapper(fn: F) -> F:
-        @wraps(fn)
-        def inner(*args, **kwargs):
-            if is_deprecated():
-                deprecated_kwargs = kwargs.keys() & deprecated_kws
-                if deprecated_kwargs:
-                    msg = (
-                        f"The keyword arguments {deprecated_kwargs} are "
-                        "deprecated and will be removed in a future update."
-                    )
-                    if additional_message is not None:
-                        msg += f" {additional_message}"
-
-                    warnings.warn(
-                        DeprecationWarning(msg),
-                        stacklevel=3,  # The inner function takes up one level
-                    )
-
-            return fn(*args, **kwargs)
-
-        return inner  # type: ignore
-
-    return wrapper
-
-
 @lru_cache
-def supports_kw(
+def _supports_kw(
     callable: Callable[..., object],
     kw_name: str,
     *,
     requires_kw_only: bool = False,
     allow_var_kwargs: bool = True,
 ) -> bool:
-    """Check if a keyword is a valid kwarg for a callable; if requires_kw_only
-    disallows kwargs names that can also be positional arguments.
-    """
+    """Internal cached implementation of supports_kw."""
     params = inspect.signature(callable).parameters
     if not params:
         return False
@@ -173,6 +95,29 @@ def supports_kw(
         )
 
     return False
+
+
+def supports_kw(
+    callable: Callable[..., object],
+    kw_name: str,
+    *,
+    requires_kw_only: bool = False,
+    allow_var_kwargs: bool = True,
+) -> bool:
+    """Check if a keyword is a valid kwarg for a callable; if requires_kw_only
+    disallows kwargs names that can also be positional arguments.
+    """
+    # Unwrap bound methods so that the lru_cache key is the underlying
+    # function, not the instance. Caching bound methods pins the object
+    # (and all its GPU tensors) for the lifetime of the cache.
+    if hasattr(callable, "__func__"):
+        callable = callable.__func__
+    return _supports_kw(
+        callable,
+        kw_name,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
 
 def get_allowed_kwarg_only_overrides(

@@ -37,7 +37,7 @@ class ProfilerConfig:
     profiler: ProfilerKind | None = None
     """Which profiler to use. Defaults to None. Options are:
 
-    - 'torch': Use PyTorch profiler.\n
+    - 'torch': Use PyTorch profiler.
     - 'cuda': Use CUDA profiler."""
 
     torch_profiler_dir: str = ""
@@ -45,10 +45,10 @@ class ProfilerConfig:
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
 
-    torch_profiler_with_stack: bool = False
-    """If `True`, enables stack tracing in the torch profiler. Disabled by default
-    to reduce overhead. Can be enabled via VLLM_TORCH_PROFILER_WITH_STACK=1 env var
-    or --profiler-config.torch_profiler_with_stack=true CLI flag."""
+    torch_profiler_with_stack: bool = True
+    """If `True`, enables stack tracing in the torch profiler. Enabled by default
+    as it is useful for debugging. Can be disabled via 
+    --profiler-config.torch_profiler_with_stack=false CLI flag."""
 
     torch_profiler_with_flops: bool = False
     """If `True`, enables FLOPS counting in the torch profiler. Disabled by default."""

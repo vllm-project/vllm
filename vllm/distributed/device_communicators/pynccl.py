@@ -108,9 +108,7 @@ class PyNcclCommunicator:
         if self.rank == 0:
             # get the unique id from NCCL
             self.unique_id = self.nccl.ncclGetUniqueId()
-            logger.info_once(
-                "vLLM is using nccl==%s", self.nccl.ncclGetVersion(), scope="local"
-            )
+            logger.info_once("vLLM is using nccl==%s", self.nccl.ncclGetVersion())
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()
@@ -144,6 +142,13 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    def destroy(self):
+        if self.available and not self.disabled:
+            with torch.accelerator.device_index(self.device.index):
+                self.nccl.ncclCommDestroy(self.comm)
+            self.available = False
+            self.disabled = True
 
     def all_reduce(
         self,

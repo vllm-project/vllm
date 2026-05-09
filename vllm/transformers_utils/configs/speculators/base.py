@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from dataclasses import fields, is_dataclass
 from typing import Any
 
 from transformers import PretrainedConfig
@@ -15,11 +16,21 @@ class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
 
     def __init__(self, **kwargs):
-        """In Transformers v5, `PretrainedConfig` is decorated with `dataclass` and
-        `huggingface_hub.dataclasses.strict(accept_kwargs=True)`.
-        Inheriting classes do not inherit the `accept_kwargs=True` behaviour so we must
-        explicitly pass any kwargs to `PretrainedConfig.__init__`."""
-        super().__init__(**kwargs)
+        # Transformers v4 - super().__init__ which sets all kwargs as attributes
+        if not is_dataclass(PretrainedConfig):
+            return super().__init__(**kwargs)
+        # Transformers v5 - super().__init__ performs some validation before
+        # setting all kwargs as attributes, so we set them first to be safe
+        pre_trained_config_fields = {f.name for f in fields(PretrainedConfig)}
+        super_kwargs = dict()
+        for key, value in kwargs.items():
+            if key == "model_type":
+                continue  # model_type is set as a class variable, so skip it here
+            elif key in pre_trained_config_fields:
+                super_kwargs[key] = value
+            else:
+                setattr(self, key, value)
+        super().__init__(**super_kwargs)
 
     @classmethod
     def from_pretrained(

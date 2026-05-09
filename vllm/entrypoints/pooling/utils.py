@@ -11,8 +11,10 @@ import pybase64
 import torch
 from fastapi.responses import JSONResponse
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
     EmbedDType,
@@ -58,6 +60,17 @@ def build_metadata_items(
 
 def encode_pooling_output_float(output: PoolingRequestOutput) -> list[float]:
     return output.outputs.data.tolist()
+
+
+def encode_pooling_output_float_or_ndarray(output: PoolingRequestOutput) -> Any:
+    """Return an ndarray when the response renderer can serialize NumPy."""
+    try:
+        data = output.outputs.data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        return data.numpy()
+    except (RuntimeError, TypeError):
+        return output.outputs.data.tolist()
 
 
 def encode_pooling_output_base64(
@@ -133,3 +146,24 @@ def get_json_response_cls() -> type[JSONResponse]:
         "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
     )
     return JSONResponse
+
+
+def enable_scoring_api(
+    supported_tasks: tuple["SupportedTask", ...],
+    model_config: ModelConfig | None = None,
+) -> bool:
+    if model_config is None:
+        return False
+
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+    if pooling_task in ("embed", "token_embed"):
+        return True
+
+    if pooling_task == "classify":
+        num_labels = getattr(model_config.hf_config, "num_labels", 0)
+        if num_labels != 1:
+            logger.debug_once("Scoring API is only enabled for num_labels == 1.")
+            return False
+        return True
+
+    return False

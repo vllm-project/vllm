@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import math
-from typing import Any
+from typing import Any, TypedDict
 
 import numpy as np
-import PIL.Image
 import torch
 import torch.nn.functional as F
+from PIL import Image
 from transformers import BatchFeature, ProcessorMixin, TensorType
-from typing_extensions import TypedDict, Unpack
+from transformers.processing_utils import ProcessingKwargs
+from typing_extensions import Unpack
+
+from vllm.tokenizers.hf import HfTokenizer
 
 MAX_PIXELS = 60_000_000  # 60-megapixel ceiling ≈ 8200 × 7300 px
 
@@ -39,7 +40,7 @@ def _make_writeable(arr: np.ndarray) -> np.ndarray:
         return arr.copy()
 
 
-def extract_image_pil(image: PIL.Image.Image) -> torch.Tensor | None:
+def extract_image_pil(image: Image.Image) -> torch.Tensor:
     if image.width * image.height > MAX_PIXELS:
         raise ValueError(
             f"Image (w={image.width}, h={image.height}) > MAX=`{MAX_PIXELS}`"
@@ -306,39 +307,45 @@ def process_vision_for_patches(
     return patches, dims_virtual
 
 
-class IsaacImageProcessorKwargs(TypedDict, total=False):
+class IsaacImagesKwargs(TypedDict, total=False):
     patch_size: int
     max_num_patches: int
     min_num_patches: int
     pixel_shuffle_scale: int
 
 
-class IsaacImageProcessor:
-    patch_size = 16
-    max_num_patches = 6144
-    min_num_patches = 256
-    pixel_shuffle_scale = 2
+class IsaacProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
+    images_kwargs: IsaacImagesKwargs
+    _defaults = {
+        "text_kwargs": {"padding": False},
+        "images_kwargs": {},
+    }
 
-    valid_kwargs = IsaacImageProcessorKwargs
+
+class IsaacImageProcessor:
     model_input_names = ["pixel_values", "image_grid_thw"]
 
-    def __init__(self, kwargs):
-        self.patch_size = kwargs.pop("patch_size", self.patch_size)
-        self.vision_max_num_patches = kwargs.pop(
-            "vision_max_num_patches", self.max_num_patches
-        )
-        self.vision_min_num_patches = kwargs.pop(
-            "vision_min_num_patches", self.min_num_patches
-        )
-        self.pixel_shuffle_scale = kwargs.pop("pixel_shuffle_scale", 2)
-
-    def preprocess(
+    def __init__(
         self,
-        images: list[torch.Tensor],
-        return_tensors: str | TensorType | None,
-        **kwargs: Unpack[IsaacImageProcessorKwargs],
+        patch_size: int = 16,
+        vision_max_num_patches: int = 6144,
+        vision_min_num_patches: int = 256,
+        pixel_shuffle_scale: int = 2,
+    ) -> None:
+        self.patch_size = patch_size
+        self.vision_max_num_patches = vision_max_num_patches
+        self.vision_min_num_patches = vision_min_num_patches
+        self.pixel_shuffle_scale = pixel_shuffle_scale
+
+    def __call__(
+        self,
+        images: Image.Image | list[Image.Image],
+        return_tensors: str | TensorType | None = None,
+        **kwargs: Unpack[IsaacImagesKwargs],
     ) -> BatchFeature:
         """Preprocess images into format compatible with vLLM input processing."""
+        if not isinstance(images, list):
+            images = [images]
 
         all_pixel_values: list[torch.Tensor] = []
         all_image_grids: list[torch.Tensor] = []
@@ -348,10 +355,16 @@ class IsaacImageProcessor:
 
             patches, dims_virtual = process_vision_for_patches(
                 image_tensor,
-                patch_size=self.patch_size,
-                max_num_patches=self.vision_max_num_patches,
-                min_num_patches=self.vision_min_num_patches,
-                pixel_shuffle_scale=self.pixel_shuffle_scale,
+                patch_size=kwargs.get("patch_size", self.patch_size),
+                max_num_patches=kwargs.get(
+                    "max_num_patches", self.vision_max_num_patches
+                ),
+                min_num_patches=kwargs.get(
+                    "min_num_patches", self.vision_min_num_patches
+                ),
+                pixel_shuffle_scale=kwargs.get(
+                    "pixel_shuffle_scale", self.pixel_shuffle_scale
+                ),
             )
 
             # Isaac packs a dummy temporal dim for images
@@ -388,23 +401,44 @@ class IsaacImageProcessor:
 class IsaacProcessor(ProcessorMixin):
     attributes = ["image_processor", "tokenizer"]
 
-    def __init__(self, image_processor=None, tokenizer=None, **kwargs):
-        self.image_token = kwargs.pop("image_token", "<image>")
+    def __init__(
+        self,
+        image_processor: IsaacImageProcessor,
+        tokenizer: HfTokenizer,
+        image_token: str = "<image>",
+    ):
         self.image_processor = image_processor
         self.tokenizer = tokenizer
 
-    def __call__(self, text=None, images=None, **kwargs) -> BatchFeature:
-        result = {}
+        self.image_token = image_token
+
+    def __call__(
+        self,
+        text: str | list[str] | None = None,
+        images: Image.Image | list[Image.Image] | None = None,
+        return_tensors: str | TensorType | None = None,
+        **kwargs: Unpack[IsaacProcessorKwargs],  # type: ignore[misc]
+    ) -> BatchFeature:
+        output_kwargs = self._merge_kwargs(
+            IsaacProcessorKwargs,
+            tokenizer_init_kwargs=self.tokenizer.init_kwargs,
+            **kwargs,
+        )
 
         if images is not None:
-            image_inputs = self.image_processor.preprocess(images, **kwargs)
+            image_inputs = self.image_processor(
+                images, **output_kwargs["images_kwargs"]
+            )
             image_grid_thw = image_inputs["image_grid_thw"]
-            result.update(image_inputs)
+        else:
+            image_inputs = {}
+            image_grid_thw = []
 
-            if text is not None:
-                if not isinstance(text, list):
-                    text = [text]
+        if text is not None:
+            if not isinstance(text, list):
+                text = [text]
 
+            if image_inputs:
                 text = text.copy()  # below lines change text in-place
                 merge_length = self.image_processor.pixel_shuffle_scale**2
                 index = 0
@@ -417,10 +451,14 @@ class IsaacProcessor(ProcessorMixin):
                         index += 1
                     text[i] = text[i].replace("<|placeholder|>", "<|image_pad|>")
 
-        if text is not None:
-            result.update(self.tokenizer(text, **kwargs))
+            text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
+        else:
+            text_inputs = {}
 
-        return BatchFeature(result)
+        return BatchFeature(
+            data={**text_inputs, **image_inputs},
+            tensor_type=return_tensors,
+        )
 
     def apply_chat_template(
         self,
