@@ -198,7 +198,8 @@ class NixlConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
-        if NixlWrapper is None:
+        nixl_wrapper_cls = NixlWrapper
+        if nixl_wrapper_cls is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
         logger.info("Initializing NIXL wrapper")
@@ -284,7 +285,7 @@ class NixlConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
+        self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
