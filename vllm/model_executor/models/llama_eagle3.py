@@ -145,12 +145,16 @@ class LlamaModel(nn.Module):
         # Get drafter's quantization config
         self.quant_config = get_draft_quant_config(vllm_config)
 
-        eagle_config = getattr(self.config, "eagle_config", None)
-        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+        eagle_config = getattr(self.config, "eagle_config", None) or {}
+        if "use_aux_hidden_state" in eagle_config:
             self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
-        self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
+        self.norm_before_fc = bool(
+            eagle_config.get(
+                "norm_before_fc", getattr(self.config, "norm_before_fc", False)
+            )
+        )
 
         current_vllm_config = get_current_vllm_config()
 
