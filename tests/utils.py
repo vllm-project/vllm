@@ -20,9 +20,9 @@ import time
 import warnings
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack, contextmanager
-from multiprocessing import Process
+from multiprocessing import Process, get_context
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import anthropic
@@ -125,6 +125,21 @@ ROCM_ENGINE_KWARGS: dict = (
     if current_platform.is_rocm()
     else {}
 )
+
+
+def requires_spawn_multiprocessing() -> bool:
+    """Whether this platform requires spawn instead of fork for test processes."""
+    return current_platform.is_rocm() or current_platform.is_xpu()
+
+
+def _run_in_new_process_group(
+    child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
+    env_dict: dict[str, str] | None,
+    model: str,
+    vllm_serve_args: list[str],
+) -> None:
+    os.setsid()
+    child_process_fxn(env_dict, model, vllm_serve_args)
 
 
 class RemoteVLLMServer:
@@ -738,8 +753,11 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     def _start_server(
         self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
     ) -> None:
-        self.proc: Process = Process(
-            target=self.child_process_fxn, args=(env_dict, model, vllm_serve_args)
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
+        ctx = get_context(method)
+        self.proc: Process = cast(Any, ctx).Process(
+            target=_run_in_new_process_group,
+            args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
         )  # type: ignore[assignment]
         self.proc.start()
 
@@ -769,12 +787,40 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     def _poll(self) -> int | None:
         return self.proc.exitcode
 
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        self.proc.join(8)
+    def _terminate_process_tree(self) -> None:
+        pid = self.proc.pid
+        if pid is None:
+            return
+
+        pgid: int | None
+        try:
+            pgid = os.getpgid(pid)
+            # _run_in_new_process_group should make the child the group
+            # leader. Avoid signaling pytest's process group if startup failed
+            # before os.setsid() ran.
+            if pgid != pid:
+                pgid = None
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self.proc.terminate()
+            print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
+
+        self.proc.join(15)
         if self.proc.is_alive():
-            # force kill if needed
-            self.proc.kill()
+            print(
+                f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL to process group"
+            )
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+            self.proc.join(10)
+
+        self._kill_process_group_survivors(pgid)
 
 
 def _test_completion(
@@ -1633,8 +1679,7 @@ def create_new_process_for_each_test(
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
-        method = "spawn" if use_spawn else "fork"
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
 
     assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
 
