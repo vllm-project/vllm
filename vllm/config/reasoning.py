@@ -26,6 +26,13 @@ class ReasoningConfig:
     reasoning_end_str: str = ""
     """String that indicates the end of reasoning content."""
 
+    cache_reasoning_tokens: bool = False
+    """Whether to keep thinking tokens in the prefix cache after request
+    completion. When False (default), thinking token blocks are immediately
+    evicted since most clients strip thinking from subsequent turns, making
+    them unreachable dead weight. Set to True if your client includes
+    thinking tokens in follow-up prompts."""
+
     _reasoning_start_token_ids: list[int] | None = field(
         default=None, init=False, repr=False
     )

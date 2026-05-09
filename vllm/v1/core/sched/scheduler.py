@@ -1767,8 +1767,67 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
-        self.kv_cache_manager.free(request)
+        num_thinking_blocks = self._get_num_thinking_blocks(request)
+        self.kv_cache_manager.free(
+            request, num_thinking_blocks=num_thinking_blocks
+        )
         del self.requests[request.request_id]
+
+    def _get_num_thinking_blocks(self, request: Request) -> int:
+        """Compute how many trailing blocks contain thinking/answer tokens
+        that should be immediately evicted from the prefix cache.
+
+        Returns 0 when reasoning is disabled, caching of reasoning tokens
+        is opted-in, or the output contains no thinking tokens.
+
+        Known limitations:
+        - Speculative decoding: ``allocate_slots()`` may allocate
+          lookahead blocks beyond ``request.num_tokens``.  The block
+          count here is based on finalized tokens only, so the
+          prompt/thinking split in ``free()`` could be off by a few
+          blocks when speculative decoding is active.
+        - Hybrid KV cache groups: this method computes a single
+          ``num_thinking_blocks`` using ``self.block_size``, but hybrid
+          cache groups may have different effective block sizes.  Passing
+          the same count to every group may over-evict for groups with
+          larger blocks.
+        - Multi-token delimiters: only ``start_ids[0]`` and
+          ``end_ids[0]`` are used.  Models with multi-token reasoning
+          delimiters are not yet supported.
+        """
+        reasoning_config = self.vllm_config.reasoning_config
+        if (
+            reasoning_config is None
+            or not reasoning_config.enabled
+            or reasoning_config.cache_reasoning_tokens
+        ):
+            return 0
+
+        start_ids = reasoning_config.reasoning_start_token_ids
+        end_ids = reasoning_config.reasoning_end_token_ids
+        if not start_ids or not end_ids:
+            return 0
+
+        # Count reasoning tokens and find the first occurrence.
+        first_reasoning_idx = request.update_reasoning_token_count(
+            start_ids[0], end_ids[0]
+        )
+        if request.num_reasoning_tokens == 0 or first_reasoning_idx is None:
+            return 0
+
+        # Evict blocks starting from the one containing the first
+        # reasoning token.  Output tokens before <think> have correct
+        # RoPE positions and are reusable in multi-turn.  Tokens at or
+        # after reasoning have mismatched positions if reasoning is
+        # stripped in subsequent turns.
+        first_evict_block_idx = (
+            (request.num_prompt_tokens + first_reasoning_idx)
+            // self.block_size
+        )
+        num_total_blocks = (
+            (request.num_tokens + self.block_size - 1) // self.block_size
+        )
+        return max(0, num_total_blocks - first_evict_block_idx)
 
     @property
     def pause_state(self) -> PauseState:
