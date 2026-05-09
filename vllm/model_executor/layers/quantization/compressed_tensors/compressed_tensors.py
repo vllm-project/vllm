@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -747,13 +746,13 @@ class CompressedTensorsConfig(QuantizationConfig):
             self.sparsity_ignore_list
         )
         sparsity_scheme: SparsityCompressionConfig | None = None
-        with suppress(ValueError):
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=sparsity_targets,
-                fused_mapping=self.packed_modules_mapping,
-            )
+        matched_target = find_matched_target(
+            layer_name=layer_name,
+            module=layer,
+            targets=sparsity_targets,
+            fused_mapping=self.packed_modules_mapping,
+        )
+        if matched_target is not None:
             sparsity_scheme = self.sparsity_scheme_map[matched_target]
 
         if self.supports_cutlass_24(
@@ -821,10 +820,11 @@ class CompressedTensorsConfig(QuantizationConfig):
                 targets=self.target_scheme_map.keys(),
                 fused_mapping=self.packed_modules_mapping,
             )
-            scheme_dict = self.target_scheme_map[matched_target]
-            if scheme_dict.get("format") is None:
-                scheme_dict["format"] = self.quant_format
-            return scheme_dict
+            if matched_target is not None:
+                scheme_dict = self.target_scheme_map[matched_target]
+                if scheme_dict.get("format") is None:
+                    scheme_dict["format"] = self.quant_format
+                return scheme_dict
 
         return None
 

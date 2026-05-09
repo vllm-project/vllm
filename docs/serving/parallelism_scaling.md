@@ -78,7 +78,7 @@ For details, see the [Ray documentation](https://docs.ray.io/en/latest/index.htm
 
 ### Ray cluster setup with containers
 
-The helper script [examples/online_serving/run_cluster.sh](../../examples/online_serving/run_cluster.sh) starts containers across nodes and initializes Ray. By default, the script runs Docker without administrative privileges, which prevents access to the GPU performance counters when profiling or tracing. To enable admin privileges, add the `--cap-add=CAP_SYS_ADMIN` flag to the Docker command.
+The helper script [examples/ray_serving/run_cluster.sh](../../examples/ray_serving/run_cluster.sh) starts containers across nodes and initializes Ray. By default, the script runs Docker without administrative privileges, which prevents access to the GPU performance counters when profiling or tracing. To enable admin privileges, add the `--cap-add=CAP_SYS_ADMIN` flag to the Docker command.
 
 Choose one node as the head node and run:
 
@@ -162,7 +162,7 @@ vllm serve /path/to/the/model/in/the/container \
 
 Efficient tensor parallelism requires fast internode communication, preferably through high-speed network adapters such as InfiniBand.
 To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the
-[examples/online_serving/run_cluster.sh](../../examples/online_serving/run_cluster.sh) helper script.
+[examples/ray_serving/run_cluster.sh](../../examples/ray_serving/run_cluster.sh) helper script.
 Contact your system administrator for more information about the required flags.
 
 ## Enabling GPUDirect RDMA
