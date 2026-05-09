@@ -273,3 +273,95 @@ def test_signature_detection_with_mocking():
         assert isinstance(new_connector, NewStyleTestConnector)
         assert new_connector._kv_cache_config is not None
         assert new_connector._kv_cache_config == kv_cache_config
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #40690:
+# MultiConnector must route child construction through the compat-aware factory
+# so that legacy 2-arg connectors work as children, not just at the top level.
+# ---------------------------------------------------------------------------
+
+_THIS_MODULE = "tests.v1.kv_connector.unit.test_backwards_compatibility"
+
+
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_multiconnector_old_style_child_instantiation(role):
+    """
+    Regression test for #40690.
+
+    A legacy connector with the old 2-arg __init__(self, vllm_config, role)
+    must work as a child of MultiConnector.  Before the fix, MultiConnector
+    directly called connector_cls(config, role, kv_cache_config), which passed
+    a third positional argument that the old-style connector doesn't accept,
+    raising TypeError.  After the fix, child construction goes through
+    KVConnectorFactory.create_connector, which applies the same compat shim
+    that the top-level path uses.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "OldStyleTestConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_module_path": _THIS_MODULE,
+                }
+            ]
+        },
+    )
+
+    scheduler = create_scheduler(vllm_config)
+    kv_cache_config = scheduler.kv_cache_config
+
+    # This must not raise TypeError before or after the fix.
+    connector = KVConnectorFactory.create_connector(vllm_config, role, kv_cache_config)
+
+    assert isinstance(connector, MultiConnector)
+    assert len(connector._connectors) == 1
+    child = connector._connectors[0]
+    assert isinstance(child, OldStyleTestConnector)
+    # Old-style connector receives no kv_cache_config
+    assert child._kv_cache_config is None
+
+
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_multiconnector_new_style_child_unaffected(role):
+    """
+    Ensure that the fix does not break new-style 3-arg children inside
+    MultiConnector.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+        MultiConnector,
+    )
+
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "NewStyleTestConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_module_path": _THIS_MODULE,
+                }
+            ]
+        },
+    )
+
+    scheduler = create_scheduler(vllm_config)
+    kv_cache_config = scheduler.kv_cache_config
+
+    connector = KVConnectorFactory.create_connector(vllm_config, role, kv_cache_config)
+
+    assert isinstance(connector, MultiConnector)
+    assert len(connector._connectors) == 1
+    child = connector._connectors[0]
+    assert isinstance(child, NewStyleTestConnector)
+    # New-style connector receives kv_cache_config
+    assert child._kv_cache_config is not None
+    assert child._kv_cache_config == kv_cache_config
