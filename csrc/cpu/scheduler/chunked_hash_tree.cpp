@@ -14,7 +14,9 @@ ChunkedHashTree::ChunkedHashTree(uint32_t chunk)
 }
 
 uint64_t ChunkedHashTree::pack_key(uint32_t level, uint64_t hash) {
-  return (uint64_t(level) << 56) | (hash & 0x00FFFFFFFFFFFFFFULL);
+  // 16 bits for level (supports up to 65535 chunks = ~3.2M tokens at
+  // chunk_size=50) 48 bits for truncated hash
+  return (uint64_t(level & 0xFFFF) << 48) | (hash & 0x0000FFFFFFFFFFFFULL);
 }
 
 void ChunkedHashTree::invalidate_cache() {
@@ -214,6 +216,7 @@ std::vector<uint64_t> ChunkedHashTree::compute_hashes(
   // Feed tokens through a single streaming state so each digest incorporates
   // all tokens from chunk 0 up to and including the current chunk boundary.
   XXH64_state_t* state = XXH64_createState();
+  if (!state) return {};
   XXH64_reset(state, 0);
 
   for (size_t i = 0; i < tokens.size(); ++i) {

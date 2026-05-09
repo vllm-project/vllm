@@ -313,7 +313,7 @@ class FeatherRequestQueue(RequestQueue):
         int_id = self._request_id_to_int.get(request_id)
         if int_id is not None:
             # Remove from radix tree to update chunk sharing of subsequent requests.
-            self._radix.finish_request(int_id)
+            self._radix.remove(int_id)
         del self._pending_requests[request_id]
         self._release_id(request_id)
 
