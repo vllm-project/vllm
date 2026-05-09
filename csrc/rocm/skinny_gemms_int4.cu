@@ -1139,10 +1139,21 @@ __global__ void moe_wvSplitK_int4_hf_(
                 2 wide-load batches per k-step instead of 4 narrow    \
                 ones, fewer waitcnt boundaries amortize HBM page-mode \
                 costs.  GFX9 wave64 stays on the previous heuristic   \
-                via MOE_WVSPLIT_INT4G_GS_W_AC's fallback. */          \
+                via MOE_WVSPLIT_INT4G_GS_W_AC's fallback.             \
+              LOW-VGPR override (gfx1x_int4 only):                    \
+                On Qwen3.5-35B-A3B (gemm2 K=512), the (W=32, AC=32)   \
+                instantiation compiles to 157 VGPRs/wave; combined    \
+                with WG=1024 threads (32 wave32) this caps occupancy  \
+                at 32 active wave32/CU = 50% of peak.  Switching to   \
+                (W=16, AC=16, U=2) drops VGPRs to 113 and WG=512      \
+                threads (16 wave32) so 3 WGs fit per CU = 48 active   \
+                wave32/CU = 75% of peak.  Better latency hiding for   \
+                memory-bound kernels. */                              \
     {                                                                 \
       if (K_in >= 1024)                                               \
         MOE_WVSPLIT_INT4G_GS(4, 4, __N, _HAS_ZP)                      \
+      else if (is_gfx1x_int4())                                       \
+        MOE_WVSPLIT_INT4G_GS(4, 2, __N, _HAS_ZP)                      \
       else                                                            \
         MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 32, 2, __N, _HAS_ZP)         \
     }                                                                 \
