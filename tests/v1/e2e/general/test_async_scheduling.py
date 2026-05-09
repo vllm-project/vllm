@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 from itertools import repeat
 from typing import Any
 
@@ -24,7 +23,9 @@ MODEL = "Qwen/Qwen3-0.6B"
 MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 # Need to enforce eager for MRV2 while we sort out cudagraph issues.
-ENFORCE_EAGER = os.getenv("ENFORCE_EAGER", "0") == "1"
+# PROBE: force eager (cudagraphs disabled) to test if cudagraph capture is the
+# source of bit-level divergence between async/preempted configs and baseline.
+ENFORCE_EAGER = True
 
 first_prompt = (
     "The following numbers of the sequence "
