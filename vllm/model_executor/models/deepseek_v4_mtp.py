@@ -43,7 +43,7 @@ from .deepseek_v4 import (
     hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
-from .utils import maybe_prefix
+from .utils import maybe_prefix, validate_num_mtp_layers
 
 logger = init_logger(__name__)
 
@@ -125,7 +125,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
@@ -157,6 +156,8 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.device = current_platform.device_type
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
 
         topk_tokens = config.index_topk
         self.topk_indices_buffer = torch.empty(
@@ -215,7 +216,6 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             positions,
             previous_hidden_states,
             inputs_embeds,
-            current_step_idx,
         )
 
     def compute_logits(

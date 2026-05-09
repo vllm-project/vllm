@@ -46,7 +46,11 @@ from .interfaces import (
     _require_is_multimodal,
 )
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
-from .utils import _merge_multimodal_embeddings, maybe_prefix
+from .utils import (
+    _merge_multimodal_embeddings,
+    maybe_prefix,
+    validate_num_mtp_layers,
+)
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
 # only the first layer and only one speculative token.
@@ -168,15 +172,14 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        spec_cfg = vllm_config.speculative_config
-        assert spec_cfg is not None
-        if spec_cfg.num_speculative_tokens != 1:
-            raise ValueError(
-                "MiMo-V2 MTP in vLLM only supports num_speculative_tokens=1."
-            )
-        num_mtp_layers = 1
 
-        self.num_mtp_layers = num_mtp_layers
+        self.num_mtp_layers = 1
+
+        validate_num_mtp_layers(
+            vllm_config,
+            self.num_mtp_layers,
+            max_speculative_tokens=1,
+        )
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -185,7 +188,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
 
         self.mtp = _MiMoV2MTPLayers(
             config=config,
-            num_mtp_layers=num_mtp_layers,
+            num_mtp_layers=self.num_mtp_layers,
             quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "mtp.layers"),
         )
@@ -203,10 +206,10 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
-        return self.mtp.layers[str(spec_step_idx)](
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        return self.mtp.layers[str(current_step_idx)](
             inputs_embeds, positions, previous_hidden_states
         )
 
@@ -216,7 +219,6 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         lm_head: ParallelLMHead,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         return self.logits_processor(lm_head, hidden_states)
 
 
@@ -245,7 +247,6 @@ class MiMoV2MTP(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         return self.model(
             input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )
@@ -255,7 +256,6 @@ class MiMoV2MTP(nn.Module):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
-        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

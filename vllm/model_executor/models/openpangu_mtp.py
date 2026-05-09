@@ -42,7 +42,10 @@ from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMultiTokenPredictorLayer,
     SharedHead,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (
+    maybe_prefix,
+    validate_num_mtp_layers,
+)
 from vllm.sequence import IntermediateTensors
 
 from .openpangu import OpenPanguDecoderLayer
@@ -70,9 +73,13 @@ class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
 class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
+
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {

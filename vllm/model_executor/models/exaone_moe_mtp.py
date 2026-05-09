@@ -10,7 +10,6 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -26,11 +25,8 @@ from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
     maybe_prefix,
+    validate_num_mtp_layers,
 )
-
-logger = init_logger(__name__)
-
-KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
 @support_torch_compile
@@ -54,6 +50,8 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "num_nextn_predict_layers", 1)
+
+        validate_num_mtp_layers(vllm_config, self.num_mtp_layers)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
