@@ -890,6 +890,13 @@ class SamplingParams(
                 if skip_guidance:
                     # Fall back to outlines if the tokenizer is non-tekken Mistral or
                     # the schema contains features unsupported by guidance
+                    if structured_outputs_config.disable_any_whitespace:
+                        logger.warning(
+                            "disable_any_whitespace is not supported by the "
+                            "outlines backend and will be ignored. To use "
+                            "disable_any_whitespace, set the backend to "
+                            "'xgrammar' or 'guidance' explicitly."
+                        )
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
