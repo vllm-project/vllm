@@ -9,9 +9,21 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServing
-from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
-from vllm.entrypoints.pooling.embed.protocol import (
+from vllm.logger import init_logger
+from vllm.outputs import PoolingRequestOutput
+from vllm.utils.serial_utils import EmbedDType, Endianness
+
+from ..base.serving import PoolingServing
+from ..typing import PoolingServeContext
+from ..utils import (
+    encode_pooling_bytes,
+    encode_pooling_output_base64,
+    encode_pooling_output_float,
+    encode_pooling_output_float_or_ndarray,
+    get_json_response_cls,
+)
+from .io_processor import EmbedIOProcessor
+from .protocol import (
     CohereBilledUnits,
     CohereEmbedRequest,
     CohereEmbedResponse,
@@ -22,16 +34,6 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponseData,
     build_typed_embeddings,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
-from vllm.entrypoints.pooling.utils import (
-    encode_pooling_bytes,
-    encode_pooling_output_base64,
-    encode_pooling_output_float,
-    get_json_response_cls,
-)
-from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
-from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
 
@@ -103,6 +105,40 @@ class ServingEmbedding(PoolingServing):
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> JSONResponse:
+        use_ndarray_response = (
+            encoding_format == "float"
+            and self.json_response_cls.__name__ == "ORJSONResponse"
+        )
+        if use_ndarray_response:
+            ndarray_items: list[dict[str, object]] = []
+            ndarray_num_tokens = 0
+
+            for idx, final_res in enumerate(final_res_batch):
+                item_dict = EmbeddingResponseData(
+                    index=idx,
+                    embedding=[],
+                ).model_dump()
+                item_dict["embedding"] = encode_pooling_output_float_or_ndarray(
+                    final_res
+                )
+                ndarray_items.append(item_dict)
+                ndarray_num_tokens += len(final_res.prompt_token_ids)
+
+            ndarray_usage = UsageInfo(
+                prompt_tokens=ndarray_num_tokens,
+                total_tokens=ndarray_num_tokens,
+            )
+            ndarray_response = EmbeddingResponse(
+                id=request_id,
+                created=created_time,
+                model=model_name,
+                data=[],  # type: ignore[arg-type]
+                usage=ndarray_usage,
+            ).model_dump()
+            ndarray_response["data"] = ndarray_items
+
+            return self.json_response_cls(content=ndarray_response)
+
         encode_fn = cast(
             Callable[[PoolingRequestOutput], list[float] | str],
             (

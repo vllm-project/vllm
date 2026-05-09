@@ -375,8 +375,8 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
 
     ```bash
     DOCKER_BUILDKIT=1 docker build \
-    --build-arg CUDA_VERSION=13.0.1 \
-    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 \
+    --build-arg CUDA_VERSION=13.0.2 \
+    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
     --build-arg max_jobs=256 \
     --build-arg nvcc_threads=2 \
     --build-arg RUN_WHEEL_CHECK=false \

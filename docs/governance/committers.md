@@ -14,6 +14,7 @@ Sorted alphabetically by GitHub handle:
 - [@aarnphm](https://github.com/aarnphm): Structured output
 - [@alexm-redhat](https://github.com/alexm-redhat): Performance
 - [@ApostaC](https://github.com/ApostaC): Connectors, offloading
+- [@bbrowning](https://github.com/bbrowning): Tool use and reasoning parser
 - [@benchislett](https://github.com/benchislett): Engine core and spec decode
 - [@bigPYJ1151](https://github.com/bigPYJ1151): Intel CPU/XPU integration
 - [@chaunceyjiang](https://github.com/chaunceyjiang): Tool use and reasoning parser
@@ -31,6 +32,7 @@ Sorted alphabetically by GitHub handle:
 - [@LucasWilkinson](https://github.com/LucasWilkinson): Kernels and performance
 - [@luccafong](https://github.com/luccafong): Llama models, speculative decoding, distributed
 - [@markmc](https://github.com/markmc): Observability
+- [@MatthewBonanni](https://github.com/MatthewBonanni): Kernels and performance
 - [@mgoin](https://github.com/mgoin): Quantization and performance
 - [@NickLucche](https://github.com/NickLucche): KV connector
 - [@njhill](https://github.com/njhill): Distributed, API server, engine core
@@ -41,6 +43,7 @@ Sorted alphabetically by GitHub handle:
 - [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat): Core, distributed, disagg
 - [@ruisearch42](https://github.com/ruisearch42): Pipeline parallelism, Ray Support
 - [@russellb](https://github.com/russellb): Structured output, engine core, security
+- [@sfeng33](https://github.com/sfeng33): Tool use and reasoning parser
 - [@sighingnow](https://github.com/sighingnow): Qwen models, new model support
 - [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
 - [@tdoublep](https://github.com/tdoublep): State space models
@@ -86,7 +89,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - AsyncLLM: the zmq based protocol hosting engine core and making it accessible for entrypoints
     - @robertgshaw2-redhat, @njhill, @russellb
 - ModelRunner, Executor, Worker: the abstractions for engine wrapping model implementation
-    - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson, @ProExpertProg
+    - @WoosukKwon, @tlrmchlsmth, @heheda12345, @LucasWilkinson, @ProExpertProg, @MatthewBonanni
 - KV Connector: Connector interface and implementation for KV cache offload and transfer
     - @robertgshaw2-redhat, @njhill, @KuntaiDu, @NickLucche, @ApostaC
 - Distributed, Parallelism, Process Management: Process launchers managing each worker, and assign them to the right DP/TP/PP/EP ranks
@@ -105,7 +108,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Custom Layers: Utility layers in vLLM such as rotary embedding and rms norms
     - @ProExpertProg
 - Attention: Attention interface for paged attention
-    - @WoosukKwon, @LucasWilkinson, @heheda12345
+    - @WoosukKwon, @LucasWilkinson, @heheda12345, @MatthewBonanni
 - FusedMoE: FusedMoE kernel, Modular kernel framework, EPLB
     - @tlrmchlsmth
 - Quantization: Various quantization config, weight loading, and kernel.
@@ -119,7 +122,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - State space models: The state space models implementation in vLLM
     - @tdoublep, @tlrmchlsmth
 - Reasoning and tool calling parsers
-    - @chaunceyjiang, @aarnphm
+    - @chaunceyjiang, @aarnphm, @sfeng33, @bbrowning
 
 ### Entrypoints
 
@@ -133,7 +136,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 ### Features
 
 - Spec Decode: Covers model definition, attention, sampler, and scheduler related to n-grams, EAGLE, and MTP.
-    - @WoosukKwon, @benchislett, @luccafong
+    - @WoosukKwon, @benchislett, @luccafong, @MatthewBonanni
 - Structured Output: The structured output implementation
     - @russellb, @aarnphm
 - RL: The RL related features such as collective rpc, sleep mode, etc.
@@ -153,8 +156,8 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 
 ### External Kernels Integration
 
-- FlashAttention: @LucasWilkinson
-- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon
+- FlashAttention: @LucasWilkinson, @MatthewBonanni
+- FlashInfer: @LucasWilkinson, @mgoin, @WoosukKwon, @MatthewBonanni
 - Blackwell Kernels: @mgoin, @yewentao256
 - DeepEP/DeepGEMM: @mgoin, @yewentao256
 

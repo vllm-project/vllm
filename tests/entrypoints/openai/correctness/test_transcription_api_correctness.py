@@ -13,7 +13,6 @@ import io
 import time
 from statistics import mean, median
 
-import librosa
 import pytest
 import soundfile
 import torch
@@ -21,10 +20,15 @@ from datasets import load_dataset
 from evaluate import load
 from transformers.models.whisper.english_normalizer import EnglishTextNormalizer
 
+from vllm.multimodal.audio import get_audio_duration
 from vllm.tokenizers import get_tokenizer
 
 from ....models.registry import HF_EXAMPLE_MODELS
 from ....utils import RemoteOpenAIServer
+
+# Tuned to prevent OOM on 18GB GPUs in transcription correctness tests.
+MAX_SEQS_FOR_TRANSCRIPTION_TEST = 8
+GPU_UTIL_FOR_TRANSCRIPTION_TEST = 0.5
 
 
 def to_bytes(y, sr):
@@ -84,7 +88,7 @@ async def process_dataset(model, client, data, concurrent_request):
         trust_remote_code=model_info.trust_remote_code,
     )
 
-    # Warmup call as the first `librosa.load` server-side is quite slow.
+    # Warmup call as the first `load_audio` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
     _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
@@ -118,7 +122,7 @@ def print_performance_metrics(results, total_time):
 
 def add_duration(sample):
     y, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
-    sample["duration_ms"] = librosa.get_duration(y=y, sr=sr) * 1000
+    sample["duration_ms"] = get_audio_duration(y=y, sr=sr) * 1000
     return sample
 
 
@@ -167,9 +171,8 @@ def run_evaluation(
     "model_config",
     [
         ("openai/whisper-large-v3", 12.744980),
-        # TODO (ekagra): turn on after asr release
         # CohereASR is used to test the variable encoder length code paths
-        # ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        ("CohereLabs/cohere-transcribe-03-2026", 11.92),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -185,6 +188,8 @@ def test_wer_correctness(
     server_args = [
         "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
+        f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
+        f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}",
     ]
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
