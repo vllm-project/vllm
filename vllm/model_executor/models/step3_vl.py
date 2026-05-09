@@ -821,10 +821,11 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             self.config.vision_config.image_size, 
             device=device, dtype=dtype
         )
-        # For patch_pixel_values, the edge case is one image with max number of patches
+        # max_num_patches is the max total patches across the whole batch.
+        # token_budget = max_batch_size * img_out + max_num_patches * patch_out
         max_num_patches = max(
           0,
-          (token_budget - img_output_tokens) // patch_output_tokens
+          (token_budget - max_batch_size * img_output_tokens) // patch_output_tokens
         )
         dummy_patch_pixel_values = torch.randn(
             max_num_patches, 3,
