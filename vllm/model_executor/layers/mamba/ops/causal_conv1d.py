@@ -37,7 +37,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     num_cache_lines: tl.constexpr,  # added to support vLLM larger cache lines
     # Strides
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
-    stride_x_token: tl.constexpr,  # stride to get to next token (same feature-index, same sequence-index)
+    stride_x_token: tl.int64,  # stride to get to next token (same feature-index, same sequence-index)
     stride_w_dim: tl.constexpr,  # stride to get to next dim-axis value
     stride_w_width: tl.constexpr,  # stride to get to next width-axis value
     stride_istate_seq: tl.constexpr,
@@ -45,7 +45,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_token: tl.constexpr,
     stride_cache_indices: tl.constexpr,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token: tl.int64,
     stride_block_m: tl.constexpr,  # Stride block to align divided by BLOCK_M
     # others
     pad_slot_id: tl.constexpr,
@@ -82,7 +82,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     if idx_seq == pad_slot_id:
         return
 
-    sequence_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
+    sequence_start_index = tl.load(query_start_loc_ptr + idx_seq)
     sequence_end_index = tl.load(query_start_loc_ptr + idx_seq + 1)
     # find the actual sequence length
     seqlen = sequence_end_index - sequence_start_index
@@ -126,9 +126,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 
     # base of the sequence
     x_base = (
-        x_ptr
-        + sequence_start_index * stride_x_token
-        + idx_feats.to(tl.int64) * stride_x_dim
+        x_ptr + sequence_start_index * stride_x_token + idx_feats * stride_x_dim
     )  # [BLOCK_N,]
 
     # cache_idx
@@ -207,11 +205,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             )  # [BLOCK_M]
             x_ptrs = (
                 x_ptr
-                + (
-                    (sequence_start_index + idx_tokens_last).to(tl.int64)
-                    * stride_x_token
-                )[:, None]
-                + (idx_feats.to(tl.int64) * stride_x_dim)[None, :]
+                + ((sequence_start_index + idx_tokens_last) * stride_x_token)[:, None]
+                + (idx_feats * stride_x_dim)[None, :]
             )  # [BLOCK_M,BLOCK_N,]
             mask_x = (
                 (idx_tokens_last >= 0)[:, None]
@@ -315,7 +310,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     else:  # chunk_offset > 0
         # read prior-token data from `x`
         load_init_state = True
-        prior_tokens = x_base + (token_offset.to(tl.int64) - 1) * stride_x_token
+        prior_tokens = x_base + (token_offset - 1) * stride_x_token
         mask_w = idx_feats < dim
         if KERNEL_WIDTH == 2:
             conv_states_ptrs = prior_tokens  # [BLOCK_N]
@@ -359,8 +354,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             ) + tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
             x_ptrs = (
                 x_ptr
-                + (idx_tokens_last.to(tl.int64) * stride_x_token)[:, None]
-                + (idx_feats.to(tl.int64) * stride_x_dim)[None, :]
+                + (idx_tokens_last * stride_x_token)[:, None]
+                + (idx_feats * stride_x_dim)[None, :]
             )  # [BLOCK_M,BLOCK_N,]
 
             mask_x = (idx_tokens_last >= 0)[:, None] & (idx_feats < dim)[
@@ -398,7 +393,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     else:
         acc_preload = tl.zeros((BLOCK_N,), dtype=tl.float32)
 
-    x_base_1d = x_base + token_offset.to(tl.int64) * stride_x_token  # starting of chunk
+    x_base_1d = x_base + token_offset * stride_x_token  # starting of chunk
 
     # PRE-LOAD WEIGHTS
     mask_w = idx_feats < dim
@@ -464,9 +459,8 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         )  # token-index  # feature-index
         o_ptrs = (
             o_ptr
-            + (sequence_start_index + token_offset + idx_token).to(tl.int64)
-            * stride_o_token
-            + (idx_feats.to(tl.int64) * stride_o_dim)
+            + (sequence_start_index + token_offset + idx_token) * stride_o_token
+            + (idx_feats * stride_o_dim)
         )
 
         tl.store(o_ptrs, acc, mask=mask_1d)
@@ -775,7 +769,7 @@ def _causal_conv1d_update_kernel(
     # Strides
     stride_x_seq: tl.constexpr,
     stride_x_dim: tl.constexpr,
-    stride_x_token: tl.constexpr,
+    stride_x_token: tl.int64,
     stride_w_dim: tl.constexpr,
     stride_w_width: tl.constexpr,
     stride_conv_state_seq: tl.constexpr,
@@ -784,7 +778,7 @@ def _causal_conv1d_update_kernel(
     stride_state_indices: tl.constexpr,
     stride_o_seq: tl.constexpr,
     stride_o_dim: tl.constexpr,
-    stride_o_token: tl.constexpr,
+    stride_o_token: tl.int64,
     # others
     null_block_id: tl.constexpr,
     # Meta-parameters
@@ -1068,10 +1062,7 @@ def _causal_conv1d_update_kernel(
             idx_feats < dim
         )  # token-index  # feature-index
         o_ptrs = (
-            o_ptr
-            + o_offset
-            + idx_token.to(tl.int64) * stride_o_token
-            + (idx_feats.to(tl.int64) * stride_o_dim)
+            o_ptr + o_offset + idx_token * stride_o_token + (idx_feats * stride_o_dim)
         )
 
         tl.store(o_ptrs, acc, mask=mask_1d)
