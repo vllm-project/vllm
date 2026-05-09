@@ -214,6 +214,38 @@ def _get_text_config(config):
     return config
 
 
+def _map_gemma4_expert_param_name(
+    name: str,
+    param_name_prefix: str,
+    weight_name: str,
+) -> str | None:
+    """Map Gemma4 expert checkpoint names to FusedMoE parameter names.
+
+    Gemma4's exploded expert weights may include layer/module prefixes before
+    the expert-specific portion of the checkpoint name. Bare expert weights
+    arrive without a `.weight` suffix, while quantized expert scales keep
+    dotted suffixes such as `.weight_scale_2` and `.input_scale`. FusedMoE
+    stores all of these as underscore-separated parameter names.
+    """
+    expert_part_start = name.rfind(weight_name)
+    if expert_part_start == -1:
+        return None
+    if expert_part_start > 0 and name[expert_part_start - 1] != ".":
+        return None
+
+    layer_prefix = name[:expert_part_start]
+    expert_part = name[expert_part_start:]
+
+    if expert_part == weight_name:
+        expert_suffix = "weight"
+    elif expert_part.startswith(weight_name + "."):
+        expert_suffix = expert_part[len(weight_name) + 1 :]
+    else:
+        return None
+
+    return f"{layer_prefix}{param_name_prefix}{expert_suffix}"
+
+
 class Gemma4MLP(nn.Module):
     def __init__(
         self,
@@ -1376,12 +1408,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         #   "experts.0.gate_proj.weight" -> "experts.w13_weight"
         num_experts = getattr(self.config, "num_experts", None) or 0
         expert_params_mapping = [
-            # (param_name, weight_name, expert_id, shard_id)
+            # (param_name_prefix, weight_name, expert_id, shard_id)
             (
                 "experts.w13_"
                 if proj_name in ["gate_proj", "up_proj"]
                 else "experts.w2_",
-                f"experts.{expert_id}.{proj_name}.",
+                f"experts.{expert_id}.{proj_name}",
                 expert_id,
                 shard_id,
             )
@@ -1436,25 +1468,15 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 break
             else:
                 for (
-                    param_name,
+                    param_name_prefix,
                     weight_name,
                     expert_id,
                     shard_id,
                 ) in expert_params_mapping:
-                    # Match both:
-                    #  - Bare weights: "experts.0.down_proj" (from 3D explosion)
-                    #  - With suffix: "experts.0.down_proj.weight_scale" (2D quantized)
-                    # weight_name has trailing dot, so check with and without it
-                    weight_name_base = weight_name.rstrip(".")
-                    if weight_name in name:
-                        # Has suffix (e.g., .weight_scale)
-                        moe_name = name.replace(weight_name, param_name)
-                    elif name.endswith(weight_name_base):
-                        # Bare weight (no suffix)
-                        moe_name = name.replace(
-                            weight_name_base, param_name.rstrip("_") + "_weight"
-                        )
-                    else:
+                    moe_name = _map_gemma4_expert_param_name(
+                        name, param_name_prefix, weight_name
+                    )
+                    if moe_name is None:
                         continue
                     if moe_name not in params_dict:
                         continue
@@ -1465,12 +1487,16 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     # orientation for FusedMoE after _weight_iterator:
                     #   gate/up: [I, H] → w1/w3 expects [I, H]
                     #   down:    [H, I] → w2 expects [H, I]
-                    # Scales and other quantization params may be 1D or scalar.
+                    if moe_name.endswith("_weight"):
+                        assert loaded_weight.dim() == 2, (
+                            f"Expected 2D expert weight for {weight_name}, "
+                            f"got shape {loaded_weight.shape}"
+                        )
                     weight_loader = param.weight_loader
                     weight_loader(
                         param,
                         loaded_weight,
-                        moe_name,  # Pass mapped name (handles both weights and scales)
+                        moe_name,
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
