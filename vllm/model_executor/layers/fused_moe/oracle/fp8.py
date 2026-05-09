@@ -569,7 +569,7 @@ def make_fp8_moe_quant_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_shape,
-            is_nvfp4_scale_swizzled=False,
+            is_scale_swizzled=False,
         )
 
     # All other backends use normal config.
