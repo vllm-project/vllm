@@ -20,14 +20,26 @@ class NemotronV3ReasoningParser(DeepSeekR1ReasoningParser):
         reasoning, final_content = super().extract_reasoning(model_output, request)
         chat_template_kwargs = getattr(request, "chat_template_kwargs", None)
 
-        if (
-            chat_template_kwargs
-            and (
-                chat_template_kwargs.get("enable_thinking") is False
-                or chat_template_kwargs.get("force_nonempty_content") is True
-            )
-            and final_content is None
-        ):
-            reasoning, final_content = final_content, reasoning
+        enable_thinking = (
+            chat_template_kwargs.get("enable_thinking", None)
+            if chat_template_kwargs
+            else None
+        )
+        force_nonempty = (
+            chat_template_kwargs.get("force_nonempty_content", False)
+            if chat_template_kwargs
+            else False
+        )
+
+        if final_content is None:
+            if enable_thinking is False or force_nonempty:
+                # Explicit non-thinking mode or force-nonempty: put output in
+                # content.
+                reasoning, final_content = final_content, reasoning
+            elif enable_thinking is not True and self.start_token not in model_output:
+                # No explicit enable_thinking=True and no start token in the
+                # output: the model did not enter a thinking section, so the
+                # entire output is regular content rather than reasoning.
+                reasoning, final_content = final_content, reasoning
 
         return reasoning, final_content
