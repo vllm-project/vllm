@@ -134,7 +134,7 @@ def apply_grammar_bitmask(
         xgr.apply_token_bitmask_inplace(
             logits_float32,
             grammar_bitmask,
-            indices=index_tensor,
+            indices=indices,
             backend=structured_output_backend,
         )
         # Copy the modified values back to the original tensor
@@ -143,7 +143,7 @@ def apply_grammar_bitmask(
         xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask,
-            indices=index_tensor,
+            indices=indices,
             backend=structured_output_backend,
         )
 
