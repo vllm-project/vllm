@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import hashlib
 import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
-from vllm.v1.utils import ConstantList
+from vllm.v1.utils import ConstantList, tensor_data
 
 try:
     from lmcache.integration.vllm.vllm_multi_process_adapter import (
@@ -220,7 +221,22 @@ class LMCacheMPRequestTracker:
 
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
-        self.cache_salt: str = request.cache_salt or ""
+        # When the request is prompt_embeds-only, `request.all_token_ids` is a
+        # placeholder list of zeros (see vllm/v1/request.py). Token IDs alone
+        # therefore cannot distinguish two same-length prompt_embeds requests,
+        # so the LMCache external KV key must also reflect the embedding
+        # contents. We fold a digest of the prompt_embeds tensor into the
+        # cache_salt so it propagates through every IPCCacheEngineKey derived
+        # from this tracker (lookup, store, retrieve, free_lookup_locks).
+        # See https://github.com/vllm-project/vllm/issues/42119.
+        base_salt = request.cache_salt or ""
+        if request.prompt_embeds is not None:
+            embeds_digest = hashlib.sha256(
+                tensor_data(request.prompt_embeds)
+            ).hexdigest()
+            self.cache_salt: str = f"{base_salt}|pe:{embeds_digest}"
+        else:
+            self.cache_salt = base_salt
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
