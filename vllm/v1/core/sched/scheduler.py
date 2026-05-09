@@ -1683,6 +1683,19 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
+            # Let the connector know a request just arrived so it can
+            # start fetching KV from disk/remote in the background now.
+            #
+            # The scheduler only looks at the waiting queue once the running
+            # queue drains enough to have spare token budget - under load that
+            # can be many iterations away. Without this, the connector sits
+            # unaware of the request the whole time, then get_num_new_matched_tokens
+            # is called and the GPU has to stall waiting for a load that could
+            # have been kicked off much earlier.
+            #
+            # See: https://github.com/vllm-project/vllm/issues/41784
+            if self.connector is not None:
+                self.connector.notify_new_request(request)
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus

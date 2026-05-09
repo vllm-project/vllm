@@ -446,6 +446,29 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
+    def notify_new_request(self, request: "Request") -> None:  # noqa: B027
+        """
+        Called once when a brand-new request lands in the waiting queue,
+        before get_num_new_matched_tokens() is ever touched.
+
+        The gap between this call and when the scheduler actually polls
+        the waiting queue can be many iterations - the running queue
+        keeps the GPU fed and the waiting loop never fires until there's
+        spare budget. For connectors that pull KV from disk or a remote
+        cache, that gap is wasted time: the fetch hasn't started, so
+        when the request finally reaches the front of the queue the GPU
+        has to sit idle while the load catches up.
+
+        Implement this to kick off that lookup early, so the data is
+        already in flight (or landed) by the time get_num_new_matched_tokens
+        is called. The scheduler guarantees this is only called once per
+        request, and only for truly new requests - not preempted ones
+        re-entering the queue.
+
+        No-op by default - connectors that don't do async background
+        loading don't need to override this.
+        """
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
