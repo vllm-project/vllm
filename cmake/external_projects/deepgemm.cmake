@@ -76,7 +76,6 @@ if(DEEPGEMM_ARCHS)
     "${deepgemm_SOURCE_DIR}/third-party/fmt/include")
 
   target_compile_options(_deep_gemm_C PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
     $<$<COMPILE_LANGUAGE:CXX>:-O3>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-psabi>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>)
