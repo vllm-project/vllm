@@ -211,6 +211,13 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                     i,
                 )
                 break
+            raw_val = args_str[val_start:i].strip()
+            if partial and raw_val.endswith("."):
+                # Trailing dot means decimal digits may still arrive
+                # (e.g. "108." may become "108.2"). Parsing now would
+                # yield float("108.") == 108.0, whose json repr "108.0"
+                # corrupts the streaming diff when the true digit lands.
+                break
             result[key] = _parse_gemma4_value(args_str[val_start:i])
 
     return result
@@ -293,6 +300,9 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
                     "aborting on malformed input.",
                     i,
                 )
+                break
+            raw_val = arr_str[val_start:i].strip()
+            if partial and raw_val.endswith("."):
                 break
             items.append(_parse_gemma4_value(arr_str[val_start:i]))
 
