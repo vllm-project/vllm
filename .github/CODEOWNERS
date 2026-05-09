@@ -18,7 +18,8 @@
 /vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
-CMakeLists.txt @tlrmchlsmth @LucasWilkinson
+/CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
+/cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
@@ -69,6 +70,10 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon @njhill
 /vllm/v1/worker/gpu/kv_connector.py @orozery
+
+# CI & building
+/.buildkite @Harry-Chen
+/docker/Dockerfile @Harry-Chen
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin 
