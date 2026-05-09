@@ -161,6 +161,7 @@ class DeepseekSparseSWAMetadata:
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
     decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, window_size]
     decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
+    decode_swa_sparse_topk_lens: torch.Tensor | None = None  # [num_decode_tokens]
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
@@ -255,6 +256,12 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        self.decode_swa_sparse_topk_lens = torch.full(
+            (max_tokens,),
+            self.window_size,
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.is_valid_token = torch.zeros(
             max_tokens,
             dtype=torch.bool,
@@ -340,6 +347,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             token_to_req_indices=token_to_req_indices,
             decode_swa_indices=self.decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
+            decode_swa_sparse_topk_lens=(
+                self.decode_swa_sparse_topk_lens[:num_decode_tokens]
+            ),
             block_size=self.block_size,
             num_decodes=num_decodes,
             num_prefills=num_prefills,

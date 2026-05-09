@@ -150,6 +150,90 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
     "trtllm_batch_decode_sparse_mla_dsv4",
     fallback_fn=_missing_dsv4_sparse_mla,
 )
+
+
+@functools.cache
+def _get_dsv4_sparse_mla_raw_impl():
+    if not has_flashinfer():
+        return None
+    core = _get_submodule("flashinfer.mla._core")
+    if core is None:
+        return None
+    op = core.get_trtllm_gen_fmha_module()
+    run_func = getattr(op, "trtllm_paged_attention_decode_sparse_mla_dsv4", None)
+    if run_func is None:
+        return None
+    return run_func, core.device_support_pdl, core.get_device_sm_count
+
+
+def flashinfer_trtllm_batch_decode_sparse_mla_dsv4_raw(
+    *,
+    query: torch.Tensor,
+    swa_kv_cache: torch.Tensor,
+    workspace_buffer: torch.Tensor,
+    sparse_indices: torch.Tensor,
+    compressed_kv_cache: torch.Tensor,
+    sparse_topk_lens: torch.Tensor,
+    seq_lens: torch.Tensor,
+    out: torch.Tensor,
+    bmm1_scale: float | torch.Tensor = 1.0,
+    bmm2_scale: float | torch.Tensor = 1.0,
+    sinks: torch.Tensor | None = None,
+    cum_seq_lens_q: torch.Tensor | None = None,
+    max_q_len: int | None = None,
+    enable_pdl: bool | None = None,
+) -> torch.Tensor:
+    """Unchecked DeepSeek V4 sparse MLA launcher for hot vLLM decode paths.
+
+    The caller must provide HND-compatible 3D/4D KV caches, contiguous INT32
+    metadata, a BF16 output tensor, and launcher-ready scale tensors. This skips
+    FlashInfer's Python validation, which otherwise adds syncs and pointwise
+    kernels on every attention layer.
+    """
+    impl = _get_dsv4_sparse_mla_raw_impl()
+    if impl is None:
+        return _missing_dsv4_sparse_mla()
+
+    run_func, device_support_pdl, get_device_sm_count = impl
+    if enable_pdl is None:
+        enable_pdl = device_support_pdl(query.device)
+
+    if swa_kv_cache.ndim == 3:
+        swa_kv_cache = swa_kv_cache.unsqueeze(1)
+    if compressed_kv_cache.ndim == 3:
+        compressed_kv_cache = compressed_kv_cache.unsqueeze(1)
+
+    if cum_seq_lens_q is None:
+        batch_size, q_len_per_request = query.shape[:2]
+        query_flat = query.flatten(0, 1)
+    else:
+        batch_size = cum_seq_lens_q.numel() - 1
+        assert max_q_len is not None
+        q_len_per_request = max_q_len
+        query_flat = query
+
+    run_func(
+        out,
+        query_flat,
+        compressed_kv_cache,
+        swa_kv_cache,
+        workspace_buffer,
+        sparse_indices,
+        seq_lens,
+        sparse_topk_lens,
+        bmm1_scale,
+        bmm2_scale,
+        batch_size,
+        q_len_per_request,
+        get_device_sm_count(query.device),
+        enable_pdl,
+        workspace_buffer.numel() * workspace_buffer.element_size(),
+        sinks,
+        cum_seq_lens_q,
+    )
+    return out
+
+
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",

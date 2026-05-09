@@ -60,7 +60,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
+from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4_raw
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -776,6 +776,16 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         self.kv_cache_dtype = kv_cache_dtype
+        self.register_buffer(
+            "_flashinfer_fp8_bmm1_scale_log2",
+            torch.tensor([self.scale * 1.4426950408889634], dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_flashinfer_fp8_bmm2_scale",
+            torch.ones(1, dtype=torch.float32),
+            persistent=False,
+        )
 
         # Register with compilation context for metadata lookup
         compilation_config = vllm_config.compilation_config
@@ -895,6 +905,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         topk_indices = None
         topk_lens = None
+        use_flashinfer_dsv4 = (
+            self.kv_cache_torch_dtype != torch.uint8 and not current_platform.is_rocm()
+        )
         if not swa_only:
             assert attn_metadata is not None
             assert swa_metadata.is_valid_token is not None
@@ -909,6 +922,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
+                    self.window_size if use_flashinfer_dsv4 else 0,
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
@@ -1023,7 +1037,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         assert swa_metadata.query_start_loc is not None
         assert swa_metadata.query_start_loc_cpu is not None
 
-        swa_indices_2d = swa_indices.view(num_decode_tokens, -1).contiguous()
+        swa_indices_2d = swa_indices.view(num_decode_tokens, -1)
         if swa_indices_2d.shape[-1] != self.window_size:
             raise ValueError(
                 f"DeepSeek V4 FlashInfer path expects {self.window_size} SWA "
@@ -1031,32 +1045,22 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if swa_only:
+            assert swa_metadata.decode_swa_sparse_topk_lens is not None
             compressed_kv_cache = self.swa_cache_layer.kv_cache
-            compressed_indices = torch.full(
-                (num_decode_tokens, 4),
-                -1,
-                dtype=torch.int32,
-                device=q.device,
-            )
-            sparse_topk_lens = torch.full(
-                (num_decode_tokens,),
-                self.window_size,
-                dtype=torch.int32,
-                device=q.device,
-            )
+            sparse_indices = swa_indices_2d
+            sparse_topk_lens = swa_metadata.decode_swa_sparse_topk_lens
         else:
             assert kv_cache is not None
             assert topk_indices is not None
             assert topk_lens is not None
             compressed_kv_cache = kv_cache
             compressed_indices = topk_indices.view(num_decode_tokens, -1).contiguous()
-            sparse_topk_lens = (topk_lens + self.window_size).to(torch.int32)
-
-        sparse_indices = torch.cat((swa_indices_2d, compressed_indices), dim=-1)
-        if sparse_indices.shape[-1] % 4 != 0:
-            pad = 4 - sparse_indices.shape[-1] % 4
-            sparse_indices = F.pad(sparse_indices, (0, pad), value=-1)
-        sparse_indices = sparse_indices.contiguous()
+            sparse_topk_lens = topk_lens
+            sparse_indices = torch.cat((swa_indices_2d, compressed_indices), dim=-1)
+            if sparse_indices.shape[-1] % 4 != 0:
+                pad = 4 - sparse_indices.shape[-1] % 4
+                sparse_indices = F.pad(sparse_indices, (0, pad), value=-1)
+            sparse_indices = sparse_indices.contiguous()
 
         query_start_loc = swa_metadata.query_start_loc[: num_decodes + 1]
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu[: num_decodes + 1]
@@ -1069,25 +1073,22 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         bmm2_scale: float | torch.Tensor = 1.0
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
             query = query.clamp(-448.0, 448.0).to(torch.float8_e4m3fn)
-            bmm1_scale = torch.tensor(
-                [self.scale], dtype=torch.float32, device=q.device
-            )
-            bmm2_scale = torch.ones(1, dtype=torch.float32, device=q.device)
+            bmm1_scale = self._flashinfer_fp8_bmm1_scale_log2
+            bmm2_scale = self._flashinfer_fp8_bmm2_scale
 
-        flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
+        flashinfer_trtllm_batch_decode_sparse_mla_dsv4_raw(
             query=query,
             swa_kv_cache=self.swa_cache_layer.kv_cache,
             workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
             sparse_indices=sparse_indices,
             compressed_kv_cache=compressed_kv_cache,
-            sparse_topk_lens=sparse_topk_lens.contiguous(),
-            seq_lens=seq_lens.contiguous(),
+            sparse_topk_lens=sparse_topk_lens,
+            seq_lens=seq_lens,
             out=output,
             bmm1_scale=bmm1_scale,
             bmm2_scale=bmm2_scale,
             sinks=self.attn_sink,
-            kv_layout="HND",
-            cum_seq_lens_q=query_start_loc.contiguous(),
+            cum_seq_lens_q=query_start_loc,
             max_q_len=max_q_len,
         )
 
