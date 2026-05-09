@@ -124,11 +124,11 @@ class Gemma4ImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
-        torch.Tensor,
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "np", "pp", dynamic_dims={"np"}),
     ]
     pixel_position_ids: Annotated[
-        torch.Tensor,
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "np", 2, dynamic_dims={"np"}),
     ]
 
