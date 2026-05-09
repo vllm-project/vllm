@@ -513,8 +513,6 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        # Each patch will produce the same number of pixels 504
-        self.patch_output_tokens = 
         # NOTE: This behavior is consistent with the previous OOV handling,
         # but does not currently handle the start/stop toks around the
         # image features (<patch_start> <patch_end> <im_start> <im_end>)
