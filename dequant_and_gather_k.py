@@ -9,6 +9,7 @@ from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Int32, Uint8, Uint32
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
+from cutlass.cute.nvgpu import cpasync
 from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
@@ -24,6 +25,21 @@ def dequant_and_gather_k_cutedsl(
 ) -> None:
     _, block_size, _ = k_cache.shape
     DequantGatherKCacheKernel.compile(block_size=block_size)(
+        out, k_cache, seq_lens, gather_lens, block_table, offset
+    )
+
+
+def dequant_and_gather_k_cpasync_cutedsl(
+    out: torch.Tensor,  # [num_reqs, max_num_tokens, head_size]
+    k_cache: torch.Tensor,  # [num_blocks, block_size, head_bytes]
+    seq_lens: torch.Tensor,  # [num_reqs]
+    gather_lens: torch.Tensor | None,  # [num_reqs]
+    block_table: torch.Tensor,  # [num_reqs, max_blocks_per_seq]
+    block_size: int,
+    offset: int,
+) -> None:
+    _, block_size, _ = k_cache.shape
+    DequantGatherKCacheCpasyncKernel.compile(block_size=block_size)(
         out, k_cache, seq_lens, gather_lens, block_table, offset
     )
 
@@ -89,7 +105,6 @@ class DequantGatherKCacheKernel:
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
 
-        # using 8B copy is faster for small shapes
         self.cp_bytes = 16
         self.threads_per_tok = self.head_dim // self.cp_bytes
         self.toks_per_cta = self.tb_size // self.threads_per_tok
@@ -173,6 +188,196 @@ class DequantGatherKCacheKernel:
         cp_bytes = self.cp_bytes
         u32_vec_size = cutlass.const_expr(cp_bytes // 4)
 
+        cp_op = cute.nvgpu.CopyUniversalOp()
+        cp_fp8_atom = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=cp_bytes * 8)
+        cp_bf16_atom = cute.make_copy_atom(
+            cp_op, Uint32, num_bits_per_copy=cp_bytes * 8 * 2
+        )
+
+        for i in range(
+            worker_id * self.toks_per_cta + subwarp_id,
+            gather_len,
+            num_workers * self.toks_per_cta,
+        ):
+            pos = start_pos + i
+            page_id = block_table[req_id, pos // self.block_size]
+
+            block_offset = pos % self.block_size
+            data = cute.make_rmem_tensor((u32_vec_size,), Uint32)
+            src = cute.local_tile(
+                k_fp8[page_id, block_offset, None],
+                tiler=(cp_bytes,),
+                coord=(sublane_id,),
+            )
+            cute.copy(cp_fp8_atom, cute.recast_tensor(src, Uint32), data)
+            scale = k_scale[
+                page_id, block_offset, sublane_id * cp_bytes // self.group_size
+            ]
+
+            scale_u32 = Uint32(scale)
+            scale_bf16x2 = (scale_u32 << Uint32(23)) | (scale_u32 << Uint32(7))
+
+            dequant = cute.make_rmem_tensor(u32_vec_size * 2, Uint32)
+            for j in cutlass.range_constexpr(u32_vec_size):
+                tmp = _fp8x4_to_bf16x4(data[j])
+
+                dequant[j * 2] = _bf16x2_mul(tmp[0], scale_bf16x2)
+                dequant[j * 2 + 1] = _bf16x2_mul(tmp[1], scale_bf16x2)
+
+            fp8_threads = cutlass.const_expr(self.fp8_dim // cp_bytes)
+            if sublane_id >= fp8_threads:
+                src_ = cute.local_tile(
+                    k_bf16[page_id, block_offset, None],
+                    tiler=(cp_bytes,),
+                    coord=(sublane_id - fp8_threads,),
+                )
+                cute.copy(cp_bf16_atom, cute.recast_tensor(src_, Uint32), dequant)
+
+            dst = cute.local_tile(
+                out[req_id, offset + i, None],
+                tiler=(cp_bytes,),
+                coord=(sublane_id,),
+            )
+            cute.copy(cp_bf16_atom, dequant, cute.recast_tensor(dst, Uint32))
+
+    @cache
+    @staticmethod
+    def compile(fp8_dim: int = 448, block_size: int = 64):
+        num_reqs = cute.sym_int()
+        head_dim = DequantGatherKCacheKernel.head_dim
+        head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
+
+        out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
+        k_cache = make_fake_tensor(Uint8, (cute.sym_int(), block_size, head_bytes))
+        seq_lens = make_fake_tensor(Int32, (num_reqs,))
+        gather_lens = make_fake_tensor(Int32, (num_reqs,))
+        block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
+
+        kernel = DequantGatherKCacheKernel(fp8_dim, block_size)
+        stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
+        return cute.compile(
+            kernel,
+            out,
+            k_cache,
+            seq_lens,
+            gather_lens,
+            block_table,
+            Int32(0),
+            stream,
+            options="--enable-tvm-ffi",
+        )
+
+
+class DequantGatherKCacheCpasyncKernel:
+    # hard-coded for DSv4
+    head_dim = 512
+    group_size = 64  # 1 scale per 64 elems
+
+    def __init__(self, fp8_dim: int = 448, block_size: int = 64):
+        self.fp8_dim = fp8_dim
+        self.bf16_dim = self.head_dim - fp8_dim
+        self.block_size = block_size
+
+        self.num_warps = 4
+        self.tb_size = self.num_warps * 32
+        self.num_stages = 2
+
+        # using 8B copy is faster for small shapes
+        self.cp_bytes = 16
+        self.threads_per_tok = self.head_dim // self.cp_bytes
+        self.toks_per_cta = self.tb_size // self.threads_per_tok
+
+    @cute.jit
+    def __call__(
+        self,
+        out: cute.Tensor,  # [num_reqs, max_num_tokens, head_size]
+        k_cache: cute.Tensor,  # [num_blocks, block_size, head_bytes]
+        seq_lens: cute.Tensor,  # [num_reqs]
+        gather_lens: cute.Tensor | None,  # [num_reqs]
+        block_table: cute.Tensor,  # [num_reqs, max_blocks_per_req]
+        offset: Int32,
+        stream: CUstream,
+    ):
+        # split k_cache into k_data and k_scale
+        # each [block_size, head_bytes] block is actually a concat of
+        # [block_size, fp8_dim + bf16_dim * 2] and [block_size, 8]
+        data_dim = cutlass.const_expr(self.fp8_dim + self.bf16_dim * 2)
+        k_ptr = cute.make_ptr(
+            Uint8, k_cache.iterator.toint(), cute.AddressSpace.gmem, assumed_align=32
+        )
+        cache_stride = cute.assume(k_cache.stride[0], 32)
+        k_fp8 = cute.make_tensor(
+            k_ptr,
+            layout=cute.make_layout(
+                (k_cache.shape[0], self.block_size, self.fp8_dim),
+                stride=(cache_stride, data_dim, 1),
+            ),
+        )
+        k_bf16 = cute.make_tensor(
+            cute.recast_ptr(k_ptr + self.fp8_dim, dtype=BFloat16),
+            layout=cute.make_layout(
+                (k_cache.shape[0], self.block_size, self.bf16_dim),
+                stride=(cache_stride // 2, data_dim // 2, 1),
+            ),
+        )
+        k_scale = cute.make_tensor(
+            k_ptr + (self.block_size * data_dim),
+            layout=cute.make_layout(
+                (k_cache.shape[0], self.block_size, 8),
+                stride=(cache_stride, 8, 1),
+            ),
+        )
+
+        grid = (out.shape[0], 1024, 1)
+        self.kernel(
+            out,
+            k_fp8,
+            k_bf16,
+            k_scale,
+            seq_lens,
+            gather_lens,
+            block_table,
+            offset,
+        ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
+
+    @cute.kernel
+    def kernel(
+        self,
+        out: cute.Tensor,  # [num_reqs, max_num_tokens, head_size]
+        k_fp8: cute.Tensor,  # [num_blocks, block_size, fp8_dim + bf16_dim * 2]
+        k_bf16: cute.Tensor,  # [num_blocks, block_size, bf16_dim]
+        k_scale: cute.Tensor,  # [num_blocks, block_size, 8]
+        seq_lens: cute.Tensor,  # [num_reqs]
+        gather_lens: cute.Tensor | None,  # [num_reqs]
+        block_table: cute.Tensor,  # [num_reqs, max_blocks_per_req]
+        offset: Int32,
+    ):
+        req_id, worker_id, _ = cute.arch.block_idx()
+        tid, _, _ = cute.arch.thread_idx()
+        _, num_workers, _ = cute.arch.grid_dim()
+
+        subwarp_id = tid // self.threads_per_tok
+        sublane_id = tid % self.threads_per_tok
+
+        cp_bytes = self.cp_bytes
+        u32_vec_size = cutlass.const_expr(cp_bytes // 4)
+
+        smem = cutlass.utils.SmemAllocator()
+        buf = smem.allocate_tensor(
+            Uint32,
+            cute.make_layout((self.head_dim // 4, self.toks_per_cta, self.num_stages)),
+            byte_alignment=16,
+        )
+        buf_slice = cute.logical_divide(buf, (u32_vec_size, None, None))[
+            (None, sublane_id), subwarp_id, None
+        ]
+
+        seq_len = seq_lens[req_id]
+        gather_len = seq_len
+        if cutlass.const_expr(gather_lens is not None):
+            gather_len = gather_lens[req_id]
+        start_pos = seq_len - gather_len
+
         # at each position, we have 448 FP8 values + 64 BF16 values.
         # to make our lives easier, we will use 16B loads for FP8,
         # then 32B stores for the dequantized BF16.
@@ -186,6 +391,34 @@ class DequantGatherKCacheKernel:
         cp_bf16_atom = cute.make_copy_atom(
             cp_op, Uint32, num_bits_per_copy=cp_bytes * 8 * 2
         )
+
+        cp_g2s_atom = cute.make_copy_atom(
+            cpasync.CopyG2SOp(cache_mode=cute.nvgpu.LoadCacheMode.GLOBAL),
+            Uint32,
+            num_bits_per_copy=128,
+        )
+
+        for i in cutlass.range_constexpr(self.num_stages - 1):
+            next_pos = (
+                start_pos
+                + worker_id * self.toks_per_cta
+                + subwarp_id
+                + i * num_workers * self.toks_per_cta
+            )
+            if next_pos < seq_len:
+                next_page_id = block_table[req_id, next_pos // self.block_size]
+                src = cute.local_tile(
+                    k_fp8[next_page_id, next_pos % self.block_size, None],
+                    tiler=(cp_bytes,),
+                    coord=(sublane_id,),
+                )
+                cute.copy(
+                    cp_g2s_atom, cute.recast_tensor(src, Uint32), buf_slice[None, i]
+                )
+            cute.arch.cp_async_commit_group()
+        prefetch_stage = self.num_stages - 1
+
+        compute_stage = 0
 
         for i in range(
             worker_id * self.toks_per_cta + subwarp_id,
@@ -203,12 +436,25 @@ class DequantGatherKCacheKernel:
             # compact, we will just issue ld PTX directly.
             block_offset = pos % self.block_size
             data = cute.make_rmem_tensor((u32_vec_size,), Uint32)
-            src = cute.local_tile(
-                k_fp8[page_id, block_offset, None],
-                tiler=(cp_bytes,),
-                coord=(sublane_id,),
-            )
-            cute.copy(cp_fp8_atom, cute.recast_tensor(src, Uint32), data)
+            next_pos = pos + num_workers * self.toks_per_cta * (self.num_stages - 1)
+            if next_pos < seq_len:
+                next_page_id = block_table[req_id, next_pos // self.block_size]
+                src = cute.local_tile(
+                    k_fp8[next_page_id, next_pos % self.block_size, None],
+                    tiler=(cp_bytes,),
+                    coord=(sublane_id,),
+                )
+                cute.copy(
+                    cp_g2s_atom,
+                    cute.recast_tensor(src, Uint32),
+                    buf_slice[None, prefetch_stage],
+                )
+                prefetch_stage = (prefetch_stage + 1) % self.num_stages
+            cute.arch.cp_async_commit_group()
+
+            cute.arch.cp_async_wait_group(self.num_stages - 1)
+            cute.copy(cp_fp8_atom, buf_slice[None, compute_stage], data)
+            compute_stage = (compute_stage + 1) % self.num_stages
             scale = k_scale[
                 page_id, block_offset, sublane_id * cp_bytes // self.group_size
             ]
@@ -247,7 +493,7 @@ class DequantGatherKCacheKernel:
     @staticmethod
     def compile(fp8_dim: int = 448, block_size: int = 64):
         num_reqs = cute.sym_int()
-        head_dim = DequantGatherKCacheKernel.head_dim
+        head_dim = DequantGatherKCacheCpasyncKernel.head_dim
         head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
 
         out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
@@ -256,7 +502,7 @@ class DequantGatherKCacheKernel:
         gather_lens = make_fake_tensor(Int32, (num_reqs,))
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
 
-        kernel = DequantGatherKCacheKernel(fp8_dim, block_size)
+        kernel = DequantGatherKCacheCpasyncKernel(fp8_dim, block_size)
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
             kernel,
