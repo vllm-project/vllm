@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# once we have more CuteDSL kernels in vLLM, we can refactor small helper functions
-# to a separate file
 from functools import cache
 
 import cutlass
@@ -91,8 +89,10 @@ class DequantGatherKCacheKernel:
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
 
+        # using 8B copy is faster for small shapes
         self.cp_bytes = 16
         self.threads_per_tok = self.head_dim // self.cp_bytes
+        self.toks_per_cta = self.tb_size // self.threads_per_tok
 
     @cute.jit
     def __call__(
@@ -171,6 +171,7 @@ class DequantGatherKCacheKernel:
         start_pos = seq_len - gather_len
 
         cp_bytes = self.cp_bytes
+        u32_vec_size = cutlass.const_expr(cp_bytes // 4)
 
         # at each position, we have 448 FP8 values + 64 BF16 values.
         # to make our lives easier, we will use 16B loads for FP8,
@@ -187,9 +188,9 @@ class DequantGatherKCacheKernel:
         )
 
         for i in range(
-            worker_id * self.num_warps + subwarp_id,
+            worker_id * self.toks_per_cta + subwarp_id,
             gather_len,
-            num_workers * self.num_warps,
+            num_workers * self.toks_per_cta,
         ):
             pos = start_pos + i
             page_id = block_table[req_id, pos // self.block_size]
@@ -200,16 +201,16 @@ class DequantGatherKCacheKernel:
             # the view, cute.autovec_copy() doesn't work without adding
             # extensive alignment/divisibility hints. to keep the code
             # compact, we will just issue ld PTX directly.
-            k_block_offset = pos % self.block_size
-            data = cute.make_rmem_tensor((cp_bytes // 4,), Uint32)
+            block_offset = pos % self.block_size
+            data = cute.make_rmem_tensor((u32_vec_size,), Uint32)
             src = cute.local_tile(
-                k_fp8[page_id, k_block_offset, None],
+                k_fp8[page_id, block_offset, None],
                 tiler=(cp_bytes,),
                 coord=(sublane_id,),
             )
             cute.copy(cp_fp8_atom, cute.recast_tensor(src, Uint32), data)
             scale = k_scale[
-                page_id, k_block_offset, sublane_id * cp_bytes // self.group_size
+                page_id, block_offset, sublane_id * cp_bytes // self.group_size
             ]
 
             # convert to bf16x2 via bit manipulation
@@ -217,8 +218,8 @@ class DequantGatherKCacheKernel:
             scale_bf16x2 = (scale_u32 << Uint32(23)) | (scale_u32 << Uint32(7))
 
             # cvt.rn.scaled::n2::ue8m0.bf16x2.e4m3x2 requires PTX 9.2 (CUDA 13.2)
-            dequant = cute.make_rmem_tensor(cp_bytes // 4 * 2, Uint32)
-            for j in cutlass.range_constexpr(cp_bytes // 4):
+            dequant = cute.make_rmem_tensor(u32_vec_size * 2, Uint32)
+            for j in cutlass.range_constexpr(u32_vec_size):
                 tmp = _fp8x4_to_bf16x4(data[j])
 
                 # bf16 multiply is safe
@@ -229,7 +230,7 @@ class DequantGatherKCacheKernel:
             fp8_threads = cutlass.const_expr(self.fp8_dim // cp_bytes)
             if sublane_id >= fp8_threads:
                 src_ = cute.local_tile(
-                    k_bf16[page_id, k_block_offset, None],
+                    k_bf16[page_id, block_offset, None],
                     tiler=(cp_bytes,),
                     coord=(sublane_id - fp8_threads,),
                 )
