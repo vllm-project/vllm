@@ -14,11 +14,83 @@ logger = init_logger(__name__)
 # - "upstream": vllm.vllm_flash_attn (CUDA) / flash_attn (ROCm) / xpu_ops (XPU)
 # - "aiter":    rocm_aiter_ops.flash_attn_varlen_func (ROCm fallback)
 # - "none":     no working impl; flash_attn_varlen_func is a stub that raises
-# Some kwargs (e.g. fa_version) are upstream-only; callers can gate on the
-# module flag _FA_VARLEN_HAS_VERSION_KW to avoid passing them when bound to
-# the AITER fallback.
-_ROCM_FLASH_ATTN_AVAILABLE = False
-_FA_VARLEN_SOURCE = "none"
+# Some kwargs (e.g. fa_version, block_table, seqused_k, softcap, q/k/v_descale,
+# scheduler_metadata, num_splits, s_aux) are upstream-only. The AITER fallback
+# is wrapped to raise NotImplementedError if any of them are passed, so callers
+# can gate on FA_VARLEN_SOURCE / FA_VARLEN_HAS_VERSION_KW to avoid hitting that
+# error path.
+FA_VARLEN_SOURCE = "none"
+
+# kwargs accepted by upstream flash_attn_varlen_func but not by AITER's variant.
+# Listed here so the wrapper can reject them with a clear error rather than
+# silently producing wrong results.
+_AITER_UNSUPPORTED_KWARGS = (
+    "block_table",
+    "seqused_k",
+    "softcap",
+    "scheduler_metadata",
+    "q_descale",
+    "k_descale",
+    "v_descale",
+    "num_splits",
+    "s_aux",
+    "fa_version",
+)
+
+
+def _build_aiter_varlen_wrapper(aiter_fn: Any) -> Any:
+    """Wrap AITER's flash_attn_varlen_func with the upstream calling convention.
+
+    Differences AITER must absorb:
+    - upstream allows cu_seqlens_k / max_seqlen_k to be None (they default to
+      the q-side values); AITER requires them
+    - upstream accepts kwargs (block_table, seqused_k, softcap, fa_version, ...)
+      that AITER does not implement; reject those explicitly
+    """
+
+    def _wrapper(
+        q: Any,
+        k: Any,
+        v: Any,
+        cu_seqlens_q: Any,
+        max_seqlen_q: int,
+        cu_seqlens_k: Any = None,
+        max_seqlen_k: int | None = None,
+        dropout_p: float = 0.0,
+        softmax_scale: float | None = None,
+        causal: bool = False,
+        window_size: Any = None,
+        alibi_slopes: Any = None,
+        return_lse: bool = False,
+        out: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        for unsupported in _AITER_UNSUPPORTED_KWARGS:
+            if kwargs.get(unsupported) is not None:
+                raise NotImplementedError(
+                    f"AITER flash_attn_varlen_func fallback does not support "
+                    f"`{unsupported}`. Install upstream flash-attn for ROCm to "
+                    f"use this code path."
+                )
+        return aiter_fn(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k if cu_seqlens_k is not None else cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k if max_seqlen_k is not None else max_seqlen_q,
+            dropout_p=dropout_p,
+            softmax_scale=softmax_scale,
+            causal=causal,
+            window_size=window_size,
+            alibi_slopes=alibi_slopes,
+            return_lse=return_lse,
+            out=out,
+        )
+
+    return _wrapper
+
 
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
@@ -27,7 +99,7 @@ if current_platform.is_cuda():
         get_scheduler_metadata,
     )
 
-    _FA_VARLEN_SOURCE = "upstream"
+    FA_VARLEN_SOURCE = "upstream"
 
 elif current_platform.is_xpu():
     from vllm import _custom_ops as ops
@@ -36,14 +108,12 @@ elif current_platform.is_xpu():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
-    _FA_VARLEN_SOURCE = "upstream"
+    FA_VARLEN_SOURCE = "upstream"
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
 
-        # Mark that upstream flash-attn is available on ROCm
-        _ROCM_FLASH_ATTN_AVAILABLE = True
-        _FA_VARLEN_SOURCE = "upstream"
+        FA_VARLEN_SOURCE = "upstream"
     except ImportError:
         # Upstream flash-attn isn't shipped in ROCm prebuilt wheels and a
         # from-source build of Composable Kernel can take 30-60 minutes.
@@ -59,10 +129,10 @@ elif current_platform.is_rocm():
         if IS_AITER_FOUND:
             from vllm._aiter_ops import rocm_aiter_ops
 
-            flash_attn_varlen_func = (  # type: ignore[no-redef,assignment]
+            flash_attn_varlen_func = _build_aiter_varlen_wrapper(  # type: ignore[no-redef,assignment]
                 rocm_aiter_ops.flash_attn_varlen_func
             )
-            _FA_VARLEN_SOURCE = "aiter"
+            FA_VARLEN_SOURCE = "aiter"
             logger.info_once(
                 "Upstream flash-attn not found on ROCm; using AITER "
                 "flash_attn_varlen_func as fallback. Install flash-attn "
@@ -89,10 +159,9 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 # Whether the bound flash_attn_varlen_func accepts the upstream-only
-# `fa_version` kwarg. AITER's variant does not, so callers should gate on
-# this flag (or on `is_flash_attn_varlen_func_available()` returning True
-# *and* this being True) before passing fa_version.
-_FA_VARLEN_HAS_VERSION_KW = _FA_VARLEN_SOURCE == "upstream"
+# `fa_version` kwarg. AITER's variant does not. Public so external callers
+# (custom backends, etc.) can gate on it before passing fa_version.
+FA_VARLEN_HAS_VERSION_KW = FA_VARLEN_SOURCE == "upstream"
 
 
 def get_flash_attn_version(
@@ -295,6 +364,6 @@ def is_flash_attn_varlen_func_available() -> bool:
 
     if current_platform.is_rocm():
         # True if either upstream flash-attn or the AITER fallback is bound.
-        return _FA_VARLEN_SOURCE != "none"
+        return FA_VARLEN_SOURCE != "none"
 
     return False
