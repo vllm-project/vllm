@@ -60,7 +60,12 @@ def test_async_tp_pass_correctness(
         "mode": CompilationMode.VLLM_COMPILE,
         "compile_sizes": [2, 4, 8],
         "splitting_ops": [],
-        "pass_config": {"fuse_gemm_comms": async_tp_enabled},
+        "pass_config": {
+            "fuse_gemm_comms": async_tp_enabled,
+            # Override threshold to ensure SP (required by async TP) is
+            # applied even for small models.
+            "sp_min_token_num": 0,
+        },
     }
 
     async_tp_args = [
