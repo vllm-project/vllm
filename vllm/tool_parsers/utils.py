@@ -3,6 +3,7 @@
 
 import ast
 import json
+from functools import lru_cache
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
@@ -169,16 +170,49 @@ def find_tool_properties(
     return {}
 
 
-def _get_tool_schema_from_tool(tool: Tool) -> dict:
-    name, params = _extract_tool_info(tool)
-    params = params if params else {"type": "object", "properties": {}}
+def _extract_tool_info_from_data(
+    tool: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    if "function" in tool:
+        function = tool["function"]
+        return function["name"], function.get("parameters")
+    if tool.get("type") == "function" and "name" in tool:
+        return tool["name"], tool.get("parameters")
+    raise TypeError(f"Unsupported tool type: {tool}")
+
+
+def _normalize_tool_for_cache(tool: Tool | ChatCompletionToolsParam) -> str:
+    return json.dumps(
+        tool.model_dump(mode="json", exclude_none=False),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _get_tool_parameters_without_defs(
+    params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not params:
+        return {"type": "object", "properties": {}}
+    if "$defs" not in params:
+        return params
+    return {key: value for key, value in params.items() if key != "$defs"}
+
+
+def _get_tool_schema_from_info(name: str, params: dict[str, Any] | None) -> dict:
     return {
         "properties": {
             "name": {"type": "string", "enum": [name]},
-            "parameters": params,
+            "parameters": _get_tool_parameters_without_defs(params),
         },
         "required": ["name", "parameters"],
     }
+
+
+def _get_tool_schema_from_tool(tool: Tool | ChatCompletionToolsParam) -> dict:
+    name, params = _extract_tool_info(tool)
+    return _get_tool_schema_from_info(name, params)
 
 
 def _get_tool_schema_defs(
@@ -189,7 +223,7 @@ def _get_tool_schema_defs(
         _, params = _extract_tool_info(tool)
         if params is None:
             continue
-        defs = params.pop("$defs", {})
+        defs = params.get("$defs", {})
         for def_name, def_schema in defs.items():
             if def_name in all_defs and all_defs[def_name] != def_schema:
                 raise ValueError(
@@ -200,21 +234,58 @@ def _get_tool_schema_defs(
     return all_defs
 
 
-def _get_json_schema_from_tools(
-    tools: list[Tool],
+def _get_json_schema_from_tool_infos(
+    tool_infos: list[tuple[str, dict[str, Any] | None]],
 ) -> dict:
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
+            "anyOf": [
+                _get_tool_schema_from_info(name, params)
+                for name, params in tool_infos
+            ],
         },
     }
-    json_schema_defs = _get_tool_schema_defs(tools)
-    if json_schema_defs:
-        json_schema["$defs"] = json_schema_defs
+
+    all_defs: dict[str, dict[str, Any]] = {}
+    for _, params in tool_infos:
+        if params is None:
+            continue
+        defs = params.get("$defs", {})
+        for def_name, def_schema in defs.items():
+            if def_name in all_defs and all_defs[def_name] != def_schema:
+                raise ValueError(
+                    f"Tool definition '{def_name}' has multiple schemas, "
+                    "which is not supported."
+                )
+            all_defs[def_name] = def_schema
+
+    if all_defs:
+        json_schema["$defs"] = all_defs
     return json_schema
+
+
+def _get_json_schema_from_tools(
+    tools: list[Tool | ChatCompletionToolsParam],
+) -> dict:
+    return _get_json_schema_from_tool_infos(
+        [_extract_tool_info(tool) for tool in tools]
+    )
+
+
+@lru_cache(maxsize=128)
+def _get_cached_json_schema_from_tools(tools_key: tuple[str, ...]) -> str:
+    tool_infos = [
+        _extract_tool_info_from_data(json.loads(tool_json))
+        for tool_json in tools_key
+    ]
+    return json.dumps(
+        _get_json_schema_from_tool_infos(tool_infos),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def get_json_schema_from_tools(
@@ -248,7 +319,11 @@ def get_json_schema_from_tools(
         return tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
-        return _get_json_schema_from_tools(tools)
+        return json.loads(
+            _get_cached_json_schema_from_tools(
+                tuple(_normalize_tool_for_cache(tool) for tool in tools)
+            )
+        )
     # tool_choice: "auto"
     return None
 

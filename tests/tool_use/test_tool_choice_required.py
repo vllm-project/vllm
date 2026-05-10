@@ -201,6 +201,52 @@ def test_structured_outputs_json(sample_output, should_match):
     )
 
 
+def test_required_schema_reuse_keeps_tool_defs_intact():
+    tools = TypeAdapter(list[ChatCompletionToolsParam]).validate_python([
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather details",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "options": {"$ref": "#/$defs/WeatherOptions"},
+                    },
+                    "required": ["options"],
+                    "$defs": {
+                        "WeatherOptions": {
+                            "type": "object",
+                            "properties": {
+                                "city": {"type": "string"},
+                            },
+                            "required": ["city"],
+                        },
+                    },
+                },
+            },
+            "strict": True,
+        }
+    ])
+
+    expected_defs = deepcopy(tools[0].function.parameters["$defs"])
+
+    first_schema = get_json_schema_from_tools(
+        tools=tools,
+        tool_choice="required",
+    )
+    second_schema = get_json_schema_from_tools(
+        tools=tools,
+        tool_choice="required",
+    )
+
+    assert first_schema == second_schema
+    assert tools[0].function.parameters["$defs"] == expected_defs
+    assert first_schema["$defs"] == expected_defs
+    parameters_schema = first_schema["items"]["anyOf"][0]["properties"]["parameters"]
+    assert "$defs" not in parameters_schema
+
+
 def update_parameters_none(tool: ChatCompletionToolsParam) -> ChatCompletionToolsParam:
     tool.function.parameters = None
     return tool

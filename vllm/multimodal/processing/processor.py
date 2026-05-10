@@ -1352,11 +1352,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
-        # Need to touch all mm hashes before update to avoid hash in updated
-        # list evict during update
-        for hashes in mm_hashes.values():
-            for item_hash in hashes:
-                cache.touch_sender_cache_item(item_hash)
+        # Touch only cached items before update so later inserts do not evict
+        # items reused by this batch.
+        for modality, hashes in mm_hashes.items():
+            cached_flags = mm_is_cached[modality]
+            for item_hash, is_cached in zip(hashes, cached_flags, strict=True):
+                if is_cached:
+                    cache.touch_sender_cache_item(item_hash)
 
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
