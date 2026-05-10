@@ -19,6 +19,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/lora
+  - vllm/model_executor/layers/fused_moe/
   - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
