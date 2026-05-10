@@ -278,6 +278,8 @@ def _topk_topp_kernel(
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
+                            min_larger = min_larger_0
+                            num_min_larger = num_min_larger_0
                             found_pivot = 1
                 else:
                     # If top-k outlier gathering failed, search whole logit space
@@ -358,6 +360,8 @@ def _topk_topp_kernel(
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
+                            min_larger = min_larger_0
+                            num_min_larger = num_min_larger_0
                             found_pivot = 1
 
                 duplicate_logit = min_larger
@@ -569,6 +573,9 @@ def _topk_topp_kernel(
                             num_iters += 1
                             if (max_range - min_range) < 1e-9 or num_iters >= 18:
                                 p_pivot = (max_range + min_range) / 2.0
+                                min_larger_prob = min_larger_0
+                                num_min_larger = num_min_larger_0
+                                p_pivots_sum = p_pivots_sum_0
                                 found_pivot = 1
 
                         duplicate_logit = (
@@ -734,6 +741,9 @@ def _topk_topp_kernel(
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
                             p_pivot = (max_range + min_range) / 2.0
+                            min_larger_prob = min_larger_0
+                            num_min_larger = num_min_larger_0
+                            p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
                 else:
                     # Re-populate the buffer with full softmax probabilities
@@ -797,6 +807,9 @@ def _topk_topp_kernel(
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
                             p_pivot = (max_range + min_range) / 2.0
+                            min_larger_prob = min_larger_0
+                            num_min_larger = num_min_larger_0
+                            p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
 
                 duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_sample
