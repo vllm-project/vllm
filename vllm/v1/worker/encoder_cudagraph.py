@@ -403,11 +403,13 @@ class EncoderCudaGraphManager:
                 # Allow models to override scatter for CPU-side merge
                 # (e.g. Step3VL processes raw features and merges using
                 # num_patches outside the CUDA graph).
-                finalize = getattr(self.model,
-                                   "finalize_encoder_cudagraph_output", None)
+                finalize = getattr(
+                    self.model, "finalize_encoder_cudagraph_output", None
+                )
                 if finalize is not None:
-                    out = finalize(output, batch_mm_kwargs,
-                                   batch_orig_indices, per_item_out_tokens)
+                    out = finalize(
+                        output, batch_mm_kwargs, batch_orig_indices, per_item_out_tokens
+                    )
                     for i, idx in enumerate(batch_orig_indices):
                         outputs_by_orig_idx[idx] = out[i]
                 else:
