@@ -237,10 +237,6 @@ class Llama4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         is_neox_style = True
-        if quant_config is not None:
-            override = quant_config.override_is_neox_style(config.model_type)
-            if override is not None:
-                is_neox_style = override
 
         self.rotary_emb = (
             get_rope(

@@ -517,11 +517,6 @@ class OpenPanguEmbeddedAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        if quant_config is not None:
-            override = quant_config.override_is_neox_style(config.model_type)
-            if override is not None:
-                is_neox_style = override
-
         rope_parameters = config.rope_parameters or {}
         if rope_parameters is not None and rope_parameters.get(
             "mrope_interleaved", False
