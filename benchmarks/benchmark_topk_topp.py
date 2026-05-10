@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Benchmark comparing PyTorch, original Triton, and current Triton
-top-k/top-p implementations.
+Benchmark comparing Triton vs PyTorch sort-based top-k/top-p implementations.
 
 Compares:
-- apply_top_k_top_p_pytorch  (PyTorch sort-based)
-- apply_top_k_top_p_triton_original (original Triton kernel)
-- apply_top_k_top_p_triton   (current Triton kernel)
+- apply_top_k_top_p_triton (Triton binary search)
+- apply_top_k_top_p (PyTorch sort-based)
 
 Scenarios:
 - top_k only (whole batch, partial batch)
@@ -23,14 +21,9 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
-
 from vllm.v1.sample.ops.topk_topp_triton import (
     apply_top_k_top_p_triton,
     reset_buffer_cache,
-)
-from vllm.v1.sample.ops.topk_top_triton_original import (
-    apply_top_k_top_p_triton as apply_top_k_top_p_triton_original,
-    reset_buffer_cache as reset_buffer_cache_original,
 )
 
 
@@ -111,7 +104,6 @@ def measure_memory() -> tuple[int, int]:
 def reset_memory_stats():
     """Reset peak memory statistics."""
     reset_buffer_cache()
-    reset_buffer_cache_original()
     torch.accelerator.reset_peak_memory_stats()
     torch.accelerator.empty_cache()
     gc.collect()
@@ -304,16 +296,28 @@ def run_benchmark(
     """Run all benchmarks and print results."""
     results = []
 
-    print("=" * 120)
-    print("Top-k/Top-p Benchmark: PyTorch vs Original Triton vs Current Triton")
-    print("=" * 120)
+    print("=" * 100)
+    print("Top-k/Top-p Benchmark: Triton vs PyTorch Sort-based")
+    print("=" * 100)
     print()
 
     for config in configs:
         if verbose:
             print(f"Running: {config.description}")
 
+        # Create fresh logits for this config
         logits = create_logits(config.batch_size, config.vocab_size)
+
+        # Benchmark Triton
+        reset_memory_stats()
+        triton_time, triton_mem = benchmark_function(
+            apply_top_k_top_p_triton,
+            logits,
+            config.k_values,
+            config.p_values,
+            warmup_iters,
+            benchmark_iters,
+        )
 
         # Benchmark PyTorch
         reset_memory_stats()
@@ -326,52 +330,27 @@ def run_benchmark(
             benchmark_iters,
         )
 
-        # Benchmark original Triton
-        reset_memory_stats()
-        orig_time, orig_mem = benchmark_function(
-            apply_top_k_top_p_triton_original,
-            logits,
-            config.k_values,
-            config.p_values,
-            warmup_iters,
-            benchmark_iters,
-        )
-
-        # Benchmark current Triton
-        reset_memory_stats()
-        curr_time, curr_mem = benchmark_function(
-            apply_top_k_top_p_triton,
-            logits,
-            config.k_values,
-            config.p_values,
-            warmup_iters,
-            benchmark_iters,
-        )
-
-        speedup_orig = pytorch_time / orig_time if orig_time > 0 else float("inf")
-        speedup_curr = pytorch_time / curr_time if curr_time > 0 else float("inf")
-        speedup_curr_vs_orig = orig_time / curr_time if curr_time > 0 else float("inf")
+        speedup = pytorch_time / triton_time if triton_time > 0 else float("inf")
+        mem_ratio = pytorch_mem / triton_mem if triton_mem > 0 else float("inf")
 
         result = {
             "config": config,
+            "triton_time_ms": triton_time,
             "pytorch_time_ms": pytorch_time,
-            "orig_time_ms": orig_time,
-            "curr_time_ms": curr_time,
+            "triton_mem": triton_mem,
             "pytorch_mem": pytorch_mem,
-            "orig_mem": orig_mem,
-            "curr_mem": curr_mem,
-            "speedup_orig": speedup_orig,
-            "speedup_curr": speedup_curr,
-            "speedup_curr_vs_orig": speedup_curr_vs_orig,
+            "speedup": speedup,
+            "mem_ratio": mem_ratio,
         }
         results.append(result)
 
         if verbose:
-            print(f"  PyTorch:         {pytorch_time:.3f} ms, {format_memory(pytorch_mem)}")
-            print(f"  Orig Triton:     {orig_time:.3f} ms, {format_memory(orig_mem)}  ({speedup_orig:.2f}x vs PyTorch)")
-            print(f"  Current Triton:  {curr_time:.3f} ms, {format_memory(curr_mem)}  ({speedup_curr:.2f}x vs PyTorch, {speedup_curr_vs_orig:.2f}x vs Orig)")
+            print(f"  Triton:  {triton_time:.3f} ms, {format_memory(triton_mem)}")
+            print(f"  PyTorch: {pytorch_time:.3f} ms, {format_memory(pytorch_mem)}")
+            print(f"  Speedup: {speedup:.2f}x, Memory ratio: {mem_ratio:.2f}x")
             print()
 
+        # Clean up
         del logits
         reset_memory_stats()
 
@@ -380,47 +359,43 @@ def run_benchmark(
 
 def print_summary_table(results: list[dict]):
     """Print a summary table of results."""
-    W = 155
     print()
-    print("=" * W)
+    print("=" * 130)
     print("SUMMARY TABLE")
-    print("=" * W)
+    print("=" * 130)
     print()
 
+    # Header
     header = (
-        f"{'Scenario':<38} {'Batch':>6} {'Vocab':>7} {'Ops%':>6} "
-        f"{'PyTorch':>10} {'OrigTri':>10} {'CurrTri':>10} "
-        f"{'Orig/Py':>8} {'Curr/Py':>8} {'Curr/Orig':>10} "
-        f"{'Py Mem':>8} {'Orig Mem':>9} {'Curr Mem':>9}"
+        f"{'Scenario':<40} {'Batch':>6} {'Vocab':>7} {'Ops%':>6} "
+        f"{'Triton (ms)':>12} {'PyTorch (ms)':>13} {'Speedup':>8} "
+        f"{'Tri Mem':>10} {'Pyt Mem':>10}"
     )
     print(header)
-    print("-" * W)
+    print("-" * 130)
 
+    # Group by scenario type
     current_vocab = None
     for result in results:
         config = result["config"]
 
+        # Add separator between vocab sizes
         if current_vocab != config.vocab_size:
             if current_vocab is not None:
-                print("-" * W)
+                print("-" * 130)
             current_vocab = config.vocab_size
 
-        scenario = config.name.split("_b")[0]
+        scenario = config.name.split("_b")[0]  # Extract scenario name
         print(
-            f"{scenario:<38} {config.batch_size:>6} {config.vocab_size:>7} "
+            f"{scenario:<40} {config.batch_size:>6} {config.vocab_size:>7} "
             f"{config.ops_pct:>5.0f}% "
-            f"{result['pytorch_time_ms']:>10.3f} "
-            f"{result['orig_time_ms']:>10.3f} "
-            f"{result['curr_time_ms']:>10.3f} "
-            f"{result['speedup_orig']:>7.2f}x "
-            f"{result['speedup_curr']:>7.2f}x "
-            f"{result['speedup_curr_vs_orig']:>9.2f}x "
-            f"{format_memory(result['pytorch_mem']):>8} "
-            f"{format_memory(result['orig_mem']):>9} "
-            f"{format_memory(result['curr_mem']):>9}"
+            f"{result['triton_time_ms']:>12.3f} {result['pytorch_time_ms']:>13.3f} "
+            f"{result['speedup']:>7.2f}x "
+            f"{format_memory(result['triton_mem']):>10} "
+            f"{format_memory(result['pytorch_mem']):>10}"
         )
 
-    print("=" * W)
+    print("=" * 130)
 
 
 def main():
@@ -450,8 +425,8 @@ def main():
     parser.add_argument(
         "--benchmark-iters",
         type=int,
-        default=200,
-        help="Number of benchmark iterations (default: 200)",
+        default=20,
+        help="Number of benchmark iterations (default: 20)",
     )
     parser.add_argument(
         "--quiet",
