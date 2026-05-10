@@ -1052,7 +1052,7 @@ async def main_mp(
             task_queue.get_nowait()
             unfinished_tasks += 1
         except Exception:
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
             try:
                 task_queue.get_nowait()
                 unfinished_tasks += 1
@@ -1061,6 +1061,17 @@ async def main_mp(
 
     if unfinished_tasks > 0:
         logger.debug(f"Discarding {unfinished_tasks} unfinished tasks")
+
+    # Drain result_queue to collect any remaining metrics still in flight.
+    while True:
+        try:
+            client_metrics.append(result_queue.get_nowait())
+        except Exception:
+            await asyncio.sleep(0.1)
+            try:
+                client_metrics.append(result_queue.get_nowait())
+            except Exception:
+                break
 
     # cancel_join_thread() prevents deadlock if any items remain in the OS
     # pipe buffer despite draining (e.g. feeder thread wrote between our
