@@ -321,8 +321,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     pid_n = tl.program_id(1)
     N_2 = N // 2
 
-    m_offset = (pid_m * BLOCK_M).to(tl.int64)
-    n_offset = (pid_n * BLOCK_N).to(tl.int64)
+    m_offset = pid_m.to(tl.int64) * BLOCK_M
+    n_offset = pid_n.to(tl.int64) * BLOCK_N
     if m_offset >= M:
         return
 
