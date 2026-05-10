@@ -42,14 +42,26 @@ def swap_blocks_batch(
     src_addrs: torch.Tensor,
     dst_addrs: torch.Tensor,
     sizes: torch.Tensor,
+    is_src_access_order_any: bool = False,
 ) -> None:
-    """Drop-in replacement for ``ops.swap_blocks_batch`` with Triton fast path."""
+    """Drop-in replacement for ``ops.swap_blocks_batch`` with Triton fast path.
+
+    The ``is_src_access_order_any`` flag is forwarded to the C++ DMA path
+    on fallback (controls ``CU_MEMCPY_SRC_ACCESS_ORDER_ANY`` for the
+    cuMemcpyBatchAsync attributes). It does not apply to the Triton path —
+    SM-issued copies don't go through the cuMemcpy descriptor pipeline.
+    """
     n = src_addrs.numel()
     if n == 0:
         return
     bpj = int(sizes[0].item())
     if bpj >= _THRESHOLD_BYTES or bpj % 8 != 0 or not bool((sizes == bpj).all()):
-        ops.swap_blocks_batch(src_addrs, dst_addrs, sizes)
+        ops.swap_blocks_batch(
+            src_addrs,
+            dst_addrs,
+            sizes,
+            is_src_access_order_any=is_src_access_order_any,
+        )
         return
     chunk = min(triton.next_power_of_2(bpj), 8192)
     _kernel[(min(_NUM_SMS, n),)](
