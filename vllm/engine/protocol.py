@@ -109,6 +109,20 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def notify_kv_transfer_request_rejected(
+        self,
+        request_id: str,
+        kv_transfer_params: dict[str, Any],
+        *,
+        data_parallel_rank: int | None = None,
+    ) -> None:
+        """Notify the engine that a KV-transfer request was rejected before
+        engine admission, so connector-side cleanup can run (e.g. free
+        prefill blocks pinned on the P node).
+        """
+        ...
+
+    @abstractmethod
     async def is_tracing_enabled(self) -> bool: ...
 
     @abstractmethod
