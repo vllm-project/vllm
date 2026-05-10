@@ -132,7 +132,7 @@ The generated timeline is an interactive visualization in the form of an HTML fi
 
 Example output:
 
-<iframe src="../../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
+<iframe src="../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
 
 ##### Dataset statistics
 
