@@ -922,13 +922,25 @@ class MooncakeConnectorWorker:
         )
         while True:
             try:
-                async with httpx.AsyncClient() as client:
+                # timeout=30s: the bootstrap server runs inside the DP0 worker
+                # process and can stall the uvicorn event loop for several
+                # seconds while DP0 is holding the GIL (e.g. EFA MR
+                # registration of multi-GB KV caches across many NICs). The
+                # httpx default of 5s is not enough headroom and causes
+                # non-DP0 workers to hit ReadTimeout even though the server
+                # eventually responds 200 OK.
+                async with httpx.AsyncClient(timeout=30.0) as client:
                     response = await client.post(url, json=payload.model_dump())
                     response.raise_for_status()
                 logger.debug("Successfully registered with bootstrap server at %s", url)
                 break
-            except httpx.ConnectError:
-                # Bootstrap server not ready, wait for a while and retry.
+            except (
+                httpx.ConnectError,
+                httpx.TimeoutException,
+                httpx.RemoteProtocolError,
+            ):
+                # Bootstrap server not ready / event loop momentarily starved
+                # / connection dropped mid-flight. Wait for a while and retry.
                 await asyncio.sleep(1)
             except Exception as e:
                 err_msg = (
