@@ -31,7 +31,6 @@ from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
-
 from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
@@ -2381,6 +2380,7 @@ class CustomAudioDataset(CustomDataset):
     - Dedicated ASR models (e.g., Whisper) via openai-audio / /v1/audio/transcriptions
     - Chat-based audio models (e.g., Qwen2-Audio) via openai-chat / /v1/chat/completions
     """
+
     IS_MULTIMODAL = True
 
     def sample(
@@ -2443,7 +2443,9 @@ class CustomAudioDataset(CustomDataset):
                             tokenize=False,
                         )
                     # else: plain prompt for Whisper-style models
-                prompt_len = len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
+                prompt_len = (
+                    len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
+                )
                 new_output_len = output_len
                 if output_len is None or output_len == -1:
                     if "output_tokens" not in item:
