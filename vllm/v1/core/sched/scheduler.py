@@ -1792,6 +1792,35 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
 
+    def _invalidate_request_kv_for_recompute(
+        self,
+        request: Request,
+        timestamp: float,
+        discard_latest_async_tokens: bool = False,
+    ) -> bool:
+        """Release a request's KV state while preserving its token state.
+
+        The request will be scheduled as PREEMPTED later, causing the worker to
+        drop any stale persistent-batch state and recompute prompt+generated
+        tokens from request.all_token_ids on resume.
+        """
+        if request.is_finished() or request.num_computed_tokens == 0:
+            return False
+
+        self.kv_cache_manager.free(request)
+        self.encoder_cache_manager.free(request)
+        request.status = RequestStatus.PREEMPTED
+        request.num_computed_tokens = 0
+        if request.spec_token_ids:
+            request.spec_token_ids = []
+        request.num_output_placeholders = 0
+        if discard_latest_async_tokens:
+            request.discard_latest_async_tokens = True
+        request.num_preemptions += 1
+        if self.log_stats:
+            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+        return True
+
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
@@ -1805,18 +1834,22 @@ class Scheduler(SchedulerInterface):
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
-            # Invalidate all the current running requests KV's by pushing them to
-            # the waiting queue. In this case, we can reduce the ref count of all
-            # the kv blocks to 0 and thus we can make sure the reset is successful.
-            # Preempt in reverse order so the requests will be added back to the
-            # running queue in FIFO order.
+            # Invalidate all requests with live KV by pushing running requests
+            # back to the waiting queue and marking already queued cached
+            # requests as PREEMPTED in-place. This covers partial-rollout pause
+            # states where some requests may be queued but still have cached
+            # worker/persistent-batch state from previous scheduling steps.
+            # Preempt running requests in reverse order so they are added back
+            # to the running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
-                self._preempt_request(request, timestamp)
-                # NOTE(zhuohan): For async scheduling, we need to discard the latest
-                # output token on the fly to avoid a redundant repetitive output token.
-                request.num_output_placeholders = 0
-                request.discard_latest_async_tokens = True
+                self._invalidate_request_kv_for_recompute(
+                    request, timestamp, discard_latest_async_tokens=True
+                )
+                self.waiting.prepend_request(request)
+
+            for request in itertools.chain(self.waiting, self.skipped_waiting):
+                self._invalidate_request_kv_for_recompute(request, timestamp)
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were

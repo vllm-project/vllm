@@ -60,6 +60,7 @@ from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
+from ...device_allocator.cumem import KNOWN_SLEEP_TAGS as _KNOWN_SLEEP_TAGS
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
 from .utils import request_memory
@@ -130,6 +131,10 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        # Tags whose CUDA mappings were released during the last sleep().
+        # Used by wake_up() to avoid running per-tag re-init hooks (e.g.
+        # zeroing the KV cache) for tags that were preserved on GPU.
+        self._slept_tags: set[str] = set()
 
         # Weight transfer engine (initialized on-demand)
         self.weight_transfer_engine = (
@@ -157,28 +162,70 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(
+        self,
+        level: int = 1,
+        offload_tags: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
-        # Save the buffers before level 2 sleep
-        if level == 2:
-            model = self.model_runner.model
-            self._sleep_saved_buffers = {
-                name: buffer.cpu().clone() for name, buffer in model.named_buffers()
-            }
+        if offload_tags is None:
+            # Legacy level-based semantics. level == 1 backs up weights to
+            # CPU and discards everything else (including KV cache).
+            # level >= 2 discards everything; we save buffers separately
+            # since they live on weights pool but are mutated at runtime.
+            offload = ("weights",) if level == 1 else ()
+            keep: tuple[str, ...] = ()
+            if level >= 2:
+                model = self.model_runner.model
+                self._sleep_saved_buffers = {
+                    name: buffer.cpu().clone()
+                    for name, buffer in model.named_buffers()
+                }
+            # Under legacy semantics every known tag is unmapped (either
+            # offloaded to CPU or discarded), so wake_up needs to re-init
+            # all of them.
+            self._slept_tags = set(_KNOWN_SLEEP_TAGS)
+        else:
+            # Tag-wise selective sleep. Tags not in `offload_tags` from the
+            # set of known sleep tags ("weights", "kv_cache") are *kept*
+            # mapped on GPU. This is what enables hybrid co-location with
+            # partial rollout: e.g. offload_tags=["weights"] frees weights
+            # GPU memory while leaving the KV cache live so an in-flight
+            # generation can be resumed after a training step.
+            #
+            # Reject unknown tags up front. Without this guard, a typo
+            # (e.g. ["weight"]) would compute keep == _KNOWN_SLEEP_TAGS,
+            # free no pool, and still record the bogus tag as slept —
+            # leaving the executor wedged in `is_sleeping=True` because
+            # `wake_up(tags=["weights"])` does not intersect _slept_tags.
+            offload_set = set(offload_tags)
+            invalid = offload_set - set(_KNOWN_SLEEP_TAGS)
+            if invalid:
+                raise ValueError(
+                    f"offload_tags contains unknown tag(s) "
+                    f"{sorted(invalid)!r}. Known tags: "
+                    f"{sorted(_KNOWN_SLEEP_TAGS)!r}."
+                )
+            offload = tuple(offload_tags)
+            keep = tuple(t for t in _KNOWN_SLEEP_TAGS if t not in offload_set)
+            self._slept_tags = set(offload)
 
         allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        allocator.sleep(offload_tags=offload, keep_tags=keep)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
-            "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
+            "Sleep mode freed %s GiB memory, %s GiB memory is still in use "
+            "(offload_tags=%s, keep_tags=%s).",
             format_gib(freed_bytes),
             format_gib(used_bytes),
+            offload,
+            keep,
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
@@ -195,8 +242,19 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
+        # Determine which tags are actually being woken on this call. The
+        # KV cache re-init must run only when kv_cache was unmapped during
+        # sleep AND it is part of this wake_up. Otherwise we would zero
+        # out a live KV cache that was kept on GPU for partial rollout.
+        if tags is None:
+            woken_tags = set(self._slept_tags)
+        else:
+            woken_tags = set(tags) & self._slept_tags
+
+        if "kv_cache" in woken_tags:
             self.model_runner.post_kv_cache_wake_up()
+
+        self._slept_tags -= woken_tags
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if not self.vllm_config.model_config.enable_sleep_mode:

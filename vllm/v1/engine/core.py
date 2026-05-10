@@ -648,18 +648,24 @@ class EngineCore:
           clear caches, then complete the returned Future.
         - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
-        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
-          output queue is empty.
+        - ``keep``: Set PAUSED_ALL; requests resume with existing KV cache.
+        - ``recompute``: Set PAUSED_ALL; requests are preserved but their KV
+          cache is released, so prompt+generated tokens are recomputed on
+          resume_generation().
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in ("keep", "recompute", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
         if mode == "wait":
             raise ValueError("'wait' mode can't be used in inproc-engine mode")
+        if mode == "recompute":
+            clear_cache = True
 
         if mode == "abort":
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
 
-        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        pause_state = (
+            PauseState.PAUSED_ALL if mode in ("keep", "recompute") else PauseState.PAUSED_NEW
+        )
         self.scheduler.set_pause_state(pause_state)
         if clear_cache:
             self._reset_caches()
@@ -674,29 +680,79 @@ class EngineCore:
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        offload_tags: list[str] | None = None,
+    ) -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
-            level: Sleep level.
+            level: Sleep level. Ignored when ``offload_tags`` is provided.
                 - Level 0: Pause scheduling only. Requests are still accepted
                            but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
+            offload_tags: Tag-wise selective sleep (hybrid co-location with
+                partial rollout). When provided, only the listed tags are
+                offloaded — other known tags ("weights", "kv_cache") are
+                preserved on GPU. For example, ``offload_tags=["weights"]``
+                frees the weights' GPU memory but keeps the KV cache live
+                so an in-flight generation can resume after a training step.
+                The prefix cache is cleared only if "kv_cache" is in the
+                offloaded set, since otherwise the cache is still intact.
         """
 
-        # Pause scheduler before sleeping.
-        clear_prefix_cache = level >= 1
+        # Validate selective-sleep tags BEFORE pausing the scheduler. If
+        # an invalid tag is rejected after `pause_scheduler`, the
+        # exception unwinds with the scheduler still in a paused state
+        # and the caller has to issue a wake_up just to recover from a
+        # typo. Validating up front keeps invalid-tag calls side-effect-
+        # free.
+        if offload_tags is not None:
+            from vllm.device_allocator.cumem import KNOWN_SLEEP_TAGS
+
+            invalid = set(offload_tags) - set(KNOWN_SLEEP_TAGS)
+            if invalid:
+                raise ValueError(
+                    f"offload_tags contains unknown tag(s) "
+                    f"{sorted(invalid)!r}. Known tags: "
+                    f"{sorted(KNOWN_SLEEP_TAGS)!r}."
+                )
+
+        # Decide whether the prefix cache must be cleared. Under the legacy
+        # API, level >= 1 always discards (or replaces) the kv_cache pool,
+        # so the prefix cache is invalid. Under offload_tags, only clear
+        # if kv_cache is actually being offloaded.
+        if offload_tags is None:
+            clear_prefix_cache = level >= 1
+        else:
+            clear_prefix_cache = "kv_cache" in offload_tags
+
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
-        if level < 1:
+
+        # Scheduler-only sleep paths skip the executor entirely:
+        #   * legacy `level=0` (no GPU offload requested), or
+        #   * tag-wise `offload_tags=[]` (no tag is offloaded; the request
+        #     is purely a pause). Entering the executor's sleeping state
+        #     here would make `wake_up(tags=["scheduling"])` resume the
+        #     scheduler while leaving `Executor.is_sleeping=True`, which
+        #     would silently drop subsequent `sleep(...)` calls.
+        if offload_tags is None and level < 1:
+            return pause_future
+        if offload_tags is not None and len(offload_tags) == 0:
             return pause_future
 
-        # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
+
+        def _do_executor_sleep():
+            return model_executor.sleep(level=level, offload_tags=offload_tags)
+
         if pause_future is None:
-            model_executor.sleep(level)
+            _do_executor_sleep()
             return None
 
         future = Future[Any]()
@@ -704,7 +760,7 @@ class EngineCore:
         def pause_complete(f: Future):
             try:
                 f.result()  # propagate any exception
-                future.set_result(model_executor.sleep(level))
+                future.set_result(_do_executor_sleep())
             except Exception as e:
                 future.set_exception(e)
 
@@ -718,14 +774,21 @@ class EngineCore:
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
         """
-        if tags is not None and "scheduling" in tags:
+        scheduling_requested = tags is not None and "scheduling" in tags
+        if scheduling_requested:
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
+        # Resume scheduling only after the executor is fully awake. In staged
+        # wakeups (e.g. weights first, kv_cache later), resuming after only
+        # weights are restored can schedule requests before the KV pool has
+        # been remapped, causing stale KV pointers to be used.
+        if self.model_executor.is_sleeping and not scheduling_requested:
+            return
+
         self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
@@ -1556,11 +1619,15 @@ class EngineCoreProc(EngineCore):
           clear caches, then complete the returned Future.
         - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
-        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
-          output queue is empty.
+        - ``keep``: Set PAUSED_ALL; requests resume with existing KV cache.
+        - ``recompute``: Set PAUSED_ALL; requests are preserved but their KV
+          cache is released, so prompt+generated tokens are recomputed on
+          resume_generation().
         """
-        if mode not in ("keep", "abort", "wait"):
+        if mode not in ("keep", "recompute", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
+        if mode == "recompute":
+            clear_cache = True
 
         def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             if clear_cache:
@@ -1573,7 +1640,9 @@ class EngineCoreProc(EngineCore):
             )
             self._send_abort_outputs(aborted_reqs)
 
-        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        pause_state = (
+            PauseState.PAUSED_ALL if mode in ("keep", "recompute") else PauseState.PAUSED_NEW
+        )
         self.scheduler.set_pause_state(pause_state)
 
         if self._pause_complete():

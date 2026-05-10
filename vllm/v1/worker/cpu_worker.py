@@ -142,7 +142,11 @@ class CPUWorker(Worker):
             self.vllm_config, torch.device("cpu")
         )
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(
+        self,
+        level: int = 1,
+        offload_tags: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 

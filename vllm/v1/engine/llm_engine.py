@@ -44,6 +44,22 @@ logger = init_logger(__name__)
 _R = TypeVar("_R", default=Any)
 
 
+def _effective_sleep_level(
+    level: int, offload_tags: list[str] | None
+) -> int:
+    """Map a (level, offload_tags) pair to the legacy integer level used
+    by the metrics system. Under tag-wise sleep, "level 1" semantics
+    (i.e. weights_offloaded=1 in the gauge) only apply when weights are
+    actually offloaded. Otherwise the engine is sleeping but neither
+    weights_offloaded nor discard_all should be flipped on.
+    """
+    if offload_tags is None:
+        return level
+    if "weights" in offload_tags:
+        return 1
+    return 0
+
+
 class LLMEngine:
     """Legacy LLMEngine for backwards compatibility."""
 
@@ -349,11 +365,18 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
-        self.engine_core.sleep(level, mode)
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        offload_tags: list[str] | None = None,
+    ):
+        self.engine_core.sleep(level, mode, offload_tags=offload_tags)
 
         if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
+            self.logger_manager.record_sleep_state(
+                1, _effective_sleep_level(level, offload_tags)
+            )
 
     def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)

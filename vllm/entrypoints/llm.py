@@ -1489,14 +1489,20 @@ class LLM:
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+    def sleep(
+        self,
+        level: int = 1,
+        mode: PauseMode = "abort",
+        *,
+        offload_tags: list[str] | None = None,
+    ):
         """
         Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
         during the sleep period, before `wake_up` is called.
 
         Args:
-            level: The sleep level.
+            level: The sleep level. Ignored when ``offload_tags`` is given.
                 - Level 0: Pause scheduling but continue accepting requests.
                            Requests are queued but not processed.
                 - Level 1: Offload model weights to CPU, discard KV cache.
@@ -1510,9 +1516,31 @@ class LLM:
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
             mode: How to handle any existing requests, can be "abort", "wait",
-                or "keep".
+                "keep", or "recompute". "recompute" freezes requests,
+                releases their KV cache, and recomputes prompt+generated
+                tokens on wake/resume.
+            offload_tags: Tag-wise selective sleep for hybrid co-location
+                with partial rollout. When provided, only the listed tags
+                are offloaded to CPU; the remaining known tags
+                ("weights", "kv_cache") are kept fully mapped on GPU. This
+                lets the engine yield GPU memory to a co-located trainer
+                without losing its KV cache, so an in-flight generation
+                can be resumed on `wake_up()` without reprocessing the
+                prompt. The prefix cache is preserved iff "kv_cache" is
+                not in the offloaded set. Examples:
+
+                - ``offload_tags=["weights"]``: weights → CPU, KV cache
+                  stays on GPU.
+                - ``offload_tags=["kv_cache"]``: KV cache → CPU, weights
+                  stay on GPU.
+                - ``offload_tags=["weights", "kv_cache"]``: both → CPU
+                  (equivalent to ``level=1`` for memory effect).
+                - ``offload_tags=[]``: pause only — no GPU memory is
+                  offloaded and the executor stays awake. Equivalent to
+                  ``level=0`` (use ``wake_up(tags=["scheduling"])`` to
+                  resume).
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        self.llm_engine.sleep(level=level, mode=mode, offload_tags=offload_tags)
 
     def wake_up(self, tags: list[str] | None = None):
         """

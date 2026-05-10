@@ -969,6 +969,55 @@ async def test_pause_keep_single_request():
 
 
 @pytest.mark.asyncio
+async def test_pause_recompute_single_request():
+    """Test that mode='recompute' freezes a request, releases its KV state,
+    and resumes by recomputing prompt+generated tokens.
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(
+                AsyncEngineArgs(
+                    model="hmellor/tiny-random-LlamaForCausalLM",
+                    enforce_eager=True,
+                )
+            )
+        after.callback(engine.shutdown)
+
+        sampling_params = SamplingParams(max_tokens=30, ignore_eos=True)
+        token_times: list[tuple[int, float]] = []
+
+        async def generator_task():
+            async for output in engine.generate(
+                request_id="test-recompute-single",
+                prompt=TEXT_PROMPT,
+                sampling_params=sampling_params,
+            ):
+                token_count = len(output.outputs[0].token_ids)
+                token_times.append((token_count, time.monotonic()))
+            return output
+
+        async def controller_task():
+            while len(token_times) < 5:
+                await asyncio.sleep(0.01)
+
+            await engine.pause_generation(mode="recompute", clear_cache=True)
+            assert await engine.is_paused()
+            await asyncio.sleep(0.5)
+            await engine.resume_generation()
+            assert not await engine.is_paused()
+
+        gen_task = asyncio.create_task(generator_task())
+        ctrl_task = asyncio.create_task(controller_task())
+        final_output, _ = await asyncio.wait_for(
+            asyncio.gather(gen_task, ctrl_task), timeout=60.0
+        )
+
+        assert final_output.finished
+        assert len(final_output.outputs[0].token_ids) == 30
+        assert len(token_times) >= 5
+
+
+@pytest.mark.asyncio
 async def test_pause_keep_multi_request():
     """Test that mode='keep' freezes multiple concurrent requests and all resume."""
     with ExitStack() as after:

@@ -24,7 +24,20 @@ async def sleep(raw_request: Request):
     # get POST params
     level = raw_request.query_params.get("level", "1")
     mode = raw_request.query_params.get("mode", "abort")
-    await engine_client(raw_request).sleep(int(level), mode)
+    # Optional tag-wise offload: ?offload_tags=weights&offload_tags=kv_cache
+    # When provided, the engine performs a selective sleep instead of
+    # using the legacy `level` semantics. Blank values (e.g. the request
+    # `?offload_tags=`) are filtered out — Starlette returns those as the
+    # empty string and forwarding them to the engine would record `''`
+    # as a real selective-sleep tag, leaving the executor stuck in
+    # `is_sleeping=True`. If every value is blank we fall back to the
+    # legacy level-based path (offload_tags=None) instead of silently
+    # turning the request into a pure pause.
+    offload_tags_raw = [
+        t for t in raw_request.query_params.getlist("offload_tags") if t.strip()
+    ]
+    offload_tags = offload_tags_raw if offload_tags_raw else None
+    await engine_client(raw_request).sleep(int(level), mode, offload_tags=offload_tags)
     # FIXME: in v0 with frontend multiprocessing, the sleep command
     # is sent but does not finish yet when we return a response.
     return Response(status_code=200)

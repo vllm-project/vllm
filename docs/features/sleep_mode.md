@@ -9,12 +9,77 @@ Key benefits:
 - **API endpoints**: Control sleep/wake_up state via HTTP endpoints or Python API.
 - **Supports distributed workloads**: Works with tensor parallelism, pipeline parallelism, etc.
 - **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
+- **Tag-wise selective offload**: Use `offload_tags=["weights"]` (or `["kv_cache"]`) on `sleep()` to release one tagged pool while keeping the other live on GPU. This enables hybrid co-location with partial rollout — the engine can yield weights' GPU memory to a co-located trainer without losing its KV cache, so an in-flight generation can be resumed without a re-prefill.
 
 !!! note
     This feature is now supported on CUDA and ROCm platform.
 
 !!! note
     For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
+
+## Tag-wise selective sleep (hybrid co-location with partial rollout)
+
+In addition to the integer `level`, `LLM.sleep` accepts an `offload_tags`
+argument that names which of the engine's tagged GPU memory pools to
+release. The known tags are `"weights"` and `"kv_cache"`. Tags that
+appear in `offload_tags` are backed up to CPU and unmapped from GPU;
+tags that are *not* in `offload_tags` are left fully mapped on GPU and
+untouched — no CPU copy, no unmap.
+
+This is what enables hybrid co-location with partial rollout in RL
+training. When a trainer and an inference engine share the same GPUs:
+
+1. Inference produces a partial rollout (the prompt + already-generated
+   prefix lives in the KV cache).
+2. The trainer needs the GPU for a step. The engine releases its
+   weights' GPU memory but *keeps* the KV cache mapped, freezing any
+   in-flight requests in place rather than aborting them:
+   `llm.sleep(offload_tags=["weights"], mode="keep")`.
+3. After the training step, the engine reloads its weights:
+   `llm.wake_up(tags=["weights"])`. Because the KV cache survived and
+   the in-flight requests were frozen, prefill for the partial prompt
+   does not need to be repeated and the rollout resumes from where it
+   left off.
+
+Important behavior to keep in mind:
+
+- The default `mode="abort"` cancels any in-flight generation; if you
+  want partial rollouts to *resume* after wake_up, you must pass
+  `mode="keep"` (or `"wait"`) to retain the requests through the
+  sleep.
+- The engine's prefix cache is cleared only when `"kv_cache"` is in the
+  offloaded set. Under tag-wise sleep that preserves the KV cache, the
+  prefix cache is preserved as well.
+- `wake_up(tags=[t])` will warn and refuse if `t` was never offloaded
+  (it's not in the executor's `sleeping_tags`). Wake the tag you slept.
+- `offload_tags=["weights", "kv_cache"]` is equivalent in memory effect
+  to `level=1` but is more explicit; it does *not* save model buffers
+  separately the way `level=2` does.
+- `offload_tags=[]` is a pure pause: no GPU memory is offloaded and
+  the executor stays awake. It is functionally equivalent to
+  `level=0`; use `wake_up(tags=["scheduling"])` to resume.
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
+out = llm.generate("Hello", SamplingParams(max_tokens=8))
+
+# Yield weights' GPU memory to a co-located trainer; keep KV cache and
+# any in-flight requests frozen so they can resume after wake_up.
+llm.sleep(offload_tags=["weights"], mode="keep")
+
+# ... trainer runs a step on the freed GPU memory ...
+
+# Restore weights. KV cache was never asleep, so we don't include it.
+llm.wake_up(tags=["weights"])
+out2 = llm.generate("Hello", SamplingParams(max_tokens=8))
+```
+
+The same control is available on the HTTP server: pass `offload_tags`
+as a repeated query parameter, e.g.
+`POST /sleep?offload_tags=weights`. Omitting `offload_tags` falls back
+to the legacy `level`-based behavior.
 
 ## Sleep levels
 
