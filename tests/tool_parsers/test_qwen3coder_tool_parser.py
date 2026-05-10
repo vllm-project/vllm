@@ -1320,6 +1320,234 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
     assert args["unit"] == "fahrenheit"
 
 
+def test_streaming_two_complete_tool_calls_single_chunk(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: speculative decode delivering two full tool calls in one
+    delta. Prior to the driver-loop fix the parser would emit only the first
+    event for the chunk and silently drop everything after it."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    big_delta = (
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nDallas\n</parameter>\n"
+        "<parameter=state>\nTX\n</parameter>\n"
+        "<parameter=unit>\nfahrenheit\n</parameter>\n"
+        "</function>\n</tool_call>\n"
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nOrlando\n</parameter>\n"
+        "<parameter=state>\nFL\n</parameter>\n"
+        "<parameter=unit>\nfahrenheit\n</parameter>\n"
+        "</function>\n</tool_call>"
+    )
+    deltas = [big_delta]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2
+    args0 = json.loads(reconstructor.tool_calls[0].function.arguments)
+    args1 = json.loads(reconstructor.tool_calls[1].function.arguments)
+    assert args0 == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+    assert args1 == {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
+    assert reconstructor.tool_calls[0].function.name == "get_current_weather"
+    assert reconstructor.tool_calls[1].function.name == "get_current_weather"
+
+
+def test_streaming_tail_plus_complete_next_tool_call_single_chunk(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: speculative decode burst delivering the tail of one tool
+    call together with the entire next tool call (+ EOS) in a single delta.
+
+    Reproduces the exact bug scenario described in the issue: under the
+    pre-fix parser, only ``{`` would be emitted for the second tool and the
+    parameters + ``}`` would be lost.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    # Stream the start of tool 0 incrementally, then deliver everything
+    # else (tail of tool 0 + all of tool 1) in one large delta.
+    deltas = [
+        "<tool_call>",
+        "\n<function=get_current_weather>",
+        "\n",  # triggers json_started -> emits "{"
+        "<parameter=city>\nDallas\n</parameter>",
+        # Big spec-decode burst: rest of tool 0 + full tool 1.
+        (
+            "\n<parameter=state>\nTX\n</parameter>"
+            "\n<parameter=unit>\nfahrenheit\n</parameter>"
+            "\n</function>\n</tool_call>\n"
+            "<tool_call>\n<function=get_current_weather>\n"
+            "<parameter=city>\nOrlando\n</parameter>\n"
+            "<parameter=state>\nFL\n</parameter>\n"
+            "<parameter=unit>\nfahrenheit\n</parameter>\n"
+            "</function>\n</tool_call>"
+        ),
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2, (
+        f"expected 2 tool calls, got {len(reconstructor.tool_calls)}: "
+        f"{reconstructor.tool_calls}"
+    )
+    args0 = json.loads(reconstructor.tool_calls[0].function.arguments)
+    args1 = json.loads(reconstructor.tool_calls[1].function.arguments)
+    assert args0 == {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}
+    assert args1 == {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}
+    assert reconstructor.tool_calls[0].function.name == "get_current_weather"
+    assert reconstructor.tool_calls[1].function.name == "get_current_weather"
+
+
+def test_streaming_missing_function_end_still_emits_closing_brace(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: trailing ``}`` must still be emitted when ``</function>``
+    is absent from the decoded stream.
+
+    Reproduces the production scenario where ``</function>`` (and/or
+    ``</parameter>``) are added/special tokens stripped under
+    ``skip_special_tokens=True`` -- so the literal substring never reaches
+    the parser even though the model logically emitted them. The chunked
+    text the parser actually sees ends with ``</tool_call>`` directly,
+    with no ``</function>`` anywhere.
+
+    Pre-fix behavior: param-end detection falls back to ``</tool_call>``
+    and emits the parameter, but the function-end check only matches
+    ``</function>`` and silently drops the closing ``}``.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    # Final chunk delivers ``</parameter>\n</tool_call>`` with no
+    # ``</function>`` -- mimicking the special-token stripping case from
+    # the production log (delta 11: ``[29, 198, 248059, 248046]``).
+    deltas = [
+        "<tool_call>\n<function=get_current_weather>\n<parameter=city>\n",
+        "Dallas",
+        # No </function> token in the stream -- jumps straight from
+        # </parameter> to </tool_call>.
+        "\n</parameter>\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    raw = reconstructor.tool_calls[0].function.arguments
+    # The key assertion: closing brace was emitted.
+    assert raw.endswith("}"), (
+        f"trailing }} was dropped; got arguments={raw!r}"
+    )
+    args = json.loads(raw)
+    assert args == {"city": "Dallas"}
+    assert reconstructor.tool_calls[0].function.name == "get_current_weather"
+
+
+def test_streaming_missing_function_end_spec_decode_burst(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: spec-decode burst delivers param value + ``</tool_call>``
+    in one chunk, with ``</function>`` absent. Both the parameter and the
+    trailing ``}`` must be emitted in the merged delta.
+
+    This mirrors the concrete production log: param value arrived in the
+    previous delta, and the final delta only contained
+    ``[>, \n, </parameter>, </tool_call>]`` (high-id special tokens that
+    decoded to no literal ``</function>``).
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nDallas",
+        # Spec-decode burst closing the call without </function>.
+        "\n</parameter>\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    raw = reconstructor.tool_calls[0].function.arguments
+    assert raw.endswith("}"), (
+        f"trailing }} was dropped (spec-decode burst); got arguments={raw!r}"
+    )
+    args = json.loads(raw)
+    assert args == {"city": "Dallas"}
+
+
+def test_streaming_two_tool_calls_missing_function_end(
+    qwen3_tool_parser, qwen3_tokenizer
+):
+    """Regression: two consecutive tool calls where ``</function>`` is
+    stripped from both. Both closing ``}`` must be emitted.
+
+    Mirrors the full production log shape (two ``bash`` tool calls back to
+    back) with ``</function>`` absent from the stream.
+    """
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    deltas = [
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nDallas\n</parameter>\n</tool_call>\n"
+        "<tool_call>\n<function=get_current_weather>\n"
+        "<parameter=city>\nOrlando\n</parameter>\n</tool_call>",
+    ]
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        deltas,
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2
+    for i, expected_city in enumerate(["Dallas", "Orlando"]):
+        raw = reconstructor.tool_calls[i].function.arguments
+        assert raw.endswith("}"), (
+            f"tool {i}: trailing }} dropped; got {raw!r}"
+        )
+        assert json.loads(raw) == {"city": expected_city}
+
+
 def test_no_double_serialization_string_args(qwen3_tool_parser):
     """Regression: string arguments must not be double-serialized (PR #35615)."""
     tools = [

@@ -197,8 +197,36 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
                     reasoning=reasoning if reasoning else None,
                     content=content if content else None,
                 )
-            # end_token_id in IDs but not in text (already stripped)
-            return None
+            # end_token_id is in IDs but the literal </think> is absent
+            # from delta_text. This happens when </think> is an added
+            # special token stripped under skip_special_tokens=True
+            # (the default). Typical with speculative decoding, where a
+            # single chunk straddles the reasoning -> content boundary:
+            # delta_token_ids carries reasoning tail + </think> + content
+            # tokens, but delta_text concatenates only the non-special
+            # pieces, so we cannot locate the split with a string find.
+            #
+            # Recover the split by decoding the token id segments on
+            # each side of </think> independently. Without this, the
+            # caller (DelegatingParser.parse_delta) sees delta_message
+            # is None and resets current_text to "", silently dropping
+            # every post-</think> token in this chunk -- including the
+            # opening <tool_call> / <function=...> tokens, which wedges
+            # the downstream tool parser.
+            delta_ids = list(delta_token_ids)
+            split_idx = delta_ids.index(self.end_token_id)
+            reasoning = self.model_tokenizer.decode(
+                delta_ids[:split_idx], skip_special_tokens=True
+            )
+            content = self.model_tokenizer.decode(
+                delta_ids[split_idx + 1 :], skip_special_tokens=True
+            )
+            if not reasoning and not content:
+                return None
+            return DeltaMessage(
+                reasoning=reasoning if reasoning else None,
+                content=content if content else None,
+            )
 
         # Implicit reasoning end via <tool_call>.
         if (

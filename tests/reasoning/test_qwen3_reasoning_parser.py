@@ -326,6 +326,106 @@ def test_reasoning_streaming_multi_token_deltas(
     assert (reconstructor.other_content or None) == expected_content
 
 
+# --- Regression: </think> stripped from delta_text under
+# skip_special_tokens=True (typical with speculative decoding chunks).
+
+
+def test_reasoning_streaming_end_token_stripped_from_text(qwen3_tokenizer):
+    """</think> token id present in delta_token_ids but literal absent
+    from delta_text must still split reasoning from content.
+
+    Reproduces the production scenario where </think> is an added
+    special token stripped under skip_special_tokens=True. Pre-fix the
+    parser returned None and the caller reset current_text to "",
+    silently dropping every post-</think> token in the same chunk
+    (including the opening <tool_call> that wedges the tool parser).
+    """
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    reasoning_text = " three files."
+    content_text = "\n\n"
+    reasoning_ids = qwen3_tokenizer.encode(
+        reasoning_text, add_special_tokens=False
+    )
+    content_ids = qwen3_tokenizer.encode(content_text, add_special_tokens=False)
+    delta_token_ids = reasoning_ids + [parser.end_token_id] + content_ids
+    # Simulate skip_special_tokens=True: </think> contributes nothing
+    # to delta_text, so reasoning and content are concatenated.
+    delta_text = reasoning_text + content_text
+
+    delta_message = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta_text,
+        delta_text=delta_text,
+        previous_token_ids=[],
+        current_token_ids=delta_token_ids,
+        delta_token_ids=delta_token_ids,
+    )
+
+    assert delta_message is not None, (
+        "parser dropped the chunk; both reasoning tail and content lost"
+    )
+    assert delta_message.reasoning == reasoning_text
+    assert delta_message.content == content_text
+
+
+def test_reasoning_streaming_end_token_stripped_empty_content(qwen3_tokenizer):
+    """</think> stripped, only reasoning tail in this chunk (no post-</think>
+    tokens). Must emit reasoning, content stays None."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    reasoning_text = " done."
+    reasoning_ids = qwen3_tokenizer.encode(
+        reasoning_text, add_special_tokens=False
+    )
+    delta_token_ids = reasoning_ids + [parser.end_token_id]
+    delta_text = reasoning_text
+
+    delta_message = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta_text,
+        delta_text=delta_text,
+        previous_token_ids=[],
+        current_token_ids=delta_token_ids,
+        delta_token_ids=delta_token_ids,
+    )
+
+    assert delta_message is not None
+    assert delta_message.reasoning == reasoning_text
+    assert delta_message.content is None
+
+
+def test_reasoning_streaming_end_token_stripped_empty_reasoning(qwen3_tokenizer):
+    """</think> stripped, only post-</think> tokens in this chunk
+    (boundary lands at chunk start). Must emit content, reasoning stays
+    None."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    content_text = "Hello world"
+    content_ids = qwen3_tokenizer.encode(content_text, add_special_tokens=False)
+    delta_token_ids = [parser.end_token_id] + content_ids
+    delta_text = content_text
+
+    delta_message = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=delta_text,
+        delta_text=delta_text,
+        previous_token_ids=[],
+        current_token_ids=delta_token_ids,
+        delta_token_ids=delta_token_ids,
+    )
+
+    assert delta_message is not None
+    assert delta_message.reasoning is None
+    assert delta_message.content == content_text
+
+
 # --- Tests for enable_thinking=False (thinking explicitly disabled) ---
 
 

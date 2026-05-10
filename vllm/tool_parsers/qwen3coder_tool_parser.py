@@ -231,6 +231,82 @@ class Qwen3CoderToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    def _streaming_state_snapshot(self) -> tuple:
+        """Snapshot of streaming state used to detect progress.
+
+        Used by the driver loop in ``extract_tool_calls_streaming`` to
+        decide whether another call to ``_extract_tool_calls_streaming_step``
+        could make further progress.
+        """
+        return (
+            self.current_tool_index,
+            self.is_tool_call_started,
+            self.header_sent,
+            self.in_function,
+            self.in_param,
+            self.json_started,
+            self.json_closed,
+            self.param_count,
+        )
+
+    def _merge_streaming_deltas(
+        self, deltas: list[DeltaMessage]
+    ) -> DeltaMessage:
+        """Merge multiple ``DeltaMessage`` emitted within a single chunk.
+
+        When ``extract_tool_calls_streaming`` drains its state machine, the
+        per-step function may emit several deltas (header, ``{``, params,
+        ``}``) for one or more tool calls. The serving layer expects at
+        most one ``DeltaMessage`` per chunk, so we concatenate content and
+        coalesce per-tool ``arguments`` here.
+        """
+        content_parts: list[str] = []
+        # Preserve insertion order keyed by tool index.
+        merged_calls: dict[int, DeltaToolCall] = {}
+        for delta in deltas:
+            if delta.content:
+                content_parts.append(delta.content)
+            if not delta.tool_calls:
+                continue
+            for tc in delta.tool_calls:
+                if tc.index not in merged_calls:
+                    merged_calls[tc.index] = DeltaToolCall(
+                        index=tc.index,
+                        id=tc.id,
+                        type=tc.type,
+                        function=DeltaFunctionCall(
+                            name=(tc.function.name if tc.function else None),
+                            arguments=(
+                                (tc.function.arguments if tc.function else "")
+                                or ""
+                            ),
+                        ),
+                    )
+                else:
+                    existing = merged_calls[tc.index]
+                    # Keep first id/name/type; concat any new arguments.
+                    if tc.function and tc.function.arguments:
+                        if (
+                            existing.function is None
+                            or existing.function.arguments is None
+                        ):
+                            existing.function = DeltaFunctionCall(
+                                name=(
+                                    existing.function.name
+                                    if existing.function
+                                    else None
+                                ),
+                                arguments="",
+                            )
+                        existing.function.arguments += tc.function.arguments
+
+        content_str = "".join(content_parts) if content_parts else None
+        tool_calls = list(merged_calls.values())
+        return DeltaMessage(
+            content=content_str,
+            tool_calls=tool_calls if tool_calls else None,
+        )
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -241,13 +317,99 @@ class Qwen3CoderToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        # Store request for type conversion
+        """Drive the per-step state machine until it reaches a fixed point.
+
+        The step function (``_extract_tool_calls_streaming_step``) emits at
+        most one event (function header / ``{`` / one parameter / ``}`` /
+        advance-to-next-tool) per invocation. With speculative decoding a
+        single engine output chunk can deliver many tokens at once -- e.g.
+        the tail of one tool call together with a complete next tool call
+        plus EOS. Calling the step once per chunk would drop everything
+        past the first emission.
+
+        Mirror ``Qwen3XMLToolParser.parse_single_streaming_chunks``: run
+        the step in a loop, draining all state transitions implied by the
+        new ``delta_text``, then merge the emitted deltas into a single
+        ``DeltaMessage``.
+        """
+        # Store request for type conversion. Reset state once at the start
+        # of a new message; do NOT reset inside the step (the driver loop
+        # below calls the step repeatedly within the same chunk).
         if not previous_text:
             self._reset_streaming_state()
             self.streaming_request = request
 
-        # If no delta text, return None unless it's an EOS token after tools
+        first = self._extract_tool_calls_streaming_step(
+            previous_text,
+            current_text,
+            delta_text,
+            previous_token_ids,
+            current_token_ids,
+            delta_token_ids,
+            request,
+        )
+
+        # When externally invoked with an empty delta_text we preserve the
+        # original single-shot behavior (EOS-flush / no-op). The driver
+        # loop is only meaningful when there is new text to drain.
         if not delta_text:
+            return first
+
+        results: list[DeltaMessage] = []
+        if first is not None:
+            results.append(first)
+
+        # Drain remaining state transitions for this chunk. Cap iterations
+        # to defend against a pathological state machine; in practice we
+        # expect at most O(params per tool * tools per chunk) steps.
+        for _ in range(256):
+            prev_snap = self._streaming_state_snapshot()
+            delta = self._extract_tool_calls_streaming_step(
+                previous_text,
+                current_text,
+                "",
+                previous_token_ids,
+                current_token_ids,
+                [],
+                request,
+                drain=True,
+            )
+            if delta is not None:
+                results.append(delta)
+            if self._streaming_state_snapshot() == prev_snap:
+                # Fixed point: no further progress possible without new
+                # tokens. Includes the defensive case where a delta was
+                # emitted without a state change (shouldn't happen, but
+                # prevents infinite loops).
+                break
+
+        if not results:
+            return None
+        if len(results) == 1:
+            return results[0]
+        return self._merge_streaming_deltas(results)
+
+    def _extract_tool_calls_streaming_step(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
+        delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
+        drain: bool = False,
+    ) -> DeltaMessage | None:
+        """Single state-machine step. Emits at most one event.
+
+        ``drain=True`` is set by the driver loop in
+        ``extract_tool_calls_streaming`` when re-invoking the step with no
+        new text. In that mode we skip the empty-delta_text early-return
+        and the trailing ``DeltaMessage(content=delta_text)`` fallback
+        (which would otherwise emit empty content).
+        """
+        # If no delta text, return None unless it's an EOS token after tools
+        if not delta_text and not drain:
             # Check if this is an EOS token after all tool calls are complete
             # Check for tool calls in text even if is_tool_call_started
             # is False (might have been reset after processing all tools)
@@ -319,6 +481,9 @@ class Qwen3CoderToolParser(ToolParser):
                     and delta_text.strip() == ""
                 ):
                     # We just ended a tool call, skip whitespace
+                    return None
+                if drain:
+                    # No new tokens during drain; nothing to emit.
                     return None
                 # Normal content, no tool call
                 return DeltaMessage(content=delta_text)
@@ -538,13 +703,36 @@ class Qwen3CoderToolParser(ToolParser):
             # </function>. If the close check ran first it would emit
             # "}" and set in_function=False before the parameter loop
             # ever ran, causing the parameter to be silently dropped.
-            if not self.json_closed and self.function_end_token in tool_text:
+            #
+            # Symmetric fallback with the parameter-end detection above:
+            # if </function> is absent but </tool_call> is present, the
+            # function has implicitly ended. This handles:
+            #   * Tokenizers where </function> / </parameter> are added
+            #     special tokens stripped under skip_special_tokens=True
+            #     (so the literal substring never appears in current_text).
+            #   * Malformed model output that emits </tool_call> without
+            #     a preceding </function>.
+            # Without this fallback the parameter is still emitted (the
+            # param-end logic above already falls back to </tool_call>),
+            # but the closing "}" is silently dropped.
+            function_ended = (
+                self.function_end_token in tool_text
+                or self.tool_call_end_token in tool_text
+            )
+            if not self.json_closed and function_ended:
                 self.json_closed = True
 
                 func_start = tool_text.find(self.tool_call_prefix) + len(
                     self.tool_call_prefix
                 )
                 func_content_end = tool_text.find(self.function_end_token, func_start)
+                if func_content_end == -1:
+                    # </function> stripped/missing; bound the function
+                    # content at </tool_call> instead so prev_tool_call_arr
+                    # gets the correct serialized arguments.
+                    func_content_end = tool_text.find(
+                        self.tool_call_end_token, func_start
+                    )
                 if func_content_end != -1:
                     func_content = tool_text[func_start:func_content_end]
                     try:
