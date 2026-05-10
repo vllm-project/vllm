@@ -7,7 +7,17 @@ steps:
   timeout_in_minutes: 45
   torch_nightly: true
   source_file_dependencies:
-  - vllm/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/test_initialization.py
   - tests/models/registry.py
   commands:
@@ -36,7 +46,17 @@ steps:
   key: basic-models-tests-other
   timeout_in_minutes: 45
   source_file_dependencies:
-  - vllm/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/test_terratorch.py
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
@@ -49,7 +69,10 @@ steps:
   - image-build-cpu
   timeout_in_minutes: 10
   source_file_dependencies:
-  - vllm/
+  - vllm/distributed/
+  - vllm/model_executor/
+  - vllm/platforms/
+  - vllm/utils/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
   device: cpu-small
