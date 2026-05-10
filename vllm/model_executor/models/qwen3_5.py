@@ -138,7 +138,6 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
-                create_in_proj_qkvz=vllm_config.lora_config is None,
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -217,7 +216,6 @@ class Qwen3_5Model(Qwen3NextModel):
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        self.enable_lora = vllm_config.lora_config is not None
 
         self.vocab_size = config.vocab_size
 
@@ -276,6 +274,9 @@ class Qwen3_5Model(Qwen3NextModel):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            # GDN
+            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
+            ("in_proj_qkvz", "in_proj_z", 3),
             # self attention
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -286,21 +287,6 @@ class Qwen3_5Model(Qwen3NextModel):
             ("in_proj_ba", "in_proj_b", 0),
             ("in_proj_ba", "in_proj_a", 1),
         ]
-
-        if self.enable_lora:
-            stacked_params_mapping.extend(
-                [
-                    ("in_proj_qkv", "in_proj_qkv", (0, 1, 2)),
-                    ("in_proj_z", "in_proj_z", 0),
-                ]
-            )
-        else:
-            stacked_params_mapping.extend(
-                [
-                    ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-                    ("in_proj_qkvz", "in_proj_z", 3),
-                ]
-            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -352,10 +338,7 @@ class Qwen3_5Model(Qwen3NextModel):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                if param_name == "in_proj_z" and self.enable_lora:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, shard_id)
+                weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -485,15 +468,6 @@ class Qwen3_5ForCausalLMBase(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
-        # instead of merged in_proj_qkvz; pack mapping must match.
-        if vllm_config.lora_config:
-            base = getattr(Qwen3_5ForCausalLMBase, "packed_modules_mapping", {})
-            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
-            self.packed_modules_mapping.pop("in_proj_qkvz", None)
-            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
-            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
-
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
@@ -586,7 +560,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
-        self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
         config: Qwen3_5Config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -613,17 +586,6 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def update_packed_mapping(self, enable_lora: bool):
-        # When LoRA is enabled, GDN uses separate in_proj_qkv and in_proj_z
-        if enable_lora:
-            base = getattr(
-                Qwen3_5ForConditionalGeneration, "packed_modules_mapping", {}
-            )
-            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
-            self.packed_modules_mapping.pop("in_proj_qkvz", None)
-            self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
-            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
 
     def embed_input_ids(
         self,
@@ -811,7 +773,6 @@ class Qwen3_5MoeForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
-        self.update_packed_mapping(enable_lora=vllm_config.lora_config is not None)
         config: Qwen3_5MoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
