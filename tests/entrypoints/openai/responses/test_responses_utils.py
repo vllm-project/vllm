@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.responses.utils import (
 
 
 def _single_chat_message(item):
-    message = _construct_message_from_response_item(item, [])
+    message = _construct_message_from_response_item(item)
     assert message is not None
     return message
 
@@ -80,7 +80,7 @@ def make_reasoning_item(
 
 def make_function_call(
     *,
-    call_id: str = "call_123",
+    call_id: str,
     name: str = "test_function",
     arguments: str = "{}",
     id: str = "tool_id",
@@ -101,7 +101,7 @@ def make_function_call(
 
 def make_function_call_output(
     *,
-    call_id: str = "call_123",
+    call_id: str,
     output: str = "42",
     id: str = "output_1",
     status: str = "completed",
@@ -732,33 +732,17 @@ class TestConstructChatMessagesCombinePolicy:
         [
             pytest.param(
                 [
-                    make_output_message("Hello"),
-                    make_output_message(", world", id="msg_2"),
-                ],
-                [
-                    {"type": "text", "text": "Hello"},
-                    {"type": "text", "text": ", world"},
-                ],
-                None,
-                None,
-                id="consecutive-output-messages",
-            ),
-            pytest.param(
-                [
                     make_reasoning_item(content_text="Let me think"),
-                    make_reasoning_item(
-                        id="reasoning_2",
-                        content_text=" a bit more",
-                    ),
+                    make_output_message("Hello"),
                 ],
+                "Hello",
+                "Let me think",
                 None,
-                "Let me think a bit more",
-                None,
-                id="consecutive-reasoning-items",
+                id="reasoning-output-messages",
             ),
             pytest.param(
                 [
-                    make_function_call(),
+                    make_function_call(call_id="call_123"),
                     make_function_call(call_id="call_456"),
                 ],
                 None,
@@ -768,23 +752,35 @@ class TestConstructChatMessagesCombinePolicy:
             ),
             pytest.param(
                 [
+                    make_reasoning_item(content_text="Let me think"),
+                    make_function_call(call_id="call_123"),
+                ],
+                None,
+                "Let me think",
+                ["call_123"],
+                id="reasoning-tool-call",
+            ),
+            pytest.param(
+                [
                     make_output_message("Hello"),
+                    make_function_call(call_id="call_123"),
+                ],
+                "Hello",
+                None,
+                ["call_123"],
+                id="output-tool-call",
+            ),
+            pytest.param(
+                [
                     make_reasoning_item(content_text="Thinking"),
-                    make_function_call(),
-                    make_output_message(" again", id="msg_2"),
-                    make_reasoning_item(
-                        id="reasoning_2",
-                        content_text=" more",
-                    ),
+                    make_output_message("Hello"),
+                    make_function_call(call_id="call_123"),
                     make_function_call(call_id="call_456"),
                 ],
-                [
-                    {"type": "text", "text": "Hello"},
-                    {"type": "text", "text": " again"},
-                ],
-                "Thinking more",
+                "Hello",
+                "Thinking",
                 ["call_123", "call_456"],
-                id="twice-interleaved-output-reasoning-tool-call",
+                id="reasoning-output-tool-call",
             ),
         ],
     )
@@ -815,56 +811,38 @@ class TestConstructChatMessagesCombinePolicy:
             )
 
     @pytest.mark.parametrize(
-        "tool_output_item",
+        ("items", "num_expected_messages"),
         [
             pytest.param(
-                make_function_call_output(),
-                id="typed-function-call-output-item",
+                [
+                    make_output_message("Hello"),
+                    make_output_message("World"),
+                ],
+                2,
+                id="consecutive-output-messages",
             ),
             pytest.param(
-                {
-                    "type": "function_call_output",
-                    "call_id": "call_123",
-                    "output": "42",
-                },
-                id="dict-function-call-output-item",
+                [
+                    make_reasoning_item(content_text="Let me think"),
+                    make_reasoning_item(content_text="Let me think more"),
+                ],
+                2,
+                id="consecutive-reasoning-messages",
+            ),
+            pytest.param(
+                [
+                    make_function_call(call_id="call_123"),
+                    make_function_call_output(call_id="call_123", output="42"),
+                    make_function_call(call_id="call_456"),
+                ],
+                3,
+                id="interrupted-by-non-assistant-item",
             ),
         ],
     )
-    def test_function_call_output_breaks_assistant_merge_chain(self, tool_output_item):
-        messages = construct_chat_messages_with_tool_call(
-            [
-                make_output_message("Before tool"),
-                make_reasoning_item(content_text="Need a tool"),
-                make_function_call(),
-                tool_output_item,
-                make_reasoning_item(
-                    id="reasoning_2",
-                    content_text="After tool",
-                ),
-                make_output_message(" done", id="msg_2"),
-                make_function_call(call_id="call_456"),
-            ]
-        )
-
-        assert len(messages) == 3
-        assert messages[0]["role"] == "assistant"
-        assert messages[0]["content"] == "Before tool"
-        assert messages[0]["reasoning"] == "Need a tool"
-        assert [tool_call["id"] for tool_call in messages[0]["tool_calls"]] == [
-            "call_123"
-        ]
-        assert messages[1] == {
-            "role": "tool",
-            "content": "42",
-            "tool_call_id": "call_123",
-        }
-        assert messages[2]["role"] == "assistant"
-        assert messages[2]["content"] == " done"
-        assert messages[2]["reasoning"] == "After tool"
-        assert [tool_call["id"] for tool_call in messages[2]["tool_calls"]] == [
-            "call_456"
-        ]
+    def test_merge_chain_breaks(self, items, num_expected_messages):
+        messages = construct_chat_messages_with_tool_call(items)
+        assert len(messages) == num_expected_messages
 
 
 class TestConstructInputMessagesInstructionsLeak:

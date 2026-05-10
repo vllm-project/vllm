@@ -6,7 +6,6 @@ from typing import Any
 
 from openai.types.chat import (
     ChatCompletionAssistantMessageParam,
-    ChatCompletionContentPartTextParam,
     ChatCompletionMessageToolCallParam,
     ChatCompletionToolMessageParam,
 )
@@ -131,7 +130,9 @@ def construct_chat_messages_with_tool_call(
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
-        message = _construct_message_from_response_item(item, messages)
+        message = _construct_message_from_response_item(
+            item, prev_msg=messages[-1] if messages else None
+        )
         if message is not None:
             messages.append(message)
 
@@ -140,11 +141,14 @@ def construct_chat_messages_with_tool_call(
 
 def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
-    msgs: list[ChatCompletionMessageParam],
+    prev_msg: ChatCompletionMessageParam | None = None,
 ) -> ChatCompletionMessageParam | None:
-    """Construct a chat message or update the prior assistant message."""
-    previous_assistant = (
-        msgs[-1] if msgs and msgs[-1].get("role") == "assistant" else None
+    """
+    Returns a new message or None. If `None`, `prev_msg` might be updated.
+    If `prev_msg` is `None`, a new message is always returned.
+    """
+    prev_assistant_msg = (
+        prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
     )
 
     if isinstance(item, ResponseFunctionToolCall):
@@ -156,10 +160,10 @@ def _construct_message_from_response_item(
             ),
             type="function",
         )
-        if previous_assistant is not None:
-            tool_calls = previous_assistant.get("tool_calls")
+        if prev_assistant_msg:
+            tool_calls = prev_assistant_msg.get("tool_calls")
             if tool_calls is None:
-                previous_assistant["tool_calls"] = [tool_call]
+                prev_assistant_msg["tool_calls"] = [tool_call]
                 return None
             if isinstance(tool_calls, list):
                 tool_calls.append(tool_call)
@@ -169,11 +173,12 @@ def _construct_message_from_response_item(
             ):
                 tool_calls = list(tool_calls)
                 tool_calls.append(tool_call)
-                previous_assistant["tool_calls"] = tool_calls
+                prev_assistant_msg["tool_calls"] = tool_calls
                 return None
             logger.warning(
                 "Previous assistant message has unknown tool_calls format. "
-                "Tool call merging is skipped. Item %s",
+                "Tool call merging is skipped and a new assistant message is created. "
+                "Item %s",
                 item.id,
             )
         return ChatCompletionAssistantMessageParam(
@@ -195,17 +200,15 @@ def _construct_message_from_response_item(
                 item.id,
             )
 
-        if previous_assistant is not None:
-            previous_reasoning = previous_assistant.get("reasoning")
+        if prev_assistant_msg:
+            previous_reasoning = prev_assistant_msg.get("reasoning")
             if previous_reasoning is None:
-                previous_assistant["reasoning"] = reasoning
-                return None
-            if isinstance(previous_reasoning, str):
-                previous_assistant["reasoning"] = previous_reasoning + reasoning
+                prev_assistant_msg["reasoning"] = reasoning
                 return None
             logger.warning(
-                "Previous assistant message has unknown reasoning format. "
-                "Reasoning concatenation is skipped. Item %s",
+                "Previous assistant message already contains reasoning. "
+                "Reasoning merging is skipped and a new assistant message is created. "
+                "Item %s",
                 item.id,
             )
         return {
@@ -214,31 +217,15 @@ def _construct_message_from_response_item(
         }
     elif isinstance(item, ResponseOutputMessage):
         output_text = item.content[0].text
-        if previous_assistant is not None:
-            previous_content = previous_assistant.get("content")
+        if prev_assistant_msg:
+            previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
-                previous_assistant["content"] = output_text
-                return None
-            if isinstance(previous_content, str):
-                previous_assistant["content"] = [
-                    ChatCompletionContentPartTextParam(
-                        type="text", text=previous_content
-                    ),
-                    ChatCompletionContentPartTextParam(type="text", text=output_text),
-                ]
-                return None
-            if isinstance(previous_content, Iterable) and not isinstance(
-                previous_content, dict
-            ):
-                previous_content_parts = list(previous_content)
-                previous_content_parts.append(
-                    ChatCompletionContentPartTextParam(type="text", text=output_text)
-                )
-                previous_assistant["content"] = previous_content_parts
+                prev_assistant_msg["content"] = output_text
                 return None
             logger.warning(
-                "Previous assistant message has unknown content format. "
-                "Content merging is skipped. Item %s",
+                "Previous assistant message already contains content. "
+                "Content merging is skipped and a new assistant message is created. "
+                "Item %s",
                 item.id,
             )
         return {
