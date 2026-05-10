@@ -116,6 +116,7 @@ class _FakeFusedMoE(torch.nn.Module):
         self.top_k = 2
         self.global_num_experts = 4
         self.expert_map = torch.tensor([-1, 0, -1, 1], dtype=torch.int32)
+        self.rocm_aiter_fmoe_enabled = False
         self.activation = "silu"
         self.apply_router_weight_on_input = False
         self.moe_config = SimpleNamespace(
@@ -151,4 +152,29 @@ def test_wna16_warmup_uses_local_experts_and_quant_config(monkeypatch):
     assert call["x_shape"] == (1, 4)
     assert call["topk_weights_shape"] == (1, 2)
     assert call["shared_experts_input"] is None
+    assert call["topk_ids"].tolist() == [[1, 3]]
+
+
+def test_wna16_warmup_rocm_aiter_expert_mask(monkeypatch):
+    # ROCm AITER returns a binary expert mask from the expert_map property.
+    monkeypatch.setattr(fused_moe_warmup, "FusedMoE", _FakeFusedMoE)
+    monkeypatch.setattr(fused_moe_warmup, "MoeWNA16Method", _FakeWNA16Method)
+    monkeypatch.setattr(
+        fused_moe_warmup,
+        "should_moe_wna16_use_cuda",
+        lambda *args, **kwargs: False,
+    )
+
+    layer = _FakeFusedMoE()
+    layer.rocm_aiter_fmoe_enabled = True
+    layer.expert_map = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+    model = torch.nn.Sequential(layer)
+
+    fused_moe_warmup.fused_moe_wna16_warmup(
+        model,
+        max_num_batched_tokens=2,
+    )
+
+    assert len(layer.quant_method.calls) == 1
+    call = layer.quant_method.calls[0]
     assert call["topk_ids"].tolist() == [[1, 3]]

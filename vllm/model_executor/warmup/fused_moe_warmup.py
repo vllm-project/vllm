@@ -129,7 +129,10 @@ def _get_warmup_expert_ids(layer: FusedMoE, device: torch.device) -> torch.Tenso
             dtype=torch.int32,
         )
 
-    expert_ids = torch.nonzero(expert_map >= 0, as_tuple=False).flatten()
+    if getattr(layer, "rocm_aiter_fmoe_enabled", False):
+        expert_ids = torch.nonzero(expert_map == 1, as_tuple=False).flatten()
+    else:
+        expert_ids = torch.nonzero(expert_map >= 0, as_tuple=False).flatten()
     return expert_ids.to(device=device, dtype=torch.int32)
 
 
