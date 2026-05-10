@@ -11,15 +11,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/language
   commands:
     # Test standard language models, excluding a subset of slow tests
@@ -54,15 +57,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
@@ -93,15 +99,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
@@ -121,15 +130,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/language/generation_ppl_test
   commands:
     - pytest -v -s models/language/generation_ppl_test
@@ -144,15 +156,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
@@ -168,15 +183,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/language/pooling_mteb_test
   commands:
     - pytest -v -s models/language/pooling_mteb_test
