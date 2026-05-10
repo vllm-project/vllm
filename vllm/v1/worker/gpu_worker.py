@@ -171,18 +171,19 @@ class Worker(WorkerBase):
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
+        offload: tuple[str, ...]
+        keep: tuple[str, ...]
         if offload_tags is None:
             # Legacy level-based semantics. level == 1 backs up weights to
             # CPU and discards everything else (including KV cache).
             # level >= 2 discards everything; we save buffers separately
             # since they live on weights pool but are mutated at runtime.
             offload = ("weights",) if level == 1 else ()
-            keep: tuple[str, ...] = ()
+            keep = ()
             if level >= 2:
                 model = self.model_runner.model
                 self._sleep_saved_buffers = {
-                    name: buffer.cpu().clone()
-                    for name, buffer in model.named_buffers()
+                    name: buffer.cpu().clone() for name, buffer in model.named_buffers()
                 }
             # Under legacy semantics every known tag is unmapped (either
             # offloaded to CPU or discarded), so wake_up needs to re-init
@@ -231,11 +232,18 @@ class Worker(WorkerBase):
     def wake_up(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
+        if tags is None:
+            woken_tags = set(self._slept_tags)
+        else:
+            woken_tags = set(tags) & self._slept_tags
+
         allocator = CuMemAllocator.get_instance()
         allocator.wake_up(tags)
 
-        # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        # Restore the buffers after level 2 sleep only after the weights
+        # pool has been remapped. If kv_cache is woken first, model buffers
+        # still point to unmapped weights memory.
+        if "weights" in woken_tags and self._sleep_saved_buffers:
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
@@ -246,11 +254,6 @@ class Worker(WorkerBase):
         # KV cache re-init must run only when kv_cache was unmapped during
         # sleep AND it is part of this wake_up. Otherwise we would zero
         # out a live KV cache that was kept on GPU for partial rollout.
-        if tags is None:
-            woken_tags = set(self._slept_tags)
-        else:
-            woken_tags = set(tags) & self._slept_tags
-
         if "kv_cache" in woken_tags:
             self.model_runner.post_kv_cache_wake_up()
 

@@ -44,9 +44,7 @@ logger = init_logger(__name__)
 _R = TypeVar("_R", default=Any)
 
 
-def _effective_sleep_level(
-    level: int, offload_tags: list[str] | None
-) -> int:
+def _effective_sleep_level(level: int, offload_tags: list[str] | None) -> int:
     """Map a (level, offload_tags) pair to the legacy integer level used
     by the metrics system. Under tag-wise sleep, "level 1" semantics
     (i.e. weights_offloaded=1 in the gauge) only apply when weights are

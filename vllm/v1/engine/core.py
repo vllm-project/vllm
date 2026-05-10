@@ -664,7 +664,9 @@ class EngineCore:
             self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
 
         pause_state = (
-            PauseState.PAUSED_ALL if mode in ("keep", "recompute") else PauseState.PAUSED_NEW
+            PauseState.PAUSED_ALL
+            if mode in ("keep", "recompute")
+            else PauseState.PAUSED_NEW
         )
         self.scheduler.set_pause_state(pause_state)
         if clear_cache:
@@ -723,6 +725,13 @@ class EngineCore:
                     f"{sorted(KNOWN_SLEEP_TAGS)!r}."
                 )
 
+        if mode == "recompute" and offload_tags is not None:
+            recompute_tags = set(offload_tags)
+            recompute_tags.add("kv_cache")
+            offload_tags = sorted(recompute_tags)
+        elif mode == "recompute" and level < 1:
+            offload_tags = ["kv_cache"]
+
         # Decide whether the prefix cache must be cleared. Under the legacy
         # API, level >= 1 always discards (or replaces) the kv_cache pool,
         # so the prefix cache is invalid. Under offload_tags, only clear
@@ -774,10 +783,12 @@ class EngineCore:
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
         """
-        scheduling_requested = tags is not None and "scheduling" in tags
-        if scheduling_requested:
+        if tags is not None and "scheduling" in tags:
+            scheduling_requested = True
             # Remove "scheduling" from tags if there are other tags to process.
             tags = [t for t in tags if t != "scheduling"]
+        else:
+            scheduling_requested = False
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
@@ -1641,7 +1652,9 @@ class EngineCoreProc(EngineCore):
             self._send_abort_outputs(aborted_reqs)
 
         pause_state = (
-            PauseState.PAUSED_ALL if mode in ("keep", "recompute") else PauseState.PAUSED_NEW
+            PauseState.PAUSED_ALL
+            if mode in ("keep", "recompute")
+            else PauseState.PAUSED_NEW
         )
         self.scheduler.set_pause_state(pause_state)
 

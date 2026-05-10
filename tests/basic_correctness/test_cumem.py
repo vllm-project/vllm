@@ -331,9 +331,7 @@ def test_offload_tags_weights_only_preserves_kv_cache():
     # Some GPU memory was freed (weights), but the KV cache pool must
     # still be mapped — i.e. less memory was freed than under the legacy
     # level=1 sleep.
-    assert free_after_sleep > free_before_sleep, (
-        "Sleep did not free any GPU memory."
-    )
+    assert free_after_sleep > free_before_sleep, "Sleep did not free any GPU memory."
     used_bytes_after_sleep = total - free_after_sleep - used_bytes_baseline
     # KV cache for a 1B-class model under default settings is the
     # dominant chunk; if it had been freed we'd see usage drop further.
@@ -344,9 +342,9 @@ def test_offload_tags_weights_only_preserves_kv_cache():
     llm.wake_up(tags=["weights"])
 
     output_after = llm.generate(prompt, sampling_params)
-    assert (
-        reference[0].outputs[0].text == output_after[0].outputs[0].text
-    ), "Output diverged after offload_tags=['weights'] sleep/wake cycle"
+    assert reference[0].outputs[0].text == output_after[0].outputs[0].text, (
+        "Output diverged after offload_tags=['weights'] sleep/wake cycle"
+    )
 
 
 @create_new_process_for_each_test()
@@ -383,6 +381,42 @@ def test_offload_tags_empty_is_scheduler_only():
     llm.wake_up()
     output_after = llm.generate(prompt, sampling_params)
     assert reference[0].outputs[0].text == output_after[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_recompute_sleep_always_releases_kv_cache():
+    """`mode="recompute"` must release KV memory even when the caller asks
+    for an otherwise scheduler-only sleep.
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+    reference = llm.generate(prompt, sampling_params)
+
+    def run_recompute_sleep_case(
+        label: str,
+        *,
+        level: int = 1,
+        offload_tags: list[str] | None = None,
+    ) -> None:
+        free_before = torch.cuda.mem_get_info()[0]
+        llm.sleep(level=level, mode="recompute", offload_tags=offload_tags)
+        free_after = torch.cuda.mem_get_info()[0]
+
+        assert llm.llm_engine.model_executor.is_sleeping
+        assert free_after > free_before, (
+            f"recompute sleep with {label} did not release KV cache memory"
+        )
+
+        llm.wake_up(tags=["kv_cache"])
+        assert not llm.llm_engine.is_sleeping()
+
+        output_after = llm.generate(prompt, sampling_params)
+        assert reference[0].outputs[0].text == output_after[0].outputs[0].text
+
+    run_recompute_sleep_case("offload_tags=[]", offload_tags=[])
+    run_recompute_sleep_case("level=0", level=0)
 
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
@@ -441,7 +475,7 @@ def test_offload_tags_rejects_unknown_tag():
     # Typo + blank must both be rejected. Validation must run BEFORE the
     # scheduler is paused, otherwise the failed call would leave the
     # scheduler in a paused state and `generate()` would hang.
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         llm.sleep(offload_tags=["weight"])
 
     # Scheduler must be untouched: generate must work without an
@@ -450,7 +484,7 @@ def test_offload_tags_rejects_unknown_tag():
     mid_check = llm.generate(prompt, sampling_params)
     assert reference[0].outputs[0].text == mid_check[0].outputs[0].text
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         llm.sleep(offload_tags=[""])
     mid_check2 = llm.generate(prompt, sampling_params)
     assert reference[0].outputs[0].text == mid_check2[0].outputs[0].text
@@ -484,6 +518,31 @@ def test_recompute_sleep_staged_wake_keeps_scheduler_paused():
     )
 
     llm.wake_up(tags=["kv_cache"])
+    assert not llm.llm_engine.is_sleeping()
+
+    output_after = llm.generate(prompt, sampling_params)
+    assert reference[0].outputs[0].text == output_after[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
+def test_deep_sleep_can_wake_kv_cache_before_weights():
+    """Level 2 staged wake-up may remap KV before weights. Saved model
+    buffers must not be restored into the still-unmapped weights pool.
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(model, enable_sleep_mode=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    reference = llm.generate(prompt, sampling_params)
+
+    llm.sleep(level=2)
+    assert llm.llm_engine.is_sleeping()
+
+    llm.wake_up(tags=["kv_cache"])
+    assert llm.llm_engine.is_sleeping()
+
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
     assert not llm.llm_engine.is_sleeping()
 
     output_after = llm.generate(prompt, sampling_params)

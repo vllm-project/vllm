@@ -55,9 +55,11 @@ Important behavior to keep in mind:
 - `offload_tags=["weights", "kv_cache"]` is equivalent in memory effect
   to `level=1` but is more explicit; it does *not* save model buffers
   separately the way `level=2` does.
-- `offload_tags=[]` is a pure pause: no GPU memory is offloaded and
-  the executor stays awake. It is functionally equivalent to
-  `level=0`; use `wake_up(tags=["scheduling"])` to resume.
+- `offload_tags=[]` is a pure pause for non-recompute modes: no GPU
+  memory is offloaded and the executor stays awake. It is functionally
+  equivalent to `level=0`; use `wake_up(tags=["scheduling"])` to
+  resume. With `mode="recompute"`, the KV cache is always released so
+  requests can recompute from prompt tokens after wake-up.
 
 ```python
 from vllm import LLM, SamplingParams

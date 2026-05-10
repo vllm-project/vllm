@@ -1535,10 +1535,11 @@ class LLM:
                   stay on GPU.
                 - ``offload_tags=["weights", "kv_cache"]``: both → CPU
                   (equivalent to ``level=1`` for memory effect).
-                - ``offload_tags=[]``: pause only — no GPU memory is
-                  offloaded and the executor stays awake. Equivalent to
-                  ``level=0`` (use ``wake_up(tags=["scheduling"])`` to
-                  resume).
+                - ``offload_tags=[]``: pause only in non-recompute modes
+                  — no GPU memory is offloaded and the executor stays
+                  awake. Equivalent to ``level=0`` (use
+                  ``wake_up(tags=["scheduling"])`` to resume). With
+                  ``mode="recompute"``, the KV cache is always released.
         """
         self.llm_engine.sleep(level=level, mode=mode, offload_tags=offload_tags)
 
