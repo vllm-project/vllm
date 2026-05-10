@@ -1013,6 +1013,34 @@ def rocm_dequantize_blocked_k_cache(
     return result
 
 
+def _gather_referenced_cache_blocks(
+    quant_k_cache: torch.Tensor,
+    indices_in_kvcache: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Gather used cache blocks and remap flattened token indices."""
+    block_size = quant_k_cache.shape[1]
+    valid_mask = indices_in_kvcache >= 0
+    valid_indices = indices_in_kvcache[valid_mask]
+    if valid_indices.numel() == 0:
+        return quant_k_cache[:1], indices_in_kvcache
+
+    valid_block_indices = torch.div(
+        valid_indices,
+        block_size,
+        rounding_mode="floor",
+    )
+    block_indices = torch.unique(valid_block_indices, sorted=True)
+    compact_k_cache = quant_k_cache.index_select(0, block_indices.to(torch.long))
+
+    compact_block_indices = torch.searchsorted(block_indices, valid_block_indices)
+    remapped_indices = indices_in_kvcache.clone()
+    remapped_valid_indices = compact_block_indices * block_size + (
+        valid_indices % block_size
+    )
+    remapped_indices[valid_mask] = remapped_valid_indices.to(remapped_indices.dtype)
+    return compact_k_cache, remapped_indices
+
+
 def rocm_ref_sparse_attn_decode(
     q: torch.Tensor,
     blocked_k: torch.Tensor,
@@ -1099,6 +1127,10 @@ def rocm_forward_decode_fallback(
     rope_head_dim: int,
     output: torch.Tensor,
 ) -> None:
+    swa_k_cache, swa_indices = _gather_referenced_cache_blocks(
+        swa_k_cache,
+        swa_indices,
+    )
     blocked_swa = rocm_dequantize_blocked_k_cache(
         swa_k_cache,
         head_dim=head_dim,
@@ -1106,8 +1138,14 @@ def rocm_forward_decode_fallback(
         rope_head_dim=rope_head_dim,
     )
     blocked_extra = None
+    compact_topk_indices = None
     if not swa_only:
         assert kv_cache is not None
+        assert topk_indices is not None
+        kv_cache, compact_topk_indices = _gather_referenced_cache_blocks(
+            kv_cache,
+            topk_indices,
+        )
         blocked_extra = rocm_dequantize_blocked_k_cache(
             kv_cache,
             head_dim=head_dim,
@@ -1123,7 +1161,7 @@ def rocm_forward_decode_fallback(
         head_dim=head_dim,
         attn_sink=attn_sink[: q.shape[1]] if attn_sink is not None else None,
         extra_blocked_k=blocked_extra,
-        extra_indices_in_kvcache=topk_indices,
+        extra_indices_in_kvcache=compact_topk_indices,
         extra_topk_length=topk_lens,
     )
     output.copy_(attn_out.to(output.dtype))
