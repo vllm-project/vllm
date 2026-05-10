@@ -51,8 +51,6 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         qk_rope_head_dim: int,
         v_head_dim: int,
         vllm_config: "VllmConfig",
-        device: torch.device,
-        layer_names: list[str] | None = None,
     ) -> None:
         super().__init__(
             num_heads=num_heads,
@@ -62,8 +60,6 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
-            device=device,
-            layer_names=layer_names,
         )
 
     def _get_workspace_buffer(self) -> torch.Tensor:

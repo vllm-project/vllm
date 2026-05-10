@@ -8,7 +8,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
@@ -19,7 +19,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
@@ -31,7 +31,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
@@ -43,7 +43,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
@@ -55,7 +55,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
@@ -67,7 +67,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
@@ -83,7 +83,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
   commands:
@@ -96,7 +96,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
