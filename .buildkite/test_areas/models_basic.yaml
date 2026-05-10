@@ -15,6 +15,7 @@ steps:
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -54,6 +55,7 @@ steps:
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -69,6 +71,7 @@ steps:
   - image-build-cpu
   timeout_in_minutes: 10
   source_file_dependencies:
+  - vllm/config/
   - vllm/distributed/
   - vllm/model_executor/
   - vllm/platforms/
