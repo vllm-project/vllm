@@ -383,11 +383,6 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None:
-                loaded_weight = self.quant_config.transform_loaded_weight(
-                    name, loaded_weight
-                )
-
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
