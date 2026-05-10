@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
+from vllm.model_executor.warmup.turboquant_warmup import turboquant_decode_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -53,6 +54,8 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def kernel_warmup(worker: "Worker"):
+    model = worker.get_model()
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
@@ -60,9 +63,31 @@ def kernel_warmup(worker: "Worker"):
         and envs.VLLM_DEEP_GEMM_WARMUP != "skip"
     )
     if do_deep_gemm_warmup:
-        model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    block_size = worker.cache_config.block_size
+    block_table_stride = 1
+    block_tables = worker.model_runner.input_batch.block_table.block_tables
+    if block_tables:
+        block_table = block_tables[0]
+        # V1 may split KV manager blocks into smaller attention-kernel blocks.
+        # Warmup must use the runtime BlockTable constants or Triton will
+        # compile a different BLOCK_SIZE/stride variant from real decode.
+        block_size = block_table.block_size
+        block_table_stride = block_table.max_num_blocks_per_req
+    max_num_decode_tokens = min(
+        worker.scheduler_config.max_num_seqs,
+        worker.scheduler_config.max_num_batched_tokens,
+    )
+    turboquant_decode_warmup(
+        model,
+        device=worker.model_runner.device,
+        block_size=block_size,
+        block_table_stride=block_table_stride,
+        max_num_decode_tokens=max_num_decode_tokens,
+        model_dtype=worker.model_runner.dtype,
+    )
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
