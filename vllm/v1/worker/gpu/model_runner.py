@@ -798,10 +798,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
-        is_prefilling_np = (
-            self.req_states.num_computed_prefill_tokens[idx_mapping_np]
-            < self.req_states.prefill_len.np[idx_mapping_np]
-        )
+        is_prefilling_np = self.req_states.is_prefilling(idx_mapping_np)
 
         # Get prefill tokens if any.
         if np.any(is_prefilling_np):

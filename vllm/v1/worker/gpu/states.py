@@ -133,8 +133,8 @@ class RequestState:
         self.free_indices.append(req_idx)
         return True
 
-    def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(
+    def is_prefilling(self, idx_mapping_np: np.ndarray) -> np.ndarray:
+        return (
             self.num_computed_prefill_tokens[idx_mapping_np]
             < self.prefill_len.np[idx_mapping_np]
         )
