@@ -6,7 +6,19 @@ steps:
   key: language-models-tests-standard
   timeout_in_minutes: 25
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/language
   commands:
     # Test standard language models, excluding a subset of slow tests
@@ -36,7 +48,19 @@ steps:
   key: language-models-tests-hybrid
   timeout_in_minutes: 75
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
@@ -62,7 +86,19 @@ steps:
   timeout_in_minutes: 110
   optional: true
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/language/generation
   commands:
     # Install fast path packages for testing against transformers
@@ -77,7 +113,19 @@ steps:
   device: h200_18gb
   optional: true
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/language/generation_ppl_test
   commands:
     - pytest -v -s models/language/generation_ppl_test
@@ -87,7 +135,19 @@ steps:
   timeout_in_minutes: 50
   optional: true
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
@@ -98,7 +158,19 @@ steps:
   device: h200_18gb
   optional: true
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/models/language/pooling_mteb_test
   commands:
     - pytest -v -s models/language/pooling_mteb_test
