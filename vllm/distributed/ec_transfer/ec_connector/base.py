@@ -24,7 +24,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -204,13 +204,29 @@ class ECConnectorBase(ABC):
         """
         pass
 
-    def ensure_cache_available(self, mm_hashes: Iterable[str]) -> bool:
+    @staticmethod
+    def _future_mm_hashes(
+        request: "Request", num_computed_tokens: int
+    ) -> Iterator[str]:
+        """Yield identifiers of mm_features whose token range extends beyond
+        num_computed_tokens (i.e. not yet fully covered by cached tokens)."""
+        for f in request.mm_features:
+            if f.mm_position.offset + f.mm_position.length > num_computed_tokens:
+                yield f.identifier
+
+    def ensure_cache_available(
+        self, request: "Request", num_computed_tokens: int
+    ) -> bool:
         """
-        Ensure encoder cache items are available for the given identifiers.
+        Ensure encoder cache items are available for the given request.
         May initiate asynchronous transfers for items not yet local.
 
+        Only mm_features whose token range extends beyond num_computed_tokens
+        need to be checked; use _future_mm_hashes() to iterate them.
+
         Args:
-            mm_hashes: identifiers of the multimodal inputs to check.
+            request: the request whose multimodal features to check.
+            num_computed_tokens: tokens already covered by cached KV blocks.
 
         Returns:
             True if any items are still in transit (request should be deferred).

@@ -15,6 +15,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -4332,8 +4333,11 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
     scheduler.add_request(request_behind)
     output = scheduler.schedule()
 
-    # ensure_cache_available must have been the actual gate
-    scheduler.ec_connector.ensure_cache_available.assert_called()
+    # ensure_cache_available must have been called with (request, num_computed_tokens=0)
+    # for a brand-new request that has no cached tokens yet.
+    scheduler.ec_connector.ensure_cache_available.assert_called_once_with(
+        request_deferred, 0
+    )
     # Deferred request must NOT be scheduled
     assert request_deferred.request_id not in output.num_scheduled_tokens
     _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)
@@ -4366,31 +4370,22 @@ def test_ec_connector_ensure_cache_available_defers_request(use_kv_connector):
 
 
 def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
-    """Test that mm_features already within num_computed_tokens are not checked.
+    """Test that ECConnectorBase._future_mm_hashes only yields features beyond
+    the computed token frontier.
 
-    When a request has multiple mm_features and some are already behind the
-    computed token frontier (offset + length <= num_computed_tokens), those
-    features must NOT be passed to ensure_cache_available. Only features that
-    extend beyond the computed frontier should be checked.
+    Features already within num_computed_tokens (past/boundary) must be
+    filtered out; only features that extend beyond the frontier (future) should
+    be yielded so that connector implementations know which items to prefetch.
 
+    Filter cases:
+      "past":     end = 0  + 16 = 16 <  32 → filtered OUT
+      "boundary": end = 16 + 16 = 32 == 32 → filtered OUT (condition is >, not >=)
+      "future":   end = 48 + 32 = 80 >  32 → yielded
     """
     BLOCK_SIZE = 16
-    # Use mock KV connector to give num_computed_tokens = 32 (2 full blocks).
-    NUM_KV_MATCHED = BLOCK_SIZE * 2  # 32 tokens → num_computed_tokens = 32
-    NUM_TOKENS = BLOCK_SIZE * 8  # 128 total prompt tokens
+    NUM_COMPUTED_TOKENS = BLOCK_SIZE * 2  # 32
+    NUM_TOKENS = BLOCK_SIZE * 8  # 128
 
-    scheduler = create_scheduler(
-        model="llava-hf/llava-1.5-7b-hf",
-        use_kv_connector=mock_kv(matched_tokens=NUM_KV_MATCHED, is_async=False),
-        use_ec_connector=True,
-        ec_role="ec_consumer",
-        block_size=BLOCK_SIZE,
-    )
-
-    # Three features covering all filter cases:
-    #   "past":     end = 0  + 16 = 16 <  32 → filtered OUT
-    #   "boundary": end = 16 + 16 = 32 == 32 → filtered OUT (condition is >, not >=)
-    #   "future":   end = 48 + 32 = 80 >  32 → passed to ensure_cache_available
     HASH_PAST = "hash_past"
     HASH_BOUNDARY = "hash_boundary"
     HASH_FUTURE = "hash_future"
@@ -4409,24 +4404,11 @@ def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
         block_size=BLOCK_SIZE,
     )[0]
 
-    captured_ids: list[str] = []
-
-    def capture_and_defer(identifiers):
-        captured_ids.extend(identifiers)
-        return True  # signal pending prefetch → defer the request
-
-    scheduler.ec_connector.ensure_cache_available = Mock(side_effect=capture_and_defer)
-
-    scheduler.add_request(request)
-    output = scheduler.schedule()
-
-    scheduler.ec_connector.ensure_cache_available.assert_called_once()
-
-    # Exactly the future feature — and nothing else — must be forwarded.
-    assert captured_ids == [HASH_FUTURE], (
-        f"Expected only {HASH_FUTURE!r} forwarded to ensure_cache_available, "
-        f"got {captured_ids!r}. Past/boundary features must be filtered out."
+    future_hashes = list(
+        ECConnectorBase._future_mm_hashes(request, NUM_COMPUTED_TOKENS)
     )
 
-    # Request must be deferred, not scheduled.
-    assert request.request_id not in output.num_scheduled_tokens
+    assert future_hashes == [HASH_FUTURE], (
+        f"Expected only {HASH_FUTURE!r} from _future_mm_hashes, "
+        f"got {future_hashes!r}. Past/boundary features must be filtered out."
+    )

@@ -609,10 +609,7 @@ class Scheduler(SchedulerInterface):
                         self.ec_connector is not None
                         and request.mm_features
                         and self.ec_connector.ensure_cache_available(
-                            f.identifier
-                            for f in request.mm_features
-                            if f.mm_position.offset + f.mm_position.length
-                            > num_computed_tokens
+                            request, num_computed_tokens
                         )
                     ):
                         request_queue.pop_request()
