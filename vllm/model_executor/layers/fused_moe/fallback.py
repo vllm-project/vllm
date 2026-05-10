@@ -7,7 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
@@ -19,11 +22,18 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         experts: mk.FusedMoEExpertsModular,
         fallback_experts: mk.FusedMoEExpertsModular,
     ):
-        super().__init__(
-            moe_config=experts.moe_config, quant_config=experts.quant_config
-        )
+        super().__init__(experts.moe_config, experts.quant_config)
         self.fallback_experts = fallback_experts
         self.experts = experts
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
+        self.fallback_experts.set_quant_config(quant_config)
+        self.experts.set_quant_config(quant_config)
+
+    # needs PWAL?
 
     @staticmethod
     def get_clses() -> tuple[

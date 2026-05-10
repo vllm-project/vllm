@@ -497,9 +497,9 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(
             moe_config=moe_config,
@@ -507,6 +507,11 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
@@ -726,9 +731,9 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(
             moe_config=moe_config,
@@ -736,6 +741,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"

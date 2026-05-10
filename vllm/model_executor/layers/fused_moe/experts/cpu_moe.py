@@ -8,9 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import CPUQuantMethod, fused_experts_cpu
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
     FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -39,16 +37,6 @@ def prepare_fp8_moe_layer_for_cpu(
 
 class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
     """CPU FP8 W8A16 block-quantized monolithic MoE experts."""
-
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(
-            moe_config,
-            quant_config,
-        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:

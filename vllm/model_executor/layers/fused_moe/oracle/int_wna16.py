@@ -10,7 +10,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     BatchedMarlinExperts,
@@ -144,7 +143,6 @@ def select_wna16_moe_backend(
 
 
 def make_wna16_moe_kernel(
-    moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts] | None,
     layer: torch.nn.Module,
@@ -165,7 +163,6 @@ def make_wna16_moe_kernel(
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
     )
@@ -180,7 +177,6 @@ def make_wna16_moe_kernel(
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
             moe_config=moe_config,
-            quant_config=moe_quant_config,
             w13_g_idx=w13_g_idx,
             w2_g_idx=w2_g_idx,
             w13_g_idx_sort_indices=w13_g_idx_sort_indices,
@@ -191,7 +187,6 @@ def make_wna16_moe_kernel(
         assert experts_cls == MarlinExperts
         experts = MarlinExperts(
             moe_config=moe_config,
-            quant_config=moe_quant_config,
             w13_g_idx=w13_g_idx,
             w2_g_idx=w2_g_idx,
             w13_g_idx_sort_indices=w13_g_idx_sort_indices,

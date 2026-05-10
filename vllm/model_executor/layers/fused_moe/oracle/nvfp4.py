@@ -472,7 +472,6 @@ def make_nvfp4_moe_quant_config(
 
 
 def make_nvfp4_moe_kernel(
-    moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -481,7 +480,6 @@ def make_nvfp4_moe_kernel(
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
@@ -496,15 +494,11 @@ def make_nvfp4_moe_kernel(
         assert max_num_tokens is not None
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
+        experts = experts_cls(moe_config=moe_config)
 
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explicit in

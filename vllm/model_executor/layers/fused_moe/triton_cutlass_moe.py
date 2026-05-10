@@ -22,7 +22,7 @@ class TritonOrCutlassExperts(FallbackExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         self.is_sm100 = current_platform.has_device_capability(100)
         super().__init__(

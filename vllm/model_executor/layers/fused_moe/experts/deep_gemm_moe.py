@@ -7,7 +7,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -121,8 +120,10 @@ def _valid_deep_gemm(
 class DeepGemmExperts(mk.FusedMoEExpertsModular):
     """DeepGemm-based fused MoE expert implementation."""
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
         assert quant_config.quant_dtype == torch.float8_e4m3fn
         assert not quant_config.per_act_token_quant
@@ -338,8 +339,10 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
     # FP4 weight block size
     _WEIGHT_BLOCK_K = 32
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         assert quant_config.weight_quant_dtype == "mxfp4"
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant

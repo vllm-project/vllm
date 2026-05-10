@@ -26,7 +26,7 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(moe_config, quant_config)
         self.routing_method_type = moe_config.routing_method

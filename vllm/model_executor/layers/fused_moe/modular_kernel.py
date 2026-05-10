@@ -461,12 +461,110 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 ################################################################################
 
 
-# TODO: add supported activations method (return string)
-class FusedMoEExperts(ABC):
+# TODO: needs doc
+class FusedMoEExpertsConfig:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
+    ):
+        self.moe_config = moe_config
+        self._quant_config: FusedMoEQuantConfig | None = None
+        self.set_quant_config(quant_config)
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is not None:
+            assert self._quant_config is None, "Can't set quant_config more than once."
+            self._quant_config = quant_config
+
+    #
+    # Various helpers for accessing quantization parameters from the
+    # quant_config.
+    #
+
+    @property
+    def quant_config(self) -> FusedMoEQuantConfig:
+        assert self._quant_config is not None, (
+            "Must pass a non-None quant_config to __init__ or call set_quant_config "
+            "(or process_weights_after_loading) before the experts are usable."
+        )
+        return self._quant_config
+
+    @property
+    def quant_dtype(self) -> torch.dtype | str | None:
+        return self.quant_config.quant_dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self.quant_config.weight_quant_dtype
+
+    @property
+    def block_shape(self) -> list[int] | None:
+        return self.quant_config.block_shape
+
+    @property
+    def per_act_token_quant(self) -> bool:
+        return self.quant_config.per_act_token_quant
+
+    @property
+    def per_out_ch_quant(self) -> bool:
+        return self.quant_config.per_out_ch_quant
+
+    @property
+    def a1_scale(self) -> torch.Tensor | None:
+        return self.quant_config.a1_scale
+
+    @property
+    def a2_scale(self) -> torch.Tensor | None:
+        return self.quant_config.a2_scale
+
+    @property
+    def a1_gscale(self) -> torch.Tensor | None:
+        return self.quant_config.a1_gscale
+
+    @property
+    def a2_gscale(self) -> torch.Tensor | None:
+        return self.quant_config.a2_gscale
+
+    @property
+    def w1_scale(self) -> torch.Tensor | None:
+        return self.quant_config.w1_scale
+
+    @property
+    def w2_scale(self) -> torch.Tensor | None:
+        return self.quant_config.w2_scale
+
+    @property
+    def w1_zp(self) -> torch.Tensor | None:
+        return self.quant_config.w1_zp
+
+    @property
+    def w2_zp(self) -> torch.Tensor | None:
+        return self.quant_config.w2_zp
+
+    @property
+    def w1_bias(self) -> torch.Tensor | None:
+        return self.quant_config.w1_bias
+
+    @property
+    def w2_bias(self) -> torch.Tensor | None:
+        return self.quant_config.w2_bias
+
+    @property
+    def g1_alphas(self) -> torch.Tensor | None:
+        return self.quant_config.g1_alphas
+
+    @property
+    def g2_alphas(self) -> torch.Tensor | None:
+        return self.quant_config.g2_alphas
+
+
+# TODO: add supported activations method (return string)
+class FusedMoEExperts(ABC, FusedMoEExpertsConfig):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
@@ -474,6 +572,8 @@ class FusedMoEExperts(ABC):
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
+        super().__init__(moe_config, quant_config)
+
         if self.activation_format() == FusedMoEActivationFormat.Standard and (
             max_num_tokens is not None or num_dispatchers is not None
         ):
@@ -489,13 +589,12 @@ class FusedMoEExperts(ABC):
                 "BatchedExperts activation format."
             )
 
-        self.moe_config = moe_config
-        self.quant_config = quant_config
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
-        pass
+        # call ensure/get here?
+        self.set_quant_config(layer.moe_quant_config)
 
     @staticmethod
     def is_monolithic() -> bool:
@@ -662,79 +761,6 @@ class FusedMoEExperts(ABC):
         for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
         """
         return False
-
-    #
-    # Various helpers for accessing quantization parameters from the
-    # quant_config.
-    #
-
-    @property
-    def quant_dtype(self) -> torch.dtype | str | None:
-        return self.quant_config.quant_dtype
-
-    @property
-    def weight_quant_dtype(self) -> torch.dtype | str | None:
-        return self.quant_config.weight_quant_dtype
-
-    @property
-    def block_shape(self) -> list[int] | None:
-        return self.quant_config.block_shape
-
-    @property
-    def per_act_token_quant(self) -> bool:
-        return self.quant_config.per_act_token_quant
-
-    @property
-    def per_out_ch_quant(self) -> bool:
-        return self.quant_config.per_out_ch_quant
-
-    @property
-    def a1_scale(self) -> torch.Tensor | None:
-        return self.quant_config.a1_scale
-
-    @property
-    def a2_scale(self) -> torch.Tensor | None:
-        return self.quant_config.a2_scale
-
-    @property
-    def a1_gscale(self) -> torch.Tensor | None:
-        return self.quant_config.a1_gscale
-
-    @property
-    def a2_gscale(self) -> torch.Tensor | None:
-        return self.quant_config.a2_gscale
-
-    @property
-    def w1_scale(self) -> torch.Tensor | None:
-        return self.quant_config.w1_scale
-
-    @property
-    def w2_scale(self) -> torch.Tensor | None:
-        return self.quant_config.w2_scale
-
-    @property
-    def w1_zp(self) -> torch.Tensor | None:
-        return self.quant_config.w1_zp
-
-    @property
-    def w2_zp(self) -> torch.Tensor | None:
-        return self.quant_config.w2_zp
-
-    @property
-    def w1_bias(self) -> torch.Tensor | None:
-        return self.quant_config.w1_bias
-
-    @property
-    def w2_bias(self) -> torch.Tensor | None:
-        return self.quant_config.w2_bias
-
-    @property
-    def g1_alphas(self) -> torch.Tensor | None:
-        return self.quant_config.g1_alphas
-
-    @property
-    def g2_alphas(self) -> torch.Tensor | None:
-        return self.quant_config.g2_alphas
 
     @staticmethod
     def supports_lora() -> bool:
@@ -1583,6 +1609,12 @@ class FusedMoEKernel:
         is reduced across all ranks.
         """
         return self.prepare_finalize.output_is_reduced()
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        self.fused_experts.set_quant_config(quant_config)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.fused_experts.process_weights_after_loading(layer)
 
     def apply_monolithic(
         self,

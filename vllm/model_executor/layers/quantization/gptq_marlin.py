@@ -755,12 +755,12 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         self._setup_kernel(layer)
 
+        super().process_weights_after_loading(layer)
+
     def _setup_kernel(self, layer: FusedMoE) -> None:
         """Build the FusedMoEKernel for this layer."""
 
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             layer=layer,

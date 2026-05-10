@@ -270,9 +270,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         """
         max_num_tokens: Maximum number of tokens from a DP Rank
@@ -285,6 +285,11 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
         assert self.quant_config.use_fp8_w8a8
 

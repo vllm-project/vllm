@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
@@ -37,14 +36,12 @@ if current_platform.is_cuda_alike():
     if has_deep_ep():
         from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
         from .prepare_finalize.deepep_ll import (
-            DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
-            NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
 
@@ -88,7 +85,6 @@ def maybe_roundup_layer_hidden_size(
 
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
@@ -148,7 +144,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_deepep_ll_kernels:
-        assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -167,16 +162,11 @@ def maybe_make_prepare_finalize(
 
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
-        )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
-            use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
@@ -199,6 +189,7 @@ def maybe_make_prepare_finalize(
             # dispatch raw BF16/FP16 data, no scales needed.
             quant_dtype = moe.in_dtype
             scale_dim = 0
+
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
@@ -221,7 +212,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_fi_nvl_two_sided_kernels:
-        assert quant_config is not None
         prepare_finalize = FlashInferNVLinkTwoSidedPrepareAndFinalize(
             num_dispatchers=all2all_manager.world_size,
         )
@@ -269,7 +259,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_nixl_ep_kernels:
-        assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -286,18 +275,10 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # Note: We may want to use FP8 dispatch just to reduce
-        # data movement.
-        use_fp8_dispatch = (
-            quant_config.quant_dtype == current_platform.fp8_dtype()
-            and quant_config.block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
-        )
-
         prepare_finalize = NixlEPPrepareAndFinalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
-            use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,

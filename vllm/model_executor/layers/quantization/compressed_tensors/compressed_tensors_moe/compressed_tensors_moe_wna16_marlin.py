@@ -342,6 +342,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(
                 layer, "w2_weight_scale", dict_weights_mxint4["gemm2_scales"]
             )
+            super().process_weights_after_loading(layer)
             return None
 
         is_a_8bit = (
@@ -456,6 +457,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w2_weight_scale", marlin_w2_scales)
 
         layer.workspace = marlin_make_workspace_new(device, 4)
+
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

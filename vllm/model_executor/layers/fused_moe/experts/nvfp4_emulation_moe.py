@@ -45,7 +45,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(moe_config, quant_config)
         logger.warning_once(
@@ -54,7 +54,12 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             " quantized MOE. Consider using a device with native quantization"
             " support (e.g. Nvidia Blackwell) for better performance."
         )
+        self.quantization_emulation = True
 
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         # `TritonExperts.apply` expects pre-dequantized weights,
         # which we handle in `apply` below.
         self.w1_scale_val = self.quant_config.w1_scale
@@ -62,8 +67,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
 
         self.quant_config._w1.scale = None
         self.quant_config._w2.scale = None
-
-        self.quantization_emulation = True
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:

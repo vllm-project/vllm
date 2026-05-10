@@ -354,20 +354,16 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        # Build quant config
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
         # Build kernel (modular or monolithic)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
-                layer=layer,
-            )
+        assert self.experts_cls is not None
+        self.moe_kernel = make_mxfp4_moe_kernel(
+            moe_config=self.moe,
+            mxfp4_backend=self.mxfp4_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+            layer=layer,
+        )
 
     def process_weights_after_loading(self, layer):
         w13 = layer.w13_weight
@@ -381,6 +377,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -682,20 +679,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
 
-        # Build quant config
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
         # Build kernel (modular or monolithic)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                mxfp4_backend=self.mxfp4_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
-                layer=layer,
-            )
+        assert self.experts_cls is not None
+        self.moe_kernel = make_mxfp4_moe_kernel(
+            moe_config=self.moe,
+            mxfp4_backend=self.mxfp4_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+            layer=layer,
+        )
 
     def process_weights_after_loading(self, layer):
         w13 = layer.w13_weight
@@ -709,6 +702,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return
 
         self._setup_kernel(layer, w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

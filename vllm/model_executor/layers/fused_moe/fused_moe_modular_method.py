@@ -50,15 +50,15 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         shared_experts: SharedExperts | None,
         inplace: bool = False,
     ) -> "FusedMoEModularMethod":
-        return FusedMoEModularMethod(
-            old_quant_method,
-            FusedMoEKernel(
-                prepare_finalize,
-                old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
-                shared_experts=shared_experts,
-                inplace=inplace,
-            ),
+        mk = FusedMoEKernel(
+            prepare_finalize,
+            old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
+            shared_experts=shared_experts,
+            inplace=inplace,
         )
+        assert old_quant_method.moe_quant_config is not None
+        mk.set_quant_config(old_quant_method.moe_quant_config)
+        return FusedMoEModularMethod(old_quant_method, mk)
 
     @property
     def supports_eplb(self) -> bool:

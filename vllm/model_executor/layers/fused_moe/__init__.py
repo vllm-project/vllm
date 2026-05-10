@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
+    FusedMoEMethodMKBase,
 )
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
@@ -56,6 +57,7 @@ __all__ = [
     "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "FusedMoEMethodMKBase",
     "MoEActivation",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",

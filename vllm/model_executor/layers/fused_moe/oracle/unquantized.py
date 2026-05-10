@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -322,7 +321,6 @@ def convert_to_unquantized_kernel_format(
 
 
 def make_unquantized_moe_kernel(
-    quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     backend: UnquantizedMoeBackend,
     experts_cls: type[mk.FusedMoEExperts],
@@ -333,7 +331,6 @@ def make_unquantized_moe_kernel(
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
-        quant_config=quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,
@@ -348,14 +345,12 @@ def make_unquantized_moe_kernel(
         assert max_num_tokens is not None
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
-            quant_config=quant_config,
         )
 
     kernel = mk.FusedMoEKernel(

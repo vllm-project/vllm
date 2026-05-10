@@ -201,7 +201,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             uint8_nibbles = ((tmp[:, 1::2] << 4) | tmp[:, ::2]).to(
                 torch.uint8
             )  # [out, in//2]
-
             # KleidiAI groupwise kernels accepts float32 scales
             # KleidiAI groupwise kernels accepts bfloat16 scales
             scale_dtype = torch.float32 if g == -1 else torch.bfloat16
@@ -288,6 +287,8 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
                 "w2_bias",
                 torch.nn.Parameter(torch.empty(0), requires_grad=False),
             )
+
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

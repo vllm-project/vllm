@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
 
-class TrtLlmMxfp4ExpertsBase:
+class TrtLlmMxfp4ExpertsBase(mk.FusedMoEExpertsConfig):
     """
     MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic.
     """
@@ -32,11 +32,10 @@ class TrtLlmMxfp4ExpertsBase:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None,
         **kwargs,
     ):
-        self.moe_config = moe_config
-        self.quant_config = quant_config
+        super().__init__(moe_config, quant_config)
 
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -49,6 +48,11 @@ class TrtLlmMxfp4ExpertsBase:
         )
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
 
         # MXFP4-specific TRTLLM parameters from quant_config
         device = torch.accelerator.current_device_index()

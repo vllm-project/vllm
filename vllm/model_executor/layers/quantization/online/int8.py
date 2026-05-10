@@ -50,6 +50,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
 
         self._quantize_weights(layer)
         self._setup_kernel(layer)
+        super().process_weights_after_loading(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -92,11 +93,8 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w2_scale", w2_scale)
 
     def _setup_kernel(self, layer: "FusedMoE") -> None:
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
         assert self.experts_cls is not None
         self.moe_kernel = make_int8_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             routing_tables=layer._maybe_init_expert_routing_tables(),

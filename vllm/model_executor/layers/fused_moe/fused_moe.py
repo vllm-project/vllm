@@ -1893,7 +1893,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         # Whether quantized MOE runs natively, or through
         # higher-precision + activation QDQ.

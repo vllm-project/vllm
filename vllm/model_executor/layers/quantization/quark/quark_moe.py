@@ -421,6 +421,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 w2_weight_scale, requires_grad=False
             )
 
+        super().process_weights_after_loading(layer)
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -731,6 +733,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 max_w13_scales, requires_grad=False
             )
 
+        super().process_weights_after_loading(layer)
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -893,6 +897,8 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         for expert_id in range(layer.local_num_experts):
             layer.w13_weight_scale_2[expert_id] *= max_w13_scales[expert_id]
             layer.w2_weight_scale_2[expert_id] *= layer.w2_weight_scale[expert_id]
+
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer):
         return fp8_w8a8_moe_quant_config(
@@ -1202,6 +1208,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # For MXFP4 schemes with native backend, use oracle
         if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
             self._setup_kernel(layer)
+            super().process_weights_after_loading(layer)
             return
 
         if self.static_input_scales and self.input_dtype == "fp8":
@@ -1287,7 +1294,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         layer.w2_weight.is_shuffled = True
 
         # Build quant config for AITER path
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        super().process_weights_after_loading(layer)
         torch.accelerator.empty_cache()
 
     def _setup_kernel(self, layer: FusedMoE):
@@ -1333,10 +1340,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         torch.accelerator.empty_cache()
 
         # Build quant config and kernel
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
+        assert self.experts_cls is not None
+        if self.moe_quant_config is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,

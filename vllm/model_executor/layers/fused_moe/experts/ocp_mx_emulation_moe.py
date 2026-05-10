@@ -42,7 +42,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(moe_config, quant_config)
         logger.warning_once(
@@ -51,6 +51,11 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             " quantized MOE. Consider using a device with native OCP MX"
             " quantization support for better performance."
         )
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
 
         self.ocp_mx_scheme = quant_config.ocp_mx_scheme
         assert self.ocp_mx_scheme is not None, (

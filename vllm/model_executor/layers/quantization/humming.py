@@ -182,7 +182,7 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str):
 
 
 class HummingConfig(QuantizationConfig):
-    packed_modules_mapping = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
     def __init__(self, full_config: dict[str, Any] | None = None):
         assert_humming_available()
@@ -873,6 +873,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
         else:
             experts = HummingGroupedExperts(layer, self.moe, self.moe_quant_config)
         self.experts = experts
+
+        super().process_weights_after_loading(layer)
 
     def select_gemm_impl(
         self,

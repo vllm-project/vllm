@@ -31,7 +31,7 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 logger = init_logger(__name__)
 
 
-class TrtLlmNvFp4ExpertsBase:
+class TrtLlmNvFp4ExpertsBase(mk.FusedMoEExpertsConfig):
     """
     NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
     """
@@ -39,11 +39,8 @@ class TrtLlmNvFp4ExpertsBase:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None,
     ):
-        self.moe_config = moe_config
-        self.quant_config = quant_config
-
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
@@ -56,17 +53,9 @@ class TrtLlmNvFp4ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        assert self.quant_config.g1_alphas is not None
-        assert self.quant_config.a2_gscale is not None
-        if moe_config.is_act_and_mul:
-            # g1_alpha_s = a13_scale * w13_scale_2
-            # a2_gscale = (1 / a2_scale)
-            # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-            self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
-        else:
-            self.g1_scale_c = self.quant_config.a2_gscale.clone()
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # order?
+        self.set_quant_config(layer.moe_quant_config)
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
         # Recompute g1_scale_c since g1_alphas was just fused in-place.

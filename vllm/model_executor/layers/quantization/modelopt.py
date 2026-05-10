@@ -889,10 +889,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale", w2_scale)
 
         # Setup modular kernel.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_fp8_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
@@ -930,6 +928,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
+
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         w1_scale = layer.w13_weight_scale
@@ -1412,16 +1412,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
         # Setup modular kernel.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             shared_experts=layer.shared_experts,
             routing_tables=layer._maybe_init_expert_routing_tables(),
         )
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
@@ -1886,6 +1884,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         self._check_weight_dtypes(layer)
         self._shuffle_weights_for_trtllm(layer)
+        super().process_weights_after_loading(layer)
         layer._already_called_process_weights_after_loading = True
 
     def maybe_make_prepare_finalize(

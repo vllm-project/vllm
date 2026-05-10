@@ -547,7 +547,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
         w13_g_idx: torch.Tensor | None = None,
@@ -557,19 +557,12 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
-        assert (
-            quant_config.use_mxfp4_w4a16
-            or quant_config.use_nvfp4_w4a16
-            or quant_config.use_int4_w4a16
-            or quant_config.use_fp8_w8a16
-        ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
         super().__init__(
             moe_config=moe_config,
@@ -577,6 +570,18 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
+        assert (
+            quant_config.use_mxfp4_w4a16
+            or quant_config.use_nvfp4_w4a16
+            or quant_config.use_int4_w4a16
+            or quant_config.use_fp8_w8a16
+        ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -878,9 +883,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
+        quant_config: FusedMoEQuantConfig | None = None,
         w13_g_idx: torch.Tensor | None = None,
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,

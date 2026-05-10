@@ -33,7 +33,7 @@ from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 logger = init_logger(__name__)
 
 
-class TrtLlmFp8ExpertsBase:
+class TrtLlmFp8ExpertsBase(mk.FusedMoEExpertsConfig):
     """
     Fp8 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic
     interfaces.
@@ -42,8 +42,10 @@ class TrtLlmFp8ExpertsBase:
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None,
     ):
+        super().__init__(moe_config, quant_config)
+
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
@@ -52,9 +54,6 @@ class TrtLlmFp8ExpertsBase:
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
-
-        self.moe_config = moe_config
-        self.quant_config = quant_config
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -219,13 +218,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(moe_config, quant_config)
-
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
         # Make additional scales for per-tensor interface.
         if self.quant_config.is_per_tensor:
             w1_scale = self.quant_config.w1_scale
@@ -241,7 +237,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             self._g2_alphas = (w2_scale * a2_scale).squeeze()
             self._g1_scale_c = (
                 self._g1_alphas / self.quant_config.a2_scale
-                if moe_config.is_act_and_mul
+                if self.moe_config.is_act_and_mul
                 else torch.ones_like(self._g1_alphas) / self.quant_config.a2_scale
             )
 

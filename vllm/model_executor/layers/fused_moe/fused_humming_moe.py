@@ -60,7 +60,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self,
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):

@@ -61,27 +61,13 @@ def is_valid_flashinfer_cutlass_fused_moe(
 
 
 class FlashInferExperts(mk.FusedMoEExpertsModular):
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.quant_config.use_nvfp4_w4a4:
-            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
-
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(moe_config, quant_config)
 
-        assert quant_config.weight_quant_dtype in (
-            "mxfp4",
-            "nvfp4",
-            torch.float8_e4m3fn,
-            None,
-        ), (
-            "Only mxfp4, nvfp4, fp8, bfloat16 and"
-            " float16 quantization are currently supported."
-        )
         self.device = moe_config.device
         self.num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
@@ -93,10 +79,27 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
-        self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+
+        super().set_quant_config(quant_config)
+
+        assert quant_config.weight_quant_dtype in (
+            "mxfp4",
+            "nvfp4",
+            torch.float8_e4m3fn,
+            None,
+        ), (
+            "Only mxfp4, nvfp4, fp8, bfloat16 and"
+            " float16 quantization are currently supported."
+        )
+
+        self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
@@ -116,6 +119,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                     device=self.device,
                     dtype=torch.float32,
                 )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.quant_config.use_nvfp4_w4a4:
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        super().process_weights_after_loading(layer)
 
     @property
     def expects_unquantized_inputs(self) -> bool:

@@ -102,9 +102,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> FusedMoEPrepareAndFinalizeModular | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        pf = maybe_make_prepare_finalize(
-            self.moe, self.moe_quant_config, routing_tables
-        )
+        pf = maybe_make_prepare_finalize(self.moe, routing_tables)
         assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
         return pf
 
@@ -172,3 +170,74 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    # Needs comment about calling convention
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_kernel is not None:
+            assert self.moe_quant_config is not None
+            self.moe_kernel.set_quant_config(self.moe_quant_config)
+
+
+# Make MK specific subclass that includes apply/apply_monolithic, etc.
+# see online/moe_base.py
+class FusedMoEMethodMKBase(FusedMoEMethodBase):
+    """Base for MoE methods that load full-precision weights on meta device
+    and quantize them after loading via the QeRL layerwise processing system.
+    """
+
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel "
+            "initialization logic. This function should not be called."
+        )
+
+    def apply_monolithic(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+        )
+
+    def apply(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
+        )

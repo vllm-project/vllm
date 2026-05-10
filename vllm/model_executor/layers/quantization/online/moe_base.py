@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import abstractmethod
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodMKBase
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.model_loader.reload.layerwise import (
     initialize_online_processing,
@@ -14,7 +12,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.utils import set_weight_attrs
 
 
-class OnlineMoEMethodBase(FusedMoEMethodBase):
+class OnlineMoEMethodBase(FusedMoEMethodMKBase):
     """Base for MoE methods that load full-precision weights on meta device
     and quantize them after loading via the QeRL layerwise processing system.
     """
@@ -93,9 +91,9 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
 
         initialize_online_processing(layer)
 
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+    # @abstractmethod
+    # def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    #    pass
 
     def _maybe_inject_biases(
         self,
@@ -112,62 +110,6 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
             if w2_bias is not None:
                 quant_config._w2.bias = w2_bias
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel "
-            "initialization logic. This function should not be called."
-        )
-
     @property
     def supports_eplb(self) -> bool:
         return True
-
-    def apply_monolithic(
-        self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply_monolithic(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            router_logits,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            num_expert_group=layer.num_expert_group,
-            topk_group=layer.topk_group,
-            e_score_correction_bias=layer.e_score_correction_bias,
-            routed_scaling_factor=layer.routed_scaling_factor,
-        )
-
-    def apply(
-        self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        x: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert not self.is_monolithic
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
-            activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts_input=shared_experts_input,
-        )

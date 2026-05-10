@@ -178,11 +178,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # which references layer.w{13,2}_bias; since weight updates
             # mutate those bias tensors in place, the kernel does not need
             # to be re-built.
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
             assert self.experts_cls is not None
             self.moe_kernel = make_unquantized_moe_kernel(
-                quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 backend=self.unquantized_backend,
                 experts_cls=self.experts_cls,
@@ -191,8 +188,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-
         # Padding the weight for better performance on ROCm.
         # _maybe_pad_weight is idempotent: on the first call it allocates a
         # padded storage and returns a strided view; on subsequent calls
@@ -208,6 +203,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             UnquantizedMoeBackend.OOT,
         ]:
             # OOT handles internally.
+            super().process_weights_after_loading(layer)
             return
 
         elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
@@ -260,6 +256,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 w13=layer.w13_weight,
                 w2=layer.w2_weight,
             )
+        super().process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:

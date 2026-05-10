@@ -268,7 +268,7 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
@@ -278,7 +278,6 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        assert quant_config.use_fp8_w8a8
 
         e = moe_config.num_local_experts
         n = moe_config.intermediate_size_per_partition
@@ -293,6 +292,12 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         self.ab_strides2 = ab_strides2
         self.c_strides1 = c_strides1
         self.c_strides2 = ab_strides1_c_strides2
+
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
+        assert quant_config.use_fp8_w8a8
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -1247,8 +1252,8 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         s_strides1: torch.Tensor,
         s_strides2: torch.Tensor,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
         group_size: int,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
         self.out_dtype = out_dtype

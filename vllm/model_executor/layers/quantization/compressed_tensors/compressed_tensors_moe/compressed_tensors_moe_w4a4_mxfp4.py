@@ -186,16 +186,15 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
             prepare_moe_fp4_layer_for_marlin(layer)
 
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None:
-            self.moe_kernel = make_mxfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-                mxfp4_backend=self.mxfp4_backend,
-                shared_experts=layer.shared_experts,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-            )
+        self.moe_kernel = make_mxfp4_moe_kernel(
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            mxfp4_backend=self.mxfp4_backend,
+            shared_experts=layer.shared_experts,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+        )
+
+        super().process_weights_after_loading(layer)
 
     def apply(
         self,

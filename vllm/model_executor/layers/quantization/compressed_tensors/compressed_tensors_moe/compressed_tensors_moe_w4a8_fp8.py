@@ -242,6 +242,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
         replace_parameter(layer, "w2_weight_scale", w2_weight_scale_packed)
 
+        super().process_weights_after_loading(layer)
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,

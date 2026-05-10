@@ -37,14 +37,11 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
+        quant_config: FusedMoEQuantConfig | None = None,
     ):
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,
-        )
-        assert quant_config.quant_dtype == "nvfp4", (
-            "Only nvfp4 quantization is currently supported."
         )
         self.out_dtype = moe_config.in_dtype
         self.hidden_dim = moe_config.hidden_dim
@@ -57,9 +54,18 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
 
+    def set_quant_config(self, quant_config: FusedMoEQuantConfig | None):
+        if quant_config is None:
+            return
+        super().set_quant_config(quant_config)
+        assert quant_config.quant_dtype == "nvfp4", (
+            "Only nvfp4 quantization is currently supported."
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
         layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        super().process_weights_after_loading(layer)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

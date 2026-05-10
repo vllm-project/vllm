@@ -229,16 +229,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = a2_scale
 
         # Setup modular kernel.
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
-            moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             shared_experts=layer.shared_experts,
             routing_tables=layer._maybe_init_expert_routing_tables(),
         )
-        self.moe_kernel.fused_experts.process_weights_after_loading(layer)
+        super().process_weights_after_loading(layer)
 
     def maybe_make_prepare_finalize(
         self,

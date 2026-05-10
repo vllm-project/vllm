@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -87,7 +88,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         buffer: deep_ep.Buffer,
         max_tokens_per_rank: int,
         num_dispatchers: int,
-        use_fp8_dispatch: bool = False,
         global_to_physical: torch.Tensor | None = None,
         physical_to_global: torch.Tensor | None = None,
         local_expert_global_ids: torch.Tensor | None = None,
@@ -96,7 +96,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
-        self.use_fp8_dispatch = use_fp8_dispatch
+        self.use_fp8_dispatch = False
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -120,6 +120,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.use_ue8m0_dispatch = False
 
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
+        quant_config = fused_experts.quant_config
+        self.use_fp8_dispatch = (
+            quant_config.quant_dtype == current_platform.fp8_dtype()
+            and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+        )
+
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return
