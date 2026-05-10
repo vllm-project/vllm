@@ -435,6 +435,7 @@ def test_tp_sp_nvfp4_generation(num_gpus_available: int):
         num_gpus_available,
         use_inductor_graph_partition=False,
         fuse_gemm_comms=False,
+        enable_prompt_embeds=False,
         method="generate",
         is_multimodal=False,
         dtype="bfloat16",
