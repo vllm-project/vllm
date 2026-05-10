@@ -649,29 +649,16 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         if mixed_qkv is None:
             return None, None, None
 
-        seq_len = mixed_qkv.shape[0]
-        q_dim = self.key_dim // self.tp_size
-        k_dim = self.key_dim // self.tp_size
-        v_dim = self.value_dim // self.tp_size
+        from vllm.model_executor.layers.mamba.ops.gdn_ops import rearrange_mixed_qkv
 
-        query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
-
-        fused = torch.cat(
-            [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
+        return rearrange_mixed_qkv(
+            mixed_qkv,
+            self.key_dim,
+            self.value_dim,
+            self.tp_size,
+            self.head_k_dim,
+            self.head_v_dim,
         )
-
-        q_size = seq_len * q_dim
-        k_size = seq_len * k_dim
-
-        q_contig = fused[0:q_size]
-        k_contig = fused[q_size : q_size + k_size]
-        v_contig = fused[q_size + k_size :]
-
-        query = q_contig.view(1, seq_len, -1, self.head_k_dim)
-        key = k_contig.view(1, seq_len, -1, self.head_k_dim)
-        value = v_contig.view(1, seq_len, -1, self.head_v_dim)
-
-        return query, key, value
 
     def forward(
         self,
@@ -983,6 +970,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
         try:
+            self.rearrange_mixed_qkv(dummy_mixed_qkv)
             self.chunk_gated_delta_rule(
                 q=q,
                 k=k,
