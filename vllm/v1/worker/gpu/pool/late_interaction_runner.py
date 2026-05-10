@@ -42,38 +42,23 @@ class LateInteractionRunner:
         self._warmup_kernels()
 
     def _warmup_kernels(self) -> None:
-        """Pre-compile Triton kernels for expected autotune buckets.
-
-        Both production kernels autotune on bucketed keys (Lq_bucket,
-        max_Ld_bucket, d_pad) where bucket ∈ {32, 64, 128, 256, 512,
-        1024, 2048, 4096}.  Pre-compile every bucket a realistic
-        workload will hit so runtime never triggers autotune+benchmark.
-        """
+        """Pre-compile flash_maxsim_rerank_direct for realistic autotune
+        buckets so the first request never triggers Triton autotune."""
         if not torch.cuda.is_available():
             return
         try:
-            from vllm.v1.pool.flash_maxsim import (
-                flash_maxsim_packed,
-                flash_maxsim_rerank_direct,
-                pack_docs,
-            )
+            from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct
 
             device = torch.accelerator.current_device_index()
-            # d=128 covers ColBERT and ColPali.  Override via env var
-            # when running models with other embedding dims.
+            # d=128 covers ColBERT and ColPali. Override via env var
+            # for other embedding dims.
             d = int(os.environ.get("VLLM_FLASH_MAXSIM_WARMUP_D", "128"))
-            # Query and doc buckets span realistic rerank workloads.
-            # Include 512/1024 for Lq so workloads that sample longer
-            # queries (e.g. random-rerank with input_len=512 → queries
-            # up to ~380 tokens → Lq bucket 512) don't trigger runtime
-            # autotune on the first request that lands in that bucket.
             lq_buckets = [32, 64, 128, 256, 512, 1024]
             ld_buckets = [32, 64, 128, 256, 512, 1024]
 
             for Lq in lq_buckets:
                 Q = torch.randn(Lq, d, device=device, dtype=torch.float16)
                 for Ld in ld_buckets:
-                    # flash_maxsim_rerank_direct — zero-copy scoring path.
                     batch = torch.randn(64 * Ld, d, device=device, dtype=torch.float16)
                     offs = torch.arange(
                         0, 64 * Ld, Ld, device=device, dtype=torch.int32
@@ -81,23 +66,10 @@ class LateInteractionRunner:
                     lens = torch.full((64,), Ld, device=device, dtype=torch.int32)
                     flash_maxsim_rerank_direct(Q, batch, offs, lens, Ld)
                     del batch, offs, lens
-
-                    # flash_maxsim_packed — fallback path.
-                    docs = [
-                        torch.randn(Ld, d, device=device, dtype=torch.float16)
-                        for _ in range(8)
-                    ]
-                    D_packed, cu_seqlens, max_ld = pack_docs(docs)
-                    flash_maxsim_packed(Q, D_packed, cu_seqlens, max_ld)
-                    del docs, D_packed, cu_seqlens
                 del Q
         except Exception as e:
-            # Surface the problem so first-request latency slowdown is
-            # not silently swallowed.  Zero-copy path will still work —
-            # it'll just trigger autotune on first real call.
             logger.warning("flash-maxsim kernel warmup failed: %s", e)
         finally:
-            # Free any partial allocations from an interrupted warmup.
             if torch.cuda.is_available():
                 torch.accelerator.empty_cache()
 
