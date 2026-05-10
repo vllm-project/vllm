@@ -61,8 +61,6 @@ def select_mxfp8_moe_backend(
     Returns:
         A tuple of (fp8_backend, experts_cls).
     """
-    if config.is_lora_enabled:
-        raise NotImplementedError("LoRA is not supported for MXFP8 MoE.")
 
     runner_backend = config.moe_backend
     if runner_backend != "auto":

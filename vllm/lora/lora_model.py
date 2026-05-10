@@ -203,6 +203,7 @@ class LoRAModel:
             tensors = TensorDeserializer(
                 lora_tensor_path,
                 dtype=tensorizer_config.dtype,
+                device=device,
                 **tensorizer_args.deserialization_kwargs,
             )
             check_unexpected_modules(tensors)
