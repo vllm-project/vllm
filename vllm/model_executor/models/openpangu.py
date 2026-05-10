@@ -712,22 +712,6 @@ class OpenPanguSinkAttention(nn.Module):
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if needs_custom_weight_type:
-            param.weight_type = loaded_weight.item()
-
-        if needs_custom_weight_materialization and isinstance(
-            param, nn.UninitializedParameter
-        ):
-            final_shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                assert final_shape[output_dim] % self.tp_size == 0
-                final_shape[output_dim] = final_shape[output_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
-
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
