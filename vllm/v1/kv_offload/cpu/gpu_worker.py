@@ -34,60 +34,44 @@ from vllm.v1.kv_offload.worker.worker import (
 logger = init_logger(__name__)
 
 
-def swap_blocks_batch(
-    src_addrs: torch.Tensor,
-    dst_addrs: torch.Tensor,
-    sizes: torch.Tensor,
-    is_src_access_order_any: bool = False,
-    gpu_to_cpu: bool = True,
-) -> None:
-    """Drop-in replacement for ``ops.swap_blocks_batch`` with a Triton fast
-    path for the CPU->GPU read direction.
+def _select_swap_blocks_fn(
+    kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+    gpu_to_cpu: bool,
+):
+    """Resolve the swap_blocks function for a handler at init time."""
+    # GPU->CPU is bandwidth-bound; the dedicated copy engine beats Triton.
+    if gpu_to_cpu:
+        return ops.swap_blocks_batch
+    page_sizes = [r.page_size_bytes for g in kv_cache_groups_data_refs for r in g]
+    # Triton wins only on small, 8-byte-aligned payloads.
+    if (
+        not page_sizes
+        or max(page_sizes) >= _THRESHOLD_BYTES
+        or any(s % 8 for s in page_sizes)
+    ):
+        return ops.swap_blocks_batch
+    chunk = min(triton.next_power_of_2(max(page_sizes)), 8192)
 
-    The fast path engages only when ALL of these hold:
-      * ``gpu_to_cpu`` is False (CPU->GPU read). On GPU->CPU writes the GPU's
-        dedicated copy engine matches or beats SM-issued stores, so writes
-        always defer to the C++ DMA path.
-      * ``n >= _MIN_N``. With fewer descriptors the Triton launch cost
-        outweighs the per-descriptor savings; ``cuMemcpyBatchAsync`` wins.
-      * ``max(sizes) < _THRESHOLD_BYTES`` and every size is 8-byte aligned.
-        Above the threshold the DMA path is bandwidth-bound and faster;
-        the kernel copies in 8-byte words so all sizes must be multiples of 8.
+    def _swap(src_addrs, dst_addrs, sizes, is_src_access_order_any=False):
+        n = src_addrs.numel()
+        # Too few descriptors to amortize Triton's launch cost.
+        if n < _MIN_N:
+            ops.swap_blocks_batch(
+                src_addrs,
+                dst_addrs,
+                sizes,
+                is_src_access_order_any=is_src_access_order_any,
+            )
+            return
+        _swap_blocks_kernel[(min(_NUM_SMS, n),)](
+            src_addrs.to("cuda", non_blocking=True),
+            dst_addrs.to("cuda", non_blocking=True),
+            sizes.to("cuda", non_blocking=True),
+            n,
+            BYTES_PER_CHUNK=chunk,
+        )
 
-    Sizes inside the batch may vary; each Triton job loads its own size
-    from the ``sizes`` tensor. ``is_src_access_order_any`` is forwarded to
-    the C++ DMA path on fallback (controls
-    ``CU_MEMCPY_SRC_ACCESS_ORDER_ANY`` for the cuMemcpyBatchAsync
-    attributes); it does not affect the Triton path.
-    """
-    n = src_addrs.numel()
-    if n == 0:
-        return
-    if gpu_to_cpu or n < _MIN_N:
-        ops.swap_blocks_batch(
-            src_addrs,
-            dst_addrs,
-            sizes,
-            is_src_access_order_any=is_src_access_order_any,
-        )
-        return
-    max_bpj = int(sizes.max().item())
-    if max_bpj >= _THRESHOLD_BYTES or bool((sizes % 8 != 0).any().item()):
-        ops.swap_blocks_batch(
-            src_addrs,
-            dst_addrs,
-            sizes,
-            is_src_access_order_any=is_src_access_order_any,
-        )
-        return
-    chunk = min(triton.next_power_of_2(max_bpj), 8192)
-    _swap_blocks_kernel[(min(_NUM_SMS, n),)](
-        src_addrs.to("cuda", non_blocking=True),
-        dst_addrs.to("cuda", non_blocking=True),
-        sizes.to("cuda", non_blocking=True),
-        n,
-        BYTES_PER_CHUNK=chunk,
-    )
+    return _swap
 
 
 @dataclass
@@ -223,6 +207,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
         self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+        self._swap_blocks_batch = _select_swap_blocks_fn(
+            kv_cache_groups_data_refs, gpu_to_cpu
+        )
 
         # GPU blocks may be smaller
         # cpu_page_size = gpu_page_size * block_size_factor.
@@ -386,12 +373,11 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         with torch.cuda.stream(stream):
             start_event.record(stream)
             if num_copy_ops > 0:
-                swap_blocks_batch(
+                self._swap_blocks_batch(
                     batch_src,
                     batch_dst,
                     batch_sizes,
                     is_src_access_order_any=is_src_access_order_any,
-                    gpu_to_cpu=self.gpu_to_cpu,
                 )
             end_event.record(stream)
 
