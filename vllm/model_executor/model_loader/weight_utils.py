@@ -258,9 +258,6 @@ def get_quant_config(
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
 
-    if not quant_cls.requires_hf_quant_config():
-        return quant_cls.from_config({})
-
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
     # some vision model may keep quantization_config in their text_config

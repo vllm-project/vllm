@@ -129,10 +129,6 @@ class QuantizationConfig(ABC):
         """
         return None
 
-    @classmethod
-    def requires_hf_quant_config(cls) -> bool:
-        return True
-
     @staticmethod
     def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
         """Get a value from the model's quantization config."""
