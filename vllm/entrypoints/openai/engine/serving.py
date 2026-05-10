@@ -157,7 +157,9 @@ class OpenAIServing:
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
-        self.has_kv_connector = engine_client.vllm_config.kv_transfer_config is not None
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self.has_kv_connector = kv_transfer_config is not None
 
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
