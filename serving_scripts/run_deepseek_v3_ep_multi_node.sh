@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=vllm-host-llama-4-maverick-17b-128e
+#SBATCH --job-name=vllm-host-deepseek-v3
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:8
@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-llama4-maverick-tp8-2x4h100-2026-05-10-v1"
+SCRIPT_VERSION="arc-ray-deepseek-v3-2x8h100-2026-05-10-v1"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 slurm_debug() {
@@ -226,11 +226,11 @@ export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 export VLLM_MOE_USE_DEEP_GEMM="${VLLM_MOE_USE_DEEP_GEMM:-0}"
 export VLLM_DEEP_GEMM_WARMUP="${VLLM_DEEP_GEMM_WARMUP:-skip}"
 
-MODEL_ID="${MODEL_ID:-meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8}"
+MODEL_ID="${MODEL_ID:-deepseek-ai/DeepSeek-V3-0324}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
 
-GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
 TOTAL_GPUS="$((GPUS_PER_NODE * NUM_NODES))"
 
@@ -242,7 +242,6 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-2048}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
-KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
 
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
@@ -252,7 +251,7 @@ echo "MODEL_ID=${MODEL_ID}"
 echo "HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} TOTAL_GPUS=${TOTAL_GPUS} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN} MAX_NUM_SEQS=${MAX_NUM_SEQS} MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS}"
-echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION} KV_CACHE_DTYPE=${KV_CACHE_DTYPE}"
+echo "GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}"
 echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_NET=${NCCL_NET} NCCL_IB_HCA=${NCCL_IB_HCA}"
 echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 echo "NCCL_DEBUG=${NCCL_DEBUG} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
@@ -378,6 +377,7 @@ PY
 echo "=== vLLM api_server (background process) ==="
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL_ID}" \
+  --trust-remote-code \
   --host "${HOST}" \
   --port "${PORT}" \
   --distributed-executor-backend ray \
@@ -387,7 +387,6 @@ python -m vllm.entrypoints.openai.api_server \
   --max-num-seqs "${MAX_NUM_SEQS}" \
   --max-num-batched-tokens "${MAX_NUM_BATCHED_TOKENS}" \
   --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}" \
-  --kv-cache-dtype "${KV_CACHE_DTYPE}" \
   --enforce-eager \
   --disable-custom-all-reduce &
 
