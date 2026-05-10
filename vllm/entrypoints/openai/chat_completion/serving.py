@@ -749,6 +749,27 @@ class OpenAIServingChat(OpenAIServing):
                             continue
                         delta_message = DeltaMessage()
 
+                    requested_stop = self._is_requested_stop_reason(
+                        request, output.stop_reason
+                    )
+                    # If a requested stop interrupts auto tool parsing before
+                    # any tool-call delta is emitted, the parser may have
+                    # buffered raw text while deciding if it is a tool call.
+                    # Flush that text as content so streaming matches
+                    # non-streaming, and preserve finish_reason="stop".
+                    if (
+                        output.finish_reason is not None
+                        and requested_stop
+                        and tool_choice_auto
+                        and tool_parser
+                        and not tools_streamed[i]
+                        and self._has_unstreamed_tool_parser_state(tool_parser)
+                        and not delta_message.content
+                        and not delta_message.reasoning
+                        and not delta_message.tool_calls
+                    ):
+                        delta_message = DeltaMessage(content=previous_texts[i])
+
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content_parts = []
@@ -868,7 +889,7 @@ class OpenAIServingChat(OpenAIServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if (
+                        if not requested_stop and (
                             auto_tools_called
                             or (tools_streamed[i] and not tool_choice_function_name)
                             or (self.use_harmony and harmony_tools_streamed[i])
@@ -1537,6 +1558,43 @@ class OpenAIServingChat(OpenAIServing):
             and delta_message.tool_calls[0]
             and delta_message.tool_calls[0].function
             and delta_message.tool_calls[0].function.arguments is not None
+        )
+
+    @staticmethod
+    def _is_requested_stop_reason(
+        request: ChatCompletionRequest,
+        stop_reason: int | str | None,
+    ) -> bool:
+        """Return whether ``stop_reason`` came from the request stop settings.
+
+        Tool-call parsing can observe partial tool-call text before generation
+        stops. When the engine reports a user-requested stop string or stop
+        token, the OpenAI response should preserve ``finish_reason="stop"``
+        instead of rewriting it to ``tool_calls``.
+        """
+        if stop_reason is None:
+            return False
+
+        if isinstance(stop_reason, str):
+            if isinstance(request.stop, str):
+                return stop_reason == request.stop
+            return request.stop is not None and stop_reason in request.stop
+
+        return stop_reason in (request.stop_token_ids or [])
+
+    @staticmethod
+    def _has_unstreamed_tool_parser_state(tool_parser: Any) -> bool:
+        """Return whether a tool parser may be buffering unstreamed text.
+
+        Some streaming tool parsers suppress raw text while they decide whether
+        it is a tool call. If a requested stop interrupts that parsing before a
+        tool-call delta is emitted, the serving layer flushes the buffered text
+        as normal content to match non-streaming behavior.
+        """
+        return bool(
+            getattr(tool_parser, "prev_tool_call_arr", None)
+            or getattr(tool_parser, "streamed_args_for_tool", None)
+            or getattr(tool_parser, "current_tool_id", -1) >= 0
         )
 
     @staticmethod
