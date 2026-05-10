@@ -354,7 +354,7 @@ class TestObjTierE2EWithPrimary:
 
         result = manager.prepare_store(keys, _CTX)
         assert result is not None
-        manager.complete_store(keys, success=True)
+        manager.complete_store(keys, _CTX, success=True)
 
         self._wait_cascade(manager, primary_tier, keys)
 
@@ -382,7 +382,7 @@ class TestObjTierE2EWithPrimary:
             cpu_tensor[int(bid)] = data
             expected[keys[i]] = data.clone()
 
-        manager.complete_store(keys, success=True)
+        manager.complete_store(keys, _CTX, success=True)
         self._wait_cascade(manager, primary_tier, keys)
 
         # Zero out primary slots; load back from S3 into fresh slots
@@ -418,7 +418,7 @@ class TestObjTierE2EWithPrimary:
             data = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
             cpu_tensor[int(bid)] = data
             expected[keys[i]] = data.clone()
-        manager.complete_store(keys, success=True)
+        manager.complete_store(keys, _CTX, success=True)
         self._wait_cascade(manager, primary_tier, keys)
 
         # Evict from primary by filling it with new blocks
@@ -427,7 +427,7 @@ class TestObjTierE2EWithPrimary:
         assert result is not None
         for bid in result.store_spec.block_ids:
             cpu_tensor[int(bid)] = 0.0
-        manager.complete_store(evict_keys, success=True)
+        manager.complete_store(evict_keys, _CTX, success=True)
         self._wait_cascade(manager, primary_tier, evict_keys)
 
         # Original blocks should be gone from primary but present in S3
@@ -453,7 +453,7 @@ class TestObjTierE2EWithPrimary:
             assert torch.equal(
                 cpu_tensor[int(bid)], expected[keys[i]]
             ), f"Block {i} data mismatch after promotion"
-        primary_tier.complete_load(keys)
+        primary_tier.complete_load(keys, _CTX)
 
     def test_cascade_promotion_roundtrip(self, setup_manager):
         """Full roundtrip: store → cascade → evict → promote → data intact."""
@@ -473,7 +473,7 @@ class TestObjTierE2EWithPrimary:
             data = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
             cpu_tensor[int(bid)] = data
             expected[keys[i]] = data.clone()
-        manager.complete_store(keys, success=True)
+        manager.complete_store(keys, _CTX, success=True)
         self._wait_cascade(manager, primary_tier, keys)
 
         # Evict
@@ -482,7 +482,7 @@ class TestObjTierE2EWithPrimary:
         assert result is not None
         for bid in result.store_spec.block_ids:
             cpu_tensor[int(bid)] = 0.0
-        manager.complete_store(evict_keys, success=True)
+        manager.complete_store(evict_keys, _CTX, success=True)
         self._wait_cascade(manager, primary_tier, evict_keys)
 
         for k in keys:
@@ -502,7 +502,7 @@ class TestObjTierE2EWithPrimary:
             assert torch.equal(
                 cpu_tensor[int(bid)], expected[keys[i]]
             ), f"Block {i} data mismatch after roundtrip"
-        primary_tier.complete_load(keys)
+        primary_tier.complete_load(keys, _CTX)
 
     def test_ref_cnt_released_after_cascade(self, setup_manager):
         """ref_cnt on primary blocks must reach 0 after S3 cascade completes."""
@@ -517,7 +517,7 @@ class TestObjTierE2EWithPrimary:
         assert isinstance(spec, CPULoadStoreSpec)
         for bid in spec.block_ids:
             cpu_tensor[int(bid)] = torch.rand((_BLOCK_ELEMENTS,), dtype=_DTYPE)
-        manager.complete_store(keys, success=True)
+        manager.complete_store(keys, _CTX, success=True)
 
         # Immediately after complete_store, ref_cnt must be 1 (cascade in flight)
         for k in keys:

@@ -131,7 +131,7 @@ class ObjSecondaryTier(SecondaryTierManager):
                 continue
             yield JobResult(job_id=job_id, success=success)
 
-    def touch(self, keys: Collection[OffloadKey]) -> None:
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         pass
 
     def shutdown(self) -> None:
