@@ -525,7 +525,9 @@ class NixlConnectorScheduler:
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
             # update_state_after_alloc must not have been called (the request
-            # must have been aborted before it was scheduled).
+            # must have been aborted before it was scheduled, e.g. via the
+            # abort_immediately path used to clean up KV-transfer requests
+            # rejected at the D-side serving layer).
             # To avoid stranding the prefill blocks in the prefill instance,
             # we must add empty block_ids to _reqs_need_recv so that our
             # worker side will notify and free blocks in the prefill instance.

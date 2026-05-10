@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
+    has_native_kv_cache_layout,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -468,9 +469,10 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
+        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
-        if block_size in (16, 32):
-            # Normal 16, 32, use vLLM native HIP C++ logic
+        if block_size in (16, 32) and has_native_layout:
+            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,
                 value,
@@ -482,8 +484,10 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._v_scale,
             )
         else:
-            # Case B: Non-standard blocks (e.g., 64, 128, 544 in Qwen3Next or Qwen3.5 ),
-            # force using our modified Triton logic
+            # Non-standard blocks and hybrid attention/Mamba layouts need the
+            # stride-aware Triton writer. The native reshape_and_cache kernel
+            # assumes contiguous block storage and writes to the wrong hybrid
+            # cache blocks.
             triton_reshape_and_cache_flash(
                 key,
                 value,
