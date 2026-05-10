@@ -84,6 +84,8 @@ def _bf16x2_mul(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
 
 @dsl_user_op
 def _fp8x4_to_bf16x4(x: Uint32, *, loc=None, ip=None) -> cute.TensorSSA:
+    # there is only fp8->fp16 conversion, hence we need to go
+    # round trip through fp16.
     out = llvm.inline_asm(
         llvm.StructType.get_literal([T.i32()] * 2),
         [x.ir_value(loc=loc, ip=ip)],
