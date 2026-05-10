@@ -47,7 +47,7 @@ def test_gemma4_moe_routing_functional_call_substitution():
     m = _MinimalGemma4MoE(n_experts)
 
     # Baseline with the default scale (all-ones)
-    orig_w, orig_ids = m(gating, topk)
+    orig_w, _orig_ids = m(gating, topk)
 
     # After functional_call substitution, routing must use new_scale
     sub_w, sub_ids = functional_call(m, {"per_expert_scale": new_scale}, (gating, topk))
