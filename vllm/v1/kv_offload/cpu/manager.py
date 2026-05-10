@@ -106,10 +106,12 @@ class CPUOffloadingManager(OffloadingManager):
             blocks.append(block)
         return self._get_load_store_spec(keys, blocks)
 
-    def touch(self, keys: Collection[OffloadKey]) -> None:
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
         self._policy.touch(keys)
 
-    def complete_load(self, keys: Collection[OffloadKey]) -> None:
+    def complete_load(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
         for key in keys:
             block = self._policy.get(key)
             assert block is not None, f"Block {key!r} not found"
@@ -172,7 +174,10 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
     def complete_store(
-        self, keys: Collection[OffloadKey], success: bool = True
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
 
