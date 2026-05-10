@@ -447,6 +447,16 @@ class LLM:
         self.request_counter = Counter()
         self.default_sampling_params: dict[str, Any] | None = None
 
+        # Per-engine LRU mapping (prefill_hash, decode_hash) -> auto-named
+        # steering module name.  Lets ``_add_request`` promote inline
+        # steering specs to the named-module fast path the first time
+        # we see them, dedup'ing repeated specs across the request pipeline.
+        # See ``maybe_auto_promote_steering_modules`` in
+        # ``vllm/config/steering_types.py`` for the contract.
+        from vllm.config.steering_types import SteeringAutoPromoteLRU
+
+        self._steering_auto_promote_lru = SteeringAutoPromoteLRU(capacity=512)
+
         supported_tasks = self.llm_engine.get_supported_tasks()
         self.supported_tasks = supported_tasks
         self.pooling_task = self.model_config.get_pooling_task(supported_tasks)
@@ -1875,6 +1885,22 @@ class LLM:
 
         return added_request_ids
 
+    def _maybe_auto_promote_steering(self, sp: SamplingParams) -> None:
+        """Auto-promote inline steering to a named module on first sight.
+
+        Calls into the per-engine LRU + collective_rpc to register the
+        spec under its hash and rewrite the request to use a name-ref.
+        Subsequent submissions of the same spec hit the cache and ship
+        only the name + scale tuple.
+        """
+        from vllm.config.steering_types import maybe_auto_promote_steering_modules
+
+        maybe_auto_promote_steering_modules(
+            sp,
+            rpc_fn=self.llm_engine.collective_rpc,
+            registry_lru=self._steering_auto_promote_lru,
+        )
+
     def _maybe_pack_inline_steering(self, sp: SamplingParams) -> None:
         """Pack inline steering vectors in the model dtype before submission."""
         from vllm.config.steering_types import maybe_pack_inline_steering_for_request
@@ -1895,6 +1921,11 @@ class LLM:
         if isinstance(params, SamplingParams):
             # We only care about the final output
             params.output_kind = RequestOutputKind.FINAL_ONLY
+            # Auto-promote inline → named (cheap if already named, no-op
+            # if unique-once-then-discarded), then pack as a fallback for
+            # the first-sight case (auto-promote already broadcast the
+            # spec; packing here is only relevant if promote bailed out).
+            self._maybe_auto_promote_steering(params)
             self._maybe_pack_inline_steering(params)
 
         request_id = str(next(self.request_counter))
