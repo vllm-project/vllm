@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -2108,6 +2109,146 @@ async def test_streaming_tool_parser_preserves_requested_stop_reason():
 
     assert final_choice is not None
     assert final_choice["delta"]["content"] == '{"n'
+    assert final_choice["finish_reason"] == "stop"
+    assert final_choice["stop_reason"] == "a"
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_parser_stop_flush_skips_streamed_content():
+    """Requested-stop flush should not replay content already streamed."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.enable_auto_tools = True
+    serving_chat.tool_parser = object()
+
+    class ParserWithContentThenPartialToolState:
+        def __init__(self, *args, **kwargs):
+            self._stream_state = SimpleNamespace(
+                tool_call_id_type="random",
+                history_tool_call_cnt=0,
+            )
+            self.tool_parser = SimpleNamespace(
+                prev_tool_call_arr=[],
+                streamed_args_for_tool=[""],
+                current_tool_id=-1,
+            )
+
+        def parse_delta(self, delta_text, *args, **kwargs):
+            if delta_text == "Hello ":
+                return DeltaMessage(content=delta_text)
+            self.tool_parser.prev_tool_call_arr = [{}]
+            self.tool_parser.current_tool_id = 0
+            return None
+
+    serving_chat.parser_cls = ParserWithContentThenPartialToolState
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        stream=True,
+        stop=["a"],
+        tools=tools,
+        tool_choice="auto",
+    )
+
+    async def result_generator():
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="Hello ",
+                    token_ids=[122],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                )
+            ],
+            finished=False,
+        )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="{",
+                    token_ids=[123],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                )
+            ],
+            finished=False,
+        )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text='"n',
+                    token_ids=[124],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                    stop_reason="a",
+                )
+            ],
+            finished=True,
+        )
+
+    content_deltas = []
+    final_choice = None
+    async for chunk_str in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=get_tokenizer(MODEL_NAME),
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        if not chunk_str.strip() or "data: [DONE]" in chunk_str:
+            continue
+        data = json.loads(chunk_str.removeprefix("data: ").strip())
+        choice = data["choices"][0]
+        delta_content = choice["delta"].get("content")
+        if delta_content:
+            content_deltas.append(delta_content)
+        if choice["finish_reason"] is not None:
+            final_choice = choice
+
+    assert final_choice is not None
+    assert final_choice["delta"]["content"] == '{"n'
+    assert "".join(content_deltas) == 'Hello {"n'
     assert final_choice["finish_reason"] == "stop"
     assert final_choice["stop_reason"] == "a"
 

@@ -435,6 +435,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
+        streamed_content_lengths = [0] * num_choices
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -755,8 +756,8 @@ class OpenAIServingChat(OpenAIServing):
                     # If a requested stop interrupts auto tool parsing before
                     # any tool-call delta is emitted, the parser may have
                     # buffered raw text while deciding if it is a tool call.
-                    # Flush that text as content so streaming matches
-                    # non-streaming, and preserve finish_reason="stop".
+                    # Flush any unstreamed suffix as content so streaming
+                    # matches non-streaming, and preserve finish_reason="stop".
                     if (
                         output.finish_reason is not None
                         and requested_stop
@@ -768,7 +769,9 @@ class OpenAIServingChat(OpenAIServing):
                         and not delta_message.reasoning
                         and not delta_message.tool_calls
                     ):
-                        delta_message = DeltaMessage(content=previous_texts[i])
+                        delta_message = DeltaMessage(
+                            content=previous_texts[i][streamed_content_lengths[i] :]
+                        )
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -915,6 +918,8 @@ class OpenAIServingChat(OpenAIServing):
                         finish_reason_sent[i] = True
 
                     choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
+                    if choice_data.delta.content:
+                        streamed_content_lengths[i] += len(choice_data.delta.content)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
