@@ -284,7 +284,7 @@ class DequantGatherKCpasyncKernel:
 
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
-        self.num_stages = 3
+        self.num_stages = 4
 
     @cute.jit
     def __call__(
@@ -348,6 +348,7 @@ class DequantGatherKCpasyncKernel:
         page_id = block_table[req_id, pos // self.block_size]
         block_offset = pos % self.block_size
 
+        # load the first 512 bytes (32x16B)
         idx = lane_id
         src = k_data_slice[page_id, block_offset, (None, idx)]
         cute.copy(
@@ -356,6 +357,7 @@ class DequantGatherKCpasyncKernel:
             s_kdata_slice[(None, idx), stage_id],
         )
 
+        # load the tail 64 bytes
         idx += 32
         if idx < cutlass.const_expr(self.data_dim // 16):
             src = k_data_slice[page_id, block_offset, (None, idx)]
@@ -393,22 +395,33 @@ class DequantGatherKCpasyncKernel:
         num_warps = self.num_warps
         num_stages = self.num_stages
 
-        k_data_slice = cute.logical_divide(k_data, (None, None, 16))
-        out_slice = cute.logical_divide(out, (None, None, 16))
-
+        # prepare smem
         smem = cutlass.utils.SmemAllocator()
         s_kdata = smem.allocate_tensor(
             Uint32,
             cute.make_layout((self.data_dim // 4, num_warps, num_stages)),
             byte_alignment=16,
         )[None, warp_id, None]
-        s_kdata_slice = cute.logical_divide(s_kdata, (4, None))
-
         s_kscale = smem.allocate_tensor(
             Uint8,
             cute.make_layout((8, num_warps, num_stages)),
             byte_alignment=8,
         )[None, warp_id, None]
+
+        # prepare for 16B cp.async
+        # also for BF16 smem loads later
+        k_data_slice = cute.logical_divide(k_data, (None, None, 16))
+        s_kdata_16B_slice = cute.logical_divide(s_kdata, (4, None))
+
+        # load FP8 elems in 8B units, so once dequantized, they are 16B units.
+        s_kdata_8B_slice = cute.logical_divide(s_kdata, (2, None))
+
+        # 16B st.global
+        out_slice = cute.logical_divide(out, (None, None, 8))
+
+        cp_op = cute.nvgpu.CopyUniversalOp()
+        cp8_atom = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=64)
+        cp16_atom = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
 
         seq_len = seq_lens[req_id]
         gather_len = seq_len
@@ -416,10 +429,7 @@ class DequantGatherKCpasyncKernel:
             gather_len = gather_lens[req_id]
         start_pos = seq_len - gather_len
 
-        cp_op = cute.nvgpu.CopyUniversalOp()
-        cp16_atom = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=128)
-        cp32_atom = cute.make_copy_atom(cp_op, Uint32, num_bits_per_copy=256)
-
+        # start prefetch
         for i in cutlass.range_constexpr(self.num_stages - 1):
             next_pos = (
                 start_pos
@@ -432,7 +442,7 @@ class DequantGatherKCpasyncKernel:
                     k_data_slice,
                     k_scale,
                     block_table,
-                    s_kdata_slice,
+                    s_kdata_16B_slice,
                     s_kscale,
                     req_id,
                     next_pos,
@@ -444,20 +454,20 @@ class DequantGatherKCpasyncKernel:
 
         compute_stage = 0
 
+        # main loop
         for i in range(
-            worker_id * num_warps + warp_id,
-            gather_len,
-            num_workers * num_warps,
+            worker_id * num_warps + warp_id, gather_len, num_workers * num_warps
         ):
             pos = start_pos + i
 
+            # prefetch next stage
             next_pos = pos + num_workers * num_warps * (num_stages - 1)
             if next_pos < seq_len:
                 self.load_g2s(
                     k_data_slice,
                     k_scale,
                     block_table,
-                    s_kdata_slice,
+                    s_kdata_16B_slice,
                     s_kscale,
                     req_id,
                     next_pos,
@@ -467,49 +477,69 @@ class DequantGatherKCpasyncKernel:
                 prefetch_stage = (prefetch_stage + 1) % num_stages
             cute.arch.cp_async_commit_group()
 
-            data = cute.make_rmem_tensor((4,), Uint32)
-
+            # wait for gmem->smem to finish
             cute.arch.cp_async_wait_group(num_stages - 1)
             cute.arch.sync_warp()
+
+            # there are 512 elems per token. as a warp, data0 holds the 1st 256 elems
+            # data1 holds the 2nd 256 elems i.e. each thread holds 8 FP8 elems.
+            # we do it this way so that when it's dequantized to 8 BF16 elems, it's
+            # contiguous 16B global stores.
+            # on Blackwell, this might not be necessary as we have 32B global stores,
+            # but doing this way doesn't seem to be slower.
+            data0 = cute.make_rmem_tensor((2,), Uint32)
+            data1 = cute.make_rmem_tensor((2,), Uint32)
             cute.copy(
-                cp16_atom,
-                s_kdata_slice[(None, lane_id), compute_stage],
-                data,
+                cp8_atom,
+                s_kdata_8B_slice[(None, lane_id), compute_stage],
+                data0,
+            )
+            cute.copy(
+                cp8_atom,
+                s_kdata_8B_slice[(None, lane_id + 32), compute_stage],
+                data1,
             )
 
             # convert to bf16x2 via bit manipulation
-            scale_u32 = Uint32(s_kscale[lane_id * 16 // self.group_size, compute_stage])
-            scale_bf16x2 = (scale_u32 << Uint32(23)) | (scale_u32 << Uint32(7))
+            # FP8 scales are per 64 elements. An 8-element chunk advances the
+            # scale index by chunk_id * 8 // group_size.
+            scale0_u32 = Uint32(s_kscale[lane_id * 8 // self.group_size, compute_stage])
+            scale0_bf16x2 = (scale0_u32 << Uint32(23)) | (scale0_u32 << Uint32(7))
+
+            scale1_u32 = Uint32(
+                s_kscale[(lane_id + 32) * 8 // self.group_size, compute_stage]
+            )
+            scale1_bf16x2 = (scale1_u32 << Uint32(23)) | (scale1_u32 << Uint32(7))
 
             # cvt.rn.scaled::n2::ue8m0.bf16x2.e4m3x2 requires PTX 9.2 (CUDA 13.2)
-            dequant = cute.make_rmem_tensor(8, Uint32)
-            for j in cutlass.range_constexpr(4):
-                tmp = _fp8x4_to_bf16x4(data[j])
+            dequant0 = cute.make_rmem_tensor(4, Uint32)
+            dequant1 = cute.make_rmem_tensor(4, Uint32)
+            for j in cutlass.range_constexpr(2):
+                tmp0 = _fp8x4_to_bf16x4(data0[j])
+                tmp1 = _fp8x4_to_bf16x4(data1[j])
 
-                # bf16 multiply is safe
-                dequant[j * 2] = _bf16x2_mul(tmp[0], scale_bf16x2)
-                dequant[j * 2 + 1] = _bf16x2_mul(tmp[1], scale_bf16x2)
+                # bf16 multiply is safe because the scales are exact power of 2
+                dequant0[j * 2] = _bf16x2_mul(tmp0[0], scale0_bf16x2)
+                dequant1[j * 2] = _bf16x2_mul(tmp1[0], scale1_bf16x2)
+                dequant0[j * 2 + 1] = _bf16x2_mul(tmp0[1], scale0_bf16x2)
+                dequant1[j * 2 + 1] = _bf16x2_mul(tmp1[1], scale1_bf16x2)
 
-            # the last 4 threads load BF16 data
-            fp8_threads = cutlass.const_expr(self.fp8_dim // 16)
-            if lane_id >= fp8_threads:
-                src_bf16 = s_kdata_slice[(None, None), compute_stage]
-                dequant_split = cute.logical_divide(dequant, 4)  # (4, 2)
-                idx = lane_id - fp8_threads
+            # last 64 elems are BF16 tail, corresponds to dequant1 of last 8 threads.
+            # we have 448 FP8 + 64 BF16 -> 28x 16B for FP8 + 8x 16B for BF16.
+            if lane_id + 32 >= self.fp8_dim // 8:
+                idx = self.fp8_dim // 16 + (lane_id + 32) - self.fp8_dim // 8
                 cute.copy(
                     cp16_atom,
-                    src_bf16[None, fp8_threads + idx * 2],
-                    dequant_split[None, 0],
-                )
-                cute.copy(
-                    cp16_atom,
-                    src_bf16[None, fp8_threads + idx * 2 + 1],
-                    dequant_split[None, 1],
+                    s_kdata_16B_slice[(None, idx), compute_stage],
+                    dequant1,
                 )
 
-            # out_slice: (num_reqs, max_num_toks, head_dim)
+            # Store two 16B BF16 chunks per lane: first half, then second half.
             dst = out_slice[req_id, offset + i, (None, lane_id)]
-            cute.copy(cp32_atom, dequant, cute.recast_tensor(dst, Uint32))
+            cute.copy(cp16_atom, dequant0, cute.recast_tensor(dst, Uint32))
+
+            dst = out_slice[req_id, offset + i, (None, lane_id + 32)]
+            cute.copy(cp16_atom, dequant1, cute.recast_tensor(dst, Uint32))
 
             compute_stage = (compute_stage + 1) % num_stages
 
