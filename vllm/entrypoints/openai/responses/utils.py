@@ -160,10 +160,22 @@ def _construct_message_from_response_item(
             tool_calls = previous_assistant.get("tool_calls")
             if tool_calls is None:
                 previous_assistant["tool_calls"] = [tool_call]
-            else:
-                assert isinstance(tool_calls, list)
+                return None
+            if isinstance(tool_calls, list):
                 tool_calls.append(tool_call)
-            return None
+                return None
+            if isinstance(tool_calls, Iterable) and not isinstance(
+                tool_calls, (dict, str)
+            ):
+                tool_calls = list(tool_calls)
+                tool_calls.append(tool_call)
+                previous_assistant["tool_calls"] = tool_calls
+                return None
+            logger.warning(
+                "Previous assistant message has unknown tool_calls format. "
+                "Tool call merging is skipped. Item %s",
+                item.id,
+            )
         return ChatCompletionAssistantMessageParam(
             role="assistant",
             tool_calls=[tool_call],
