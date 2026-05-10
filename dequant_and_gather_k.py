@@ -24,7 +24,7 @@ def dequant_and_gather_k_cutedsl(
     offset: int,
 ) -> None:
     _, block_size, _ = k_cache.shape
-    DequantGatherKCacheKernel.compile(block_size=block_size)(
+    DequantGatherKBaseKernel.compile(block_size=block_size)(
         out, k_cache, seq_lens, gather_lens, block_table, offset
     )
 
@@ -39,7 +39,7 @@ def dequant_and_gather_k_cpasync_cutedsl(
     offset: int,
 ) -> None:
     _, block_size, _ = k_cache.shape
-    DequantGatherKCacheCpasyncKernel.compile(block_size=block_size)(
+    DequantGatherKCpasyncKernel.compile(block_size=block_size)(
         out, k_cache, seq_lens, gather_lens, block_table, offset
     )
 
@@ -92,7 +92,7 @@ def _bf16x2_mul(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
     return Uint32(out)
 
 
-class DequantGatherKCacheKernel:
+class DequantGatherKBaseKernel:
     # hard-coded for DSv4
     head_dim = 512
     group_size = 64  # 1 scale per 64 elems
@@ -105,6 +105,7 @@ class DequantGatherKCacheKernel:
         self.num_warps = 4
         self.tb_size = self.num_warps * 32
 
+        # using 8B copy is faster for small shapes
         self.cp_bytes = 16
         self.threads_per_tok = self.head_dim // self.cp_bytes
         self.toks_per_cta = self.tb_size // self.threads_per_tok
@@ -242,7 +243,7 @@ class DequantGatherKCacheKernel:
     @staticmethod
     def compile(fp8_dim: int = 448, block_size: int = 64):
         num_reqs = cute.sym_int()
-        head_dim = DequantGatherKCacheKernel.head_dim
+        head_dim = DequantGatherKBaseKernel.head_dim
         head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
 
         out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
@@ -256,7 +257,7 @@ class DequantGatherKCacheKernel:
         gather_lens = make_fake_tensor(Int32, (num_reqs,))
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
 
-        kernel = DequantGatherKCacheKernel(fp8_dim, block_size)
+        kernel = DequantGatherKBaseKernel(fp8_dim, block_size)
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
             kernel,
@@ -271,7 +272,7 @@ class DequantGatherKCacheKernel:
         )
 
 
-class DequantGatherKCacheCpasyncKernel:
+class DequantGatherKCpasyncKernel:
     # hard-coded for DSv4
     head_dim = 512
     group_size = 64  # 1 scale per 64 elems
@@ -350,10 +351,14 @@ class DequantGatherKCacheCpasyncKernel:
         sublane_id,  # i32
         stage_id,  # i32
     ):
+        if cutlass.const_expr(self.cp_bytes == 16):
+            cache_mode = cute.nvgpu.LoadCacheMode.GLOBAL  # .cg
+        else:
+            cache_mode = cute.nvgpu.LoadCacheMode.ALWAYS  # .ca
         cp_atom = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cute.nvgpu.LoadCacheMode.GLOBAL),
+            cpasync.CopyG2SOp(cache_mode),
             Uint32,
-            num_bits_per_copy=128,
+            num_bits_per_copy=self.cp_bytes * 8,
         )
         page_id = block_table[req_id, pos // self.block_size]
         src = cute.local_tile(
@@ -461,6 +466,8 @@ class DequantGatherKCacheCpasyncKernel:
                 prefetch_stage = (prefetch_stage + 1) % self.num_stages
             cute.arch.cp_async_commit_group()
 
+            # don't need syncthreads/syncwarp because
+            # the same thread loads the same data
             cute.arch.cp_async_wait_group(self.num_stages - 1)
             cute.copy(cp_fp8_atom, buf_slice[None, compute_stage], data)
             compute_stage = (compute_stage + 1) % self.num_stages
@@ -502,7 +509,7 @@ class DequantGatherKCacheCpasyncKernel:
     @staticmethod
     def compile(fp8_dim: int = 448, block_size: int = 64):
         num_reqs = cute.sym_int()
-        head_dim = DequantGatherKCacheCpasyncKernel.head_dim
+        head_dim = DequantGatherKCpasyncKernel.head_dim
         head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
 
         out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
@@ -516,7 +523,7 @@ class DequantGatherKCacheCpasyncKernel:
         gather_lens = make_fake_tensor(Int32, (num_reqs,))
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
 
-        kernel = DequantGatherKCacheCpasyncKernel(fp8_dim, block_size)
+        kernel = DequantGatherKCpasyncKernel(fp8_dim, block_size)
         stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
         return cute.compile(
             kernel,
