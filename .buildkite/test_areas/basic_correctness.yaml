@@ -11,11 +11,13 @@ steps:
   - vllm/device_allocator/
   - vllm/distributed/
   - vllm/engine/
+  - vllm/entrypoints/llm.py
   - vllm/inputs/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
