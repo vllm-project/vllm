@@ -105,16 +105,21 @@ class FilterReusedOffloadingManager(OffloadingManager):
     ) -> LoadStoreSpec:
         return self._backing.prepare_load(keys, req_context)
 
-    def touch(self, keys: Collection[OffloadKey]) -> None:
-        return self._backing.touch(keys)
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        return self._backing.touch(keys, req_context)
 
-    def complete_load(self, keys: Collection[OffloadKey]) -> None:
-        return self._backing.complete_load(keys)
+    def complete_load(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        return self._backing.complete_load(keys, req_context)
 
     def complete_store(
-        self, keys: Collection[OffloadKey], success: bool = True
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        success: bool = True,
     ) -> None:
-        return self._backing.complete_store(keys, success)
+        return self._backing.complete_store(keys, req_context, success)
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         return self._backing.take_events()

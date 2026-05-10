@@ -147,22 +147,24 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def touch(self, keys: Collection[OffloadKey]):
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
         """
         return
 
-    def complete_load(self, keys: Collection[OffloadKey]):
+    def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Marks previous blocks that were prepared to load as done loading.
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
         """
         return
 
@@ -189,7 +191,12 @@ class OffloadingManager(ABC):
         """
         pass
 
-    def complete_store(self, keys: Collection[OffloadKey], success: bool = True):
+    def complete_store(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+        success: bool = True,
+    ):
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
@@ -198,6 +205,7 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
             success: whether the blocks were stored successfully.
         """
         return

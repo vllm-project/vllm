@@ -291,7 +291,7 @@ class OffloadingConnectorScheduler:
             self.config.kv_group_configs, req_status.group_states
         ):
             if group_config.sliding_window_size_in_blocks is None:
-                self.manager.touch(group_state.offload_keys)
+                self.manager.touch(group_state.offload_keys, req_status.req_context)
             else:
                 # we aim to keep just blocks that are necessary to hit
                 # the original request (+ decoded blocks)
@@ -300,7 +300,10 @@ class OffloadingConnectorScheduler:
                     group_state.num_hit_blocks
                     - group_config.sliding_window_size_in_blocks,
                 )
-                self.manager.touch(group_state.offload_keys[blocks_to_skip:])
+                self.manager.touch(
+                    group_state.offload_keys[blocks_to_skip:],
+                    req_status.req_context,
+                )
 
     def _lookup(self, req_status: RequestOffloadState) -> int | None:
         """
@@ -802,14 +805,13 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
+            req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys)
+                self.manager.complete_store(job_status.keys, req_status.req_context)
             else:
-                self.manager.complete_load(job_status.keys)
+                self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
-
-            req_status = self._req_status[job_status.req_id]
             if self._block_id_to_pending_jobs:
                 # Sliding window blocks are tracked from store creation
                 # and must be cleaned up unconditionally.
