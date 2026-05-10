@@ -7,7 +7,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.base import (
@@ -17,7 +19,12 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.cpu.triton_swap import swap_blocks_batch
+from vllm.v1.kv_offload.cpu.triton_swap import (
+    _MIN_N,
+    _NUM_SMS,
+    _THRESHOLD_BYTES,
+    _swap_blocks_kernel,
+)
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
@@ -25,6 +32,62 @@ from vllm.v1.kv_offload.worker.worker import (
 )
 
 logger = init_logger(__name__)
+
+
+def swap_blocks_batch(
+    src_addrs: torch.Tensor,
+    dst_addrs: torch.Tensor,
+    sizes: torch.Tensor,
+    is_src_access_order_any: bool = False,
+    gpu_to_cpu: bool = True,
+) -> None:
+    """Drop-in replacement for ``ops.swap_blocks_batch`` with a Triton fast
+    path for the CPU->GPU read direction.
+
+    The fast path engages only when ALL of these hold:
+      * ``gpu_to_cpu`` is False (CPU->GPU read). On GPU->CPU writes the GPU's
+        dedicated copy engine matches or beats SM-issued stores, so writes
+        always defer to the C++ DMA path.
+      * ``n >= _MIN_N``. With fewer descriptors the Triton launch cost
+        outweighs the per-descriptor savings; ``cuMemcpyBatchAsync`` wins.
+      * ``max(sizes) < _THRESHOLD_BYTES`` and every size is 8-byte aligned.
+        Above the threshold the DMA path is bandwidth-bound and faster;
+        the kernel copies in 8-byte words so all sizes must be multiples of 8.
+
+    Sizes inside the batch may vary; each Triton job loads its own size
+    from the ``sizes`` tensor. ``is_src_access_order_any`` is forwarded to
+    the C++ DMA path on fallback (controls
+    ``CU_MEMCPY_SRC_ACCESS_ORDER_ANY`` for the cuMemcpyBatchAsync
+    attributes); it does not affect the Triton path.
+    """
+    n = src_addrs.numel()
+    if n == 0:
+        return
+    if gpu_to_cpu or n < _MIN_N:
+        ops.swap_blocks_batch(
+            src_addrs,
+            dst_addrs,
+            sizes,
+            is_src_access_order_any=is_src_access_order_any,
+        )
+        return
+    max_bpj = int(sizes.max().item())
+    if max_bpj >= _THRESHOLD_BYTES or bool((sizes % 8 != 0).any().item()):
+        ops.swap_blocks_batch(
+            src_addrs,
+            dst_addrs,
+            sizes,
+            is_src_access_order_any=is_src_access_order_any,
+        )
+        return
+    chunk = min(triton.next_power_of_2(max_bpj), 8192)
+    _swap_blocks_kernel[(min(_NUM_SMS, n),)](
+        src_addrs.to("cuda", non_blocking=True),
+        dst_addrs.to("cuda", non_blocking=True),
+        sizes.to("cuda", non_blocking=True),
+        n,
+        BYTES_PER_CHUNK=chunk,
+    )
 
 
 @dataclass
