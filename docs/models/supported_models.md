@@ -659,6 +659,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     For `Gemma4ForConditionalGeneration`:
     - audio input is only supported by the `gemma-4-E2B` and `gemma-4-E4B` variants.
     - The model does not ingest videos directly. However, vLLM’s Gemma 4 implementation supports video inputs by handling video processing internally. Users can send videos directly in the message structure to vLLM, where they are converted into text and image frames before being passed to the model.
+    - Gemma 4 assistant checkpoints for speculative decoding use vLLM's Gemma
+      4 MTP path, not generic draft-model speculative decoding. See the
+      [Gemma 4 assistant model MTP example](../features/speculative_decoding/mtp.md#gemma-4-assistant-models).
 
 !!! note
     For `InternVLChatModel`, only InternVL2.5 with Qwen2.5 text backbone (`OpenGVLab/InternVL2.5-1B` etc.), InternVL3 and InternVL3.5 have video inputs support currently.
