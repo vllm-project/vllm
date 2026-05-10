@@ -11,14 +11,17 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/test_initialization.py
   - tests/models/registry.py
   commands:
@@ -51,14 +54,17 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/test_terratorch.py
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
