@@ -34,10 +34,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("wvSplitK_sweep", torch::kCUDA, &wvSplitK_sweep);
 #endif
 
-  // W8A16 skinny GEMM: int8 weights, fp16/bf16 activations, per-channel scale
+  // W8A16 skinny GEMM: int8 weights, fp16/bf16 activations.
+  // group_size = -1 -> per-channel (1-D scale [M]); 32/64/128 -> per-group
+  // (2-D scale [M, K/group_size]).
   rocm_ops.def(
       "wvSplitK_int8(Tensor in_a, Tensor in_b, Tensor in_scale, "
-      "Tensor? in_bias, int CuCount) -> Tensor");
+      "Tensor? in_bias, int CuCount, int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int8", torch::kCUDA, &wvSplitK_int8);
 
   // W8A8 skinny GEMM: int8 weights, int8 or bf16/fp16 activations,

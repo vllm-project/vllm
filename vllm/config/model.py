@@ -209,7 +209,10 @@ class ModelConfig:
     dynamic_lm_head_quantization: str | None = None
     """Dynamically quantize the lm_head at load time. Supported values:
     'int8' — channel-wise symmetric INT8 (ROCm only, uses wvSplitK_int8
-    kernel). None — no dynamic quantization (default)."""
+    kernel). 'int8:gN' (e.g. 'int8:g32', 'int8:g64', 'int8:g128') —
+    per-group symmetric INT8 along K with group size N (ROCm only, uses
+    wvSplitK_int8 with a 2-D scale tensor). None — no dynamic quantization
+    (default)."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use

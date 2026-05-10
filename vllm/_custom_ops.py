@@ -2648,8 +2648,9 @@ def wvSplitK_int8(
     scale: torch.Tensor,
     cu_count: int,
     bias: torch.Tensor = None,
+    group_size: int = -1,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK_int8(a, b, scale, bias, cu_count)
+    return torch.ops._rocm_C.wvSplitK_int8(a, b, scale, bias, cu_count, group_size)
 
 
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int8"):
@@ -2661,6 +2662,7 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int8")
         in_scale: torch.Tensor,
         in_bias: torch.Tensor | None,
         CuCount: int,
+        group_size: int,
     ) -> torch.Tensor:
         N = in_b.size(0)
         M = in_a.size(0)

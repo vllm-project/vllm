@@ -22,11 +22,15 @@ def _w8a16_apply_impl(
     w_dequant: torch.Tensor,
     bias: torch.Tensor | None,
     cu_count: int,
+    group_size: int,
 ) -> torch.Tensor:
     """Dispatch between skinny GEMM kernel and dequant fallback.
 
     Registered as a custom op so torch.compile treats it as opaque,
     avoiding issues with the data-dependent branch.
+
+    group_size: -1 = per-channel (w_s is 1-D [M]); >0 = per-group
+    (w_s is 2-D [M, K/group_size]).
     """
     import vllm._custom_ops as ops
 
@@ -34,7 +38,7 @@ def _w8a16_apply_impl(
     K = x_2d.shape[1]
 
     if K * N <= LDS_CAPACITY_ELEMENTS:
-        return ops.wvSplitK_int8(w_q, x_2d, w_s, cu_count, bias)
+        return ops.wvSplitK_int8(w_q, x_2d, w_s, cu_count, bias, group_size)
 
     return torch.nn.functional.linear(x_2d, w_dequant, bias)
 
@@ -46,6 +50,7 @@ def _w8a16_apply_fake(
     w_dequant: torch.Tensor,
     bias: torch.Tensor | None,
     cu_count: int,
+    group_size: int,
 ) -> torch.Tensor:
     N = x_2d.size(0)
     M = w_q.size(0)
@@ -56,7 +61,7 @@ def _register_w8a16_op():
     lib = torch.library.Library("_rocm_skinny_w8", "DEF")
     lib.define(
         "w8a16_apply(Tensor x_2d, Tensor w_q, Tensor w_s, Tensor w_dequant,"
-        " Tensor? bias, int cu_count) -> Tensor"
+        " Tensor? bias, int cu_count, int group_size) -> Tensor"
     )
     lib.impl("w8a16_apply", _w8a16_apply_impl, "CUDA")
     lib.impl("w8a16_apply", _w8a16_apply_fake, "Meta")
@@ -93,8 +98,11 @@ class HipW8A16LinearKernel(MPLinearKernel):
         if c.act_type not in (torch.float16, torch.bfloat16):
             return False, "requires float16 or bfloat16 activations"
 
-        if c.group_size != -1:
-            return False, "requires per-channel quantization (group_size=-1)"
+        if c.group_size != -1 and c.group_size not in (32, 64, 128):
+            return False, (
+                f"unsupported group_size={c.group_size}; "
+                "supported: -1 (per-channel), 32, 64, 128"
+            )
 
         if c.zero_points:
             return False, "does not support zero points (asymmetric)"
@@ -105,6 +113,9 @@ class HipW8A16LinearKernel(MPLinearKernel):
         K = c.partition_weight_shape[0]
         if K % 16 != 0:
             return False, f"K={K} must be divisible by 16"
+
+        if c.group_size != -1 and K % c.group_size != 0:
+            return False, (f"K={K} must be divisible by group_size={c.group_size}")
 
         return True, None
 
@@ -119,13 +130,24 @@ class HipW8A16LinearKernel(MPLinearKernel):
             return (unpacked - bias_val).to(torch.int8).contiguous()
 
         def transform_w_s(x: BasevLLMParameter) -> torch.Tensor:
-            return x.data.squeeze(-1).contiguous()
+            # Per-channel: collapse trailing dim to 1-D [M].
+            # Per-group: expect 2-D [M, K/group_size]; ensure contiguous.
+            if c.group_size == -1:
+                return x.data.squeeze(-1).contiguous()
+            return x.data.contiguous()
 
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
         w_q, w_s, _, _ = self._get_weight_params(layer)
-        self._w_dequant = (w_q.to(c.act_type) * w_s.unsqueeze(1)).contiguous()
+        if c.group_size == -1:
+            self._w_dequant = (w_q.to(c.act_type) * w_s.unsqueeze(1)).contiguous()
+        else:
+            # Per-group dequant: w_q[m, g*G+i] * w_s[m, g] -> bf16 fallback.
+            M, K = w_q.shape
+            G = c.group_size
+            w_q_g = w_q.to(c.act_type).reshape(M, K // G, G)
+            self._w_dequant = (w_q_g * w_s.unsqueeze(-1)).reshape(M, K).contiguous()
 
     def apply_weights(
         self,
@@ -156,5 +178,6 @@ class HipW8A16LinearKernel(MPLinearKernel):
                 self._w_dequant,
                 bias,
                 cu_count,
+                self.config.group_size,
             )
         return output.reshape(out_shape)

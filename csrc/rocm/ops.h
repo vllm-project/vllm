@@ -12,7 +12,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
                             const at::Tensor& in_scale,
                             const std::optional<at::Tensor>& in_bias,
-                            const int64_t CuCount);
+                            const int64_t CuCount, const int64_t group_size);
 
 torch::Tensor wvSplitK_w8a8(const at::Tensor& in_a, const at::Tensor& in_b,
                             const at::Tensor& in_w_scale,
