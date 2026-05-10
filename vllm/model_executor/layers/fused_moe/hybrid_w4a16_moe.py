@@ -113,8 +113,16 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
     # threshold the Triton prefill kernel is used instead.
     MAX_SKINNY_BATCH_SIZE = 5
 
-    # Default Triton BLOCK_SIZE_M for prefill.
-    TRITON_BLOCK_SIZE_M = 64
+    # Default Triton BLOCK_SIZE_M for prefill.  P-1 autotune (Strix Halo,
+    # Qwen3.5-A3B prefill shapes M=128 N=1024 K=2048 + M=128 N=2048 K=1024)
+    # showed BLOCK_M=128 with BLOCK_N=32, BLOCK_K=128, GROUP_SIZE_M=8,
+    # num_warps=4, num_stages=1 wins both shapes (-12% / -30% kernel time
+    # vs the prior BM=64,BN=64,BK=32,GM=8,nw=4,ns=2 default; joint -19%).
+    # Gated behind VLLM_HYBRID_W4A16_TRITON_TUNED_P1=1 (default ON) so the
+    # change can be toggled off if a regression is later observed on a
+    # different MoE prefill shape.
+    _P1_TUNED = os.environ.get("VLLM_HYBRID_W4A16_TRITON_TUNED_P1", "1") == "1"
+    TRITON_BLOCK_SIZE_M = 128 if _P1_TUNED else 64
 
     @staticmethod
     def _select_block_size_m(num_tokens: int, topk: int, E: int) -> int:
@@ -172,7 +180,29 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
         return (workspace1, workspace2, output)
 
     def _triton_config(self, K: int) -> dict:
-        """Return Triton kernel config for shuffle-packed MoE prefill."""
+        """Return Triton kernel config for shuffle-packed MoE prefill.
+
+        P-1 (2026-05-10): autotune sweep over the Qwen3.5-A3B prefill
+        MoE shapes on Strix Halo (Radeon 8060S, gfx1151) found the joint
+        optimum is BLOCK_M=128, BLOCK_N=32, BLOCK_K=group_size,
+        GROUP_SIZE_M=8, num_warps=4, num_stages=1 (-19% kernel time vs
+        the prior default).  The previous code clamped BLOCK_K to
+        min(group_size, 32) which was overly conservative — BLOCK_K can
+        equal group_size (one scale per K-tile) and the larger tile is
+        clearly faster on this GPU.  Gated behind
+        VLLM_HYBRID_W4A16_TRITON_TUNED_P1 (default ON).
+        """
+        if HybridW4A16MoEExperts._P1_TUNED:
+            BLOCK_SIZE_K = self._group_size  # = 128 for the Qwen3.5-A3B path
+            assert BLOCK_SIZE_K % 8 == 0
+            return {
+                "BLOCK_SIZE_M": self.TRITON_BLOCK_SIZE_M,  # 128 when tuned
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": BLOCK_SIZE_K,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 1,
+            }
         BLOCK_SIZE_K = min(self._group_size, 32)
         # Ensure BLOCK_K is a multiple of 8 for shuffle interleave
         assert BLOCK_SIZE_K % 8 == 0
