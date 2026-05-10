@@ -72,6 +72,17 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `rejection_sample_method` | `string` | `strict` | `strict`, `probabilistic`, or `synthetic`. |
 | `synthetic_acceptance_rate` | `float` | `None` | Average acceptance rate to target when `rejection_sample_method` is `synthetic`. Valid range is `[0, 1]`. |
 
+!!! note
+    Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
+    as generic draft models. Use `"method": "mtp"` with the assistant
+    checkpoint in `model`, as shown in the [MTP guide](mtp.md#gemma-4-assistant-models).
+
+    If startup logs show `SpeculativeConfig(method='draft_model', ...)` for a
+    Gemma 4 assistant checkpoint, the installed vLLM version does not include
+    Gemma 4 MTP support for that path. Upgrade to a version that includes
+    Gemma 4 MTP support instead of forcing the assistant checkpoint through
+    generic draft-model speculative decoding.
+
 ### Method-specific keys
 
 #### N-gram
