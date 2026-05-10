@@ -6,7 +6,6 @@ from enum import Enum
 from typing import Literal, cast, get_args, overload
 
 import torch
-from torch.nn.parameter import UninitializedParameter
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -1155,15 +1154,6 @@ class FusedMoE(PluggableLayer):
         # dimension intermediate_size_per_partition is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if needs_custom_weight_type:
-            param.weight_type = loaded_weight.item()
-            param.data.copy_(loaded_weight)
-            return True if return_success else None
-
         # Case for BitsAndBytes
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         if use_bitsandbytes_4bit:
@@ -1208,19 +1198,6 @@ class FusedMoE(PluggableLayer):
         full_load = len(loaded_weight.shape) == 3
         if full_load:
             shard_dim += 1
-
-        if needs_custom_weight_materialization and isinstance(
-            param, UninitializedParameter
-        ):
-            # To materialize a tensor, we must have full shape including
-            # number of experts, making this portion to require `full_load`.
-            assert full_load
-            final_shape = list(loaded_weight.shape)
-            # w1 and w3 are merged per expert.
-            if shard_id in {"w1", "w3"}:
-                final_shape[1] *= 2
-            final_shape[shard_dim] = final_shape[shard_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
 
