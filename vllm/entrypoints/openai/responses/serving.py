@@ -324,6 +324,17 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_responses(request, raw_request), request, raw_request
+        )
+
+    async def _create_responses(
+        self, request: ResponsesRequest, raw_request: Request | None = None
+    ) -> (
+        AsyncGenerator[StreamingResponsesResponse, None]
+        | ResponsesResponse
+        | ErrorResponse
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
