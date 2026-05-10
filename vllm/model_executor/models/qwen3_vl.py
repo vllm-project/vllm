@@ -136,6 +136,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -562,6 +563,13 @@ class Qwen3_VisionTransformer(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+
+        # FP8 attention: Q/K/V become independent contiguous tensors
+        # after quantization, so cu_seqlens uses uniform stride (no 3x V).
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            self.num_heads, head_dim
+        )
+
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -776,6 +784,7 @@ class Qwen3_VisionTransformer(nn.Module):
             self.hidden_size,
             self.tp_size,
             device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )
 
         return metadata

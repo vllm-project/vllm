@@ -302,6 +302,33 @@ def patch_worker_dependencies():
         }
 
 
+def test_worker_uses_data_parallel_index_in_dense_dp():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    vllm_config.parallel_config.data_parallel_rank = 0
+    vllm_config.parallel_config.data_parallel_index = 3
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+
+    assert connector.connector_worker.dp_rank == 3
+
+
+def test_worker_uses_local_rank_when_local_engines_only():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    vllm_config.parallel_config.data_parallel_index = 7
+    vllm_config.parallel_config.data_parallel_rank_local = 1
+    vllm_config.parallel_config.data_parallel_hybrid_lb = True
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+
+    assert connector.connector_worker.dp_rank == 1
+
+
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.TransferEngine",

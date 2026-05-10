@@ -34,6 +34,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
+    get_mooncake_dp_engine_index,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -762,9 +763,7 @@ class MooncakeConnectorWorker:
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
-        dp_rank = parallel_config.data_parallel_index
-        dp_local_rank = parallel_config.data_parallel_rank_local
-        self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
+        self.dp_rank = get_mooncake_dp_engine_index(parallel_config)
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
         if pp_size > 1:
             raise ValueError(

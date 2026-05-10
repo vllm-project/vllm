@@ -50,7 +50,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
-    RoutingMethodType,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -336,17 +335,6 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
-        )
-
-        # NOTE(rob): this is a hack until we finish off the PR for
-        # merging TRTLLM kernels into the MK framework. Then we can
-        # query the MonolithicMK for the expected router logits.
-        # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
-        self.gate.set_out_dtype(
-            torch.float32
-            if self.experts.quant_method.is_monolithic
-            and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
-            else torch.bfloat16
         )
 
         # Pre-cast the bias to match the gate output dtype so the

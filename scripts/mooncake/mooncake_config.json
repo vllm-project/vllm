@@ -1,0 +1,8 @@
+{
+  "metadata_server": "P2PHANDSHAKE",
+  "master_server_address": "127.0.0.1:50051",
+  "global_segment_size": "600GB",
+  "local_buffer_size": "4GB",
+  "protocol": "rdma",
+  "device_name": ""
+}

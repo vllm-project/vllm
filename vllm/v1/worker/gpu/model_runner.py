@@ -590,7 +590,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            self.cudagraph_manager.capture(
+            captured_attn_states = self.cudagraph_manager.capture(
                 self.model,
                 self.model_state,
                 self.input_buffers,
@@ -602,7 +602,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
             )
             if self.speculator is not None:
-                self.speculator.capture_model()
+                self.speculator.capture(captured_attn_states)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

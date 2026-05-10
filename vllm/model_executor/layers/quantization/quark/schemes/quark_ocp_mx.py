@@ -376,11 +376,15 @@ class QuarkOCP_MX(QuarkScheme):
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
-        else:
-            return torch.ops.vllm.gemm_with_dynamic_quant(
-                x,
-                layer.weight,
-                layer.weight_scale,
-                self.rocm_use_aiter_fp4_asm_gemm,
-                self.out_dtype,
-            )
+        y = torch.ops.vllm.gemm_with_dynamic_quant(
+            x,
+            layer.weight,
+            layer.weight_scale,
+            self.rocm_use_aiter_fp4_asm_gemm,
+            self.out_dtype,
+        )
+        # gemm_with_dynamic_quant has no bias argument; add it here so the
+        # native path matches F.linear (e.g. qkv_proj with qkv_bias=True).
+        if bias is not None:
+            y = y + bias
+        return y

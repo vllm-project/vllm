@@ -33,6 +33,7 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -218,6 +219,11 @@ class MultiConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        for c in self._connectors:
+            if hasattr(c, "bind_gpu_block_pool"):
+                c.bind_gpu_block_pool(gpu_block_pool)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
