@@ -20,7 +20,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
   namespace P = vllm::persistent;
 
   const int64_t num_rows = logits.size(0);
-  const int64_t stride = logits.size(1);
+  const int64_t stride = logits.stride(0);
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   static int num_sms = 0;
@@ -243,7 +243,7 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
   TORCH_CHECK(output.dim() == 2, "output must be 2D");
 
   const int64_t num_rows = logits.size(0);
-  const int64_t stride = logits.size(1);
+  const int64_t stride = logits.stride(0);
 
   TORCH_CHECK(lengths.numel() == num_rows, "lengths size mismatch");
   TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k,
