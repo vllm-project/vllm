@@ -1400,6 +1400,25 @@ class VllmConfig:
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
+    def set_platform_extra(self, path: str, value: Any) -> None:
+        if not path:
+            raise ValueError("path must be non-empty")
+
+        parts = path.split(".")
+        if len(parts) == 1:
+            self.platform_extra[parts[0]] = value
+            return
+
+        target: Any = self
+        for part in parts[:-1]:
+            if not hasattr(target, part):
+                raise AttributeError(
+                    f"{type(target).__name__} has no attribute '{part}' in path '{path}'"
+                )
+            target = getattr(target, part)
+
+        target.platform_extra[parts[-1]] = value
+
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism

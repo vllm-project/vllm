@@ -29,6 +29,74 @@ logger = init_logger(__name__)
 
 _PLATFORM_EXTRA_ATTR = "_platform_extra"
 
+
+class _PlatformExtraView(dict[str, Any]):
+
+    def __init__(self, owner: Any) -> None:
+        self._owner = owner
+
+    def _storage(self) -> dict[str, Any]:
+        platform_extra = self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR)
+        if platform_extra is None:
+            platform_extra = {}
+            self._owner.__dict__[_PLATFORM_EXTRA_ATTR] = platform_extra
+        return cast(dict[str, Any], platform_extra)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._storage()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self._storage()[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._storage()[key]
+
+    def __iter__(self):
+        return iter(self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}))
+
+    def __len__(self) -> int:
+        return len(self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}))
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {})
+
+    def __eq__(self, other: object) -> bool:
+        return dict(self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {})) == other
+
+    def __repr__(self) -> str:
+        return repr(dict(self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {})))
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}).get(key, default)
+
+    def keys(self):
+        return self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}).keys()
+
+    def values(self):
+        return self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}).values()
+
+    def items(self):
+        return self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}).items()
+
+    def copy(self) -> dict[str, Any]:
+        return dict(self._owner.__dict__.get(_PLATFORM_EXTRA_ATTR, {}))
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        self._storage().update(*args, **kwargs)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        return self._storage().setdefault(key, default)
+
+    def pop(self, key: str, default: Any = MISSING) -> Any:
+        storage = self._storage()
+        if default is MISSING:
+            return storage.pop(key)
+        return storage.pop(key, default)
+
+    def clear(self) -> None:
+        if _PLATFORM_EXTRA_ATTR in self._owner.__dict__:
+            self._owner.__dict__[_PLATFORM_EXTRA_ATTR].clear()
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 else:
@@ -77,13 +145,16 @@ def config(
     def get_platform_extra(self: Any) -> dict[str, Any]:
         platform_extra = self.__dict__.get(_PLATFORM_EXTRA_ATTR)
         if platform_extra is None:
-            platform_extra = {}
-            self.__dict__[_PLATFORM_EXTRA_ATTR] = platform_extra
+            return cast(dict[str, Any], _PlatformExtraView(self))
         return cast(dict[str, Any], platform_extra)
 
     def set_platform_extra(self: Any, value: Mapping[str, Any]) -> None:
         if not isinstance(value, Mapping):
             raise TypeError("platform_extra must be a mapping (e.g., dict).")
+        try:
+            normalize_value(value)
+        except TypeError as e:
+            raise TypeError(f"Invalid platform_extra value: {e}")
         self.__dict__[_PLATFORM_EXTRA_ATTR] = dict(value)
 
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
@@ -95,6 +166,14 @@ def config(
 
         if not has_platform_extra:
             cls.platform_extra = property(get_platform_extra, set_platform_extra)
+
+        if not hasattr(cls, "__getattr__"):
+            def __getattr__(self: Any, name: str) -> Any:
+                platform_extra = self.__dict__.get(_PLATFORM_EXTRA_ATTR)
+                if platform_extra and name in platform_extra:
+                    return platform_extra[name]
+                raise AttributeError(f"'{cls.__name__}' object has no attribute '{name}'")
+            cls.__getattr__ = __getattr__
 
         return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
@@ -158,7 +237,12 @@ def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     dataclass_dict = {
         k: v
         for k, v in dataclass_dict.items()
-        if k in dataclass_field_names and is_init_field(cls, k)
+        if (
+            k in dataclass_field_names
+            and is_init_field(cls, k)
+            and not (dataclass_field_names[k].default_factory is not MISSING and v is None)
+            and not (dataclass_field_names[k].default is None and v is None)
+        )
     }
     dataclass_dict.update(kwargs)
     new_instance = cls(**dataclass_dict)
@@ -311,10 +395,8 @@ def normalize_value(x):
     if callable(x):
         raise TypeError("normalize_value: function or callable instance unsupported")
 
-    # Torch dtype: stringify (torch.float64 -> "torch.float64").
-    # We rely on the string form here; dtype-bearing fields that need additional
-    # disambiguation should encode that at the config layer.
-    if isinstance(x, torch.dtype):
+    # Torch dtype and device: stringify.
+    if isinstance(x, (torch.dtype, torch.device)):
         return str(x)
 
     # Bytes

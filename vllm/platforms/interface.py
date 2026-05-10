@@ -443,6 +443,18 @@ class Platform:
         pass
 
     @classmethod
+    def dispatch_platform_extra(
+        cls,
+        vllm_config: "VllmConfig",
+        path: str,
+        value: Any,
+    ) -> None:
+        """Dispatch an OOT platform value into the appropriate config object's
+        platform_extra storage using a dot-separated path.
+        """
+        vllm_config.set_platform_extra(path, value)
+
+    @classmethod
     def _find_non_ssm_backend(
         cls, vllm_config: "VllmConfig"
     ) -> "type[AttentionBackend] | None":

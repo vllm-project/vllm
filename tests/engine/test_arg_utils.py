@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
@@ -11,6 +12,7 @@ from pydantic import Field
 
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
+    AsyncEngineArgs,
     EngineArgs,
     _expand_json_human_readable_numbers,
     contains_type,
@@ -597,7 +599,6 @@ def test_ir_op_priority():
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
 
-
 @pytest.mark.parametrize(
     ("input_json", "expected_json"),
     [
@@ -625,3 +626,77 @@ def test_ir_op_priority():
 )
 def test_expand_json_human_readable_numbers(input_json, expected_json):
     assert _expand_json_human_readable_numbers(input_json) == expected_json
+
+
+class _DummyOOTPlatform:
+    @classmethod
+    def pre_register_and_update(cls, parser):
+        parser.add_argument("--oot-param", type=int)
+        return parser
+
+
+def test_add_cli_args_accepts_oot_args(monkeypatch):
+    monkeypatch.setattr("vllm.engine.arg_utils.load_general_plugins", lambda: None)
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", _DummyOOTPlatform())
+
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--oot-param", "7"])
+
+    assert args.oot_param == 7
+
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.additional_config["oot_platform_params"]["oot_param"] == 7
+
+
+def test_add_cli_args_rejects_oot_flags(monkeypatch):
+    monkeypatch.setattr("vllm.engine.arg_utils.load_general_plugins", lambda: None)
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", _DummyOOTPlatform())
+
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--unknown-flag", "7"])
+
+
+class _DummyNoPlatform:
+    @classmethod
+    def pre_register_and_update(cls, parser):
+        return parser
+
+
+def test_no_oot_platform_params_when_no_platform_args(monkeypatch):
+    monkeypatch.setattr("vllm.engine.arg_utils.load_general_plugins", lambda: None)
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", _DummyNoPlatform())
+
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([])
+
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert "oot_platform_params" not in engine_args.additional_config
+
+
+def test_unrelated_extra_flag_not_captured_into_oot_platform_params(monkeypatch):
+    monkeypatch.setattr("vllm.engine.arg_utils.load_general_plugins", lambda: None)
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", _DummyOOTPlatform())
+
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+    parser.add_argument("--unrelated-flag", type=str, default="ignored")
+    args = parser.parse_args(["--oot-param", "3", "--unrelated-flag", "surprise"])
+
+    engine_args = EngineArgs.from_cli_args(args=args)
+    oot = engine_args.additional_config.get("oot_platform_params", {})
+    assert oot.get("oot_param") == 3
+    assert "unrelated_flag" not in oot
+
+
+def test_core_engine_args_not_duplicated_into_oot_platform_params(monkeypatch):
+    monkeypatch.setattr("vllm.engine.arg_utils.load_general_plugins", lambda: None)
+    monkeypatch.setattr("vllm.engine.arg_utils.current_platform", _DummyOOTPlatform())
+
+    parser = AsyncEngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--oot-param", "5"])
+
+    engine_args = EngineArgs.from_cli_args(args=args)
+    oot = engine_args.additional_config.get("oot_platform_params", {})
+    core_fields = {f.name for f in dataclasses.fields(EngineArgs)}
+    assert not (core_fields & set(oot.keys()))

@@ -1474,10 +1474,22 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
+        oot_dest_names: set[str] = getattr(args, "_oot_platform_dest_names", set())
+        platform_only_args = {
+            key: vars(args)[key]
+            for key in oot_dest_names
+            if key in vars(args)
+        }
         # Set the attributes from the parsed arguments.
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
         )
+        if platform_only_args:
+            additional_config = dict(engine_args.additional_config)
+            oot_platform_params = dict(additional_config.get("oot_platform_params", {}))
+            oot_platform_params.update(platform_only_args)
+            additional_config["oot_platform_params"] = oot_platform_params
+            engine_args.additional_config = additional_config
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
@@ -2458,7 +2470,10 @@ class AsyncEngineArgs(EngineArgs):
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.",
         )
+        dests_before = {a.dest for a in parser._actions}
         current_platform.pre_register_and_update(parser)
+        oot_dests = {a.dest for a in parser._actions} - dests_before
+        parser.set_defaults(_oot_platform_dest_names=oot_dests)
         return parser
 
 
