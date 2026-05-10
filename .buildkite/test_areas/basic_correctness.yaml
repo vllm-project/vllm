@@ -7,20 +7,24 @@ steps:
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
+  - vllm/beam_search.py
   - vllm/config/
   - vllm/device_allocator/
   - vllm/distributed/
   - vllm/engine/
   - vllm/entrypoints/llm.py
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
   - tests/basic_correctness/test_cumem.py
