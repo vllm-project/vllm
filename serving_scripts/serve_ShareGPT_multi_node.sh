@@ -9,7 +9,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-bench-sharegpt-generic-model-2026-05-10-v3"
+SCRIPT_VERSION="arc-bench-sharegpt-generic-autogen-2026-05-10-v4"
 
 resolve_host_ipv4() {
   local nodename="$1"
@@ -109,6 +109,7 @@ source "${VENV_DIR}/bin/activate"
 
 PYTHON_PATH="$(command -v python)"
 EXPECTED_PYTHON="${VENV_DIR}/bin/python"
+
 echo "Using python: ${PYTHON_PATH}"
 
 if [ "${PYTHON_PATH}" != "${EXPECTED_PYTHON}" ]; then
@@ -129,11 +130,15 @@ fi
 MODEL_ID="${MODEL_ID:-meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8}"
 MODEL_SLUG="${MODEL_SLUG:-$(make_model_slug "${MODEL_ID}")}"
 
+# Workload shape:
+# SP = prompt / prefill token bucket
+# SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-128}"
 
 DATASET_DIR="${DATASET_DIR:-${REPO_ROOT}/datasets/sharegpt_buckets/${MODEL_SLUG}/sd${SD}}"
-DATASET_PATH="${DATASET_PATH:-${DATASET_DIR}/sharegpt_sp${SP}.jsonl}"
+DEFAULT_DATASET_PATH="${DATASET_DIR}/sharegpt_sp${SP}.jsonl"
+DATASET_PATH="${DATASET_PATH:-${DEFAULT_DATASET_PATH}}"
 
 AUTO_GENERATE_DATASET="${AUTO_GENERATE_DATASET:-1}"
 DATASET_NAME="${DATASET_NAME:-Aeala/ShareGPT_Vicuna_unfiltered}"
@@ -203,7 +208,13 @@ echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-<unset>}"
 echo "MODEL_ID=${MODEL_ID}"
 echo "MODEL_SLUG=${MODEL_SLUG}"
 echo "SP=${SP} SD=${SD}"
+echo "DATASET_NAME=${DATASET_NAME}"
+echo "DATASET_SPLIT=${DATASET_SPLIT}"
+echo "DATASET_DIR=${DATASET_DIR}"
 echo "DATASET_PATH=${DATASET_PATH}"
+echo "AUTO_GENERATE_DATASET=${AUTO_GENERATE_DATASET}"
+echo "DATASET_MAX_PER_BUCKET=${DATASET_MAX_PER_BUCKET}"
+echo "DATASET_MAX_SOURCE_ROWS=${DATASET_MAX_SOURCE_ROWS}"
 echo "NUM_PROMPTS=${NUM_PROMPTS}"
 echo "REQUEST_RATE=${REQUEST_RATE}"
 echo "BURSTINESS=${BURSTINESS}"
@@ -214,21 +225,56 @@ echo "ENDPOINT=${ENDPOINT}"
 echo "SAVE_RESULT=${SAVE_RESULT}"
 echo "SAVE_DETAILED=${SAVE_DETAILED}"
 echo "RESULT_DIR=${RESULT_DIR}"
+echo "RESULT_FILENAME=${RESULT_FILENAME:-<default>}"
 
 if [ ! -f "${DATASET_PATH}" ]; then
-  echo "Dataset file not found: ${DATASET_PATH}" >&2
-  echo "" >&2
-  echo "Generate it first, for example:" >&2
-  echo "  cd ${REPO_ROOT}" >&2
-  echo "  source ${VENV_DIR}/bin/activate" >&2
-  echo "  python datasets/build_sharegpt_length_buckets.py \\" >&2
-  echo "    --model ${MODEL_ID} \\" >&2
-  echo "    --targets ${SP} \\" >&2
-  echo "    --out-dir ${DATASET_DIR} \\" >&2
-  echo "    --max-per-bucket 1000 \\" >&2
-  echo "    --custom-output-len ${SD} \\" >&2
-  echo "    --write-jsonl" >&2
-  exit 1
+  echo "Dataset file not found: ${DATASET_PATH}"
+
+  if [ "${AUTO_GENERATE_DATASET}" != "1" ]; then
+    echo "AUTO_GENERATE_DATASET=${AUTO_GENERATE_DATASET}; refusing to generate automatically." >&2
+    exit 1
+  fi
+
+  echo "Generating ShareGPT bucket:"
+  echo "  MODEL_ID=${MODEL_ID}"
+  echo "  SP=${SP}"
+  echo "  SD=${SD}"
+  echo "  DATASET_DIR=${DATASET_DIR}"
+
+  mkdir -p "${DATASET_DIR}"
+  cd "${REPO_ROOT}"
+
+  python datasets/build_sharegpt_length_buckets.py \
+    --model "${MODEL_ID}" \
+    --dataset-name "${DATASET_NAME}" \
+    --split "${DATASET_SPLIT}" \
+    --targets "${SP}" \
+    --out-dir "${DATASET_DIR}" \
+    --max-source-rows "${DATASET_MAX_SOURCE_ROWS}" \
+    --max-per-bucket "${DATASET_MAX_PER_BUCKET}" \
+    --custom-output-len "${SD}" \
+    --write-jsonl
+
+  GENERATED_PATH="${DATASET_DIR}/sharegpt_sp${SP}.jsonl"
+
+  if [ ! -f "${GENERATED_PATH}" ]; then
+    echo "Dataset generation finished, but expected file is missing: ${GENERATED_PATH}" >&2
+    exit 1
+  fi
+
+  if [ "${DATASET_PATH}" != "${GENERATED_PATH}" ]; then
+    echo "Custom DATASET_PATH differs from generated path."
+    echo "Copying:"
+    echo "  from ${GENERATED_PATH}"
+    echo "  to   ${DATASET_PATH}"
+    mkdir -p "$(dirname "${DATASET_PATH}")"
+    cp "${GENERATED_PATH}" "${DATASET_PATH}"
+  fi
+
+  if [ ! -f "${DATASET_PATH}" ]; then
+    echo "Dataset still missing after generation/copy: ${DATASET_PATH}" >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "${RESULT_DIR}"
