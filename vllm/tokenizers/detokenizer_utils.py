@@ -94,6 +94,7 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
 
     """
+    token_ids = list(token_ids)
     unique_ids = set(token_ids)
     decoded = {}
     for uid in unique_ids:
