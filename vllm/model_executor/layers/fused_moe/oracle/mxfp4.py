@@ -124,7 +124,7 @@ def backend_to_kernel_cls(
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -160,21 +160,21 @@ def backend_to_kernel_cls(
         ]
 
     elif backend == Mxfp4MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
         return [MarlinExperts]
 
     elif backend == Mxfp4MoeBackend.BATCHED_MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             BatchedMarlinExperts,
         )
 
         return [BatchedMarlinExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
