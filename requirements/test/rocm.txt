@@ -273,12 +273,6 @@ genai-perf==0.0.16
     # via -r requirements/test/rocm.in
 genson==1.3.0
     # via datamodel-code-generator
-geopandas==1.1.3
-    # via terratorch
-gitdb==4.0.12
-    # via gitpython
-gitpython==3.1.46
-    # via wandb
 google-api-core==2.30.0
     # via
     #   google-cloud-core
@@ -585,8 +579,6 @@ numpy==2.2.6
     #   evaluate
     #   fastparquet
     #   genai-perf
-    #   geopandas
-    #   h5py
     #   imagehash
     #   imageio
     #   librosa
