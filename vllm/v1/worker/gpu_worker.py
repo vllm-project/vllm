@@ -4,6 +4,7 @@
 
 import gc
 import os
+import socket
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -111,6 +112,7 @@ class Worker(WorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
+        listen_fd: int | None = None,
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -119,6 +121,9 @@ class Worker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        # Pre-bound TCPStore listening FD adopted via master_listen_fd; only
+        # set on rank 0 of the local node when MultiprocExecutor pre-binds.
+        self.listen_fd = listen_fd
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -286,7 +291,11 @@ class Worker(WorkerBase):
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+                listen_fd=self.listen_fd,
             )
+            # FD ownership has been transferred to the TCPStore; clear the
+            # local reference so it isn't re-used.
+            self.listen_fd = None
 
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
@@ -1118,12 +1127,65 @@ class Worker(WorkerBase):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
 
 
+def _build_tcp_store_from_fd(
+    init_method: str,
+    listen_fd: int,
+    world_size: int,
+    timeout: timedelta,
+) -> "torch.distributed.Store | None":
+    """Build a master TCPStore that adopts an already-listening FD.
+
+    Returns None and closes the FD on any failure so the caller can fall
+    back to the URL-based init path.
+    """
+    from vllm.distributed.utils import create_tcp_store
+    from vllm.utils.network_utils import split_zmq_path
+
+    try:
+        scheme, host, port_str = split_zmq_path(init_method)
+        port = int(port_str)
+        assert scheme == "tcp"
+    except (ValueError, AssertionError):
+        logger.warning(
+            "Unsupported init_method=%s for FD adoption; "
+            "falling back to URL-based init",
+            init_method,
+        )
+        socket.close(listen_fd)
+        return None
+    listen_socket = socket.socket(fileno=listen_fd)
+    try:
+        store = create_tcp_store(
+            host=host,
+            port=port,
+            listen_socket=listen_socket,
+            world_size=world_size,
+            is_master=True,
+            timeout=timeout,
+            wait_for_workers=False,
+            use_libuv=False,
+        )
+    except Exception as e:
+        logger.warning(
+            "TCPStore FD-adoption failed (%s); falling back to URL-based init",
+            e,
+        )
+        return None
+    logger.info(
+        "Adopted pre-bound TCPStore listener on %s:%d (rank 0)",
+        host,
+        port,
+    )
+    return store
+
+
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,
     rank: int,
     distributed_init_method: str | None = None,
     local_rank: int = -1,
     backend: str = "nccl",
+    listen_fd: int | None = None,
 ) -> None:
     """Initialize the distributed environment."""
     parallel_config = vllm_config.parallel_config
@@ -1139,6 +1201,15 @@ def init_worker_distributed_environment(
     if parallel_config.distributed_timeout_seconds is not None:
         timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)
 
+    pre_built_store = None
+    if listen_fd is not None and init_method.startswith("tcp://"):
+        pre_built_store = _build_tcp_store_from_fd(
+            init_method=init_method,
+            listen_fd=listen_fd,
+            world_size=parallel_config.world_size,
+            timeout=timeout or timedelta(seconds=600),
+        )
+
     init_distributed_environment(
         parallel_config.world_size,
         rank,
@@ -1146,6 +1217,7 @@ def init_worker_distributed_environment(
         local_rank,
         backend,
         timeout,
+        pre_built_store=pre_built_store,
     )
 
     ensure_model_parallel_initialized(

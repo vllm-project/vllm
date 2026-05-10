@@ -5,6 +5,7 @@ import os
 import pickle
 import queue
 import signal
+import socket
 import threading
 import time
 import traceback
@@ -18,6 +19,7 @@ from enum import Enum, auto
 from functools import cached_property, partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.reduction import recv_handle, send_handle
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
 from typing import Any, cast
@@ -64,6 +66,39 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOu
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+
+# How long rank-0 worker waits for the parent to send the TCPStore listening
+# FD over the handshake pipe. send_handle is ~sub-millisecond in the success
+# case; this generous bound only matters if the parent crashes between
+# proc.start() and send_handle.
+_LISTEN_FD_RECV_TIMEOUT_S = 30.0
+
+
+def _bind_local_listen_socket(host: str) -> socket.socket | None:
+    """Bind a TCP listening socket on ``(host, 0)`` and return it.
+
+    The returned socket is held open in the parent until the FD has been
+    sent to rank-0 worker via ``multiprocessing.reduction.send_handle``;
+    rank-0 then adopts the FD via ``torch.distributed.TCPStore``'s
+    ``master_listen_fd`` parameter. This eliminates the TOCTOU window
+    that exists when a port is picked by ``get_open_port()`` (which
+    closes its socket immediately) and re-bound later by libtorch.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((host, 0))
+        s.listen(128)
+    except OSError as e:
+        logger.warning(
+            "Could not pre-bind TCPStore listener on %s: %s; "
+            "falling back to URL-based init",
+            host,
+            e,
+        )
+        s.close()
+        return None
+    return s
 
 
 class FutureWrapper(Future):
@@ -124,9 +159,26 @@ class MultiprocExecutor(Executor):
         set_multiprocessing_worker_envs()
 
         # use the loopback address get_loopback_ip() for communication.
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+        host = get_loopback_ip()
+        # Pre-bind the TCPStore listener in the parent and pass the FD to
+        # rank-0 via send_handle so libtorch's TCPStore can adopt it
+        # without a separate bind. Single-node, single-DP, non-elastic-EP
+        # only — DP/multi-node init paths overwrite the URL inside
+        # init_distributed_environment, which would invalidate the FD.
+        # Mirrors the inverse gate at parallel_state.init_distributed_environment.
+        listen_socket: socket.socket | None = None
+        if (
+            current_platform.is_cuda_alike()
+            and self.parallel_config.nnodes == 1
+            and self.parallel_config.data_parallel_size == 1
+            and not self.parallel_config.enable_elastic_ep
+        ):
+            listen_socket = _bind_local_listen_socket(host)
+        if listen_socket is not None:
+            port = listen_socket.getsockname()[1]
+        else:
+            port = get_open_port()
+        distributed_init_method = get_distributed_init_method(host, port)
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -187,7 +239,17 @@ class MultiprocExecutor(Executor):
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=is_driver_worker,
                         inherited_fds=inherited_fds,
+                        listen_socket=(listen_socket if global_rank == 0 else None),
                     )
+                # Release the parent's copy of the listener as soon as
+                # rank-0 has been spawned: on success the FD has been duped
+                # into rank-0 via send_handle; on send_handle failure the
+                # worker will fall back to URL-based init and must be able
+                # to bind this exact port — which it cannot while the
+                # parent still holds an actively-listening socket on it.
+                if global_rank == 0 and listen_socket is not None:
+                    listen_socket.close()
+                    listen_socket = None
                 unready_workers.append(unready_worker_handle)
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
@@ -242,6 +304,10 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                         uw.death_writer = None
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
+            # The listening FD has been duped into rank-0 via send_handle
+            # (or never bound); release the parent's copy unconditionally.
+            if listen_socket is not None:
+                listen_socket.close()
 
         self.output_rank = self._get_output_rank()
 
@@ -585,6 +651,7 @@ class WorkerProc:
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
         is_driver_worker: bool,
+        listen_fd: int | None = None,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
@@ -600,6 +667,10 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             "shared_worker_lock": shared_worker_lock,
         }
+        # Only inject when present so non-GPU Worker classes — which do not
+        # accept this kwarg — are unaffected.
+        if listen_fd is not None:
+            all_kwargs[local_rank]["listen_fd"] = listen_fd
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
@@ -650,12 +721,22 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
         inherited_fds: list[int] | None = None,
+        listen_socket: socket.socket | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
         ready_reader, ready_writer = context.Pipe(duplex=False)
         # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
+        # Dedicated socketpair-backed connection for ferrying the TCPStore
+        # listening FD to rank-0 via multiprocessing.reduction.send_handle.
+        # Must be duplex=True so the underlying FDs are AF_UNIX sockets;
+        # send_handle/recv_handle use SCM_RIGHTS, which Pipe(duplex=False)
+        # (os.pipe-backed) does not support.
+        fd_pipe_parent: Connection | None = None
+        fd_pipe_child: Connection | None = None
+        if listen_socket is not None:
+            fd_pipe_parent, fd_pipe_child = context.Pipe(duplex=True)
         if inherited_fds is not None:
             inherited_fds = inherited_fds.copy()
             inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
@@ -667,6 +748,7 @@ class WorkerProc:
             "input_shm_handle": input_shm_handle,
             "ready_pipe": ready_writer,
             "death_pipe": death_reader,
+            "fd_pipe": fd_pipe_child,
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
             # Have the worker close parent end of this worker's pipes too
@@ -689,6 +771,25 @@ class WorkerProc:
         # Close child ends of pipes here in the parent
         ready_writer.close()
         death_reader.close()
+        if fd_pipe_child is not None:
+            fd_pipe_child.close()
+
+        # Hand the listening socket FD to rank-0 via SCM_RIGHTS. The child
+        # adopts it inside torch's TCPStore via ``master_listen_fd``, so
+        # rank-0 never re-binds the port. If this hop fails the worker
+        # falls back to the URL-based init path with a warning.
+        if fd_pipe_parent is not None:
+            assert listen_socket is not None
+            try:
+                send_handle(fd_pipe_parent, listen_socket.fileno(), proc.pid)
+            except Exception as e:
+                logger.warning(
+                    "send_handle to rank-0 (pid=%s) failed: %s; "
+                    "rank 0 will fall back to URL-based init",
+                    proc.pid,
+                    e,
+                )
+            fd_pipe_parent.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
@@ -814,6 +915,7 @@ class WorkerProc:
         worker = None
         ready_writer = kwargs.pop("ready_pipe")
         death_pipe = kwargs.pop("death_pipe", None)
+        fd_pipe: Connection | None = kwargs.pop("fd_pipe", None)
 
         # Close inherited pipes from parent (incl. other worker pipes)
         # Explicitly passing in existing pipes and closing them makes the pipe
@@ -824,6 +926,25 @@ class WorkerProc:
                 os.close(fd)
             except Exception as e:
                 logger.warning("Error closing inherited connection: %s: %s", type(e), e)
+
+        # Receive the TCPStore listening FD from the parent (rank-0 only).
+        # Presence of fd_pipe is the signal that we expect a handle.
+        if fd_pipe is not None:
+            try:
+                if fd_pipe.poll(timeout=_LISTEN_FD_RECV_TIMEOUT_S):
+                    kwargs["listen_fd"] = recv_handle(fd_pipe)
+                else:
+                    logger.warning(
+                        "Timed out waiting for TCPStore listen_fd; "
+                        "falling back to URL-based init"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "recv_handle for TCPStore listen_fd failed: %s; "
+                    "falling back to URL-based init",
+                    e,
+                )
+            fd_pipe.close()
 
         try:
             # Initialize tracer

@@ -1362,6 +1362,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
     timeout: timedelta | None = None,
+    pre_built_store: "torch.distributed.Store | None" = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1406,6 +1407,13 @@ def init_distributed_environment(
                 rank,
                 distributed_init_method,
             )
+        if pre_built_store is not None:
+            logger.warning(
+                "Discarding pre_built_store: DP/multi-node init rewrites "
+                "host:port to %s, which would not match the FD-adopted store.",
+                distributed_init_method,
+            )
+            pre_built_store = None
     if not torch.distributed.is_initialized():
         logger.info(
             "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1415,10 +1423,11 @@ def init_distributed_environment(
             distributed_init_method,
             backend,
         )
-        assert distributed_init_method is not None, (
-            "distributed_init_method must be provided when initializing "
-            "distributed environment"
-        )
+        if pre_built_store is None:
+            assert distributed_init_method is not None, (
+                "distributed_init_method must be provided when initializing "
+                "distributed environment"
+            )
         if not torch.distributed.is_backend_available(backend):
             logger.warning(
                 "Distributed backend %s is not available; falling back to gloo.",
@@ -1428,13 +1437,19 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
+        # store= and init_method= are mutually exclusive in PyTorch.
+        rendezvous_kwarg: dict[str, Any] = (
+            {"store": pre_built_store}
+            if pre_built_store is not None
+            else {"init_method": distributed_init_method}
+        )
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,
-            init_method=distributed_init_method,
             world_size=world_size,
             rank=rank,
             timeout=timeout,
+            **rendezvous_kwarg,
         )
         if enable_elastic_ep:
             tp_pp_cpu_group = torch.distributed.new_group(
