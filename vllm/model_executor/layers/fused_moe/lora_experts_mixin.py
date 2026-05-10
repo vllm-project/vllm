@@ -70,6 +70,7 @@ class LoRAExpertsMixin:
             lora_context.w13_num_slices,
             lora_context.fully_sharded,
             lora_context.use_tuned_config,
+            token_lora_mapping=lora_context.local_token_lora_mapping,
         )
 
     def apply_w2_lora(

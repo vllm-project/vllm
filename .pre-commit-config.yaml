@@ -131,6 +131,16 @@ repos:
         --python-version, "3.12",
       ]
       files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+    - id: pip-compile
+      alias: pip-compile-docs
+      name: pip-compile-docs
+      args: [
+        requirements/docs.in,
+        -o, requirements/docs.txt,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/docs\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
