@@ -55,6 +55,17 @@ async def reset_mm_cache(raw_request: Request):
     return Response(status_code=200)
 
 
+@router.post("/reset_encoder_cache")
+async def reset_encoder_cache(raw_request: Request):
+    """
+    Reset the encoder cache. Note that we currently do not check if the
+    encoder cache is successfully reset in the API server.
+    """
+    logger.info("Resetting encoder cache...")
+    await engine_client(raw_request).reset_encoder_cache()
+    return Response(status_code=200)
+
+
 def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return

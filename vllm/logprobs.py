@@ -28,7 +28,7 @@ LogprobsOnePosition = dict[int, Logprob]
 
 
 @dataclass
-class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
+class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
     """
     Flat logprobs of a request into multiple primitive type lists.
 
@@ -140,7 +140,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
     def __delitem__(self, item) -> None:
         raise TypeError("Cannot delete logprobs from FlatLogprobs")
 
-    def insert(self, item) -> None:
+    def insert(self, index: int, value: dict[int, Logprob] | None) -> None:
         raise TypeError("Cannot insert logprobs to FlatLogprobs")
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
@@ -161,7 +161,7 @@ SampleLogprobs = FlatLogprobs | list[LogprobsOnePosition]
 
 def create_prompt_logprobs(flat_logprobs: bool) -> PromptLogprobs:
     """Creates a container to store prompt logprobs for a request"""
-    logprobs = FlatLogprobs() if flat_logprobs else []
+    logprobs: PromptLogprobs = FlatLogprobs() if flat_logprobs else []
     # NOTE: logprob of first prompt token is None.
     logprobs.append(None)
     return logprobs

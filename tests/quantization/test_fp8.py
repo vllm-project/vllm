@@ -5,11 +5,15 @@
 Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
+import logging
+
 import pytest
+import regex as re
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
@@ -19,6 +23,8 @@ from vllm.model_executor.layers.quantization.fp8 import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
 
 MODELS = [
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
@@ -133,7 +139,7 @@ def test_kv_cache_model_load_and_run(
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
-def test_load_fp16_model(
+def test_online_quantization(
     vllm_runner,
     kv_cache_dtype: str,
     force_marlin: bool,
@@ -191,6 +197,102 @@ def test_load_fp16_model(
 
         llm.apply_model(check_model)
 
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
+        print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_online_quant_peak_mem(
+    vllm_runner,
+    caplog_mp_spawn,
+    monkeypatch,
+) -> None:
+    # Note: `allenai/OLMoE-1B-7B-0125-Instruct` was selected because:
+    # 1. it covers both Linear and MoE paths
+    # 2. it is already used by other tests in CI, so adding it here
+    #    does not increase disk space for CI runners
+    # I really wanted to use `ibm-granite/granite-3.0-1b-a400m-base`
+    # which I think is the smallest MoE model in vLLM (2.5 GiB bf16,
+    # 1.3 GiB fp8), but could not as adding one more model makes CI
+    # run out of disk space.
+    model_name = "allenai/OLMoE-1B-7B-0125-Instruct"
+
+    # Force spawn to ensure caplog_mp_spawn works consistently
+    # (it relies on VLLM_LOGGING_CONFIG_PATH which spawn reads but fork ignores)
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+    with (
+        caplog_mp_spawn(logging.DEBUG) as log_holder,
+        vllm_runner(
+            model_name,
+            quantization="fp8",
+            enforce_eager=True,
+        ) as llm,
+    ):
+        outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
+        print(outputs[0][1])
+
+    log_text = log_holder.text
+
+    # Parse memory usage from captured logs
+    model_memory_gib = None
+    peak_memory_gib = None
+    for line in log_text.splitlines():
+        if model_memory_gib is None:
+            match = re.search(r"Model loading took ([\d.]+) GiB memory", line)
+            if match:
+                model_memory_gib = float(match.group(1))
+        if peak_memory_gib is None:
+            match = re.search(
+                r"Peak GPU memory after loading weights: ([\d.]+) GiB", line
+            )
+            if match:
+                peak_memory_gib = float(match.group(1))
+
+    assert model_memory_gib is not None, "Could not find model loading memory log"
+    assert peak_memory_gib is not None, "Could not find peak memory log"
+    print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
+    print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
+
+    # model specific, allenai/OLMoE-1B-7B-0125-Instruct fp8 online quant
+    # uses 6.65 GiB for weight loading (bf16 checkpoint is ~12.89 GiB)
+    expected_model_memory_gib = 6.7
+
+    # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06
+    # GiB, which is 1.36x above model_memory_gib. A slightly higher number is
+    # expected as when we load and quantize weights in a streaming fashion we
+    # need to have individual weights in bf16 + fp8 alive at the same time.
+    expected_peak_memory_gib = expected_model_memory_gib * 1.4
+
+    assert model_memory_gib < expected_model_memory_gib, (
+        f"{model_memory_gib=} higher than {expected_model_memory_gib}"
+    )
+    assert peak_memory_gib < expected_peak_memory_gib, (
+        f"{peak_memory_gib=} higher than {expected_peak_memory_gib}"
+    )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_online_quant_load_format_dummy(
+    vllm_runner,
+    monkeypatch,
+    caplog,
+) -> None:
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="fp8",
+        enforce_eager=True,
+        load_format="dummy",
+    ) as llm:
+        outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
+        print(outputs[0][1])
+
 
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
@@ -214,7 +316,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Note that we use a shape % 4 != 0 to cover edge cases,
     # because scaled_fp8_quant is vectorized by 4.
-    x = (torch.randn(size=(11, 11), device="cuda") * 13).to(dtype)
+    x = (torch.randn(size=(11, 11), device=DEVICE_TYPE) * 13).to(dtype)
 
     # Dynamic quantization
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
@@ -238,7 +340,9 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # non-contiguous input with padding
     m, n, padded_stride = 975, 512, 576
-    padded_tensor = (torch.randn(size=(m, padded_stride), device="cuda") * 13).to(dtype)
+    padded_tensor = (torch.randn(size=(m, padded_stride), device=DEVICE_TYPE) * 13).to(
+        dtype
+    )
     x_nc = padded_tensor[:, :n]  # shape (m, n) with stride (padded_stride, 1)
 
     assert not x_nc.is_contiguous()
@@ -307,7 +411,9 @@ def test_fp8_reloading(
             "If this is your use case, consider using a restore function like #26327"
         )
 
-    with torch.device("cuda:0"):
+    # Set model config as model_config.dtype is required in Fp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
+    with torch.device(f"{DEVICE_TYPE}:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
             weight_block_size=weight_block_size,
@@ -367,3 +473,26 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_kv_cache_dtype_skip_layers(vllm_runner, monkeypatch):
+    """Test that kv_cache_dtype_skip_layers skips quantization for specified layers."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "facebook/opt-125m",
+        kv_cache_dtype="fp8",
+        kv_cache_dtype_skip_layers=["0", "2"],
+        enforce_eager=True,
+    ) as llm:
+
+        def check_layers(model):
+            for i, layer in enumerate(model.model.decoder.layers):
+                expected = "auto" if str(i) in ["0", "2"] else "fp8"
+                assert layer.self_attn.attn.kv_cache_dtype == expected
+
+        llm.apply_model(check_layers)

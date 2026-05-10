@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
 from torch.nn import Module
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -21,9 +20,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEActivationFormat,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
@@ -31,19 +29,9 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-
-if current_platform.is_cuda_alike():
-    from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import TritonExperts
-else:
-    TritonExperts = None  # type: ignore
-
 
 logger = init_logger(__name__)
 
@@ -53,56 +41,44 @@ logger = init_logger(__name__)
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
+    # --8<-- [end:unquantized_fused_moe]
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.unquantized_backend = select_unquantized_moe_backend(
-            use_ep=self.moe.moe_parallel_config.use_ep,
-            use_dp=self.moe.moe_parallel_config.dp_size > 1,
+        self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
+            moe_config=self.moe,
         )
 
-        # AITER only supports gated activations (silu/gelu), so disable it
-        # for non-gated MoE (is_act_and_mul=False)
-        self.rocm_aiter_moe_enabled = (
-            rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
-        )
-        self.kernel: mk.FusedMoEModularKernel | None = None
+    @property
+    def is_monolithic(self) -> bool:
+        # Escape hatch for CPU, which stays on the old monolithic path.
+        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
+            return True
+        return super().is_monolithic
 
     @property
     def supports_eplb(self) -> bool:
         return True
 
-    @property
-    def allow_inplace(self) -> bool:
-        return True
-
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalize | None:
-        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            return None
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+    ):
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic for all but the CPU backend. CPU backend is monolithic. "
+            "So this function should not be called."
+        )
 
     def select_gemm_impl(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        if (
-            prepare_finalize.activation_format
-            == FusedMoEActivationFormat.BatchedExperts
-        ):
-            logger.debug("BatchedTritonExperts %s", self.moe)
-            return BatchedTritonExperts(
-                max_num_tokens=self.moe.max_num_tokens,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                quant_config=self.moe_quant_config,
-            )
-        else:
-            logger.debug("TritonExperts %s", self.moe)
-            return TritonExperts(self.moe_quant_config)
+    ) -> FusedMoEExpertsModular:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def create_weights(
         self,
@@ -167,7 +143,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ):
             num_pad = 256 // weight.element_size()
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
 
         return weight
 
@@ -178,44 +154,69 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         w2: torch.Tensor,
     ) -> None:
         # Shuffle weights to runtime format.
-        w13, w2 = convert_to_unquantized_kernel_format(
+        w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
             layer=layer,
             w13_weight=w13,
             w2_weight=w2,
         )
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
+        # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
+        # On the first call we replace the parameter normally. On subsequent
+        # calls (e.g. RL weight updates that re-trigger
+        # process_weights_after_loading) the moe kernel has already been set
+        # up and CUDA graphs may have captured the parameter addresses, so
+        # we copy the shuffled data into the existing storage instead of
+        # re-registering a new Parameter.
+        is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
+        replace_parameter(layer, "w13_weight", w13_new, prefer_copy=is_weight_update)
+        replace_parameter(layer, "w2_weight", w2_new, prefer_copy=is_weight_update)
 
-        # Setup Modular Kernel for TP Case
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
+        # AITER backend requires weights to be marked as shuffled.
+        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
 
-        self.kernel, self.use_inplace = make_unquantized_moe_kernel(
-            layer=layer,
-            backend=self.unquantized_backend,
-            quant_config=self.moe_quant_config,
-            moe_config=self.moe,
-        )
+        if not is_weight_update:
+            # Setup moe kernel only on the first call. For the unquantized
+            # method, moe_quant_config is either the constant
+            # FUSED_MOE_UNQUANTIZED_CONFIG or biased_moe_quant_config(...)
+            # which references layer.w{13,2}_bias; since weight updates
+            # mutate those bias tensors in place, the kernel does not need
+            # to be re-built.
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            assert self.experts_cls is not None
+            self.moe_kernel = make_unquantized_moe_kernel(
+                quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                backend=self.unquantized_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
 
-        # Padding the weight for better performance on ROCm
+        # Padding the weight for better performance on ROCm.
+        # _maybe_pad_weight is idempotent: on the first call it allocates a
+        # padded storage and returns a strided view; on subsequent calls
+        # (weight updates) the stride condition no longer matches so it
+        # returns the input unchanged. The reassignment to .data is therefore
+        # a no-op on updates and preserves the storage address (data_ptr)
+        # used by captured CUDA graphs.
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
 
-        if self.unquantized_backend == UnquantizedMoeBackend.XPU:
-            import intel_extension_for_pytorch as ipex
+        if self.unquantized_backend in [
+            UnquantizedMoeBackend.TPU,
+            UnquantizedMoeBackend.OOT,
+        ]:
+            # OOT handles internally.
+            return
 
-            ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
-            layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                layer.w13_weight,
-                layer.w2_weight,
-                use_prepack=True,
-                experts_start_id=ep_rank_start,
-            )
         elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
+            # CPU stays on the old path — no oracle, no moe_kernel.
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
@@ -241,31 +242,29 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     )
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
+                    self.cpu_fused_moe: Callable = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                    self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-        elif current_platform.is_cuda_alike():
+                self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+        elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
+            w13 = layer.w13_weight
+            w2 = layer.w2_weight
+
+            w13.data = w13.transpose(-1, -2).contiguous()
+            w2.data = w2.transpose(-1, -2).contiguous()
+
+            self._setup_kernel(
+                layer=layer,
+                w13=w13,
+                w2=w2,
+            )
+        else:
             self._setup_kernel(
                 layer=layer,
                 w13=layer.w13_weight,
                 w2=layer.w2_weight,
             )
-
-    def apply(
-        self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward(
-            router=router,
-            layer=layer,
-            x=x,
-            router_logits=router_logits,
-        )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
@@ -276,97 +275,101 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             return FUSED_MOE_UNQUANTIZED_CONFIG
 
-    def forward_cuda(
+    def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel
-
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return self.forward(
+            layer=layer,
+            x=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts_input=shared_experts_input,
         )
 
-        result = self.kernel(
+    def forward_native(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=self.use_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
+            shared_experts_input=shared_experts_input,
         )
 
-        return result
-
-    def forward_cpu(
+    def forward_cuda(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.eplb_state.expert_load_view is not None
-            or layer.eplb_state.logical_to_physical_map is not None
-            or layer.eplb_state.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for CPU.")
-
-        return layer.cpu_fused_moe(
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        return self.forward_native(
             layer,
             x,
-            layer.use_grouped_topk,
-            layer.top_k,
-            router_logits,
-            layer.renormalize,
-            layer.topk_group,
-            layer.num_expert_group,
-            layer.global_num_experts,
-            layer.expert_map,
-            layer.custom_routing_function,
-            layer.scoring_func,
-            layer.routed_scaling_factor,
-            layer.e_score_correction_bias,
-            layer.apply_router_weight_on_input,
-            layer.activation,
+            topk_weights,
+            topk_ids,
+            shared_experts_input,
         )
 
-    def forward_xpu(
+    def apply_monolithic(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            layer.enable_eplb is not False
-            or layer.eplb_state.expert_load_view is not None
-            or layer.eplb_state.logical_to_physical_map is not None
-            or layer.eplb_state.logical_replica_count is not None
-        ):
-            raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        return layer.ipex_fusion(
-            x,
-            layer.use_grouped_topk,
-            layer.top_k,
-            router_logits,
-            layer.renormalize,
-            layer.topk_group,
-            layer.num_expert_group,
-            custom_routing_function=layer.custom_routing_function,
-        )
-
-    if current_platform.is_cpu():
-        forward_native = forward_cpu
-    elif current_platform.is_xpu():
-        forward_native = forward_xpu
-    else:
-        forward_native = forward_cuda
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
+            assert self.moe_kernel is None
+            return self.cpu_fused_moe(
+                layer,
+                x,
+                layer.use_grouped_topk,
+                layer.top_k,
+                router_logits,
+                layer.renormalize,
+                layer.topk_group,
+                layer.num_expert_group,
+                layer.global_num_experts,
+                layer.expert_map,
+                layer.custom_routing_function,
+                layer.scoring_func,
+                layer.routed_scaling_factor,
+                layer.e_score_correction_bias,
+                layer.apply_router_weight_on_input,
+                layer.activation,
+            )
+        else:
+            assert self.moe_kernel is not None
+            return self.moe_kernel.apply_monolithic(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                router_logits,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                num_expert_group=layer.num_expert_group,
+                topk_group=layer.topk_group,
+                e_score_correction_bias=layer.e_score_correction_bias,
+                routed_scaling_factor=layer.routed_scaling_factor,
+            )

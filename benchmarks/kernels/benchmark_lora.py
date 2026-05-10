@@ -842,6 +842,7 @@ class BenchmarkTensors:
             "sorted_token_ids": sorted_token_ids,
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
+            "token_lora_mapping": self.lora_kernel_meta.token_lora_mapping,
             "top_k_num": ctx.top_k_num,
             "device": self.input.device,
             "N": lora_rank,
@@ -915,6 +916,7 @@ class BenchmarkTensors:
             "sorted_token_ids": sorted_token_ids,
             "expert_ids": expert_ids,
             "num_tokens_post_padded": num_tokens_post_padded,
+            "token_lora_mapping": self.lora_kernel_meta.token_lora_mapping,
             "top_k_num": ctx.top_k_num,
             "device": self.input.device,
             "N": lora_rank,
@@ -1033,7 +1035,7 @@ def bench_optype(
     # Run bench function so that _LORA_A_PTR_DICT and _LORA_B_PTR_DICT are set up
     for kwargs in kwargs_list:
         op_type.bench_fn()(**kwargs)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Merge into a single kwargs and qualify arguments as ArgPool
     kwargs = {k: ArgPool([]) for k in kwargs_list[0]}

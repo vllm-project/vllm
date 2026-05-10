@@ -40,18 +40,71 @@ def check_gguf_file(model: str | PathLike) -> bool:
 
 @cache
 def is_remote_gguf(model: str | Path) -> bool:
-    """Check if the model is a remote GGUF model."""
+    """Check if the model is a remote GGUF model.
+
+    Recognizes two forms:
+    1. Standard: ``repo_id:quant_type`` where *quant_type* is a known
+       GGML quantization type (e.g. ``Q4_K_M``).
+    2. Non-standard: ``repo_id:quant_type`` where *quant_type* contains
+       a known GGML type with extra prefixes (e.g. ``UD-Q4_K_XL``).
+       A warning is logged and actual file existence is validated later
+       during download.
+    """
     pattern = r"^[a-zA-Z0-9][a-zA-Z0-9._-]*/[a-zA-Z0-9][a-zA-Z0-9._-]*:[A-Za-z0-9_+-]+$"
     model = str(model)
     if re.fullmatch(pattern, model):
         _, quant_type = model.rsplit(":", 1)
-        return is_valid_gguf_quant_type(quant_type)
+        if is_valid_gguf_quant_type(quant_type):
+            return True
+        if is_nonstandard_gguf_quant_type(quant_type):
+            logger.warning(
+                "Non-standard GGUF quant type '%s' detected.",
+                quant_type,
+            )
+            return True
     return False
 
 
+def is_nonstandard_gguf_quant_type(quant_type: str) -> bool:
+    """Check if a non-standard quant type contains a known GGML type.
+
+    Splits the quant type by the last ``-`` and checks whether the
+    trailing part is a standard GGML type.  For example::
+
+        UD-Q4_K_XL      → rsplit → ["UD", "Q4_K_XL"]      → Q4_K_XL valid ✓
+        UD-IQ4_NL       → rsplit → ["UD", "IQ4_NL"]       → IQ4_NL  valid ✓
+        Custom-UD-Q4_K  → rsplit → ["Custom-UD", "Q4_K"]  → Q4_K    valid ✓
+        RANDOM          → no "-" → False
+    """
+    if "-" not in quant_type:
+        return False
+    _, remainder = quant_type.rsplit("-", 1)
+    return is_valid_gguf_quant_type(remainder)
+
+
+# Common suffixes used in GGUF file naming conventions
+# e.g., Q4_K_M, Q3_K_S, Q5_K_L, Q2_K_XL
+_GGUF_QUANT_SUFFIXES = ("_M", "_S", "_L", "_XL", "_XS", "_XXS")
+
+
 def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
-    """Check if the quant type is a valid GGUF quant type."""
-    return getattr(GGMLQuantizationType, gguf_quant_type, None) is not None
+    """Check if the quant type is a valid GGUF quant type.
+
+    Supports both exact GGML quant types (e.g., Q4_K, IQ1_S) and
+    extended naming conventions (e.g., Q4_K_M, Q3_K_S, Q5_K_L).
+    """
+    # Check for exact match first
+    if getattr(GGMLQuantizationType, gguf_quant_type, None) is not None:
+        return True
+
+    # Check for extended naming conventions (e.g., Q4_K_M -> Q4_K)
+    for suffix in _GGUF_QUANT_SUFFIXES:
+        if gguf_quant_type.endswith(suffix):
+            base_type = gguf_quant_type[: -len(suffix)]
+            if getattr(GGMLQuantizationType, base_type, None) is not None:
+                return True
+
+    return False
 
 
 def split_remote_gguf(model: str | Path) -> tuple[str, str]:
@@ -63,7 +116,10 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
     raise ValueError(
         f"Wrong GGUF model or invalid GGUF quant type: {model}.\n"
         "- It should be in repo_id:quant_type format.\n"
-        f"- Valid GGMLQuantizationType values: {GGMLQuantizationType._member_names_}",
+        f"- Valid base quant types: {GGMLQuantizationType._member_names_}\n"
+        f"- Extended suffixes also supported: {_GGUF_QUANT_SUFFIXES}\n"
+        "- Non-standard GGUF quant types also supported: "
+        "dash-separated prefixes (e.g. UD-Q4_K_XL, Custom-Q8_0)",
     )
 
 
@@ -229,7 +285,7 @@ def maybe_patch_hf_config_from_gguf(
         text_config = hf_config.get_text_config()
         is_gemma3 = hf_config.model_type in ("gemma3", "gemma3_text")
         if vision_config is not None and is_gemma3:
-            new_hf_config = Gemma3Config.from_text_vision_configs(
+            new_hf_config = Gemma3Config(
                 text_config=text_config,
                 vision_config=vision_config,
                 architectures=["Gemma3ForConditionalGeneration"],

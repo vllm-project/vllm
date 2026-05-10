@@ -63,6 +63,7 @@ class ECConnectorBase(ABC):
         self._role = role
         if vllm_config.ec_transfer_config is not None:
             self._is_producer = vllm_config.ec_transfer_config.is_ec_producer
+            self._is_consumer = vllm_config.ec_transfer_config.is_ec_consumer
         else:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
@@ -73,6 +74,10 @@ class ECConnectorBase(ABC):
     @property
     def is_producer(self) -> bool:
         return self._is_producer
+
+    @property
+    def is_consumer(self) -> bool:
+        return self._is_consumer
 
     # ==============================
     # Worker-side methods
@@ -182,19 +187,19 @@ class ECConnectorBase(ABC):
     # ==============================
 
     @abstractmethod
-    def has_caches(
+    def has_cache_item(
         self,
-        request: "Request",
-    ) -> list[bool]:
+        identifier: str,
+    ) -> bool:
         """
-        Check if encoder cache exists for each mm data of requests
+        Check if a single encoder cache exists
 
         Args:
-            request (Request): the request object.
+            identifier (str): the identifier of the media.
 
         Returns:
-            A list bool where ith value is True if cache exist for
-            ith mm_data of requests
+            A bool where value is True if cache exist for
+            the media
         """
         pass
 

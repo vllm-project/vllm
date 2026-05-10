@@ -28,11 +28,11 @@ import torch
 from torch import nn
 from transformers import Exaone4Config
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -75,6 +75,7 @@ class Exaone4GatedMLP(nn.Module):
         reduce_results: bool = True,
         bias: bool = False,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -83,6 +84,7 @@ class Exaone4GatedMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
@@ -91,6 +93,7 @@ class Exaone4GatedMLP(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -490,7 +493,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

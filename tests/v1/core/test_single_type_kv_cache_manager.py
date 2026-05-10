@@ -22,11 +22,13 @@ pytestmark = pytest.mark.cpu_test
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
+    # Tests don't exercise admission gating; pass a large cap that is a no-op.
     return SlidingWindowManager(
         sliding_window_spec,
-        block_pool,
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
+        max_admission_blocks_per_request=10**9,
     )
 
 
@@ -35,9 +37,10 @@ def get_chunked_local_attention_manager(
 ):
     return ChunkedLocalAttentionManager(
         chunked_local_attention_spec,
-        block_pool,
+        block_pool=block_pool,
         enable_caching=enable_caching,
         kv_cache_group_id=0,
+        max_admission_blocks_per_request=10**9,
     )
 
 
@@ -342,11 +345,15 @@ def test_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        manager.get_num_blocks_to_allocate(
+            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+        )
         == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        manager.get_num_blocks_to_allocate(
+            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+        )
         == 15
     )
 
@@ -375,6 +382,7 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_tokens=2 * block_size,
         new_computed_blocks=[evictable_block],
         total_computed_tokens=block_size,
+        num_tokens_main_model=2 * block_size,
     )
     # Free capacity check should count evictable cached blocks, but allocation
     # should only allocate the truly new block.
@@ -386,7 +394,9 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_local_computed_tokens=block_size,
         num_external_computed_tokens=0,
     )
-    new_blocks = manager.allocate_new_blocks(request_id, num_tokens=4)
+    new_blocks = manager.allocate_new_blocks(
+        request_id, num_tokens=4, num_tokens_main_model=4
+    )
     assert len(new_blocks) == 1
     assert len(manager.req_to_blocks[request_id]) == 2
 
@@ -411,10 +421,63 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     ]
 
     assert (
-        manager.get_num_blocks_to_allocate("1", 20 * block_size, cached_blocks_1, 0)
+        manager.get_num_blocks_to_allocate(
+            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+        )
         == 20
     )
     assert (
-        manager.get_num_blocks_to_allocate("2", 20 * block_size, cached_blocks_2, 0)
+        manager.get_num_blocks_to_allocate(
+            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+        )
         == 15
     )
+
+
+def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
+    """In forward steps, `get_num_blocks_to_allocate` must return exactly what
+    `allocate_new_blocks` will pull; otherwise `block_pool.get_new_blocks`
+    raises `ValueError: Cannot get N free blocks from the pool`.
+    """
+    block_size = 2
+    sliding_window = 8  # 4-block live window
+    cap = sliding_window // block_size
+
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=100, enable_caching=True, hash_block_size=block_size
+    )
+    manager = SlidingWindowManager(
+        spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        max_admission_blocks_per_request=cap,
+    )
+
+    request_id = "req"
+    total_computed = 0
+    # Walk through request forward steps. Check num_blocks returned by
+    # `get_num_blocks_to_allocate` matches what `allocate_new_blocks` pulls
+    for num_tokens in (4, 8, 12, 16):
+        predicted = manager.get_num_blocks_to_allocate(
+            request_id=request_id,
+            num_tokens=num_tokens,
+            new_computed_blocks=[],
+            total_computed_tokens=total_computed,
+            num_tokens_main_model=num_tokens,
+        )
+        new_blocks = manager.allocate_new_blocks(
+            request_id, num_tokens=num_tokens, num_tokens_main_model=num_tokens
+        )
+        assert predicted == len(new_blocks), (
+            f"num_tokens={num_tokens}: predictor returned {predicted} "
+            f"but allocator pulled {len(new_blocks)}"
+        )
+        total_computed = num_tokens

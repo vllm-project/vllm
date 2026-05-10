@@ -34,6 +34,7 @@ class AsyncMicrobatchTokenizer:
         tokenizer,
         max_batch_size: int = 32,
         batch_wait_timeout_s: float = 0.002,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self.tokenizer = tokenizer
         self.max_batch_size = max_batch_size
@@ -47,17 +48,21 @@ class AsyncMicrobatchTokenizer:
         self._batcher_tasks: list[Task] = []
 
         # Single-thread executor for blocking tokenizer calls.
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        # Accept an external executor to serialize with other tokenizer users.
+        self._executor = executor or ThreadPoolExecutor(max_workers=1)
 
     # === Public async API ===
-    async def __call__(self, prompt, **kwargs):
+    async def __call__(self, prompt, **kwargs) -> BatchEncoding:
         result_future: Future = self._loop.create_future()
         key = self._queue_key("encode", kwargs)
         queue = self._get_queue(self._loop, key)
         await queue.put((prompt, kwargs, result_future))
         return await result_future
 
-    async def decode(self, token_ids, **kwargs):
+    async def encode(self, prompt, **kwargs) -> list[int]:
+        return (await self(prompt, **kwargs)).input_ids
+
+    async def decode(self, token_ids, **kwargs) -> str:
         result_future: Future = self._loop.create_future()
         key = self._queue_key("decode", kwargs)
         queue = self._get_queue(self._loop, key)

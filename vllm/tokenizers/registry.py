@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.util
+import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -11,6 +11,7 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.gguf_utils import (
     check_gguf_file,
     get_gguf_file_path_from_hf,
@@ -18,7 +19,10 @@ from vllm.transformers_utils.gguf_utils import (
     is_remote_gguf,
     split_remote_gguf,
 )
-from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.transformers_utils.repo_utils import (
+    any_pattern_in_repo_files,
+    is_mistral_model_repo,
+)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 from .protocol import TokenizerLike
@@ -29,11 +33,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Model types whose hub tokenizer_class is incorrect and should be overridden with
+# TokenizersBackend (the generic fast tokenizer). Adding a model type here is always a
+# temporary workaround and better long term solutions are:
+# - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
+# - Fix tokenizer_class on the hub for the affected models (best)
+_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
+    "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
+    "fastokens": ("fastokens", "FastokensTokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
+    "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
+    "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
 }
 
 
@@ -142,26 +157,18 @@ def resolve_tokenizer_args(
         kwargs["use_fast"] = False
 
     # Try to use official Mistral tokenizer if possible
-    if tokenizer_mode == "auto" and importlib.util.find_spec("mistral_common"):
-        allow_patterns = ["tekken.json", "tokenizer.model.v*"]
-        files_list = list_filtered_repo_files(
+    if (
+        tokenizer_mode == "auto"
+        and is_mistral_model_repo(
+            model_name_or_path=str(tokenizer_name), revision=revision
+        )
+        and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
-            allow_patterns=allow_patterns,
+            allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
         )
-        if len(files_list) > 0:
-            tokenizer_mode = "mistral"
-
-    # Try to use Grok2 tiktoken tokenizer if possible
-    if tokenizer_mode == "auto":
-        allow_patterns = ["tokenizer.tok.json"]
-        files_list = list_filtered_repo_files(
-            model_name_or_path=str(tokenizer_name),
-            allow_patterns=allow_patterns,
-            revision=revision,
-        )
-        if len(files_list) > 0:
-            tokenizer_mode = "grok2"
+    ):
+        tokenizer_mode = "mistral"
 
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":
@@ -206,7 +213,31 @@ def get_tokenizer(
         **kwargs,
     )
 
-    if tokenizer_cls == TokenizerLike:
+    # Ensure that, if the config were to come from vllm.transformers_utils.config, it is
+    # registered with AutoConfig before the tokenizer is loaded. This is necessary since
+    # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
+    # This may fail for paths that don't have a model config (e.g. LoRA adapters),
+    # which is fine — those don't need custom config registration.
+    config = None
+    with contextlib.suppress(ValueError, OSError):
+        config = get_config(
+            tokenizer_name,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+        )
+
+    # Some models have an incorrect tokenizer_class on the hub.
+    # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
+    model_type = getattr(config, "model_type", None) if config else None
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from transformers.tokenization_utils_tokenizers import TokenizersBackend
+
+        logger.debug(
+            "Overriding tokenizer_class to TokenizersBackend for model_type=%r",
+            model_type,
+        )
+        tokenizer_cls_ = TokenizersBackend
+    elif tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:
         tokenizer_cls_ = tokenizer_cls

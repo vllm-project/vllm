@@ -81,7 +81,7 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename weight_packed to weight that marlin expects
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
@@ -98,7 +98,7 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
-            weight_scale_2=None,
+            weight_global_scale=None,
             workspace=layer.workspace,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,

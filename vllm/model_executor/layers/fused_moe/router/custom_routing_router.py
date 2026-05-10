@@ -34,6 +34,15 @@ class CustomRoutingRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
+        from vllm.model_executor.models.cohere2_moe import token_choice_with_bias
+        from vllm.model_executor.models.llama4 import Llama4MoE
+
+        # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
+        if self.custom_routing_function == Llama4MoE.custom_routing_function:
+            return RoutingMethodType.Llama4
+        # Cohere MoE uses a sigmoid -> top-k -> renormalize routing function.
+        if self.custom_routing_function == token_choice_with_bias:
+            return RoutingMethodType.SigmoidRenorm
         return RoutingMethodType.Custom
 
     def _compute_routing(
@@ -41,6 +50,8 @@ class CustomRoutingRouter(BaseRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using the custom routing function."""
         topk_weights, topk_ids = self.custom_routing_function(
@@ -50,4 +61,6 @@ class CustomRoutingRouter(BaseRouter):
             renormalize=self.renormalize,
         )
 
-        return topk_weights.to(torch.float32), topk_ids
+        return topk_weights.to(torch.float32), topk_ids.to(
+            torch.int32 if indices_type is None else indices_type
+        )

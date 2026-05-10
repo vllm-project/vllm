@@ -5,19 +5,32 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
-    TopKWeightAndReduceNaiveBatched,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
-    normalize_scales_shape,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    group_broadcast,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
@@ -474,188 +487,72 @@ def invoke_moe_batched_triton_kernel(
     )
 
 
-class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
-    """
-    A reference prepare/finalize class that reorganizes the tokens into
-    expert batched format, i.e. E x max_num_tokens x K.  This is the format
-    that the PPLX dispatch/combine kernels use.
-    """
-
-    def __init__(
-        self,
-        max_num_tokens: int,
-        num_local_experts: int,
-        num_dispatchers: int,
-        rank: int,
-    ):
-        super().__init__()
-        self.max_num_tokens = max_num_tokens
-        self.num_local_experts = num_local_experts
-        self.rank = rank
-        self.num_dispatchers_ = num_dispatchers
-
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def max_num_tokens_per_rank(self) -> int | None:
-        return self.max_num_tokens
-
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        return None
-
-    def num_dispatchers(self) -> int:
-        return self.num_dispatchers_
-
-    def output_is_reduced(self) -> bool:
-        return False
-
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        num_experts: int,
-        expert_map: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
-        quant_config: FusedMoEQuantConfig,
-    ) -> mk.PrepareResultType:
-        assert a1.dim() == 2
-        assert topk_ids.dim() == 2
-        assert topk_ids.size(0) == a1.size(0)
-
-        if apply_router_weight_on_input:
-            topk = topk_ids.size(1)
-            # TODO: this only works for topK=1, will need to update for topK>1
-            assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1"
-            )
-            a1.mul_(topk_weights.to(a1.dtype))
-
-        num_tokens, hidden_dim = a1.size()
-        topk = topk_ids.size(1)
-
-        tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
-
-        num_local_experts = self.num_local_experts
-
-        if quant_config.quant_dtype is None:
-            b_type = a1.dtype
-        else:
-            b_type = quant_config.quant_dtype
-
-        b_a1 = torch.zeros(
-            (num_local_experts, self.max_num_tokens, hidden_dim),
-            dtype=b_type,
-            device=a1.device,
-        )
-
-        if quant_config.is_quantized:
-            scale_shape = quant_config.batched_scale_shape(
-                num_local_experts, self.max_num_tokens, hidden_dim
-            )
-
-            b_a1_scale = torch.empty(scale_shape, dtype=torch.float32, device=a1.device)
-        else:
-            assert quant_config.a1_scale is None
-            b_a1_scale = None
-
-        first_expert = num_local_experts * self.rank
-        last_expert = first_expert + num_local_experts
-
-        a1_scale = normalize_scales_shape(quant_config.a1_scale)
-
-        for expert_id in range(first_expert, last_expert):
-            topks = torch.any(topk_ids == expert_id, dim=1).flatten()
-            rows = torch.count_nonzero(topks.flatten())
-            if rows == 0:
-                continue
-            idx = expert_id - first_expert
-            tokens_per_expert[idx] = rows
-            rhs = a1[: topks.numel()][topks]
-            if quant_config.quant_dtype is not None:
-                if a1_scale is not None:
-                    if quant_config.is_per_act_token:
-                        rhs_a1_scale = a1_scale[: topks.numel()][topks]
-                    else:
-                        rhs_a1_scale = a1_scale
-                else:
-                    rhs_a1_scale = None
-                b_a1[idx, :rows, :], b_s = moe_kernel_quantize_input(
-                    rhs,
-                    rhs_a1_scale,
-                    quant_config.quant_dtype,
-                    quant_config.per_act_token_quant,
-                    quant_config.block_shape,
-                )
-                assert b_s is not None
-                if quant_config.is_per_act_token:
-                    b_a1_scale[idx, :rows] = b_s[:rows]
-                else:
-                    b_a1_scale[idx, : b_s.shape[0]] = b_s
-            else:
-                b_a1[idx, :rows, :] = rhs
-
-        assert b_a1_scale is None or b_a1_scale.ndim == 3
-
-        expert_tokens_meta = mk.ExpertTokensMetadata(
-            expert_num_tokens=tokens_per_expert, expert_num_tokens_cpu=None
-        )
-
-        return b_a1, b_a1_scale, expert_tokens_meta, None, None
-
-    def finalize(
-        self,
-        output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
-        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
-            weight_and_reduce_impl = TopKWeightAndReduceNaiveBatched(self.rank)
-        weight_and_reduce_impl.apply(
-            output=output,
-            fused_expert_output=fused_expert_output,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-
-
-class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
     """
     A reference MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
         )
 
-    def supports_chunking(self) -> bool:
-        return False
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "NaiveBatchedExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_expert_map(self) -> bool:
         return False
@@ -673,8 +570,10 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         workspace13 = (num_experts, self.max_num_tokens * num_dp, K)
@@ -698,7 +597,7 @@ class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -817,40 +716,87 @@ def batched_moe_kernel_quantize_input(
         return A_q, A_q_scale
 
 
-class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     """
     A Triton based MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         max_num_tokens: int,
         num_dispatchers: int,
-        quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
-        assert max_num_tokens > 0
-        assert num_dispatchers > 0
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda_alike()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        p = current_platform
+        if p.is_rocm():
+            from vllm.platforms.rocm import on_gfx9
+
+            is_rocm_on_gfx9 = on_gfx9()
+        else:
+            is_rocm_on_gfx9 = False
+
+        device_supports_fp8 = is_rocm_on_gfx9 or (
+            p.is_cuda() and p.has_device_capability((8, 9))
         )
 
-    def supports_chunking(self) -> bool:
-        return False
+        supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
+        if device_supports_fp8:
+            supported += [
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            ]
+        return (weight_key, activation_key) in supported
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SILU_NO_MUL,
+            MoEActivation.GELU_NO_MUL,
+            MoEActivation.GELU_TANH_NO_MUL,
+            MoEActivation.RELU2_NO_MUL,
+        ]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return False
@@ -868,8 +814,10 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        assert self.num_dispatchers is not None
+        assert self.max_num_tokens is not None
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
@@ -887,7 +835,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -913,6 +861,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             torch.float16,
             torch.bfloat16,
             torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
         ]
         assert expert_tokens_meta is not None
 
@@ -942,7 +891,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             compute_type = tl.float16
         elif hidden_states.dtype == torch.float32:
             compute_type = tl.float32
-        elif hidden_states.dtype == torch.float8_e4m3fn:
+        elif hidden_states.dtype == current_platform.fp8_dtype():
             compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")

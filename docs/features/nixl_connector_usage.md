@@ -2,6 +2,8 @@
 
 NixlConnector is a high-performance KV cache transfer connector for vLLM's disaggregated prefilling feature. It provides fully asynchronous send/receive operations using the NIXL library for efficient cross-process KV cache transfer.
 
+For feature compatibility details (supported model architectures, TP configurations, and feature interactions), see the [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md).
+
 ## Prerequisites
 
 ### Installation
@@ -11,7 +13,7 @@ Install the NIXL library: `uv pip install nixl`, as a quick start on Nvidia plat
 - Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
 - The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
 
-For ROCm platform, the [base ROCm docker file](../../docker/Dockerfile.rocm_base) includes RIXL and ucx already.
+For ROCm platform, the [ROCm docker file](../../docker/Dockerfile.rocm) includes RIXL and ucx already.
 
 - Refer to [RIXL official repository](https://github.com/rocm/rixl) for more information
 - The supportive libraries for RIXL can be found in [requirements/kv_connectors_rocm.txt](../../requirements/kv_connectors_rocm.txt)
@@ -35,6 +37,35 @@ export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1
 
 !!! tip
     When using UCX as the transport backend, NCCL environment variables (like `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`) are not applicable to NixlConnector, so configure UCX-specific environment variables instead of NCCL variables.
+
+#### Selecting a NIXL transport backend (plugin)
+
+NixlConnector can use different NIXL transport backends (plugins). By default, NixlConnector uses UCX as the transport backend.
+
+To select a different backend, set `kv_connector_extra_config.backends` in `--kv-transfer-config`.
+
+### Example: using LIBFABRIC backend
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_both",
+    "kv_connector_extra_config":{"backends":["LIBFABRIC"]}
+  }'
+```
+
+You can also pass JSON keys individually using dotted arguments, and you can append list elements using `+`:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config.kv_connector NixlConnector \
+  --kv-transfer-config.kv_role kv_both \
+  --kv-transfer-config.kv_connector_extra_config.backends+ LIBFABRIC
+```
+
+!!! note
+    Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
 ## Basic Usage (on the same host)
 
@@ -168,8 +199,8 @@ For multi-host DP deployment, only need to provide the host/port of the head ins
 
 The `kv_load_failure_policy` setting controls how the system handles failures when the decoder instance loads KV cache blocks from the prefiller instance:
 
-- **fail** (recommended): Immediately fail the request with an error when KV load fails. This prevents performance degradation by avoiding recomputation of prefill work on the decode instance.
-- **recompute** (default): Recompute failed blocks locally on the decode instance. This may cause performance _jitter_ on decode instances as the scheduled prefill will delay and interfere with other decodes. Furthermore, decode instances are typically configured with low-latency optimizations.
+- **fail** (default): Immediately fail the request with an error when KV load fails. This prevents performance degradation by avoiding recomputation of prefill work on the decode instance.
+- **recompute**: Recompute failed blocks locally on the decode instance. This may cause performance _jitter_ on decode instances as the scheduled prefill will delay and interfere with other decodes. Furthermore, decode instances are typically configured with low-latency optimizations.
 
 !!! warning
     Using `kv_load_failure_policy="recompute"` can lead to performance degradation in production deployments. When KV loads fail, the decode instance will execute prefill work with decode-optimized configurations, which is inefficient and defeats the purpose of disaggregated prefilling. This also increases tail latency for other ongoing decode requests.
@@ -182,6 +213,15 @@ Support use case: Prefill with 'HND' and decode with 'NHD' with experimental con
 
 ```bash
 --kv-transfer-config '{..., "enable_permute_local_kv":"True"}'
+```
+
+### Cross layers blocks
+
+By default, this feature is disabled. On attention backends that support this feature, each logical block is contiguous in physical memory. This reduces the number of buffers that need to be transferred.
+To enable this feature:
+
+```bash
+--kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
 ## Example Scripts/Code

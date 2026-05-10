@@ -109,7 +109,7 @@ void computeExpertFirstTokenOffset(int const* sorted_indices,
       sorted_indices, total_indices, num_experts, expert_first_token_offset);
 }
 
-void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
+void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
                        int* permuted_experts, int* permuted_rows,
                        int64_t* expert_first_token_offset, int num_rows,
                        int num_experts, int num_experts_per_node, int k,
@@ -166,66 +166,6 @@ void preprocessTopkIdLauncher(int* topk_id_ptr, int size,
   int smem_size = (num_experts) * sizeof(int);
   preprocessTopkIdKernel<<<grid, block, smem_size, stream>>>(
       topk_id_ptr, size, expert_map_ptr, num_experts);
-}
-
-template <bool ALIGN_BLOCK_SIZE>
-__global__ void getMIndicesKernel(int64_t* expert_first_token_offset,
-                                  int64_t* align_expert_first_token_offset,
-                                  int* m_indices, const int num_local_expert,
-                                  const int align_block_size) {
-  int eidx = blockIdx.x;
-  int tidx = threadIdx.x;
-  extern __shared__ int64_t smem_expert_first_token_offset[];
-  for (int i = tidx; i <= num_local_expert; i += blockDim.x) {
-    smem_expert_first_token_offset[i] = __ldg(expert_first_token_offset + i);
-  }
-  __syncthreads();
-  auto last_token_offset = smem_expert_first_token_offset[eidx + 1];
-  auto first_token_offset = smem_expert_first_token_offset[eidx];
-  int n_token_in_expert = last_token_offset - first_token_offset;
-
-  if constexpr (ALIGN_BLOCK_SIZE) {
-    n_token_in_expert = (n_token_in_expert + align_block_size - 1) /
-                        align_block_size * align_block_size;
-    // round up to ALIGN_BLOCK_SIZE
-    int64_t accumulate_align_offset = 0;
-    for (int i = 1; i <= eidx + 1; i++) {
-      int n_token = smem_expert_first_token_offset[i] -
-                    smem_expert_first_token_offset[i - 1];
-      accumulate_align_offset =
-          accumulate_align_offset + (n_token + align_block_size - 1) /
-                                        align_block_size * align_block_size;
-      if (i == eidx) {
-        first_token_offset = accumulate_align_offset;
-      }
-      // last block store align_expert_first_token_offset
-      if (eidx == num_local_expert - 1 && threadIdx.x == 0) {
-        align_expert_first_token_offset[i] = accumulate_align_offset;
-      }
-    }
-  }
-  for (int idx = tidx; idx < n_token_in_expert; idx += blockDim.x) {
-    // update m_indice with expert id
-    m_indices[first_token_offset + idx] = eidx;
-  }
-}
-
-void getMIndices(int64_t* expert_first_token_offset,
-                 int64_t* align_expert_first_token_offset, int* m_indices,
-                 int num_local_expert, const int align_block_size,
-                 cudaStream_t stream) {
-  int block = 256;
-  int grid = num_local_expert;
-  int smem_size = sizeof(int64_t) * (num_local_expert + 1);
-  if (align_block_size == -1) {
-    getMIndicesKernel<false><<<grid, block, smem_size, stream>>>(
-        expert_first_token_offset, align_expert_first_token_offset, m_indices,
-        num_local_expert, align_block_size);
-  } else {
-    getMIndicesKernel<true><<<grid, block, smem_size, stream>>>(
-        expert_first_token_offset, align_expert_first_token_offset, m_indices,
-        num_local_expert, align_block_size);
-  }
 }
 
 #endif

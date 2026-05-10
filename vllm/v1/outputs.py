@@ -13,9 +13,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorWorkerMetadata,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
     KVConnectorStats = object
+    KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
 
 
@@ -51,13 +55,17 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
+    # [num_reqs]
+    cu_num_generated_tokens: list[int] | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens,
+            cu_num_generated_tokens
+            if cu_num_generated_tokens is not None
+            else self.cu_num_generated_tokens,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
@@ -67,10 +75,14 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
+            self.cu_num_generated_tokens,
         )
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
         """Filter the logprobs tensors with the given bool mask."""
+        assert self.cu_num_generated_tokens is None, (
+            "filter can't be used with cu_num_generated_tokens"
+        )
         return LogprobsTensors(
             self.logprob_token_ids[mask],
             self.logprobs[mask],
@@ -119,6 +131,7 @@ class KVConnectorOutput:
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
     kv_cache_events: KVConnectorKVEvents | None = None
+    kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
@@ -136,6 +149,7 @@ class KVConnectorOutput:
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
+            and not self.kv_connector_worker_meta
         )
 
 
@@ -183,6 +197,9 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    # req_id -> routed experts ndarray of shape (seq_len, num_moe_layers, top_k)
+    routed_experts_dict: dict[str, np.ndarray] | None = None
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None

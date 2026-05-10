@@ -9,8 +9,7 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
-from vllm.attention.layer import Attention
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed
@@ -37,7 +36,9 @@ BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 
 def ref_masked_attention(
@@ -445,7 +446,7 @@ def ref_multi_query_kv_attention(
 
 
 @pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])
-def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
+def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
     head_size = 64
     scale = float(1.0 / (head_size**0.5))
     num_heads = 16

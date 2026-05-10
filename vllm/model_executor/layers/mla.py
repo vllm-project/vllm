@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -30,13 +30,13 @@ class MLAModules:
 
 
 # --8<-- [start:multi_head_latent_attention]
-@CustomOp.register("multi_head_latent_attention")
-class MultiHeadLatentAttentionWrapper(CustomOp):
-    """MLA layer registered as CustomOp to allow OOT backends to add
+@PluggableLayer.register("multi_head_latent_attention")
+class MultiHeadLatentAttentionWrapper(PluggableLayer):
+    """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
-    Note that currently MLA ignores the enable/disable mechanism of CustomOp
-    because there is only one in-tree implementation in forward_native.
-    TODO: implement this with a new PluggableLayer mechanism.
+    Note that currently oot platforms can still use CustomOp.register_oot to
+    replace MLA layer entirely, although we use PluggableLayer to register
+    this layer now.
 
     This class takes positions and hidden_states as input.
     The input tensors can either contain prefill tokens or decode tokens.
@@ -64,6 +64,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -87,6 +88,11 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
 
+        # Whether to skip top-k token selection computation in this layer.
+        # When True, the indexer will not be called, and the layer will reuse
+        # the topk_tokens buffer written by a previous layer in the same pass.
+        # Refer: https://arxiv.org/abs/2603.12201 for more details.
+        self.skip_topk = skip_topk
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -110,7 +116,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
 
         self.prefix = prefix
 
-    def forward_native(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -129,6 +135,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             assert self.q_b_proj is not None, (
                 "q_b_proj is required when q_lora_rank is not None"
             )
+
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -158,10 +165,8 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse:
-            _topk_indices = self.indexer(
-                hidden_states, q_c, positions, self.indexer_rope_emb
-            )
+        if self.indexer and self.is_sparse and not self.skip_topk:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
@@ -174,6 +179,3 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         )
 
         return self.o_proj(attn_out)[0]
-
-    def forward_cuda(self, *args, **kwargs):
-        return self.forward_native(*args, **kwargs)

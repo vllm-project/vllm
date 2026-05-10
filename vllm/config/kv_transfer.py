@@ -5,8 +5,6 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
@@ -15,8 +13,13 @@ KVConsumer = Literal["kv_consumer", "kv_both"]
 KVRole = Literal[KVProducer, KVConsumer]
 
 
+def kv_buffer_device_default_factory() -> str:
+    from vllm.platforms import current_platform
+
+    return current_platform.device_type
+
+
 @config
-@dataclass
 class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
 
@@ -27,9 +30,9 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str = "cuda"
-    """The device used by kv connector to buffer the KV cache. Choices are 
-    'cuda' and 'cpu'."""
+    kv_buffer_device: str = field(default_factory=kv_buffer_device_default_factory)
+    """The device used by kv connector to buffer the KV cache. Choices are
+    'cuda', 'cpu' and 'xpu'."""
 
     kv_buffer_size: float = 1e9
     """The buffer size for TorchDistributedConnector. Measured in number of
@@ -64,10 +67,10 @@ class KVTransferConfig:
     enable_permute_local_kv: bool = False
     """Experiment feature flag to enable HND to NHD KV Transfer"""
 
-    kv_load_failure_policy: Literal["recompute", "fail"] = "recompute"
+    kv_load_failure_policy: Literal["recompute", "fail"] = "fail"
     """Policy for handling KV cache load failures.
-    'recompute': reschedule the request to recompute failed blocks (default)
-    'fail': immediately fail the request with an error finish reason"""
+    'recompute': reschedule the request to recompute failed blocks
+    'fail': immediately fail the request with an error finish reason (default)"""
 
     def compute_hash(self) -> str:
         """

@@ -15,6 +15,7 @@ from regex import escape as regex_escape
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -96,7 +97,7 @@ class OutlinesBackend(StructuredOutputBackend):
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
             dtype=torch.int32,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=is_pin_memory_available(),
         )
 
     def destroy(self):
@@ -122,7 +123,12 @@ class OutlinesGrammar(StructuredOutputGrammar):
         Returns False if the FSM failed to advance.
         """
         if self.guide.accepts_tokens(tokens):
-            # Advance cannot fail because we checked Guide.accepts_tokens()
+            # Advance can fail when the next state reached after advancing with
+            # the current tokens is a dead state. This is because Guide.accepts_tokens()
+            # only checks whether the current tokens can be accepted,
+            # whereas guide.advance() additionally checks the next state
+            # after all tokens are accepted.
+            # We need to be aware that the FSM must be prepared without dead states.
             for t in tokens:
                 self.guide.advance(t)
                 self.num_processed_tokens += 1

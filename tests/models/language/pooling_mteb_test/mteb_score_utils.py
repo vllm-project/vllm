@@ -79,9 +79,9 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
         outputs = self.llm.score(
             queries,
             corpus,
-            truncate_prompt_tokens=-1,
             use_tqdm=False,
             chat_template=self.chat_template,
+            tokenization_kwargs={"truncate_prompt_tokens": -1},
         )
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
@@ -191,6 +191,9 @@ def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
         mteb_tasks: list[mteb.abstasks.AbsTaskRetrieval] = mteb.get_tasks(
             tasks=tasks, languages=languages, eval_splits=eval_splits
         )
+        for task in mteb_tasks:
+            if not task.data_loaded:
+                task.load_data()
 
         mteb.evaluate(
             bm25s,
@@ -238,6 +241,7 @@ def mteb_test_rerank_models(
 
     with vllm_runner(
         model_info.name,
+        revision=model_info.revision,
         runner="pooling",
         max_model_len=None,
         max_num_seqs=8,
@@ -283,7 +287,9 @@ def mteb_test_rerank_models(
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
-        with hf_runner(model_info.name, dtype=model_info.hf_dtype) as hf_model:
+        with hf_runner(
+            model_info.name, revision=model_info.revision, dtype=model_info.hf_dtype
+        ) as hf_model:
             hf_model.chat_template = chat_template
             st_main_score = run_mteb_rerank(
                 hf_model,

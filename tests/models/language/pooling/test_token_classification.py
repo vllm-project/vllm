@@ -1,18 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import pytest
 import torch
 from transformers import AutoModelForTokenClassification
 
 from tests.models.utils import softmax
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
-@pytest.mark.parametrize("model", ["boltuix/NeuroBERT-NER"])
+@pytest.fixture(autouse=True)
+def seed_everything():
+    """Seed all random number generators for reproducibility."""
+    seed = 0
+    set_random_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    yield
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "boltuix/NeuroBERT-NER",
+        "gyr66/Ernie-3.0-base-chinese-finetuned-ner",
+    ],
+)
 # The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
 @torch.inference_mode
-def test_bert_models(
+def test_bert_like_models(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -51,6 +69,7 @@ def test_bert_models(
 
 @pytest.mark.parametrize("model", ["disham993/electrical-ner-ModernBERT-base"])
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.flaky(reruns=3)
 @torch.inference_mode
 def test_modernbert_models(
     hf_runner,
@@ -59,6 +78,15 @@ def test_modernbert_models(
     model: str,
     dtype: str,
 ) -> None:
+    # NOTE: https://github.com/vllm-project/vllm/pull/32403
+    # `disham993/electrical-ner-ModernBERT-base` is a randomly initialized
+    # model, which can cause numerical precision variance and edge cases.
+    # We use @flaky(reruns=3) to mitigate intermittent failures.
+    print(
+        f"\n[NOTE] Testing {model} (randomly initialized weights) - "
+        "flaky tolerance enabled due to numerical precision variance."
+    )
+
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 

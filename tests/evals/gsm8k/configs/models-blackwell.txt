@@ -5,3 +5,4 @@ DeepSeek-V2-Lite-Instruct-FP8.yaml
 Qwen3-30B-A3B-NVFP4.yaml
 Qwen3-Next-80B-A3B-NVFP4-EP2.yaml
 Qwen3-Next-FP8-EP2.yaml
+Nemotron-3-Super-120B-A12B-NVFP4.yaml

@@ -10,10 +10,10 @@ from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
@@ -132,7 +132,7 @@ def grouped_topk(
         )  # [n, n_group]
 
     # For batch invariance, use sorted=True to ensure deterministic expert selection
-    use_sorted = vllm_is_batch_invariant()
+    use_sorted = envs.VLLM_BATCH_INVARIANT
     group_idx = torch.topk(group_scores, k=topk_group, dim=-1, sorted=use_sorted)[
         1
     ]  # [n, top_k_group]
@@ -261,7 +261,6 @@ class GroupedTopKRouter(BaseRouter):
         num_fused_shared_experts: int = 0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
-        routing_method_type: RoutingMethodType | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -278,23 +277,23 @@ class GroupedTopKRouter(BaseRouter):
         self.e_score_correction_bias = e_score_correction_bias
         self.num_fused_shared_experts = num_fused_shared_experts
 
-        # Determine routing method type
-        if routing_method_type is not None:
-            self._routing_method_type = routing_method_type
-        elif scoring_func == "sigmoid":
-            self._routing_method_type = RoutingMethodType.DeepSeekV3
-        else:
-            self._routing_method_type = RoutingMethodType.TopK
-
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        return self._routing_method_type
+        return get_routing_method_type(
+            scoring_func=self.scoring_func,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+            num_expert_group=self.num_expert_group,
+            has_e_score_bias=self.e_score_correction_bias is not None,
+        )
 
     def _compute_routing(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using grouped top-k."""
 
@@ -311,6 +310,7 @@ class GroupedTopKRouter(BaseRouter):
                 topk_weights, topk_ids = fused_topk_bias(
                     hidden_states=hidden_states,
                     gating_output=router_logits,
+                    scoring_func=self.scoring_func,
                     e_score_correction_bias=self.e_score_correction_bias.data,
                     topk=self.top_k,
                     renormalize=self.renormalize,

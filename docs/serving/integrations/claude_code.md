@@ -39,6 +39,7 @@ Launch Claude Code with environment variables pointing to your vLLM server:
 ```bash
 ANTHROPIC_BASE_URL=http://localhost:8000 \
 ANTHROPIC_API_KEY=dummy \
+ANTHROPIC_AUTH_TOKEN=dummy \
 ANTHROPIC_DEFAULT_OPUS_MODEL=my-model \
 ANTHROPIC_DEFAULT_SONNET_MODEL=my-model \
 ANTHROPIC_DEFAULT_HAIKU_MODEL=my-model \
@@ -51,12 +52,16 @@ The environment variables:
 | -------------------------------- | --------------------------------------------------------------------- |
 | `ANTHROPIC_BASE_URL`             | Points to your vLLM server (default port is 8000)                     |
 | `ANTHROPIC_API_KEY`              | Can be any value since vLLM doesn't require authentication by default |
+| `ANTHROPIC_AUTH_TOKEN`           | Is required. Can be any value.                                        |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | Model name for Opus-tier requests                                     |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | Model name for Sonnet-tier requests                                   |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | Model name for Haiku-tier requests                                    |
 
 !!! tip
     You can add these environment variables to your shell profile (e.g., `.bashrc`, `.zshrc`), Claude Code configuration file (`~/.claude/settings.json`), or create a wrapper script for convenience.
+
+!!! warning
+    Claude Code recently started injecting a per-request hash in the system prompt, which can defeat [prefix caching](../../design/prefix_caching.md) because the prompt changes on every request, causing greatly reduced performance. This is addressed automatically in vLLM versions > 0.17.1 but for older versions `"CLAUDE_CODE_ATTRIBUTION_HEADER": "0"` should be added to the `"env"` section of `~/.claude/settings.json` (see this [blog post](https://unsloth.ai/docs/basics/claude-code#fixing-90-slower-inference-in-claude-code) from Unsloth).
 
 ## Testing the Setup
 

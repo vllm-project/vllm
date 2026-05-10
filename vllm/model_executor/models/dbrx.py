@@ -8,14 +8,16 @@ import torch
 import torch.nn as nn
 from transformers import DbrxConfig
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+)
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
@@ -85,7 +87,6 @@ class DbrxExperts(FusedMoE):
             hidden_size=config.d_model,
             intermediate_size=config.ffn_config.ffn_hidden_size,
             params_dtype=params_dtype,
-            reduce_results=True,
             renormalize=True,
             quant_config=quant_config,
             tp_size=get_tensor_model_parallel_world_size(),
@@ -361,7 +362,7 @@ class DbrxModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -462,7 +463,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

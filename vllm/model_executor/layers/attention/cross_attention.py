@@ -6,19 +6,23 @@ from copy import copy
 import numpy as np
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
     AttentionType,
     CommonAttentionMetadata,
-    subclass_attention_backend,
+    subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
+    KVCacheSpec,
+    get_kv_quant_mode,
+)
 
 logger = init_logger(__name__)
 
@@ -68,10 +72,11 @@ def _get_cross_slot_mapping(
 
 @functools.lru_cache
 def create_cross_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "CrossAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
+    underlying_impl = underlying_attn_backend.get_impl_cls()
 
     class CrossAttentionBuilder(underlying_builder):  # type: ignore
         def build(
@@ -82,17 +87,26 @@ def create_cross_attention_backend(
         ) -> AttentionMetadata:
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
+            assert new_metadata.encoder_seq_lens_cpu is not None
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Any computed tokens indicated decode step>1 (no chunked prefill)
-            num_cache_decodes = (
-                (common_attn_metadata.num_computed_tokens_cpu > 0).sum().item()
+            # Any computed tokens indicates decode step>1 (no chunked prefill).
+            # The upper bound is exact for this `> 0` test - prefill rows have
+            # num_computed == 0 and decode rows have num_computed > 0.
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
             )
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            num_computed_tokens_cpu = (
+                common_attn_metadata.seq_lens_cpu_upper_bound - query_lens_cpu
+            )
+            num_cache_decodes = (num_computed_tokens_cpu > 0).sum().item()
             if num_cache_decodes > 0:
                 # CrossAttn KV cache has already been populated on first decoder step,
                 # skip slot_mapping calculation for requests that do not need
                 # reshape_and_cache.
-                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
+                num_tokens = num_computed_tokens_cpu.numpy()
                 new_metadata.encoder_seq_lens_cpu = np.where(
                     num_tokens > 0, 0, new_metadata.encoder_seq_lens_cpu
                 )
@@ -106,18 +120,67 @@ def create_cross_attention_backend(
             )
 
             # NOTE (NickLucche) use `new_metadata` instead of `common_*` (initial) here
-            new_metadata.slot_mapping = _get_cross_slot_mapping(
+            slot_mapping = _get_cross_slot_mapping(
                 new_metadata.encoder_seq_lens_cpu,
                 new_metadata.block_table_tensor,
                 self.kv_cache_spec,
                 self.device,
             )
-            return super().build(common_prefix_len, new_metadata, fast_build)
+            attn_metadata = super().build(common_prefix_len, new_metadata, fast_build)
+            attn_metadata.slot_mapping = slot_mapping  # type: ignore[attr-defined]
+            return attn_metadata
 
-    attn_backend = subclass_attention_backend(
+    # NOTE(Lucas): we need a custom impl so we can use the slot-mapping computed by
+    # `CrossAttentionBuilder` instead of the one computed by `BlockTable`
+    # (gpu_model_runner)
+    class CrossAttentionImpl(underlying_impl):  # type: ignore[valid-type,misc]
+        def forward(
+            self,
+            layer: torch.nn.Module,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
+            output: torch.Tensor,
+            output_scale: torch.Tensor | None = None,
+            output_block_scale: torch.Tensor | None = None,
+        ) -> torch.Tensor:
+            if (
+                not underlying_attn_backend.forward_includes_kv_cache_update
+                and attn_metadata is not None
+                and layer.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
+            ):
+                self.do_kv_cache_update(  # type: ignore[attr-defined]
+                    layer,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata.slot_mapping,  # type: ignore[attr-defined]
+                )
+
+            return super().forward(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output,
+                output_scale,
+                output_block_scale,
+            )
+
+    attn_backend = subclass_attention_backend_with_overrides(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
-        builder_cls=CrossAttentionBuilder,
+        overrides={
+            "get_builder_cls": lambda: CrossAttentionBuilder,
+            "get_impl_cls": lambda: CrossAttentionImpl,
+            "forward_includes_kv_cache_update": True,
+        },
     )
 
     return attn_backend
@@ -142,10 +205,8 @@ class CrossAttention(Attention):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (
@@ -156,7 +217,6 @@ class CrossAttention(Attention):
             head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             attn_type=AttentionType.ENCODER_DECODER,
         )
         attn_backend = create_cross_attention_backend(underlying_attn_backend)
@@ -177,4 +237,5 @@ class CrossAttention(Attention):
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )

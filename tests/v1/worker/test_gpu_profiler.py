@@ -3,6 +3,7 @@
 import pytest
 
 from vllm.config import ProfilerConfig
+from vllm.config.profiler import _is_uri_path
 from vllm.profiler.wrapper import WorkerProfiler
 
 
@@ -202,3 +203,36 @@ def test_mixed_delay_and_stop(default_profiler_config):
     profiler.step()
 
     assert profiler.start_call_count == 0
+
+
+class TestIsUriPath:
+    """Tests for the _is_uri_path helper function."""
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            # Valid URI schemes - should return True
+            ("gs://bucket/path", True),
+            ("s3://bucket/path", True),
+            ("hdfs://cluster/path", True),
+            ("abfs://container/path", True),
+            ("http://example.com/path", True),
+            ("https://example.com/path", True),
+            # Local paths - should return False
+            ("/tmp/local/path", False),
+            ("./relative/path", False),
+            ("relative/path", False),
+            ("/absolute/path", False),
+            # Windows drive letters - should return False (single char scheme)
+            ("C://windows/path", False),
+            ("D://drive/path", False),
+            # Edge cases
+            ("", False),
+            ("no-scheme", False),
+            ("scheme-no-slashes:", False),
+            ("://no-scheme", False),
+        ],
+    )
+    def test_is_uri_path(self, path, expected):
+        """Test that _is_uri_path correctly identifies URI vs local paths."""
+        assert _is_uri_path(path) == expected
