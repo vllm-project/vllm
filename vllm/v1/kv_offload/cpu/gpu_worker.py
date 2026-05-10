@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -18,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.triton_swap import swap_blocks_batch
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
@@ -316,7 +316,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         with torch.cuda.stream(stream):
             start_event.record(stream)
             if num_copy_ops > 0:
-                ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
+                swap_blocks_batch(batch_src, batch_dst, batch_sizes)
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
