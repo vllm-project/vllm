@@ -12,6 +12,7 @@ from http import HTTPStatus
 
 import hvac
 import pydantic
+from cachetools import TTLCache
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -107,6 +108,10 @@ class VaultAuthenticationMiddleware:
         1. The HTTP method is OPTIONS.
         2. The request path doesn't start with /v1 (e.g. /health).
 
+    TTL Cache = 60 seconds
+
+    Employ's asyncio.Lock()
+
     """
 
     def __init__(
@@ -117,6 +122,7 @@ class VaultAuthenticationMiddleware:
         secret_path,
         vault_key,
         mount_point="secret",
+        cache_ttl: int = 60,
     ):
         """
         :param vault_url: The full URL to your Vault server.
@@ -124,6 +130,7 @@ class VaultAuthenticationMiddleware:
         :param secret_path: The path to the secret (e.g., 'myapp/api-keys').
         :param vault_key: key in the returned object that the token is in
         :param mount_point: The KV engine mount point (default is 'secret' for KV V2).
+        :param cache: TTL cache for tokens
         """
 
         self.app = app
@@ -131,62 +138,89 @@ class VaultAuthenticationMiddleware:
         self.secret_path = secret_path
         self.key = vault_key
         self.mount_point = mount_point
+        self.cache: TTLCache[str, str] = TTLCache(maxsize=1, ttl=cache_ttl)
+        self._lock = asyncio.Lock()
 
-    def verify_token(self, headers: Headers) -> bool:
-        authorization_header_value = headers.get("Authorization")
-        if not authorization_header_value:
-            return False
-
-        scheme, _, param = authorization_header_value.partition(" ")
-        if scheme.lower() != "bearer":
-            return False
-
-        token_match = False
+    def _get_vault_secret_sync(self) -> str | None:
+        """
+        Synchronous process to check with Vault
+        Uses a cache and the short TTL
+        """
+        cached_token = self.cache.get("vault_token")  # simple cache name
+        if cached_token:
+            return cached_token
 
         try:
-            # Read from Vault
             read_response = self.client.secrets.kv.v2.read_secret_version(
                 path=self.secret_path, mount_point=self.mount_point
             )
+            expected_token = read_response["data"]["data"].get(self.key)
 
-            # Extract the expected value
-            vault_secrets = read_response["data"]["data"]
-            expected_token = vault_secrets.get(self.key)
+            if expected_token:
+                self.cache["vault_token"] = expected_token
+                return expected_token
 
-            if not expected_token:
-                # Can't find the token
-                logger.error(
-                    "Can't find the key %s at path %s", self.key, self.secret_path
-                )
-                return False
-
-            # Compare
-            return secrets.compare_digest(param, expected_token)
-
+            logger.error(
+                "Key '%s' not found in Vault path '%s'", self.key, self.secret_path
+            )
         except hvac.exceptions.Forbidden:
-            # access denied
-            logger.error("Vault access error.  Validate permissions.")
+            logger.error("Vault access denied. Check token permissions.")
         except Exception as e:
-            logger.error("An error occurred checking the token: %s", e)
+            logger.error("Unexpected Vault error: %s", e)
 
-        return token_match
+        return None
 
-    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+    async def verify_token(self, headers: Headers) -> bool:
+        auth_header = headers.get("Authorization")
+        if not auth_header:
+            return False
+
+        scheme, _, param = auth_header.partition(" ")
+        if scheme.lower() != "bearer":
+            return False
+
+        # Cache check
+        expected_token = self.cache.get("vault_token")
+
+        if not expected_token:
+            # Use lock to ensure only one thread-offload happens
+            async with self._lock:
+                # Check cache inside lock in case another request filled it
+                expected_token = self.cache.get("vault_token")
+                if not expected_token:
+                    expected_token = await asyncio.to_thread(
+                        self._get_vault_secret_sync
+                    )  # handle blocking in async
+
+        if not expected_token:
+            return False
+
+        return secrets.compare_digest(param, expected_token)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if (
             scope["type"] not in ("http", "websocket")
             or scope.get("method") == "OPTIONS"
         ):
-            # scope["type"] can be "lifespan" or "startup" for example,
-            # in which case we don't need to do anything
-            return self.app(scope, receive, send)
+            await self.app(scope, receive, send)
+            return
+
+        # get path for filtering
         root_path = scope.get("root_path", "")
         url_path = URL(scope=scope).path.removeprefix(root_path)
-        headers = Headers(scope=scope)
-        # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
-            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
-            return response(scope, receive, send)
-        return self.app(scope, receive, send)
+
+        # authenticate /v1 requests
+        if url_path.startswith("/v1"):
+            headers = Headers(scope=scope)
+            authenticated = await self.verify_token(headers)
+
+            if not authenticated:
+                response = JSONResponse(
+                    content={"error": "Unauthorized"}, status_code=401
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 class XRequestIdMiddleware:
