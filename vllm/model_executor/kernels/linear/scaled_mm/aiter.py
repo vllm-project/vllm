@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import os
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -26,6 +28,33 @@ from .ScaledMMLinearKernel import (
 )
 
 logger = init_logger(__name__)
+
+
+# Workaround for a non-determinism bug in
+# `aiter.gemm_a8w8_blockscale_ck` when the CK split-K reduction runs with
+# KBatch > 1. The reduction accumulates partial K products through atomic
+# floating-point adds, which is not associative; back-to-back calls with
+# bit-identical inputs can differ by up to 4 LSBs in bf16. On DeepSeek-V3.2
+# (TP=4, MI355X) this drifts top-1 logits enough to cause token loops at
+# `--max-num-seqs >= 2`, dropping `lm_eval gsm8k` from ~0.95 to ~0.12.
+#
+# The CSV-driven dispatcher inside AITER selects splitK >= 2 for several
+# DSV3.2 dense GEMM shapes (notably `o_proj` at M=1..16 and `q_a_proj` at
+# M=16..128) starting with the `aiter#3024` ("[Silo] Add configs missing
+# from bulk merge #3004", merged 2026-05-05) tuning re-roll, which
+# replaced previously deterministic splitK=0 entries with faster but
+# non-deterministic splitK={2,3} ones.
+#
+# Until the underlying CK reduction is made deterministic upstream, we
+# bypass the CSV dispatcher in `AiterFp8BlockScaledMMKernel` and call the
+# CK kernel directly with splitK=0. Cost is ~10-60% on a handful of
+# small-M decode shapes that wanted splitK>0; correctness is restored
+# bit-exactly. Set `VLLM_ROCM_AITER_BLOCK_SCALED_FORCE_SPLITK0=0` to opt
+# out (e.g. for benchmarking the buggy path).
+_AITER_FORCE_SPLITK_ZERO = (
+    os.getenv("VLLM_ROCM_AITER_BLOCK_SCALED_FORCE_SPLITK0", "1").lower()
+    not in ("0", "false", "no")
+)
 
 
 class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
@@ -328,6 +357,18 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 Bs = Bs.to(torch.float32)
 
         out_dtype = self.config.out_dtype
+
+        if _AITER_FORCE_SPLITK_ZERO and not self.use_triton:
+            # Bypass the CSV-driven splitK selection in
+            # `aiter.gemm_a8w8_blockscale` and call the CK kernel directly
+            # with splitK=0. See module-level comment for rationale.
+            import aiter
+
+            M = A.shape[0]
+            N = B.shape[0]
+            Y = torch.empty(M, N, dtype=out_dtype, device=A.device)
+            return aiter.gemm_a8w8_blockscale_ck(A, B, As, Bs, Y, splitK=0)
+
         if self.use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
