@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
@@ -102,6 +103,7 @@ def create_vllm_config(
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
     kv_role: str = "kv_both",
+    disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -117,6 +119,7 @@ def create_vllm_config(
         max_model_len=max_model_len,
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -249,6 +252,7 @@ def create_model_runner_output(
     invalid_block_ids: set[int] | None = None,
     use_eos: bool = False,
     token_id: int = 0,
+    kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
 
@@ -266,11 +270,13 @@ def create_model_runner_output(
             finished_sending is None
             and finished_recving is None
             and invalid_block_ids is None
+            and kv_connector_worker_meta is None
         )
         else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
+            kv_connector_worker_meta=kv_connector_worker_meta,
         )
     )
 
@@ -287,9 +293,14 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-    def __init__(self, config: VllmConfig, role, kv_cache_config):
+    def __init__(
+        self,
+        config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = ExampleConnector(config, role)
+        self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -362,7 +373,7 @@ class MockKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         extra_config = self._kv_transfer_config.kv_connector_extra_config

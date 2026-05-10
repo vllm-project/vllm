@@ -141,6 +141,10 @@ class AlwaysHitShapeEnv:
 
     def __init__(self) -> None:
         self.guards: list[Any] = []
+        # Read by torch._inductor.codecache.FxGraphHashDetails (torch>=2.11)
+        # to incorporate user-provided dynamic-shape hint overrides into the
+        # cache key. We never override hints, so an empty dict is correct.
+        self.var_to_hint_override: dict[Any, int] = {}
 
     def evaluate_guards_expression(self, *args: Any, **kwargs: Any) -> Literal[True]:
         return True
@@ -150,6 +154,17 @@ class AlwaysHitShapeEnv:
 
     def produce_guards_expression(self, *args: Any, **kwargs: Any) -> Literal[""]:
         return ""
+
+
+def _get_vllm_functorch_config() -> dict[str, Any]:
+    """Return the functorch config overrides that vLLM applies at compile time.
+
+    Used by both set_functorch_config() and get_inductor_factors() to ensure
+    the compile-time config and cache key are always consistent."""
+    cfg: dict[str, Any] = {}
+    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        cfg["bundled_autograd_cache"] = False
+    return cfg
 
 
 def get_inductor_factors() -> list[Any]:
@@ -165,6 +180,13 @@ def get_inductor_factors() -> list[Any]:
 
     torch_factors = torch_key()
     factors.append(torch_factors)
+
+    from torch._functorch import config as functorch_config
+    from torch._inductor import config as inductor_config
+
+    factors.append(inductor_config.save_config_portable())
+    with functorch_config.patch(_get_vllm_functorch_config()):
+        factors.append(functorch_config.save_config_portable())
     return factors
 
 
@@ -739,8 +761,8 @@ def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
 
 
 def set_functorch_config() -> None:
-    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-        torch._functorch.config.bundled_autograd_cache = False
+    for k, v in _get_vllm_functorch_config().items():
+        setattr(torch._functorch.config, k, v)
 
 
 class EagerAdaptor(CompilerInterface):
