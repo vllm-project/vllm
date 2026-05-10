@@ -171,7 +171,7 @@ def _silu_mul_quant_fp8_packed_kernel(
 
     pid_pack = tl.program_id(0)
     pid_m = tl.program_id(1)
-    m_offset = (pid_m * BLOCK_M).to(tl.int64)
+    m_offset = pid_m.to(tl.int64) * BLOCK_M
 
     if m_offset >= M:
         return
