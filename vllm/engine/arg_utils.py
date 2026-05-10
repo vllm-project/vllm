@@ -1484,8 +1484,6 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-        load_general_plugins()
-
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
                 "The global random seed is set to %d. Since "
@@ -1629,7 +1627,6 @@ class EngineArgs:
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
         current_platform.pre_register_and_update()
-        load_general_plugins()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
