@@ -161,7 +161,7 @@ class VaultAuthenticationMiddleware:
                 return False
 
             # Compare
-            return param == expected_token
+            return secrets.compare_digest(param, expected_token)
 
         except hvac.exceptions.Forbidden:
             # access denied

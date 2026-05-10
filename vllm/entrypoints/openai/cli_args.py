@@ -303,7 +303,7 @@ class FrontendArgs(BaseFrontendArgs):
     Authentication token for the Vault server
     Ignored if api_key is set.
     Must have all 4 vault parameters to be activated."""
-    vault_path: str | None = None
+    vault_secret_path: str | None = None
     """If provided, the server will use Hashicorp Vault for the token validation.
     Path in vault to find the key
     Ignored if api_key is set.

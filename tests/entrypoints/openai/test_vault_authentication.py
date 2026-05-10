@@ -41,7 +41,7 @@ def test_vault_arg_parsing(serve_parser):
             "http://someserver:8200",
             "--vault-token",
             "hvs.test_token",
-            "--vault-path",
+            "--vault-secret-path",
             "secret/data/vllm",
             "--vault-key",
             "api-token",
@@ -49,7 +49,7 @@ def test_vault_arg_parsing(serve_parser):
     )
     assert args.vault_url == "http://someserver:8200"
     assert args.vault_token == "hvs.test_token"
-    assert args.vault_path == "secret/data/vllm"
+    assert args.vault_secret_path == "secret/data/vllm"
     assert args.vault_key == "api-token"
 
 
