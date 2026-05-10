@@ -281,14 +281,3 @@ class GenerationError(Exception):
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
-
-
-# RequestResponseMetadata.finished_stats references FinishedRequestStats, which
-# in turn has a forward-reference annotation `FinishReason`. Pydantic resolves
-# forward refs in the namespace of the module where the dataclass was defined
-# (vllm.v1.metrics.stats), so we must supply the real symbol via
-# _types_namespace. Import here (not at module top) to keep this localized to
-# the rebuild and avoid polluting the public import surface.
-from vllm.v1.engine import FinishReason as _FinishReason  # noqa: E402, F401
-
-RequestResponseMetadata.model_rebuild(_types_namespace={"FinishReason": _FinishReason})
