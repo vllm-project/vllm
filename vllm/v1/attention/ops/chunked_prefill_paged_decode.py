@@ -346,25 +346,32 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
-    # Triton is only forced when encountering a non-standard block
-    # like Qwen3 with a size of 544.
-    # 1. Check if block_size is a power of 2 (16, 32, 64...)
-    # 2. If it's a power of 2, we trust the vLLM's native use_custom decision.
-    # 3. If it's not a power of 2 (such as Qwen3's 544),
-    # then our Triton path is forced.
-    is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2:
-        use_custom = False
-
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = (
             max_seq_len + _PARTITION_SIZE_ROCM - 1
         ) // _PARTITION_SIZE_ROCM
-        assert _PARTITION_SIZE_ROCM % block_size == 0
         total_num_seq = block_table.shape[0]
+        # Extra space for multi-pass float4 reduction buffer.
+        # The float4 buffer starts at byte offset
+        # num_seqs * num_heads * max_num_partitions * head_size * elem_size
+        # which must be 16-byte aligned (sizeof(float4)).
+        assert (head_size * query.element_size()) % 16 == 0, (
+            f"head_size * element_size must be float4-aligned, "
+            f"got {head_size} * {query.element_size()}"
+        )
+        max_passes = (max_num_partitions + 511) // 512
+        float4_bytes = 16
+        elem_bytes = query.element_size()
+        extra_per_pass = (
+            1 + (float4_bytes + elem_bytes - 1) // elem_bytes
+        )
+        padded_partitions = (
+            max_num_partitions + max_passes * extra_per_pass
+        )
         tmp_output = torch.empty(
-            size=(total_num_seq, num_query_heads, max_num_partitions, head_size),
+            size=(total_num_seq, num_query_heads,
+                  padded_partitions, head_size),
             dtype=query.dtype,
             device=output.device,
         )
