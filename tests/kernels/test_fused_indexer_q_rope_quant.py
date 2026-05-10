@@ -122,7 +122,7 @@ def _reference(
         return q_fp8, weights_out
 
 
-@pytest.mark.parametrize("num_tokens", [1, 7, 32, 257])
+@pytest.mark.parametrize("num_tokens", [1, 7, 32, 257, 1023])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_fp4", [False, True])
 @torch.inference_mode()
