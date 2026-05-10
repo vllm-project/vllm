@@ -391,6 +391,12 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+    if args.enable_request_stats_headers and args.disable_log_stats:
+        raise TypeError(
+            "Error: --enable-request-stats-headers requires per-request stats "
+            "collection, which is disabled by --disable-log-stats. Drop one of "
+            "the two flags."
+        )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

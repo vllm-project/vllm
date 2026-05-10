@@ -570,10 +570,12 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
-        if last_final_res is not None:
-            # Known limitation: for multi-prompt batch requests, timing
-            # headers reflect only the last prompt's metrics. Token counts
-            # in usage are correctly summed across all prompts.
+        # x-vllm-* headers reflect a single request's timing. For multi-prompt
+        # batch requests the per-prompt FinishedRequestStats can't be
+        # meaningfully aggregated (queue/prefill/decode intervals are
+        # per-prompt), so we skip emitting headers entirely in that case.
+        # Token counts in usage are correctly summed across all prompts.
+        if last_final_res is not None and len(final_res_batch) == 1:
             request_metadata.finished_stats = last_final_res.finished_stats
         prompt_routed_experts = None
         if final_res_batch:

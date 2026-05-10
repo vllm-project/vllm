@@ -668,7 +668,14 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            # 4) Create and handle RequestOutput objects.
+            # 4) Finalize per-request stats before constructing RequestOutput
+            # so that finished_stats is populated on the output we hand off.
+            if finish_reason is not None and not req_state.streaming_input:
+                self._update_stats_from_finished(
+                    req_state, finish_reason, iteration_stats
+                )
+
+            # 5) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                 new_token_ids,
                 pooling_output,
@@ -702,18 +709,6 @@ class OutputProcessor:
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
 
-                    # Track per-request stats
-                    self._update_stats_from_finished(
-                        req_state, finish_reason, iteration_stats
-                    )
-                    # Attach finished_stats to the already-built RequestOutput so
-                    # downstream serving layers can read it. We can't compute
-                    # finished_stats earlier because update_from_finished_request
-                    # depends on prior side effects in this iteration.
-                    if request_output is not None and isinstance(
-                        request_output, RequestOutput
-                    ):
-                        request_output.finished_stats = req_state.finished_stats
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
