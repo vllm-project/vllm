@@ -6154,7 +6154,8 @@ class GPUModelRunner(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
-            self.init_routed_experts_capturer()
+            if self.model_config.enable_return_routed_experts:
+                self.init_routed_experts_capturer()
             return 0
 
         # Initialize encoder CUDA graph manager if enabled.
@@ -6193,7 +6194,8 @@ class GPUModelRunner(
         # address is baked into the graph.  Do NOT call this inside
         # _capture_cudagraphs() -- creating the capturer twice replaces
         # the device buffer, causing graphs to write to a dead buffer.
-        self.init_routed_experts_capturer()
+        if self.model_config.enable_return_routed_experts:
+            self.init_routed_experts_capturer()
 
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
@@ -6989,6 +6991,10 @@ class GPUModelRunner(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
         )
+        if not self.model_config.enable_return_routed_experts:
+            self.routed_experts_initialized = False
+            return
+
         from vllm.distributed import get_tp_group
 
         if hasattr(self.model_config.hf_text_config, "n_shared_experts"):
