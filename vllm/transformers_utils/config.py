@@ -602,15 +602,12 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    try:
-        config_dict, _ = PretrainedConfig.get_config_dict(
-            model,
-            revision=revision,
-            token=hf_token,
-            **without_trust_remote_code(kwargs),
-        )
-    except OSError:
-        config_dict = {}
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model,
+        revision=revision,
+        token=hf_token,
+        **without_trust_remote_code(kwargs),
+    )
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
