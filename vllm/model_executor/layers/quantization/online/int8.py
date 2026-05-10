@@ -96,6 +96,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         assert self.experts_cls is not None
         self.moe_kernel = make_int8_moe_kernel(
             moe_config=self.moe,
+            activation_key=None,  # TODO XXXXXXXXX
             experts_cls=self.experts_cls,
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,

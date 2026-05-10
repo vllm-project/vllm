@@ -331,6 +331,7 @@ def make_unquantized_moe_kernel(
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
+        activation_key=None,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,

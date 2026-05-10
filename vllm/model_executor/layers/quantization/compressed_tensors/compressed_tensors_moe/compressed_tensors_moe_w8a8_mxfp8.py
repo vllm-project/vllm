@@ -133,6 +133,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.experts_cls is not None
         self.moe_kernel = make_fp8_moe_kernel(
             moe_config=self.moe,
+            activation_key=None,  # TODO XXXXXXXXX
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._maybe_init_expert_routing_tables(),

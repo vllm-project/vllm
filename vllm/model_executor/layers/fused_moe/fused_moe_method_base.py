@@ -102,7 +102,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> FusedMoEPrepareAndFinalizeModular | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        pf = maybe_make_prepare_finalize(self.moe, routing_tables)
+        pf = maybe_make_prepare_finalize(
+            activation_key=None,  # activation_key, # TODO XXXXXXXXXXX
+            moe=self.moe,
+            routing_tables=routing_tables,
+        )
         assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
         return pf
 

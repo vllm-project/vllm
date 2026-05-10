@@ -27,6 +27,12 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one
 from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP4_DTYPE,
+    FP8_DTYPE,
+    GroupShape,
+    QuantKey,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 
@@ -36,12 +42,14 @@ if current_platform.is_cuda_alike():
     if has_deep_ep():
         from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
         from .prepare_finalize.deepep_ll import (
+            DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
+            NIXL_EP_QUANT_BLOCK_SHAPE,
             NixlEPPrepareAndFinalize,
         )
 
@@ -83,8 +91,36 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
+def quant_key_to_quant_info(
+    activation_key: QuantKey | None,
+) -> tuple[torch.dtype | str | None, bool, list[int] | None]:
+    quant_dtype: torch.dtype | str | None = None
+    is_per_act_token = False
+    block_shape: list[int] | None = None
+
+    if activation_key is not None:
+        if activation_key.dtype == FP4_DTYPE:
+            quant_dtype = "mxfp4"
+        elif activation_key.dtype == FP8_DTYPE:
+            quant_dtype = activation_key.dtype
+        else:
+            quant_dtype = activation_key.dtype
+
+        block_shape = None
+        if activation_key.scale.group_shape == GroupShape.PER_TENSOR:
+            is_per_act_token = True
+        elif activation_key.scale.group_shape != GroupShape.PER_TOKEN:
+            is_per_act_token = False
+        else:
+            block_shape = list(activation_key.scale.group_shape)
+
+    return (quant_dtype, is_per_act_token, block_shape)
+
+
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
+    activation_key: QuantKey | None,
+    mx_alignment: int = 0,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
@@ -103,6 +139,9 @@ def maybe_make_prepare_finalize(
     #   * maybe_make_prepare_finalize() is called from the oracle. We
     #     always return a PrepareAndFinalize object and the quant method
     #     holds the ModularKernel.
+
+    quant_dtype, is_per_act_token, block_shape = quant_key_to_quant_info(activation_key)
+
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
@@ -162,34 +201,33 @@ def maybe_make_prepare_finalize(
 
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
+        use_fp8_dispatch = (
+            quant_dtype == current_platform.fp8_dtype()
+            and block_shape == DEEPEP_QUANT_BLOCK_SHAPE
+        )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
         )
     elif moe.use_mori_kernels:
-        assert quant_config is not None
-
         # Note: We may want to use FP8 dispatch just to reduce
         # data movement.
-        use_fp8_dispatch = (
-            quant_config.is_per_act_token or quant_config.is_block_quantized
-        )
+        use_fp8_dispatch = is_per_act_token or block_shape is not None
         if use_fp8_dispatch:
             # For PTPC (per token per channel) quant, scale dim is 1
             # For 1x128 quant, scale dim is hidden_dim // 128
-            quant_dtype = quant_config.quant_dtype
-            scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+            scale_dim = 1 if is_per_act_token else moe.hidden_dim // 128
         else:
             # Unquantized dispatch (e.g. AITER with defer_input_quant):
             # dispatch raw BF16/FP16 data, no scales needed.
             quant_dtype = moe.in_dtype
             scale_dim = 0
-
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
@@ -217,19 +255,18 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_fi_nvl_one_sided_kernels:
-        assert quant_config is not None
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
-        if quant_config.quant_dtype is None:
+        if quant_dtype is None:
             dispatch_dtype_bytes_per_elem = 2
             dispatch_scale_bytes_per_token = 0
-        elif quant_config.quant_dtype == "nvfp4":
+        elif quant_dtype == "nvfp4":
             dispatch_dtype_bytes_per_elem = 0
             dispatch_scale_bytes_per_token = moe.hidden_dim // 16
-        elif quant_config.quant_dtype == "mxfp8":
+        elif quant_dtype == "mxfp8":
             dispatch_dtype_bytes_per_elem = 1
-            align = quant_config.mx_alignment
+            align = mx_alignment
             if align > 0:
                 padded_k = ((moe.hidden_dim + align - 1) // align) * align
             else:
@@ -239,7 +276,7 @@ def maybe_make_prepare_finalize(
             raise NotImplementedError(
                 "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
                 "and bf16 (quant_dtype=None) today; got "
-                f"quant_dtype={quant_config.quant_dtype!r}"
+                f"quant_dtype={quant_dtype!r}"
             )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
@@ -275,10 +312,18 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
+        # Note: We may want to use FP8 dispatch just to reduce
+        # data movement.
+        use_fp8_dispatch = (
+            quant_dtype == current_platform.fp8_dtype()
+            and block_shape == NIXL_EP_QUANT_BLOCK_SHAPE
+        )
+
         prepare_finalize = NixlEPPrepareAndFinalize(
             handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,

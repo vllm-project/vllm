@@ -1496,6 +1496,7 @@ def make_mxfp4_moe_quant_config(
 
 
 def make_mxfp4_moe_kernel(
+    activation_key: QuantKey | None,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
@@ -1506,8 +1507,15 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
+    if mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
+        mx_alignment = 256
+    else:
+        mx_alignment = 0
+
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
+        activation_key=activation_key,
+        mx_alignment=mx_alignment,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,

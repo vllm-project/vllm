@@ -585,6 +585,7 @@ def make_fp8_moe_quant_config(
 
 
 def make_fp8_moe_kernel(
+    activation_key: QuantKey | None,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
@@ -594,6 +595,7 @@ def make_fp8_moe_kernel(
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
+        activation_key=activation_key,
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),

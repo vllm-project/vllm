@@ -188,6 +188,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
 
         self.moe_kernel = make_mxfp4_moe_kernel(
             moe_config=self.moe,
+            activation_key=None,  # TODO XXXXXXXXX
             experts_cls=self.experts_cls,
             mxfp4_backend=self.mxfp4_backend,
             shared_experts=layer.shared_experts,

@@ -143,6 +143,7 @@ def select_wna16_moe_backend(
 
 
 def make_wna16_moe_kernel(
+    activation_key: QuantKey | None,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts] | None,
     layer: torch.nn.Module,
@@ -163,6 +164,7 @@ def make_wna16_moe_kernel(
 
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
+        activation_key=None,
         routing_tables=routing_tables,
         allow_new_interface=True,
     )
