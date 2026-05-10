@@ -328,6 +328,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                     batch_dst,
                     batch_sizes,
                     is_src_access_order_any=is_src_access_order_any,
+                    gpu_to_cpu=self.gpu_to_cpu,
                 )
             end_event.record(stream)
 
