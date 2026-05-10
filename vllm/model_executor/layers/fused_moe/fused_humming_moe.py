@@ -64,11 +64,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
     ):
-        self.layer = layer
-        self.num_experts = self.layer.num_experts
-        self.global_num_experts = self.layer.global_num_experts
-        self.init_humming_moe()
-
+        self.init_humming_moe(layer)
         if self.is_batched():
             assert max_num_tokens is not None and num_dispatchers is not None
 
@@ -79,7 +75,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
 
-    def init_humming_moe(self):
+    def init_humming_moe(self, layer: torch.nn.Module):
+        self.layer = layer
+        self.num_experts = self.layer.local_num_experts
+        self.global_num_experts = self.layer.global_num_experts
         self.compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
