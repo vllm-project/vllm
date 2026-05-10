@@ -184,7 +184,7 @@ class KVConnectorBase_V1(ABC):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
@@ -197,13 +197,6 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
-        if self._kv_cache_config is None:
-            logger.warning(
-                "KVConnectorBase_V1 initialized without kv_cache_config. "
-                "This is deprecated - please update your connector to accept "
-                "kv_cache_config as the third constructor argument and pass it "
-                "to super().__init__()."
-            )
         self._role = role
 
     @property
