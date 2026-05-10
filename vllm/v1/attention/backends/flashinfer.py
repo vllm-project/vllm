@@ -1377,11 +1377,9 @@ class FlashInferImpl(AttentionImpl):
             self.head_size,
         )
         lse_shape = (num_decode_tokens, total_num_heads)
-        output_buffer, lse_buffer = (
-            current_workspace_manager().get_simultaneous(
-                (buffer_shape, query.dtype),
-                (lse_shape, torch.float32),
-            )
+        output_buffer, lse_buffer = current_workspace_manager().get_simultaneous(
+            (buffer_shape, query.dtype),
+            (lse_shape, torch.float32),
         )
         return output_buffer, lse_buffer
 
