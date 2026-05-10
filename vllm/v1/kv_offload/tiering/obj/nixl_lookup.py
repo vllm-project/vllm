@@ -3,8 +3,12 @@
 """S3 block existence check via NIXL query_memory."""
 
 import hashlib
+from typing import TYPE_CHECKING
 
 from nixl._api import nixl_agent, nixl_agent_config
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.tiering.obj.obj_store_config import ObjStoreConfig
 
 
 def obj_key_to_dev_id(obj_key: str) -> int:
@@ -15,27 +19,10 @@ def obj_key_to_dev_id(obj_key: str) -> int:
 class NixlLookup:
     """Checks whether an S3 object exists using NIXL query_memory."""
 
-    def __init__(
-        self,
-        bucket: str,
-        endpoint_override: str,
-        access_key: str,
-        secret_key: str,
-        scheme: str = "http",
-        ca_bundle: str = "",
-    ):
+    def __init__(self, obj_config: "ObjStoreConfig"):
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjNixlLookup", agent_config)
-        params: dict[str, str] = {
-            "bucket": bucket,
-            "endpoint_override": endpoint_override,
-            "scheme": scheme,
-            "access_key": access_key,
-            "secret_key": secret_key,
-        }
-        if ca_bundle:
-            params["ca_bundle"] = ca_bundle
-        self._agent.create_backend("OBJ", params)
+        self._agent.create_backend("OBJ", obj_config.to_nixl_params())
 
     def exists(self, s3_key: str) -> bool:
         results = self._agent.query_memory(

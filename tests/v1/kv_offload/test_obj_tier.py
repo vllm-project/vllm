@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Tests for ObjSecondaryTier.
+Tests for ObjectStoreSecondaryTierManager.
 
 These tests use real NIXL OBJ (S3) I/O to verify the OBJ secondary tier
 implementation. The tier writes KV cache blocks to an S3-compatible store via
@@ -26,7 +26,7 @@ import torch
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
-from vllm.v1.kv_offload.tiering.obj.tier import ObjSecondaryTier
+from vllm.v1.kv_offload.tiering.obj import ObjectStoreSecondaryTierManager, ObjStoreConfig
 
 # ---------------------------------------------------------------------------
 # S3 credentials — skip entire module if not configured
@@ -46,15 +46,19 @@ if not all([_S3_BUCKET, _S3_ENDPOINT, _S3_ACCESS_KEY, _S3_SECRET_KEY]):
         allow_module_level=True,
     )
 
+_OBJ_CONFIG = ObjStoreConfig(
+    bucket=_S3_BUCKET,
+    endpoint_override=_S3_ENDPOINT,
+    access_key=_S3_ACCESS_KEY,
+    secret_key=_S3_SECRET_KEY,
+    scheme=_S3_SCHEME,
+    ca_bundle=_S3_CA_BUNDLE,
+)
+
 # Probe NIXL OBJ plugin availability
 try:
-    _probe = ObjSecondaryTier(
-        bucket=_S3_BUCKET,
-        endpoint_override=_S3_ENDPOINT,
-        access_key=_S3_ACCESS_KEY,
-        secret_key=_S3_SECRET_KEY,
-        scheme=_S3_SCHEME,
-        ca_bundle=_S3_CA_BUNDLE,
+    _probe = ObjectStoreSecondaryTierManager(
+        obj_config=_OBJ_CONFIG,
         model_name="_probe",
         gpu_block_size=16,
         tp_size=1,
@@ -102,14 +106,9 @@ def make_job(
 def make_tier(
     key_prefix: str = _RUN_PREFIX,
     **kwargs,
-) -> ObjSecondaryTier:
-    return ObjSecondaryTier(
-        bucket=_S3_BUCKET,
-        endpoint_override=_S3_ENDPOINT,
-        access_key=_S3_ACCESS_KEY,
-        secret_key=_S3_SECRET_KEY,
-        scheme=_S3_SCHEME,
-        ca_bundle=_S3_CA_BUNDLE,
+) -> ObjectStoreSecondaryTierManager:
+    return ObjectStoreSecondaryTierManager(
+        obj_config=_OBJ_CONFIG,
         model_name="test_model",
         gpu_block_size=16,
         tp_size=1,
@@ -125,14 +124,14 @@ def make_tier(
 def make_tier_with_view(
     num_total_blocks: int = 8,
     **kwargs,
-) -> tuple[ObjSecondaryTier, torch.Tensor]:
+) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
     tier = make_tier(**kwargs)
     tensor = torch.zeros((num_total_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
     tier.set_primary_view(memoryview(tensor.numpy()))
     return tier, tensor
 
 
-def drain(tier: ObjSecondaryTier, max_rounds: int = 200) -> list[JobResult]:
+def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 200) -> list[JobResult]:
     """Poll get_finished() until all pending jobs resolve or timeout."""
     results: list[JobResult] = []
     for _ in range(max_rounds):
@@ -236,7 +235,7 @@ class TestObjTierBasic:
 class TestObjTierIO:
     """Data written by store must be exactly recovered by load."""
 
-    def _make(self, num_total_blocks: int = 8) -> tuple[ObjSecondaryTier, torch.Tensor]:
+    def _make(self, num_total_blocks: int = 8) -> tuple[ObjectStoreSecondaryTierManager, torch.Tensor]:
         prefix = f"{_RUN_PREFIX}/io/{uuid.uuid4().hex[:6]}"
         return make_tier_with_view(num_total_blocks=num_total_blocks, key_prefix=prefix)
 
@@ -300,7 +299,7 @@ class TestObjTierIO:
 
 class TestObjTierE2EWithPrimary:
     """
-    End-to-end tests integrating ObjSecondaryTier with
+    End-to-end tests integrating ObjectStoreSecondaryTierManager with
     CPUPrimaryTierOffloadingManager using real S3 I/O via NIXL.
 
     Verifies full data integrity through cascade and promotion pipelines.

@@ -4,53 +4,40 @@
 
 import contextlib
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable
 from typing import NamedTuple
 
 import numpy as np
 import torch
-from nixl._api import nixl_agent, nixl_agent_config
+from nixl._api import nixl_agent, nixl_agent_config, nixl_xfer_handle
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.obj.nixl_lookup import obj_key_to_dev_id
 
+from vllm.v1.kv_offload.tiering.obj.obj_store_config import ObjStoreConfig
+
 logger = init_logger(__name__)
 
+WRITE = "WRITE"
+READ = "READ"
 
-class _TransferEntry(NamedTuple):
+
+class TransferEntry(NamedTuple):
     job_id: int
-    xfer_handle: object
+    xfer_handle: nixl_xfer_handle
     files_desc: object
 
 
 class NixlEngine:
     """Manages async CPU DRAM <-> S3 transfers via NIXL."""
 
-    def __init__(
-        self,
-        bucket: str,
-        endpoint_override: str,
-        access_key: str,
-        secret_key: str,
-        scheme: str = "http",
-        ca_bundle: str = "",
-        io_threads: int = 4,
-    ):
+    def __init__(self, obj_config: ObjStoreConfig, io_threads: int = 4):
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjNixlEngine", agent_config)
-        params: dict[str, str] = {
-            "bucket": bucket,
-            "endpoint_override": endpoint_override,
-            "scheme": scheme,
-            "access_key": access_key,
-            "secret_key": secret_key,
-            "num_threads": str(io_threads),
-        }
-        if ca_bundle:
-            params["ca_bundle"] = ca_bundle
+        params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
         self._agent.create_backend("OBJ", params)
 
-        self._in_flight: deque[_TransferEntry] = deque()
+        self._in_flight: deque[TransferEntry] = deque()
         self._primary_tensor: torch.Tensor | None = None
         self._primary_reg = None
         self._base_addr: int = 0
@@ -67,8 +54,8 @@ class NixlEngine:
     def submit_transfer(
         self,
         job_id: int,
-        block_ids: Sequence[int],
-        s3_keys: Sequence[str],
+        block_ids: Iterable[int],
+        s3_keys: Iterable[str],
         op: str,
     ) -> bool:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
@@ -105,13 +92,13 @@ class NixlEngine:
             self._agent.release_xfer_handle(xfer_handle)
             return False
 
-        self._in_flight.append(_TransferEntry(job_id, xfer_handle, files_desc))
+        self._in_flight.append(TransferEntry(job_id, xfer_handle, files_desc))
         return True
 
     def get_finished(self) -> list[tuple[int, bool]]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
         results: list[tuple[int, bool]] = []
-        still_in_flight: deque[_TransferEntry] = deque()
+        still_in_flight: deque[TransferEntry] = deque()
 
         for entry in self._in_flight:
             try:
