@@ -16,6 +16,7 @@ steps:
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -58,6 +59,7 @@ steps:
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -96,6 +98,7 @@ steps:
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -123,6 +126,7 @@ steps:
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -145,6 +149,7 @@ steps:
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
@@ -168,6 +173,7 @@ steps:
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
