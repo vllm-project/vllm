@@ -96,8 +96,34 @@ class WorkerLoRAManager:
         self._adapter_manager = lora_manager
         return lora_manager.model
 
+    def _validate_request_moe_format(self, lora_request: LoRARequest) -> None:
+        """Reject MoE LoRA requests whose declared on-disk format conflicts
+        with the engine configuration.
+
+        When `enable_mixed_moe_lora_format` is off, the engine instantiates a
+        single MoE wrapper class that only accepts adapters whose layout
+        matches the base model. Allowing a mismatched LoRARequest through
+        would silently load weights into the wrong storage and produce
+        garbage outputs, so fail fast here.
+        """
+        if self.lora_config.enable_mixed_moe_lora_format:
+            return
+        model = self._adapter_manager.model
+        if not getattr(model, "supports_lora", False):
+            return
+        model_is_3d = bool(getattr(model, "is_3d_moe_weight", False))
+        if lora_request.is_3d_lora_weight != model_is_3d:
+            raise ValueError(
+                f"LoRA adapter '{lora_request.lora_name}' declares "
+                f"is_3d_lora_weight={lora_request.is_3d_lora_weight} but the "
+                f"base model expects is_3d_moe_weight={model_is_3d}. To load "
+                "MoE adapters whose layout differs from the base model, "
+                "start the engine with enable_mixed_moe_lora_format=True."
+            )
+
     def _load_adapter(self, lora_request: LoRARequest) -> LoRAModel:
         try:
+            self._validate_request_moe_format(lora_request)
             supported_lora_modules = self._adapter_manager.supported_lora_modules
             packed_modules_mapping = self._adapter_manager.packed_modules_mapping
             expected_lora_lst: list[str] = []
@@ -141,6 +167,10 @@ class WorkerLoRAManager:
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
             )
+            # Stamp the on-disk MoE layout onto the loaded model so the
+            # adapter manager can route 3D-format checkpoints through the
+            # 3D->2D conversion when running under the universal 2D wrapper.
+            lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both

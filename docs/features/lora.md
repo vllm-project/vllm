@@ -248,6 +248,41 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
+## Mixing 2D and 3D MoE LoRA Adapters
+
+To serve 2D-format(based on `megatron`) and 3D-format (based on `peft`) adapters from the same engine instance, start the server with `--enable-mixed-moe-lora-format`
+and declare the layout of each adapter explicitly via the `is_3d_lora_weight` field.
+
+Server startup (static modules):
+
+```bash
+vllm serve Qwen/Qwen3.6-35B-A3B \
+    --enable-lora \
+    --enable-mixed-moe-lora-format \
+    --tensor-parallel-size 4 \
+    --enable-expert-parallel \
+    --lora-modules \
+        '{"name": "lora-2d", "path": "jeeejeee/qwen36-35ba3b-2d-weights-poken-lora", "is_3d_lora_weight": false}' \
+        '{"name": "lora-3d", "path": "jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora", "is_3d_lora_weight": true}'
+```
+
+Dynamic load via `/v1/load_lora_adapter`:
+
+```bash
+curl -X POST http://localhost:8000/v1/load_lora_adapter \
+-H "Content-Type: application/json" \
+-d '{
+    "lora_name": "lora-3d",
+    "lora_path": "/path/to/3d-format-lora",
+    "is_3d_lora_weight": true
+}'
+```
+
+When `--enable-mixed-moe-lora-format` is **not** set, `is_3d_lora_weight`
+must agree with the base model's `is_3d_moe_weight` or the request is
+rejected at load time. The `is_3d_lora_weight` field is ignored for
+non-MoE models.
+
 ## LoRA model lineage in model card
 
 The new format of `--lora-modules` is mainly to support the display of parent model information in the model card. Here's an explanation of how your current response supports this:
