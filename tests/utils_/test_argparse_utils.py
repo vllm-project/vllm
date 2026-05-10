@@ -342,6 +342,16 @@ def test_convert_ids_list_to_tokens():
     assert tokens == ["Hello", ",", " world", "!"]
 
 
+def test_convert_ids_list_to_tokens_with_duplicates():
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+    # Simulate logprobs: sampled token + top-k alternatives with repeats
+    token_ids = [9707, 11, 9707, 0, 11, 1879, 0]
+    tokens = convert_ids_list_to_tokens(tokenizer, token_ids)
+    assert tokens == ["Hello", ",", "Hello", "!", ",", " world", "!"]
+    assert tokens[0] == tokens[2]  # same ID -> same decode
+    assert tokens[3] == tokens[6]  # same ID -> same decode
+
+
 def test_load_config_file(tmp_path):
     # Define the configuration data
     config_data = {
