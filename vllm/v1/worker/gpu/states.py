@@ -104,9 +104,8 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
-        self.num_computed_tokens_np[req_idx] = num_computed_tokens
 
-        if num_computed_tokens > 0 and num_computed_tokens <= prefill_len:
+        if 0 < num_computed_tokens <= prefill_len:
             # For PD disagg or resumed requests: set last_sampled to the last
             # computed token so the first decode step gets the right input_id.
             # For fresh prefill requests (num_computed_tokens == 0) the tensor
