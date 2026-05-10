@@ -9,7 +9,6 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 """
 
-
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -89,6 +88,7 @@ def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, senti
     num_min_larger = tl.where(is_new, tile_cnt, num_min_larger + tile_cnt * is_same)
     min_larger = tl.minimum(min_larger, tile_min)
     return min_larger, num_min_larger
+
 
 @triton.jit
 def _topk_topp_kernel(
@@ -542,8 +542,11 @@ def _topk_topp_kernel(
 
                                 min_larger_0, num_min_larger_0 = (
                                     _update_min_larger_stats(
-                                        probs_blk, above_0,
-                                        min_larger_0, num_min_larger_0, 1.0,
+                                        probs_blk,
+                                        above_0,
+                                        min_larger_0,
+                                        num_min_larger_0,
+                                        1.0,
                                     )
                                 )
 
@@ -703,11 +706,12 @@ def _topk_topp_kernel(
                             above_0 = probs_blk > p_pivot_0
                             p_pivots_sum_0 += tl.sum(probs_blk * above_0)
 
-                            min_larger_0, num_min_larger_0 = (
-                                _update_min_larger_stats(
-                                    probs_blk, above_0,
-                                    min_larger_0, num_min_larger_0, 1.0,
-                                )
+                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
+                                probs_blk,
+                                above_0,
+                                min_larger_0,
+                                num_min_larger_0,
+                                1.0,
                             )
 
                         # Check if the pivot satisfies termination condition
@@ -765,11 +769,12 @@ def _topk_topp_kernel(
                             above_0 = probs_blk > p_pivot_0
                             p_pivots_sum_0 += tl.sum(probs_blk * above_0)
 
-                            min_larger_0, num_min_larger_0 = (
-                                _update_min_larger_stats(
-                                    probs_blk, above_0,
-                                    min_larger_0, num_min_larger_0, 1.0,
-                                )
+                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
+                                probs_blk,
+                                above_0,
+                                min_larger_0,
+                                num_min_larger_0,
+                                1.0,
                             )
 
                         # Check if the pivot satisfies termination condition
@@ -825,9 +830,7 @@ def _topk_topp_kernel(
                         tl.abs(logits_blk - duplicate_logit) < 1e-9
                     ) & mask_n
                     duplicate_count = tl.cumsum(duplicate_mask) + num_kept
-                    duplicate_keep_mask = (
-                        duplicate_count <= num_keep
-                    ) & duplicate_mask
+                    duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
                     duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
                     num_kept += tl.sum(duplicate_keep_mask)
                     keep_mask = keep_mask & (~duplicate_remove_mask)
