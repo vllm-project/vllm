@@ -12,15 +12,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
@@ -42,15 +45,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
@@ -72,15 +78,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
@@ -101,15 +110,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
@@ -128,15 +140,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal
   - tests/models/registry.py
   device: cpu-medium
@@ -154,15 +169,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
@@ -189,15 +207,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
@@ -219,15 +240,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal/generation
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
@@ -242,15 +266,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal/generation
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
@@ -266,15 +293,18 @@ steps:
   - vllm/distributed/
   - vllm/engine/
   - vllm/inputs/
+  - vllm/logging_utils/
   - vllm/model_executor/
   - vllm/multimodal/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/sampling_params.py
   - vllm/sequence.py
+  - vllm/tasks.py
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - vllm/version.py
   - tests/models/multimodal/pooling
   commands:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
