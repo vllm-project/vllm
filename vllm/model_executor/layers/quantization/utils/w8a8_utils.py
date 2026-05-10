@@ -40,6 +40,22 @@ def cutlass_group_gemm_supported() -> bool:
 
 CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
+FP8_SCALE_DTYPES = tuple(
+    dtype
+    for dtype in (
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        getattr(torch, "float8_e8m0fnu", None),
+    )
+    if dtype is not None
+)
+
+
+def _double_scale(scale: torch.Tensor) -> torch.Tensor:
+    if scale.dtype in FP8_SCALE_DTYPES:
+        return (scale.float() * 2.0).to(scale.dtype)
+    return scale * 2.0
 
 
 def per_tensor_dequantize(
@@ -125,7 +141,7 @@ def normalize_e4m3fn_to_e4m3fnuz(
     # the e4m3fn value, so we should double the scaling factor to
     # get the same dequantized value.
     # https://onnx.ai/onnx/technical/float8.html
-    weight_scale = weight_scale * 2.0
+    weight_scale = _double_scale(weight_scale)
     if input_scale is not None:
-        input_scale = input_scale * 2.0
+        input_scale = _double_scale(input_scale)
     return weight, weight_scale, input_scale
