@@ -293,6 +293,27 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+    vault_url: str | None = None
+    """If provided, the server will use Hashicorp Vault for the token validation.
+    URL for the Vault server
+    Ignored if api_key is set.
+    Must have all 4 vault parameters to be activated."""
+    vault_token: str | None = None
+    """If provided, the server will use Hashicorp Vault for the token validation.
+    Authentication token for the Vault server
+    Ignored if api_key is set.
+    Must have all 4 vault parameters to be activated."""
+    vault_path: str | None = None
+    """If provided, the server will use Hashicorp Vault for the token validation.
+    Path in vault to find the key
+    Ignored if api_key is set.
+    Must have all 4 vault parameters to be activated."""
+    vault_key: str | None = None
+    """If provided, the server will use Hashicorp Vault for the token validation.
+    Key in the Vault document to retrieve.  Compared against the value of
+    'Authentication: Bearer (token)'
+    Ignored if api_key is set.
+    Must have all 4 vault parameters to be activated."""
 
     @classmethod
     def _customize_cli_kwargs(

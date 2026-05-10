@@ -369,6 +369,10 @@ huggingface-hub==1.10.2
     #   vocos
 humanize==4.15.0
     # via runai-model-streamer
+hvac==2.4.0
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
 hyperframe==6.1.0
     # via h2
 hypothesis==6.151.9
@@ -999,6 +1003,7 @@ requests==2.32.5
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
+    #   hvac
     #   lm-eval
     #   mistral-common
     #   msal

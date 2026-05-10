@@ -268,6 +268,11 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    """Hashicorp Vault integration"""
+    VLLM_VAULT_TOKEN: str | None = None
+    VLLM_VAULT_SECRET_PATH: str | None = None
+    VLLM_VAULT_KEY: str | None = None
+    VLLM_VAULT_URL: str | None = None
 
 
 def get_default_cache_root():
@@ -1788,6 +1793,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
+    # VAULT setup
+    "VLLM_VAULT_TOKEN": lambda: os.environ.get("VLLM_VAULT_TOKEN", None),
+    "VLLM_VAULT_SECRET_PATH": lambda: os.environ.get("VLLM_VAULT_SECRET_PATH", None),
+    "VLLM_VAULT_KEY": lambda: os.environ.get("VLLM_VAULT_KEY", None),
+    "VLLM_VAULT_URL": lambda: os.environ.get("VLLM_VAULT_URL", None),
 }
 
 

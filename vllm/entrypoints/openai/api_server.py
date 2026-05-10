@@ -269,10 +269,41 @@ def build_app(
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
+    api_key_used = False
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
         from vllm.entrypoints.openai.server_utils import AuthenticationMiddleware
 
         app.add_middleware(AuthenticationMiddleware, tokens=tokens)
+        api_key_used = True
+
+    # Vault setup;
+    # ignore if api-key is set
+    if not api_key_used:
+        # follow pattern of passed args overriding env variables
+        vault_url = args.vault_url or envs.VLLM_VAULT_URL
+        vault_token = args.vault_token or envs.VLLM_VAULT_TOKEN
+        vault_path = args.vault_secret_path or envs.VLLM_VAULT_SECRET_PATH
+        vault_key = args.vault_key or envs.VLLM_VAULT_KEY
+
+        vault_params = [
+            vault_url,
+            vault_token,
+            vault_path,
+            vault_key,
+        ]
+        # ignore if ALL values aren't set
+        if all(vault_params):
+            from vllm.entrypoints.openai.server_utils import (
+                VaultAuthenticationMiddleware,
+            )
+
+            app.add_middleware(
+                VaultAuthenticationMiddleware,
+                vault_url=vault_url,
+                vault_token=vault_token,
+                secret_path=vault_path,
+                vault_key=vault_key,
+            )
 
     if args.enable_request_id_headers:
         from vllm.entrypoints.openai.server_utils import XRequestIdMiddleware

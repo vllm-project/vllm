@@ -10,6 +10,7 @@ from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
+import hvac
 import pydantic
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -65,6 +66,108 @@ class AuthenticationMiddleware:
         token_match = False
         for token_hash in self.api_tokens:
             token_match |= secrets.compare_digest(param_hash, token_hash)
+
+        return token_match
+
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+        if (
+            scope["type"] not in ("http", "websocket")
+            or scope.get("method") == "OPTIONS"
+        ):
+            # scope["type"] can be "lifespan" or "startup" for example,
+            # in which case we don't need to do anything
+            return self.app(scope, receive, send)
+        root_path = scope.get("root_path", "")
+        url_path = URL(scope=scope).path.removeprefix(root_path)
+        headers = Headers(scope=scope)
+        # Type narrow to satisfy mypy.
+        if url_path.startswith("/v1") and not self.verify_token(headers):
+            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+            return response(scope, receive, send)
+        return self.app(scope, receive, send)
+
+
+class VaultAuthenticationMiddleware:
+    """
+    HVAC library usage to check a passed token against a Hashicorp Vault path.
+
+    ASGI middleware that authenticates each request by checking
+    if the Authorization Bearer token exists and equals secret at set "{vault_path}"
+
+    Notes
+    -----
+    Uses 'hvac' library to access Vault.
+    Requires values set including:
+        - vault_token
+        - vault_secret_path (including mount point)
+        - vault_key
+        - vault_url
+
+    Follows existing AuthenticationMiddleware pattern and skips two cases:
+        1. The HTTP method is OPTIONS.
+        2. The request path doesn't start with /v1 (e.g. /health).
+
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        vault_url,
+        vault_token,
+        secret_path,
+        vault_key,
+        mount_point="secret",
+    ):
+        """
+        :param vault_url: The full URL to your Vault server.
+        :param vault_token: A token with read permissions for the secret_path.
+        :param secret_path: The path to the secret (e.g., 'myapp/api-keys').
+        :param vault_key: key in the returned object that the token is in
+        :param mount_point: The KV engine mount point (default is 'secret' for KV V2).
+        """
+
+        self.app = app
+        self.client = hvac.Client(url=vault_url, token=vault_token)
+        self.secret_path = secret_path
+        self.key = vault_key
+        self.mount_point = mount_point
+
+    def verify_token(self, headers: Headers) -> bool:
+        authorization_header_value = headers.get("Authorization")
+        if not authorization_header_value:
+            return False
+
+        scheme, _, param = authorization_header_value.partition(" ")
+        if scheme.lower() != "bearer":
+            return False
+
+        token_match = False
+
+        try:
+            # Read from Vault
+            read_response = self.client.secrets.kv.v2.read_secret_version(
+                path=self.secret_path, mount_point=self.mount_point
+            )
+
+            # Extract the expected value
+            vault_secrets = read_response["data"]["data"]
+            expected_token = vault_secrets.get(self.key)
+
+            if not expected_token:
+                # Can't find the token
+                logger.error(
+                    "Can't find the key %s at path %s", self.key, self.secret_path
+                )
+                return False
+
+            # Compare
+            return param == expected_token
+
+        except hvac.exceptions.Forbidden:
+            # access denied
+            logger.error("Vault access error.  Validate permissions.")
+        except Exception as e:
+            logger.error("An error occurred checking the token: %s", e)
 
         return token_match
 

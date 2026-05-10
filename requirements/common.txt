@@ -55,3 +55,4 @@ opentelemetry-sdk >= 1.27.0
 opentelemetry-api >= 1.27.0
 opentelemetry-exporter-otlp >= 1.27.0
 opentelemetry-semantic-conventions-ai >= 0.4.1
+hvac >= 2.4.0 # Used for Hashicorp Vault integration
