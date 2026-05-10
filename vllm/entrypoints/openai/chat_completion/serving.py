@@ -1357,6 +1357,7 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        request_metadata.finished_stats = final_res.finished_stats
 
         prompt_routed_experts = None
         if final_res.prompt_routed_experts is not None:

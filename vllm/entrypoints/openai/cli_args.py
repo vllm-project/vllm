@@ -151,6 +151,11 @@ class BaseFrontendArgs:
     """
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    enable_request_stats_headers: bool = False
+    """If set to True, include per-request timing and compute stats as
+    x-vllm-* response headers on non-streaming responses. Headers reflect
+    the same intervals reported by Prometheus (e2e, queued, prefill,
+    decode, inference, mean time per output token)."""
     tokens_only: bool = False
     """
     If set to True, only enable the Tokens In<>Out endpoint.

@@ -433,7 +433,7 @@ class IterationStats:
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
         num_cached_tokens: int = 0,
-    ):
+    ) -> FinishedRequestStats:
         e2e_latency = self._time_since(req_stats.arrival_time)
 
         # Queued interval is from first QUEUED event to first SCHEDULED
@@ -478,6 +478,8 @@ class IterationStats:
         # Count corrupted requests when they finish (only once per request)
         if req_stats.is_corrupted:
             self.num_corrupted_reqs += 1
+
+        return finished_req
 
 
 class LoRAStats:

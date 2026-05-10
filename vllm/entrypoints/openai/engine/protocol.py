@@ -20,6 +20,7 @@ from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.v1.metrics.stats import FinishedRequestStats
 
 logger = init_logger(__name__)
 
@@ -110,8 +111,11 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     final_usage_info: UsageInfo | None = None
+    finished_stats: FinishedRequestStats | None = None
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
@@ -277,3 +281,14 @@ class GenerationError(Exception):
     def __init__(self, message: str = "Internal server error"):
         super().__init__(message)
         self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
+# RequestResponseMetadata.finished_stats references FinishedRequestStats, which
+# in turn has a forward-reference annotation `FinishReason`. Pydantic resolves
+# forward refs in the namespace of the module where the dataclass was defined
+# (vllm.v1.metrics.stats), so we must supply the real symbol via
+# _types_namespace. Import here (not at module top) to keep this localized to
+# the rebuild and avoid polluting the public import surface.
+from vllm.v1.engine import FinishReason as _FinishReason  # noqa: E402, F401
+
+RequestResponseMetadata.model_rebuild(_types_namespace={"FinishReason": _FinishReason})

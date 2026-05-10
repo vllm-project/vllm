@@ -35,6 +35,7 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
+    FinishedRequestStats,
     IterationStats,
     LoRARequestStates,
     RequestStateStats,
@@ -177,6 +178,7 @@ class RequestState:
         self.num_cached_tokens = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        self.finished_stats: FinishedRequestStats | None = None
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -396,6 +398,7 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
             prompt_routed_experts=prompt_routed_experts,
+            finished_stats=self.finished_stats,
         )
 
     def _new_completion_output(
@@ -703,6 +706,14 @@ class OutputProcessor:
                     self._update_stats_from_finished(
                         req_state, finish_reason, iteration_stats
                     )
+                    # Attach finished_stats to the already-built RequestOutput so
+                    # downstream serving layers can read it. We can't compute
+                    # finished_stats earlier because update_from_finished_request
+                    # depends on prior side effects in this iteration.
+                    if request_output is not None and isinstance(
+                        request_output, RequestOutput
+                    ):
+                        request_output.finished_stats = req_state.finished_stats
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
@@ -822,7 +833,7 @@ class OutputProcessor:
 
         assert finish_reason is not None
         assert req_state.stats is not None
-        iteration_stats.update_from_finished_request(
+        req_state.finished_stats = iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
             request_id=req_state.external_req_id,
             num_prompt_tokens=req_state.prompt_len,
