@@ -17,6 +17,7 @@ from flashinfer import (
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
+from typing_extensions import override
 
 from vllm import envs
 from vllm.config import (
@@ -703,6 +704,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             with_numpy=True,
         )
 
+    @override  # type: ignore[misc]
     @classmethod
     def get_cudagraph_support(
         cls: type["FlashInferMetadataBuilder"],
@@ -981,6 +983,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
+        )
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
@@ -1002,13 +1010,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
-
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
@@ -1367,7 +1368,7 @@ class FlashInferImpl(AttentionImpl):
         self,
         query: torch.Tensor,
         num_decode_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.dcp_world_size > 1
         total_num_heads = self.num_heads * self.dcp_world_size
         buffer_shape = (
@@ -1376,14 +1377,13 @@ class FlashInferImpl(AttentionImpl):
             self.head_size,
         )
         lse_shape = (num_decode_tokens, total_num_heads)
-        query_buffer, output_buffer, lse_buffer = (
+        output_buffer, lse_buffer = (
             current_workspace_manager().get_simultaneous(
-                (buffer_shape, query.dtype),
                 (buffer_shape, query.dtype),
                 (lse_shape, torch.float32),
             )
         )
-        return query_buffer, output_buffer, lse_buffer
+        return output_buffer, lse_buffer
 
     def forward(
         self,
@@ -1738,17 +1738,14 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    decode_query_buffer, output_tmp, lse = self._get_dcp_decode_buffers(
+                    output_tmp, lse = self._get_dcp_decode_buffers(
                         decode_query, num_decode_tokens
                     )
-                    decode_query_buffer.copy_(
-                        get_dcp_group().all_gather(
-                            decode_query.contiguous(),
-                            dim=-2,
-                        )
+                    decode_query = get_dcp_group().all_gather(
+                        decode_query.contiguous(), dim=-2
                     )
                     decode_wrapper.run(
-                        decode_query_buffer,
+                        decode_query,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
