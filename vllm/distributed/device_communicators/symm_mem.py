@@ -8,6 +8,7 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
+    SYMM_MEM_TWO_SHOT_ALL_REDUCE_MAX_SIZES,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -38,6 +39,7 @@ class SymmMemCommunicator:
         max_size_override: int | None = None,
     ):
         self.disabled = True
+        self.multicast_supported = False
 
         if not symm_mem_available:
             return
@@ -102,12 +104,23 @@ class SymmMemCommunicator:
                 str(e),
             )
             return
-        if handle.multicast_ptr == 0:
+        self.multicast_supported = handle.multicast_ptr != 0
+        if not self.multicast_supported:
+            two_shot_max_size = SYMM_MEM_TWO_SHOT_ALL_REDUCE_MAX_SIZES.get(
+                self.device_capability, {}
+            ).get(self.world_size)
+            if max_size_override is None and two_shot_max_size is not None:
+                self.max_size = two_shot_max_size
+                logger.info(
+                    "SymmMemCommunicator: using two-shot allreduce max size "
+                    "of %s bytes.",
+                    self.max_size,
+                )
             logger.warning(
                 "SymmMemCommunicator: symmetric memory "
-                "multicast operations are not supported."
+                "multicast operations are not supported. Falling back to "
+                "two-shot allreduce."
             )
-            return
         self.force_multimem = force_multimem
         self.disabled = False
         if envs.VLLM_BATCH_INVARIANT:
@@ -136,11 +149,19 @@ class SymmMemCommunicator:
         use_multimem = False
         if self.force_multimem is not None:
             # Test override: use forced setting
-            use_multimem = self.force_multimem
+            use_multimem = self.force_multimem and self.multicast_supported
+            if self.force_multimem and not self.multicast_supported:
+                logger.warning_once(
+                    "SymmMemCommunicator: force_multimem=True was requested, "
+                    "but multicast operations are not supported. Falling back "
+                    "to two-shot allreduce."
+                )
         else:
             # Normal logic: use multimem for supported world sizes
             use_multimem = (
-                self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
+                self.multicast_supported
+                and self.world_size
+                in self._WORLD_SIZES_MULTIMEM.get(self.device_capability, [])
             )
 
         if use_multimem:

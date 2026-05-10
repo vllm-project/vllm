@@ -51,7 +51,7 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     "9.0": {
-        2: 64 * MiB,  # 64 MB
+        2: 32 * MiB,  # 32 MB
         4: 32 * MiB,  # 32 MB
         6: 64 * MiB,  # 64 MB
         8: 64 * MiB,  # 64 MB
@@ -59,14 +59,37 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
     "10.0": {
         2: 8 * MiB,  # 8 MB
         4: 32 * MiB,  # 32 MB
-        6: 128 * MiB,  # 128 MB
+        6: 32 * MiB,  # 32 MB
         8: 128 * MiB,  # 128 MB
     },
     "10.3": {
-        2: 4 * MiB,  # 4 MB
+        2: 8 * MiB,  # 8 MB
+        4: 64 * MiB,  # 64 MB
+        6: 64 * MiB,  # 64 MB
+        8: 128 * MiB,  # 128 MB
+    },
+}
+
+# Max size for symmetric memory allreduce when multicast is unavailable and
+# vLLM must use the two-shot implementation for all world sizes.
+SYMM_MEM_TWO_SHOT_ALL_REDUCE_MAX_SIZES = {
+    "9.0": {
+        2: 32 * MiB,  # 32 MB
+        4: 16 * MiB,  # 16 MB
+        6: 16 * MiB,  # 16 MB
+        8: 16 * MiB,  # 16 MB
+    },
+    "10.0": {
+        2: 8 * MiB,  # 8 MB
         4: 32 * MiB,  # 32 MB
-        6: 32 * MiB,  # 32 MB
-        8: 64 * MiB,  # 64 MB
+        6: 16 * MiB,  # 16 MB
+        8: 128 * MiB,  # 128 MB
+    },
+    "10.3": {
+        2: 8 * MiB,  # 8 MB
+        4: 64 * MiB,  # 64 MB
+        6: 16 * MiB,  # 16 MB
+        8: 128 * MiB,  # 128 MB
     },
 }
 
