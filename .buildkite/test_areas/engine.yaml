@@ -7,7 +7,17 @@ steps:
   timeout_in_minutes: 15
   device: h200_18gb
   source_file_dependencies:
-  - vllm/
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/engine/
+  - vllm/entrypoints/logger.py
+  - vllm/envs.py
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/platforms/
+  - vllm/sequence.py
+  - vllm/triton_utils/
+  - vllm/utils/
   - tests/engine
   - tests/test_sequence
   - tests/test_config
@@ -52,8 +62,24 @@ steps:
   optional: true
   num_devices: 2
   source_file_dependencies:
-    - vllm/
-    - tests/v1/e2e
+    - vllm/compilation/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/envs.py
+    - vllm/forward_context.py
+    - vllm/inputs/
+    - vllm/logger.py
+    - vllm/logging_utils/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/triton_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/e2e/spec_decode
   commands:
     # Only run tests that need exactly 2 GPUs
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
@@ -64,8 +90,24 @@ steps:
   optional: true
   num_devices: 4
   source_file_dependencies:
-    - vllm/
-    - tests/v1/e2e
+    - vllm/compilation/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/envs.py
+    - vllm/forward_context.py
+    - vllm/inputs/
+    - vllm/logger.py
+    - vllm/logging_utils/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/triton_utils/
+    - vllm/utils/
+    - vllm/v1/
+    - tests/v1/e2e/spec_decode
   commands:
     # Only run tests that need 4 GPUs
     - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
