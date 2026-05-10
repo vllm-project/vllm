@@ -124,27 +124,25 @@ class DequantGatherKCacheKernel:
         # each [block_size, head_bytes] block is actually a concat of
         # [block_size, fp8_dim + bf16_dim * 2] and [block_size, 8]
         data_dim = cutlass.const_expr(self.fp8_dim + self.bf16_dim * 2)
-        k_ptr = cute.make_ptr(Uint8, k_cache.iterator.toint(), assumed_align=32)
-        cache_stride = cute.assume(k_cache.stride[0], 32)
         k_fp8 = cute.make_tensor(
-            k_ptr,
+            k_cache.iterator,
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, self.fp8_dim),
-                stride=(cache_stride, data_dim, 1),
+                stride=(k_cache.stride[0], data_dim, 1),
             ),
         )
         k_bf16 = cute.make_tensor(
-            cute.recast_ptr(k_ptr + self.fp8_dim, dtype=BFloat16),
+            cute.recast_ptr(k_cache.iterator + self.fp8_dim, dtype=BFloat16),
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, self.bf16_dim),
-                stride=(cache_stride // 2, data_dim // 2, 1),
+                stride=(k_cache.stride[0] // 2, data_dim // 2, 1),
             ),
         )
         k_scale = cute.make_tensor(
-            k_ptr + (self.block_size * data_dim),
+            k_cache.iterator + (self.block_size * data_dim),
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, 8),
-                stride=(cache_stride, 8, 1),
+                stride=(k_cache.stride[0], 8, 1),
             ),
         )
 
@@ -248,7 +246,12 @@ class DequantGatherKCacheKernel:
         head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
 
         out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
-        k_cache = make_fake_tensor(Uint8, (cute.sym_int(), block_size, head_bytes))
+        k_cache = cute.runtime.make_fake_tensor(
+            Uint8,
+            (cute.sym_int(), block_size, head_bytes),
+            stride=(cute.sym_int64(divisibility=32), head_bytes, 1),
+            assumed_align=32,
+        )
         seq_lens = make_fake_tensor(Int32, (num_reqs,))
         gather_lens = make_fake_tensor(Int32, (num_reqs,))
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
@@ -302,29 +305,25 @@ class DequantGatherKCacheCpasyncKernel:
         # each [block_size, head_bytes] block is actually a concat of
         # [block_size, fp8_dim + bf16_dim * 2] and [block_size, 8]
         data_dim = cutlass.const_expr(self.fp8_dim + self.bf16_dim * 2)
-        k_ptr = cute.make_ptr(
-            Uint8, k_cache.iterator.toint(), cute.AddressSpace.gmem, assumed_align=32
-        )
-        cache_stride = cute.assume(k_cache.stride[0], 32)
         k_fp8 = cute.make_tensor(
-            k_ptr,
+            k_cache.iterator,
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, self.fp8_dim),
-                stride=(cache_stride, data_dim, 1),
+                stride=(k_cache.stride[0], data_dim, 1),
             ),
         )
         k_bf16 = cute.make_tensor(
-            cute.recast_ptr(k_ptr + self.fp8_dim, dtype=BFloat16),
+            cute.recast_ptr(k_cache.iterator + self.fp8_dim, dtype=BFloat16),
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, self.bf16_dim),
-                stride=(cache_stride // 2, data_dim // 2, 1),
+                stride=(k_cache.stride[0] // 2, data_dim // 2, 1),
             ),
         )
         k_scale = cute.make_tensor(
-            k_ptr + (self.block_size * data_dim),
+            k_cache.iterator + (self.block_size * data_dim),
             layout=cute.make_layout(
                 (k_cache.shape[0], self.block_size, 8),
-                stride=(cache_stride, 8, 1),
+                stride=(k_cache.stride[0], 8, 1),
             ),
         )
 
@@ -339,6 +338,30 @@ class DequantGatherKCacheCpasyncKernel:
             block_table,
             offset,
         ).launch(grid=grid, block=(self.tb_size, 1, 1), stream=stream)
+
+    @cute.jit
+    def load_g2s(
+        self,
+        k_fp8: cute.Tensor,  # u8[num_blocks, block_size, fp8_dim]
+        block_table: cute.Tensor,  # i32[num_reqs, max_blocks_per_req]
+        buf_slice: cute.Tensor,  # u32[cp_bytes / 4, num_stages]
+        req_id,  # i32
+        pos,  # i32
+        sublane_id,  # i32
+        stage_id,  # i32
+    ):
+        cp_atom = cute.make_copy_atom(
+            cpasync.CopyG2SOp(cache_mode=cute.nvgpu.LoadCacheMode.GLOBAL),
+            Uint32,
+            num_bits_per_copy=128,
+        )
+        page_id = block_table[req_id, pos // self.block_size]
+        src = cute.local_tile(
+            k_fp8[page_id, pos % self.block_size, None],
+            tiler=(self.cp_bytes,),
+            coord=(sublane_id,),
+        )
+        cute.copy(cp_atom, cute.recast_tensor(src, Uint32), buf_slice[None, stage_id])
 
     @cute.kernel
     def kernel(
@@ -392,12 +415,6 @@ class DequantGatherKCacheCpasyncKernel:
             cp_op, Uint32, num_bits_per_copy=cp_bytes * 8 * 2
         )
 
-        cp_g2s_atom = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cute.nvgpu.LoadCacheMode.GLOBAL),
-            Uint32,
-            num_bits_per_copy=128,
-        )
-
         for i in cutlass.range_constexpr(self.num_stages - 1):
             next_pos = (
                 start_pos
@@ -406,14 +423,8 @@ class DequantGatherKCacheCpasyncKernel:
                 + i * num_workers * self.toks_per_cta
             )
             if next_pos < seq_len:
-                next_page_id = block_table[req_id, next_pos // self.block_size]
-                src = cute.local_tile(
-                    k_fp8[next_page_id, next_pos % self.block_size, None],
-                    tiler=(cp_bytes,),
-                    coord=(sublane_id,),
-                )
-                cute.copy(
-                    cp_g2s_atom, cute.recast_tensor(src, Uint32), buf_slice[None, i]
+                self.load_g2s(
+                    k_fp8, block_table, buf_slice, req_id, next_pos, sublane_id, i
                 )
             cute.arch.cp_async_commit_group()
         prefetch_stage = self.num_stages - 1
@@ -438,16 +449,14 @@ class DequantGatherKCacheCpasyncKernel:
             data = cute.make_rmem_tensor((u32_vec_size,), Uint32)
             next_pos = pos + num_workers * self.toks_per_cta * (self.num_stages - 1)
             if next_pos < seq_len:
-                next_page_id = block_table[req_id, next_pos // self.block_size]
-                src = cute.local_tile(
-                    k_fp8[next_page_id, next_pos % self.block_size, None],
-                    tiler=(cp_bytes,),
-                    coord=(sublane_id,),
-                )
-                cute.copy(
-                    cp_g2s_atom,
-                    cute.recast_tensor(src, Uint32),
-                    buf_slice[None, prefetch_stage],
+                self.load_g2s(
+                    k_fp8,
+                    block_table,
+                    buf_slice,
+                    req_id,
+                    next_pos,
+                    sublane_id,
+                    prefetch_stage,
                 )
                 prefetch_stage = (prefetch_stage + 1) % self.num_stages
             cute.arch.cp_async_commit_group()
@@ -497,7 +506,12 @@ class DequantGatherKCacheCpasyncKernel:
         head_bytes = fp8_dim + (head_dim - fp8_dim) * 2 + 8
 
         out = make_fake_tensor(BFloat16, (num_reqs, cute.sym_int(), head_dim), 16)
-        k_cache = make_fake_tensor(Uint8, (cute.sym_int(), block_size, head_bytes))
+        k_cache = cute.runtime.make_fake_tensor(
+            Uint8,
+            (cute.sym_int(), block_size, head_bytes),
+            stride=(cute.sym_int64(divisibility=32), head_bytes, 1),
+            assumed_align=32,
+        )
         seq_lens = make_fake_tensor(Int32, (num_reqs,))
         gather_lens = make_fake_tensor(Int32, (num_reqs,))
         block_table = make_fake_tensor(Int32, (num_reqs, cute.sym_int()))
