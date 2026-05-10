@@ -30,7 +30,7 @@ def _quantize_input(
         quant_dtype=quant_config.quant_dtype,
         per_act_token_quant=quant_config.per_act_token_quant,
         block_shape=quant_config.block_shape,
-        is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+        is_scale_swizzled=quant_config.is_scale_swizzled,
         mx_alignment=quant_config.mx_alignment,
     )
 

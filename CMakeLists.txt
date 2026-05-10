@@ -13,8 +13,12 @@ cmake_minimum_required(VERSION 3.26)
 # cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_HIP_STANDARD 20)
+set(CMAKE_HIP_STANDARD_REQUIRED ON)
 
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
