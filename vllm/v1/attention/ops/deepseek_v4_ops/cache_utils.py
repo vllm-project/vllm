@@ -350,12 +350,6 @@ def dequantize_and_gather_k_cache_triton(
     )
 
 
-def is_dequant_gather_k_cutedsl_supported() -> bool:
-    from vllm.platforms import current_platform
-
-    return current_platform.is_cuda() and has_cutedsl()
-
-
 def dequantize_and_gather_k_cache(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
@@ -370,7 +364,7 @@ def dequantize_and_gather_k_cache(
     block_size: int,
     offset: int,
 ) -> None:
-    if is_dequant_gather_k_cutedsl_supported():
+    if has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from .dequant_gather_k_cutedsl import dequantize_and_gather_k_cache_cutedsl
 
