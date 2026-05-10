@@ -25,6 +25,7 @@
 # limitations under the License.
 """Inference-only Qwen2MoE model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
@@ -117,8 +118,108 @@ class Qwen2MoeMLP(nn.Module):
             )
         self.expert_gate = expert_gate
 
+        # META3-2: cache the result of the precondition probe for the
+        # FUSED_SILU_MUL bf16 wvSplitK fast path.  The probe is filled
+        # lazily on the first forward() call once we have a real input
+        # tensor (need its dtype + the down_proj.weight to be set).
+        # `None` = not probed; `False` = probe failed; `True` = ok.
+        self._meta3_2_fused_silu_ok: bool | None = None
+        self._meta3_2_cu_count: int = 0
+
+    def _meta3_2_probe_fused_silu(self, gate_up: torch.Tensor) -> bool:
+        """Decide whether the bf16 wvSplitK_fused_silu_mul fast path is
+        applicable for this MLP.  Result cached in
+        ``self._meta3_2_fused_silu_ok`` so we only pay this once.
+
+        Preconditions:
+        - ``VLLM_BF16_WVSPLITK_FUSED_SILU=1`` (default OFF for now).
+        - ROCm platform.
+        - ``gate_up`` activation is bf16/fp16.
+        - ``down_proj`` is unquantized (``layer.weight`` is the raw weight).
+        - ``down_proj.reduce_results`` is False, OR tp_size == 1
+          (otherwise we'd skip the all-reduce).
+        - The post-silu_mul intermediate fits LDS (always true for
+          shared_expert d ~ 512..2048).
+        - ``gate_up.size(-1) == 2 * down_proj.weight.size(-1)``.
+        """
+        if os.environ.get("VLLM_BF16_WVSPLITK_FUSED_SILU", "0") != "1":
+            return False
+        if gate_up.dtype not in (torch.bfloat16, torch.float16):
+            return False
+        # Need the unquantized weight; bail out otherwise.
+        weight = getattr(self.down_proj, "weight", None)
+        if weight is None or weight.dtype != gate_up.dtype:
+            return False
+        # Skip if RowParallelLinear would do an all-reduce: the fast path
+        # bypasses the layer entirely and can't issue that all-reduce.
+        if (
+            getattr(self.down_proj, "reduce_results", True)
+            and getattr(self.down_proj, "tp_size", 1) > 1
+        ):
+            return False
+        # Bias is uncommon on these projections; the kernel does support it
+        # but the layer's TP-aware bias plumbing is non-trivial -- bail.
+        if getattr(self.down_proj, "bias", None) is not None:
+            return False
+        # Shape sanity: gate_up [..., 2*K] vs down_proj weight [hidden, K].
+        K = weight.size(-1)
+        if gate_up.size(-1) != 2 * K:
+            return False
+        # ROCm check: the op only exists in the _rocm_C namespace.
+        try:
+            self._meta3_2_cu_count = torch.cuda.get_device_properties(
+                weight.device
+            ).multi_processor_count
+        except Exception:
+            return False
+        # Probe op availability lazily (fails open-loud if rocm extension
+        # doesn't have the new op, e.g. older binary in the venv).  The
+        # Phase 2 op (`wvSplitK_fused_silu_gate_mul`) is checked at the
+        # call site; if only Phase 1 is built in we still take the Phase
+        # 1 fast path and run the Python sigmoid*out tail unchanged.
+        if not hasattr(torch.ops, "_rocm_C"):
+            return False
+        return hasattr(torch.ops._rocm_C, "wvSplitK_fused_silu_mul")
+
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
+        # META3-2: bf16 wvSplitK FUSED_SILU_MUL fast path -- collapses
+        # silu_and_mul + down_proj into a single kernel.  Only N=1 (decode
+        # batch=1) is supported by the kernel; multi-token paths fall back
+        # to the unfused sequence below.  See
+        # notes/qwen35-perf-campaign/ideas-research/meta3-2-investigation.md
+        # META3-2 Phase 2 additionally folds the trailing
+        # `sigmoid(expert_gate(x)) * out` mul into the down GEMM epilogue
+        # via wvSplitK_fused_silu_gate_mul.  Same env knob.
+        if gate_up.size(0) == 1 and gate_up.dim() == 2:
+            if self._meta3_2_fused_silu_ok is None:
+                self._meta3_2_fused_silu_ok = self._meta3_2_probe_fused_silu(gate_up)
+            if self._meta3_2_fused_silu_ok:
+                # Local import to avoid pulling _custom_ops at module load
+                # time on non-ROCm platforms.
+                from vllm import _custom_ops as ops
+
+                weight = self.down_proj.weight
+                if self.expert_gate is not None and hasattr(
+                    torch.ops._rocm_C, "wvSplitK_fused_silu_gate_mul"
+                ):
+                    # Phase 2: collapse silu_mul + down + sigmoid*out
+                    # into a single fused kernel.
+                    gate_scalar = F.sigmoid(self.expert_gate(x)[0])
+                    return ops.wvSplitK_fused_silu_gate_mul(
+                        weight,
+                        gate_up,
+                        gate_scalar,
+                        self._meta3_2_cu_count,
+                        None,
+                    )
+                out = ops.wvSplitK_fused_silu_mul(
+                    weight, gate_up, self._meta3_2_cu_count, None
+                )
+                if self.expert_gate is not None:
+                    out = F.sigmoid(self.expert_gate(x)[0]) * out
+                return out
+
         out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
 

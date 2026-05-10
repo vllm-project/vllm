@@ -2631,6 +2631,39 @@ def wvSplitK(
     return torch.ops._rocm_C.wvSplitK(a, b, bias, cu_count)
 
 
+def wvSplitK_fused_silu_mul(
+    a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
+) -> torch.Tensor:
+    """META3-2: bf16/fp16 wvSplitK that fuses a silu_and_mul preamble.
+
+    a: weight tensor [M, K] (bf16/fp16)
+    b: activation tensor [N=1, 2*K] packed as [gate(K) | up(K)]
+    bias: optional bias
+    Returns [N=1, M]; the kernel computes out = (silu(gate)*up) @ a.T + bias.
+    """
+    return torch.ops._rocm_C.wvSplitK_fused_silu_mul(a, b, bias, cu_count)
+
+
+def wvSplitK_fused_silu_gate_mul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    gate: torch.Tensor,
+    cu_count: int,
+    bias: torch.Tensor = None,
+) -> torch.Tensor:
+    """META3-2 Phase 2: bf16/fp16 wvSplitK with fused silu_and_mul preamble
+    and per-token scalar gate-mul epilogue.
+
+    a: weight tensor [M, K] (bf16/fp16)
+    b: activation tensor [N=1, 2*K] packed as [gate_act(K) | up(K)]
+    gate: per-token scalar weight [N=1, 1] (or [N]); same dtype as b.
+    bias: optional bias
+    Returns [N=1, M]; the kernel computes
+        out = ((silu(gate_act)*up) @ a.T + bias) * gate
+    """
+    return torch.ops._rocm_C.wvSplitK_fused_silu_gate_mul(a, b, gate, bias, cu_count)
+
+
 def wvSplitK_sweep(
     a: torch.Tensor,
     b: torch.Tensor,

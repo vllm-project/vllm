@@ -9,6 +9,23 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                        const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount);
 
+// META3-2: bf16/fp16 wvSplitK that fuses a silu_and_mul preamble.
+// in_b is laid out as [N=1, 2*K] = [gate(K) | up(K)]; the kernel writes
+// silu(gate)*up into LDS before the GEMM.  Output is [N=1, M].
+torch::Tensor wvSplitK_fused_silu_mul(const at::Tensor& in_a,
+                                      const at::Tensor& in_b,
+                                      const std::optional<at::Tensor>& in_bias,
+                                      const int64_t CuCount);
+
+// META3-2 Phase 2: bf16/fp16 wvSplitK that fuses BOTH the silu_and_mul
+// preamble and a per-token scalar (gate) mul epilogue.
+// in_b is [N=1, 2*K] = [gate(K) | up(K)].
+// in_gate is [N=1, 1] (or [N]); the kernel multiplies each output element
+// by in_gate[n] before writing to C.  Output is [N=1, M].
+torch::Tensor wvSplitK_fused_silu_gate_mul(
+    const at::Tensor& in_a, const at::Tensor& in_b, const at::Tensor& in_gate,
+    const std::optional<at::Tensor>& in_bias, const int64_t CuCount);
+
 torch::Tensor wvSplitK_int8(const at::Tensor& in_a, const at::Tensor& in_b,
                             const at::Tensor& in_scale,
                             const std::optional<at::Tensor>& in_bias,

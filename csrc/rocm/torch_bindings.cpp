@@ -26,6 +26,24 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
+  // META3-2: bf16/fp16 skinny GEMM with fused silu_and_mul preamble.
+  // in_b is [N=1, 2*K] = [gate(K) | up(K)]; output is [N=1, M].
+  rocm_ops.def(
+      "wvSplitK_fused_silu_mul(Tensor in_a, Tensor in_b, Tensor? in_bias, "
+      "int CuCount) -> Tensor");
+  rocm_ops.impl("wvSplitK_fused_silu_mul", torch::kCUDA,
+                &wvSplitK_fused_silu_mul);
+
+  // META3-2 Phase 2: bf16/fp16 skinny GEMM with fused silu_and_mul preamble
+  // AND a fused per-token scalar (gate) mul epilogue.
+  // in_b is [N=1, 2*K] = [gate(K) | up(K)]; in_gate is [N=1, 1].  Output
+  // is [N=1, M] = (silu(g)*u) @ in_a.T * in_gate.
+  rocm_ops.def(
+      "wvSplitK_fused_silu_gate_mul(Tensor in_a, Tensor in_b, "
+      "Tensor in_gate, Tensor? in_bias, int CuCount) -> Tensor");
+  rocm_ops.impl("wvSplitK_fused_silu_gate_mul", torch::kCUDA,
+                &wvSplitK_fused_silu_gate_mul);
+
 #ifdef VLLM_SKINNY_GEMM_SWEEP
   // FP16/BF16 skinny GEMM sweep: ytile/unrl as runtime args (benchmark only)
   rocm_ops.def(
