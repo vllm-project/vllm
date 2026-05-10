@@ -57,7 +57,7 @@ def write_zeros_to_output(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["EM", "num_valid_tokens"])
 def fused_moe_kernel_gptq_awq(
     # Pointers to matrices
     a_ptr,
