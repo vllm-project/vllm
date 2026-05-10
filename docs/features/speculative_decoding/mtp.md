@@ -9,6 +9,31 @@ MTP is useful when:
 - Your model natively supports MTP.
 - You want model-based speculative decoding with minimal extra configuration.
 
+## Gemma 4 Assistant Models
+
+Gemma 4 assistant checkpoints use vLLM's Gemma 4 MTP path. They are not generic
+draft models, even though they are passed through the `model` field in
+`--speculative-config`.
+
+Use `"method": "mtp"` when serving Gemma 4 with an assistant checkpoint:
+
+```bash
+vllm serve google/gemma-4-E2B-it \
+    --tensor-parallel-size 1 \
+    --max-model-len 8192 \
+    --speculative-config '{"method":"mtp","model":"gg-hf-am/gemma-4-E2B-it-assistant","num_speculative_tokens":1}'
+```
+
+The E2B, E4B, 26B-A4B, and 31B Gemma 4 IT assistant checkpoints are supported
+when their configuration uses `model_type: gemma4_assistant`. vLLM maps those
+checkpoints to `Gemma4MTPModel` internally and wires the assistant layers to
+share KV cache with the target model.
+
+If an older vLLM release logs `SpeculativeConfig(method='draft_model', ...)`
+for a Gemma 4 assistant checkpoint, that release is treating the assistant as a
+generic draft model and may fail during initialization for multimodal Gemma 4
+targets. Upgrade to a version with Gemma 4 MTP support instead.
+
 ## Offline Example
 
 ```python
