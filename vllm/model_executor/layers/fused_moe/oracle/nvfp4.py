@@ -439,6 +439,7 @@ def make_nvfp4_moe_quant_config(
     w2_scale_2: torch.Tensor,
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
+    swiglu_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -455,6 +456,7 @@ def make_nvfp4_moe_quant_config(
             a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
@@ -478,6 +480,7 @@ def make_nvfp4_moe_quant_config(
                 NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
         ),
+        gemm1_clamp_limit=swiglu_limit,
     )
 
 
