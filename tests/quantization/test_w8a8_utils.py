@@ -7,6 +7,7 @@ import types
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import torch
 
 
@@ -49,13 +50,18 @@ def _load_w8a8_utils(monkeypatch):
     return module
 
 
+@pytest.mark.skipif(
+    not hasattr(torch, "float8_e8m0fnu"),
+    reason="torch.float8_e8m0fnu is unavailable in this PyTorch build.",
+)
 def test_normalize_e4m3fn_to_e4m3fnuz_handles_e8m0fnu_scales(monkeypatch):
+    e8m0fnu_dtype = getattr(torch, "float8_e8m0fnu", None)
+    assert e8m0fnu_dtype is not None
+
     w8a8_utils = _load_w8a8_utils(monkeypatch)
     weight = torch.tensor([1.0], dtype=torch.float32).to(torch.float8_e4m3fn)
-    weight_scale = torch.tensor([1.0, 2.0], dtype=torch.float32).to(
-        torch.float8_e8m0fnu
-    )
-    input_scale = torch.tensor([4.0], dtype=torch.float32).to(torch.float8_e8m0fnu)
+    weight_scale = torch.tensor([1.0, 2.0], dtype=torch.float32).to(e8m0fnu_dtype)
+    input_scale = torch.tensor([4.0], dtype=torch.float32).to(e8m0fnu_dtype)
 
     _, normalized_weight_scale, normalized_input_scale = (
         w8a8_utils.normalize_e4m3fn_to_e4m3fnuz(
@@ -65,9 +71,9 @@ def test_normalize_e4m3fn_to_e4m3fnuz_handles_e8m0fnu_scales(monkeypatch):
         )
     )
 
-    assert normalized_weight_scale.dtype == torch.float8_e8m0fnu
+    assert normalized_weight_scale.dtype == e8m0fnu_dtype
     assert normalized_input_scale is not None
-    assert normalized_input_scale.dtype == torch.float8_e8m0fnu
+    assert normalized_input_scale.dtype == e8m0fnu_dtype
     torch.testing.assert_close(
         normalized_weight_scale.float(),
         torch.tensor([2.0, 4.0], dtype=torch.float32),

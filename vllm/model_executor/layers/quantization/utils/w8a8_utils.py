@@ -53,7 +53,7 @@ FP8_SCALE_DTYPES = tuple(
 
 
 def _double_scale(scale: torch.Tensor) -> torch.Tensor:
-    if scale.dtype in FP8_SCALE_DTYPES:
+    if isinstance(scale, torch.Tensor) and scale.dtype in FP8_SCALE_DTYPES:
         return (scale.float() * 2.0).to(scale.dtype)
     return scale * 2.0
 
