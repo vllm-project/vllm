@@ -180,18 +180,19 @@ class TurboQuantConfig:
     ) -> list[str]:
         """Layer indices to skip TQ compression (boundary protection).
 
-        For hybrid models (attention + Mamba/linear-attention), boundary
-        protection is disabled — hybrids typically have only 8-12
-        full-attention layers and a hard n=2 on each side would cover
-        ~40 % of them.  The dense GSM8K baselines that motivate n=2
-        don't apply to hybrids.
+        For hybrid models (attention + Mamba/linear-attention) and mixed
+        sliding-window/full-attention layouts, boundary protection is
+        disabled. These models have fewer globally-attending layers and a hard
+        n=2 skip can also make some layers fall back to uncompressed KV, which
+        conflicts with a uniform TurboQuant attention backend.
 
         For dense models, skips first N and last N attention layers.
         Empirically required for aggressive presets (k3v4_nc, 3bit_nc)
         — without it GSM8K drops ~30 points on Qwen3-4B.
         """
+        num_layers = model_config.hf_text_config.num_hidden_layers
+        attn_indices = _get_full_attention_layer_indices(model_config)
         if model_config.is_hybrid:
-            attn_indices = _get_full_attention_layer_indices(model_config)
             if not attn_indices:
                 raise NotImplementedError(
                     "TurboQuant KV cache requires identifiable "
@@ -201,7 +202,12 @@ class TurboQuantConfig:
             logger.info("TQ hybrid: full-attention layers %s", attn_indices)
             return []
 
-        num_layers = model_config.hf_text_config.num_hidden_layers
+        if attn_indices and len(attn_indices) < num_layers:
+            logger.info(
+                "TQ mixed attention layout: full-attention layers %s", attn_indices
+            )
+            return []
+
         if n <= 0 or num_layers <= 0:
             return []
         n = min(n, num_layers // 2)  # don't skip more than half
@@ -239,7 +245,7 @@ def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
     ``layers_block_type`` (Jamba/Zamba2), ``attn_type_list`` (Minimax).
     """
     text_cfg = model_config.hf_text_config
-    hf_cfg = model_config.hf_config
+    hf_cfg = getattr(model_config, "hf_config", None)
 
     layer_types = getattr(text_cfg, "layer_types", None)
     if layer_types is not None:

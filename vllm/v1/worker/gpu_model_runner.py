@@ -6602,7 +6602,15 @@ class GPUModelRunner(
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+                    # KV-sharing layers do not own a KVCacheSpec entry because
+                    # they reuse the target layer's KV cache. Use the target
+                    # spec when grouping their attention backend.
+                    spec_layer_name = self.shared_kv_cache_layers.get(
+                        layer_name, layer_name
+                    )
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                        spec_layer_name
+                    ]
                 # Non-Attention layer types (e.g. Mamba1, ShortConv) do not
                 # expose ``num_heads``; fall back to 0 so they cluster as
                 # before. Such layers never coexist with Attention in a

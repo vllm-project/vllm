@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/quantization/test_turboquant.py -v
 """
 
 import math
+from inspect import signature
 
 import pytest
 import torch
@@ -19,7 +20,9 @@ from vllm.model_executor.layers.quantization.turboquant.config import (
     TurboQuantConfig,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
+from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
 
 # ============================================================================
 # Helpers
@@ -90,6 +93,38 @@ class TestTurboQuantConfig:
     def test_invalid_preset_raises(self):
         with pytest.raises(ValueError, match="Unknown TurboQuant"):
             TurboQuantConfig.from_cache_dtype("turboquant_invalid", head_dim=128)
+
+    def test_backend_supports_known_cache_dtypes(self):
+        for preset in ALL_PRESETS:
+            assert TurboQuantAttentionBackend.supports_kv_cache_dtype(preset)
+
+    def test_backend_supports_k8v4_for_flash_attention_head_size(self):
+        reason = TurboQuantAttentionBackend.supports_combination(
+            head_size=128,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="turboquant_k8v4",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            device_capability=DeviceCapability(8, 6),
+        )
+        assert reason is None
+
+    def test_backend_rejects_k8v4_when_head_size_exceeds_flash_attention_limit(self):
+        reason = TurboQuantAttentionBackend.supports_combination(
+            head_size=512,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="turboquant_k8v4",
+            block_size=16,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            device_capability=DeviceCapability(8, 6),
+        )
+        assert reason is not None
+        assert "turboquant_k8v4 requires FlashAttention-compatible" in reason
+        assert "head_size <= 256" in reason
 
     # ---- Per-preset concrete value checks (table-driven) ----
 
@@ -209,6 +244,68 @@ class TestTurboQuantConfig:
         mc = self._dense_model_config(8)
         layers = TurboQuantConfig.get_boundary_skip_layers(mc, 10)
         assert len(layers) == 8
+
+    def test_boundary_skip_layers_mixed_attention_layout(self):
+        from types import SimpleNamespace
+
+        mc = SimpleNamespace(
+            is_hybrid=False,
+            hf_config=SimpleNamespace(),
+            hf_text_config=SimpleNamespace(
+                num_hidden_layers=6,
+                layer_types=[
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                    "sliding_attention",
+                    "sliding_attention",
+                    "full_attention",
+                ],
+            ),
+        )
+        assert TurboQuantConfig.get_boundary_skip_layers(mc) == []
+
+    def test_tq_full_attention_spec_preserves_sliding_window(self):
+        from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+        spec = TQFullAttentionSpec(
+            block_size=16,
+            num_kv_heads=2,
+            head_size=256,
+            head_size_v=256,
+            dtype=torch.bfloat16,
+            tq_slot_size=262,
+            sliding_window=512,
+        )
+        assert spec.sliding_window == 512
+        assert spec.real_page_size_bytes == 16 * 2 * 262
+
+    def test_decode_launcher_accepts_sliding_window(self):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        assert (
+            "sliding_window" in signature(triton_turboquant_decode_attention).parameters
+        )
+
+    def test_decode_workspace_reservation_uses_safe_upper_bound(self):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            _get_turboquant_decode_workspace_shapes,
+        )
+
+        shapes = _get_turboquant_decode_workspace_shapes(
+            batch_size=128,
+            num_heads=4,
+            head_size=512,
+            max_num_kv_splits=16,
+        )
+
+        assert shapes == (
+            ((128, 4, 16, 513), torch.float32),
+            ((128, 4, 512), torch.float32),
+            ((128, 4), torch.float32),
+        )
 
 
 class TestHybridAttentionIndices:

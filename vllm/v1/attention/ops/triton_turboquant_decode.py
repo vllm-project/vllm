@@ -81,6 +81,7 @@ def _tq_decode_stage1(
     BLOCK_D: tl.constexpr,  # next_power_of_2(HEAD_DIM)
     BLOCK_KV: tl.constexpr,  # tokens per tile (16)
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
+    SLIDING_WINDOW: tl.constexpr = -1,  # -1 disables sliding-window masking
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
@@ -136,6 +137,10 @@ def _tq_decode_stage1(
     for start_n in range(split_start, split_end, BLOCK_KV):
         kv_offs = start_n + kv_range
         kv_mask = kv_offs < split_end
+        if SLIDING_WINDOW > 0:
+            # Decode query is the last token in this sequence.
+            query_pos = seq_len - 1
+            kv_mask = kv_mask & ((query_pos - kv_offs) < SLIDING_WINDOW)
 
         page_idx = kv_offs // BLOCK_SIZE
         page_off = kv_offs % BLOCK_SIZE
@@ -503,6 +508,7 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -549,6 +555,7 @@ def triton_turboquant_decode_attention(
 
     # Stage 1: split-KV tiled attention scoring + value accumulation
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
+    sliding_window_arg = -1 if sliding_window is None else sliding_window
     BLOCK_KV = 4
     grid = (B, Hq, NUM_KV_SPLITS)
     _tq_decode_stage1[grid](
@@ -581,6 +588,7 @@ def triton_turboquant_decode_attention(
         BLOCK_D=cfg["BLOCK_D"],
         BLOCK_KV=BLOCK_KV,
         KEY_FP8=1 if key_fp8 else 0,
+        SLIDING_WINDOW=sliding_window_arg,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
         num_warps=1,
