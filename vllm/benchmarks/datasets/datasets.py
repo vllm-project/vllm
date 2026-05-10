@@ -1426,8 +1426,9 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random-rerank",
             "hf",
             "custom",
-            "custom_mm",
             "custom_audio",
+            "custom_image",
+            "custom_mm",
             "prefix_repetition",
             "spec_bench",
             "speed_bench",
@@ -1844,8 +1845,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
         )
 
-    elif args.dataset_name == "custom_mm":
-        dataset = CustomMMDataset(
+    elif args.dataset_name in ("custom_image", "custom_mm"):
+        dataset = CustomImageDataset(
             dataset_path=args.dataset_path,
             disable_shuffle=args.disable_shuffle,
             random_seed=args.seed,
@@ -1861,13 +1862,15 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
 
     elif args.dataset_name == "custom_audio":
         dataset = CustomAudioDataset(
-            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
         )
         input_requests = dataset.sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
-            skip_chat_template=args.skip_chat_template,
+            enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
@@ -2290,9 +2293,9 @@ class CustomDataset(BenchmarkDataset):
         return sampled_requests
 
 
-class CustomMMDataset(CustomDataset):
+class CustomImageDataset(CustomDataset):
     """
-    Implements the Custom MultiModal dataset. Loads data from a JSONL file and generates
+    Implements the Custom image dataset. Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
     {
@@ -2371,8 +2374,12 @@ class CustomMMDataset(CustomDataset):
 
 class CustomAudioDataset(CustomDataset):
     """
-    Custom dataset for ASR benchmarking. Loads data from a JSONL file. E.g.,
-    {"prompt": "", "audio": "/path/to/audio.wav"}
+    Custom dataset for audio benchmarking. Loads data from a JSONL file. E.g.,
+    {"prompt": "Transcribe the audio.", "audio": "/path/to/audio.wav"}
+
+    Supports both:
+    - Dedicated ASR models (e.g., Whisper) via openai-audio / /v1/audio/transcriptions
+    - Chat-based audio models (e.g., Qwen2-Audio) via openai-chat / /v1/chat/completions
     """
     IS_MULTIMODAL = True
 
@@ -2384,32 +2391,59 @@ class CustomAudioDataset(CustomDataset):
         request_id_prefix: str = "",
         no_oversample: bool = False,
         skip_chat_template: bool = False,
+        enable_multimodal_chat: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         self.num_available_samples = len(self.data)
         if num_requests <= 0:
             num_requests = self.num_available_samples
-
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item.get("prompt", "")
-            y, sr = process_audio(item["audio"])
-            mm_content = {"audio": (y, sr)}
-
             if tokenizer is None:
                 prompt_len = 1
-                new_output_len = output_len if output_len is not None and output_len != -1 else 256
+                new_output_len = output_len if output_len not in (None, -1) else 256
+                mm_content = None
             else:
-                if not skip_chat_template:
-                    prompt = tokenizer.apply_chat_template(
-                        [{"role": "user", "content": prompt}],
-                        add_generation_prompt=True,
-                        tokenize=False,
-                    )
-                prompt_len = len(tokenizer(prompt).input_ids)
-
+                use_chat_template = (
+                    not skip_chat_template
+                    and hasattr(tokenizer, "chat_template")
+                    and tokenizer.chat_template is not None
+                )
+                if enable_multimodal_chat:
+                    # Chat-based audio models (e.g., Qwen2-Audio):
+                    # encode audio as base64; serve.py assembles the chat message
+                    # as: {"role": "user", "content": [
+                    #     {"type": "text", "text": prompt},
+                    #     {"type": "input_audio", "input_audio": {...}}
+                    # ]}
+                    y, sr = process_audio(item["audio"])
+                    buf = io.BytesIO()
+                    sf.write(buf, y, sr, format="WAV")
+                    audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    mm_content = {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                    }
+                    # prompt stays as plain string; serve.py handles wrapping
+                else:
+                    # Whisper-style models: load audio array locally
+                    y, sr = process_audio(item["audio"])
+                    mm_content = {"audio": (y, sr)}
+                    if use_chat_template:
+                        # ASR models with a chat template but not multimodal chat
+                        prompt = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": prompt}],
+                            add_generation_prompt=True,
+                            tokenize=False,
+                        )
+                    # else: plain prompt for Whisper-style models
+                prompt_len = len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
                 new_output_len = output_len
                 if output_len is None or output_len == -1:
                     if "output_tokens" not in item:
@@ -2418,7 +2452,6 @@ class CustomAudioDataset(CustomDataset):
                             "custom dataset must contain an 'output_tokens' field."
                         )
                     new_output_len = int(item["output_tokens"])
-
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
