@@ -152,6 +152,16 @@ class PassConfig:
     Larger batch sizes e.g. during prefill will use the unfused kernels.
     """
 
+    lift_mla_decode_q_prep: bool = False
+    """Lift the MLA decode q-prep chain (split + q-absorb BMM + cat +
+    static FP8 quant) out of ``MLAAttention.forward_impl`` into
+    ``forward()`` so torch.compile sees it as discrete FX nodes that a
+    Phase 2 pattern matcher can rewrite into the AITER fused kernel.
+
+    Off by default. Requires ``cc.use_inductor_graph_partition=True`` to
+    avoid the cudagraph capture/replay SymInt freeze on the lifted
+    decode rows. Only applies on the FP8 decode path."""
+
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
