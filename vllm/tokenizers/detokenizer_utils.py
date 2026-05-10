@@ -94,14 +94,12 @@ def convert_ids_list_to_tokens(
       Python list of token string representations
 
     """
-    token_str_lst = []
-    for token_id in token_ids:
-        # use default skip_special_tokens.
-        token_str = tokenizer.decode([token_id])
-        if token_str is None:
-            token_str = ""
-        token_str_lst.append(token_str)
-    return token_str_lst
+    unique_ids = set(token_ids)
+    decoded = {}
+    for uid in unique_ids:
+        token_str = tokenizer.decode([uid])
+        decoded[uid] = token_str if token_str is not None else ""
+    return [decoded[tid] for tid in token_ids]
 
 
 # Based on
