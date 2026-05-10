@@ -18,6 +18,7 @@ steps:
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -38,6 +39,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
@@ -61,6 +63,7 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -81,6 +84,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
@@ -98,6 +102,7 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -118,6 +123,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
@@ -136,6 +142,7 @@ steps:
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -156,6 +163,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
@@ -172,6 +180,7 @@ steps:
   timeout_in_minutes: 130
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -192,6 +201,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
@@ -211,6 +221,7 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -231,6 +242,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
@@ -246,6 +258,7 @@ steps:
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
+  - vllm/_aiter_ops.py
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
@@ -266,6 +279,7 @@ steps:
   - vllm/reasoning/
   - vllm/renderers/
   - vllm/sampling_params.py
+  - vllm/sequence.py
   - vllm/tokenizers/
   - vllm/tool_parsers/
   - vllm/transformers_utils/
