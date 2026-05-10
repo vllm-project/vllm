@@ -293,9 +293,14 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-    def __init__(self, config: VllmConfig, role, kv_cache_config):
+    def __init__(
+        self,
+        config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = ExampleConnector(config, role)
+        self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -368,7 +373,7 @@ class MockKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         extra_config = self._kv_transfer_config.kv_connector_extra_config
