@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
