@@ -413,7 +413,10 @@ class NixlConnectorWorker:
 
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
-        logger.info("Detected attention backend %s", self.backend_name)
+        logger.info(
+            "Detected attention backend(s) %s",
+            [backend.get_name() for backend in self.attn_backends],
+        )
         logger.info("Detected kv cache layout %s", self.kv_cache_layout)
 
         # lazy initialized in register_kv_caches
@@ -870,9 +873,21 @@ class NixlConnectorWorker:
                 else:
                     self.block_len_per_layer.append(physical_page_size)
 
-                assert cache.shape[0] == num_blocks, (
-                    "All kv cache tensors must have the same number of blocks"
-                )
+                if cache.shape[0] != num_blocks:
+                    raise AssertionError(
+                        "All kv cache tensors must have the same number of "
+                        f"blocks; layer={layer_name}, "
+                        f"expected_num_blocks={num_blocks}, "
+                        f"cache_shape={tuple(cache.shape)}, "
+                        f"cache_stride={tuple(cache.stride())}, "
+                        f"layer_spec={type(layer_spec).__name__}, "
+                        f"backend={self.backend_name}, "
+                        "all_backends="
+                        f"{[backend.get_name() for backend in self.attn_backends]}, "
+                        f"kv_cache_layout={self.kv_cache_layout}, "
+                        "blocks_first="
+                        f"{self.transfer_topo.is_kv_layout_blocks_first}"
+                    )
 
                 if not self.use_mla:
                     # Different kv cache shape is not supported by HeteroTP.
