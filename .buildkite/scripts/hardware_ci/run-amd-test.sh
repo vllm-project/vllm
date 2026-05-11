@@ -378,9 +378,11 @@ HF_MOUNT="/root/.cache/huggingface"
 # double-quotes will have been stripped by the calling shell.
 if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
 else
   commands="$*"
+  commands_source="argv"
   if [[ -z "$commands" ]]; then
     echo "Error: No test commands provided." >&2
     echo "Usage:" >&2
@@ -397,9 +399,15 @@ fi
 
 echo "Raw commands: $commands"
 
-# Fix quoting before ROCm overrides (so overrides see correct structure)
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
+# Only try to repair stripped pytest -m/-k quoting in legacy argv mode.
+# VLLM_TEST_COMMANDS preserves inner quoting already, and re-quoting that path
+# can corrupt embedded echo strings or otherwise well-formed shell fragments.
+if [[ "$commands_source" == "argv" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
 
 commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"

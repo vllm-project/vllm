@@ -13,8 +13,12 @@ cmake_minimum_required(VERSION 3.26)
 # cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_HIP_STANDARD 20)
+set(CMAKE_HIP_STANDARD_REQUIRED ON)
 
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
@@ -307,12 +311,12 @@ set(VLLM_EXT_SRC
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/custom_all_reduce.cu"
-  "csrc/torch_bindings.cpp")
+  "csrc/torch_bindings.cpp"
+  "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_EXT_SRC
-    "csrc/minimax_reduce_rms_kernel.cu"
-    "csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
+    "csrc/minimax_reduce_rms_kernel.cu")
 
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
@@ -1047,13 +1051,13 @@ endif()
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
   "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/topk_softmax_kernels.cu")
+  "csrc/moe/topk_softmax_kernels.cu"
+  "csrc/moe/topk_softplus_sqrt_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
     "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu"
-    "csrc/moe/topk_softplus_sqrt_kernels.cu")
+    "csrc/moe/grouped_topk_kernels.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
