@@ -630,9 +630,9 @@ class SpecDecodeBaseProposer:
                 # matching the target model's computation in
                 # MRotaryEmbedding.get_next_input_positions_tensor:
                 #   position = delta + context_len
-                # The kernel above already incremented seq_lens by 1, so
-                # seq_lens now equals context_len for this step (i.e. the
-                # number of tokens seen so far including the new draft token).
+                # where context_len is the number of tokens in the KV cache
+                # before the new draft token. The kernel above incremented
+                # seq_lens by 1, so subtracting 1 recovers context_len.
                 # For text decode tokens all 3 MRoPE dims are identical.
                 decode_pos = (
                     mrope_position_deltas
@@ -643,9 +643,8 @@ class SpecDecodeBaseProposer:
                 decode_pos = decode_pos.clamp(max=self.max_model_len - 1)
                 self.mrope_positions[:, :batch_size] = decode_pos.unsqueeze(0)
             else:
-                # Fallback: replicate dim 0 to dims 1 and 2. Numerically
-                # correct for text-only decode tokens (all dims are equal)
-                # but does not use the per-request delta explicitly.
+                # No delta available: replicate dim 0 into dims 1 and 2.
+                # Correct for text-only tokens where all dims are equal.
                 self.mrope_positions[1:, :batch_size] = (
                     self.mrope_positions[0, :batch_size]
                 )
