@@ -47,6 +47,7 @@ class TestResponsesRequestSamplingParams:
             seed=42,
             stop=["END", "STOP"],
             ignore_eos=True,
+            thinking_token_budget=128,
             vllm_xargs={"custom": "value"},
         )
 
@@ -56,6 +57,7 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.seed == 42
         assert sampling_params.stop == ["END", "STOP"]
         assert sampling_params.ignore_eos is True
+        assert sampling_params.thinking_token_budget == 128
         assert sampling_params.extra_args == {"custom": "value"}
 
     def test_stop_string_conversion(self):

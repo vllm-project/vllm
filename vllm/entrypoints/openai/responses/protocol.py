@@ -265,6 +265,22 @@ class ResponsesRequest(OpenAIBaseModel):
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword arguments passed to the chat template renderer. "
+            "Useful for model-specific controls such as enable_thinking. "
+            "These are merged before internally derived response controls, so "
+            "the Responses API's computed values take precedence for "
+            "overlapping keys such as add_generation_prompt and "
+            "continue_final_message."
+        ),
+    )
+    thinking_token_budget: int | None = Field(
+        default=None,
+        ge=0,
+        description="Maximum number of tokens allowed for thinking operations.",
+    )
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -295,8 +311,10 @@ class ResponsesRequest(OpenAIBaseModel):
         return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(  # To remove unset values
-                {},
+            # Merge request-provided kwargs first so internally derived
+            # Responses API controls take precedence on overlapping keys.
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
                 dict(
                     add_generation_prompt=not continue_final,
                     continue_final_message=continue_final,
@@ -396,6 +414,7 @@ class ResponsesRequest(OpenAIBaseModel):
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
+            thinking_token_budget=self.thinking_token_budget,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
             output_kind=(
