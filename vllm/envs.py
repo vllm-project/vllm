@@ -61,13 +61,6 @@ _MCP_LABEL_CHOICES = {"container", "code_interpreter", "web_search_preview"}
 _TPU_PATHWAYS_SENTINEL = "__VLLM_TPU_USING_PATHWAYS_UNSET_SENTINEL__"
 
 
-def maybe_convert_bool(value: str | None) -> bool | None:
-    """Back-compat shim: used by tests/ci_envs.py."""
-    if value is None:
-        return None
-    return bool(int(value))
-
-
 # ----------------------------------------------------------------------------
 # Shared config for sub-models
 # ----------------------------------------------------------------------------
@@ -303,6 +296,13 @@ class DistributedSettings(BaseSettings):
     allreduce_use_flashinfer: bool = False
     use_nccl_symm_mem: bool = False
     msgpack_zero_copy_threshold: int = 256
+    use_spinloop_ext: bool = Field(
+        default=False,
+        description=(
+            "If set to 1, use Python spinloop extension to poll in a more "
+            "efficient way when using the mp backend."
+        ),
+    )
 
 
 class CompilationSettings(BaseSettings):
