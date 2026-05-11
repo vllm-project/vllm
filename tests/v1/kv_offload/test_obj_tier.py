@@ -136,7 +136,7 @@ def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 200) -> list[
     results: list[JobResult] = []
     for _ in range(max_rounds):
         results.extend(tier.get_finished())
-        if not tier._pending_stores and not tier._pending_loads:
+        if not tier._pending_jobs:
             break
         time.sleep(0.1)
     return results
@@ -192,27 +192,6 @@ class TestObjTierBasic:
         # Blocks remain in S3 after load
         assert self.tier.lookup(key(1), _CTX) is True
         assert self.tier.lookup(key(2), _CTX) is True
-
-    def test_load_in_flight_returns_none(self):
-        """Keys being promoted (submit_load in flight) must return None."""
-        k = key(5)
-
-        # Store the key to S3 first so the subsequent load has something to read
-        store_job = make_job(2, [k], [0])
-        self.tier.submit_store(store_job)
-        store_results = drain(self.tier)
-        assert store_results and store_results[0].success
-        assert self.tier.lookup(k, _CTX) is True
-
-        # Submit load into a different slot and check in-flight before draining
-        load_job = make_job(3, [k], [1])
-        self.tier.submit_load(load_job)
-
-        assert self.tier.lookup(k, _CTX) is None
-
-        drain(self.tier)
-        # After completion, no longer in-flight
-        assert self.tier.lookup(k, _CTX) is True
 
     def test_multiple_jobs_tracked_independently(self):
         job1 = make_job(1, [key(1)], [0])

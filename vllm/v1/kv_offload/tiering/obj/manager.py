@@ -45,12 +45,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             f"/{dtype}"
         )
 
-        # Keys currently being promoted S3 -> CPU (submit_load in flight)
-        self._load_in_flight: set[OffloadKey] = set()
-        # Store jobs: only need to know they exist, not their keys
-        self._pending_stores: set[int] = set()
-        # Load jobs: keys needed to clear _load_in_flight on completion
-        self._pending_loads: dict[int, list[OffloadKey]] = {}
+        self._pending_jobs: set[int] = set()
 
         self._probe_connectivity()
 
@@ -80,8 +75,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return f"{self._key_base}/{h[:3]}/{h[3:5]}/{h}.bin"
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        if key in self._load_in_flight:
-            return None
         s3_key = self._get_obj_key(get_offload_block_hash(key))
         return self._nixl_lookup.exists(s3_key)
 
@@ -94,29 +87,24 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             job_metadata.job_id, job_metadata.block_ids, s3_keys, WRITE
         )
         if ok:
-            self._pending_stores.add(job_metadata.job_id)
+            self._pending_jobs.add(job_metadata.job_id)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        keys = list(job_metadata.keys)
-        s3_keys = [
-            self._get_obj_key(get_offload_block_hash(k)) for k in keys
-        ]
+        s3_keys = (
+            self._get_obj_key(get_offload_block_hash(k))
+            for k in job_metadata.keys
+        )
         ok = self._engine.submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, s3_keys, READ
         )
         if ok:
-            self._load_in_flight.update(keys)
-            self._pending_loads[job_metadata.job_id] = keys
+            self._pending_jobs.add(job_metadata.job_id)
 
     def get_finished(self) -> Iterable[JobResult]:
         for job_id, success in self._engine.get_finished():
-            if job_id in self._pending_stores:
-                self._pending_stores.remove(job_id)
-            elif job_id in self._pending_loads:
-                keys = self._pending_loads.pop(job_id)
-                self._load_in_flight.difference_update(keys)
-            else:
+            if job_id not in self._pending_jobs:
                 continue
+            self._pending_jobs.discard(job_id)
             yield JobResult(job_id=job_id, success=success)
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
