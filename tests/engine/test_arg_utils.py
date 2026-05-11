@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 import pytest
 from pydantic import Field
 
-from vllm.config import AttentionConfig, CompilationConfig, config
+from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -116,6 +116,10 @@ class DummyConfig:
     """Regular bool with default True"""
     optional_bool: bool | None = None
     """Optional bool with default None"""
+
+    optional_bool_or_str: bool | str | None = None
+    """Optional bool-or-str with default None"""
+
     optional_literal: Literal["x", "y"] | None = None
     """Optional literal with default None"""
     tuple_n: tuple[int, ...] = Field(default_factory=lambda: (1, 2, 3))
@@ -170,6 +174,11 @@ def test_get_kwargs():
     # bools should not have their type set
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
+    # optional bool-or-str should accept an optional string value
+    assert kwargs["optional_bool_or_str"]["type"] is str
+    assert kwargs["optional_bool_or_str"]["nargs"] == "?"
+    assert kwargs["optional_bool_or_str"]["const"] is True
+    assert "action" not in kwargs["optional_bool_or_str"]
     # optional literals should have None as a choice
     assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
     # tuples should have the correct nargs
@@ -195,6 +204,32 @@ def test_get_kwargs():
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
+
+
+def test_hf_token_get_kwargs():
+    kwargs = get_kwargs(ModelConfig)["hf_token"]
+
+    assert kwargs["type"] is str
+    assert kwargs["nargs"] == "?"
+    assert kwargs["const"] is True
+    assert "action" not in kwargs
+
+
+@pytest.mark.parametrize(
+    ("cli_args", "expected"),
+    [
+        ([], None),
+        (["--hf-token"], True),
+        (["--hf-token", "hf_secret"], "hf_secret"),
+        (["--hf-token", "None"], "None"),
+    ],
+)
+def test_hf_token_cli_arg(cli_args, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    args = parser.parse_args(cli_args)
+
+    assert args.hf_token == expected
 
 
 @pytest.mark.parametrize(
