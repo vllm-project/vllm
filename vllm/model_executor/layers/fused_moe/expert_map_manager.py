@@ -12,7 +12,7 @@ import torch
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     init_aiter_topK_meta_data,
 )
 
