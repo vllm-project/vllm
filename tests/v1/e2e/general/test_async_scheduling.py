@@ -1,30 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from itertools import repeat
-from typing import Any
 
-import pytest
-import torch._dynamo.config as dynamo_config
+# PROBE: TF32-disable only (no cuBLAS workspace, no torch deterministic mode).
+# Isolates whether disabling TF32 alone is sufficient to make the test pass on
+# H200 + CI Docker image. If yes -> TF32 paths were the sole nondeterminism
+# source. If no -> we need cuBLAS algo selection determinism too.
+os.environ.setdefault("NVIDIA_TF32_OVERRIDE", "0")
+os.environ.setdefault("TRITON_F32_DEFAULT", "ieee")
 
-from tests.utils import (
+from itertools import repeat  # noqa: E402
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
+import torch._dynamo.config as dynamo_config  # noqa: E402
+
+from tests.utils import (  # noqa: E402
     large_gpu_mark,
     single_gpu_only,
 )
-from vllm import SamplingParams
-from vllm.logprobs import Logprob
-from vllm.platforms import current_platform
-from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.metrics.reader import Metric
+from vllm import SamplingParams  # noqa: E402
+from vllm.logprobs import Logprob  # noqa: E402
+from vllm.platforms import current_platform  # noqa: E402
+from vllm.sampling_params import StructuredOutputsParams  # noqa: E402
+from vllm.v1.metrics.reader import Metric  # noqa: E402
 
-from ....conftest import VllmRunner
-from ....models.utils import check_outputs_equal
+from ....conftest import VllmRunner  # noqa: E402
+from ....models.utils import check_outputs_equal  # noqa: E402
 
 MODEL = "Qwen/Qwen3-0.6B"
 MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
-# Need to enforce eager for MRV2 while we sort out cudagraph issues.
-ENFORCE_EAGER = os.getenv("ENFORCE_EAGER", "0") == "1"
+# PROBE: keep cudagraph capture disabled (already ruled out as cause).
+ENFORCE_EAGER = True
 
 first_prompt = (
     "The following numbers of the sequence "
