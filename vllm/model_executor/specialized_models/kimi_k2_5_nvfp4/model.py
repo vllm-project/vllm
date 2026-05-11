@@ -475,7 +475,7 @@ def _fallback_to_generic_kimi_k25(
 
 
 # ---------------------------------------------------------------------------
-# Forked MLA attention custom op
+# MLA attention custom op
 # ---------------------------------------------------------------------------
 # Runs the Kimi attention block through fused Q/KV projection, KV-cache
 # update, attention, and W_UV up-projection as a single opaque op so that
@@ -483,13 +483,13 @@ def _fallback_to_generic_kimi_k25(
 # ---------------------------------------------------------------------------
 
 
-def _forked_kimi_mla_attn(
+def _kimi_mla_attn(
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    """Forked MLA attention block through W_UV for compilation."""
+    """MLA attention block through W_UV for compilation."""
     layer = get_forward_context().no_compile_layers[layer_name]
     mla = layer.mla_attn
 
@@ -647,7 +647,7 @@ def _forked_kimi_mla_attn(
     return output
 
 
-def _forked_kimi_mla_attn_fake(
+def _kimi_mla_attn_fake(
     positions: torch.Tensor,
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -658,16 +658,16 @@ def _forked_kimi_mla_attn_fake(
 
 
 direct_register_custom_op(
-    op_name="forked_monolithic_attn",
-    op_func=_forked_kimi_mla_attn,
-    fake_impl=_forked_kimi_mla_attn_fake,
+    op_name="monolithic_attn",
+    op_func=_kimi_mla_attn,
+    fake_impl=_kimi_mla_attn_fake,
     mutates_args=["output"],
     dispatch_key=current_platform.dispatch_key,
 )
 
 
 class KimiK25Nvfp4MLAAttention(nn.Module):
-    """Forked MLA path used by the compiled Kimi attention graph."""
+    """MLA path used by the compiled Kimi attention graph."""
 
     def __init__(
         self,
@@ -772,7 +772,7 @@ class KimiK25Nvfp4MLAAttention(nn.Module):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
-        attn_out = torch.ops.vllm.forked_monolithic_attn(
+        attn_out = torch.ops.vllm.monolithic_attn(
             positions,
             hidden_states,
             attn_output,
