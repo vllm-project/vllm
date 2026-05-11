@@ -28,11 +28,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
 )
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    rocm_forward_decode_fallback,
-    rocm_inv_rope_einsum,
-    rocm_sparse_attn_prefill,
-)
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -725,6 +721,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        if current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+                DeepseekV4ROCMAiterMLASparseBackend,
+            )
+
+            return DeepseekV4ROCMAiterMLASparseBackend
         return DeepseekV4FlashMLASparseBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
@@ -756,6 +758,14 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         assert output.dtype == q.dtype, (
             f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
         )
+
+        if current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+                DeepseekV4ROCMAiterMLASparseImpl,
+            )
+
+            DeepseekV4ROCMAiterMLASparseImpl.forward(self, q, kv, positions, output)
+            return
 
         # Get SWA and indexer metadata from forward context
         forward_context = get_forward_context()
@@ -838,25 +848,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
-
-        if current_platform.is_rocm():
-            rocm_forward_decode_fallback(
-                q=q,
-                kv_cache=kv_cache,
-                swa_k_cache=self.swa_cache_layer.kv_cache,
-                swa_only=swa_only,
-                topk_indices=topk_indices,
-                topk_lens=topk_lens,
-                swa_indices=swa_indices,
-                swa_lens=swa_lens,
-                attn_sink=self.attn_sink,
-                scale=self.scale,
-                head_dim=self.head_dim,
-                nope_head_dim=self.nope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-                output=output,
-            )
-            return
 
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
@@ -1021,28 +1012,15 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 M,
                 N,
             )
-
-            if current_platform.is_rocm():
-                rocm_sparse_attn_prefill(
-                    q=q[query_start:query_end],
-                    kv=kv.view(-1, 1, q.shape[-1]),
-                    indices=combined_indices.unsqueeze(1),
-                    topk_length=combined_lens,
-                    scale=self.scale,
-                    head_dim=self.head_dim,
-                    attn_sink=self.attn_sink,
-                    output=output[query_start:query_end],
-                )
-            else:
-                output_chunk, _, _ = flash_mla_sparse_fwd(
-                    q=q[query_start:query_end],
-                    kv=kv.view(-1, 1, q.shape[-1]),
-                    indices=combined_indices.unsqueeze(1),
-                    sm_scale=self.scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=combined_lens,
-                    out=output[query_start:query_end],
-                )
+            flash_mla_sparse_fwd(
+                q=q[query_start:query_end],
+                kv=kv.view(-1, 1, q.shape[-1]),
+                indices=combined_indices.unsqueeze(1),
+                sm_scale=self.scale,
+                attn_sink=self.attn_sink,
+                topk_length=combined_lens,
+                out=output[query_start:query_end],
+            )
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
