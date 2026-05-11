@@ -86,7 +86,9 @@
             {{- '<TOOLCALL>[' -}}
             {%- for call in message.tool_calls -%}
                 {%- set fn = call.function if call.function is defined else call -%}
-                {{- '{"name": "' + fn.name + '", "arguments": ' -}}
+                {{- '{"name": ' -}}
+                {{- fn.name | tojson -}}
+                {{- ', "arguments": ' -}}
                 {%- if fn.arguments is string -%}
                     {{- fn.arguments -}}
                 {%- else -%}
