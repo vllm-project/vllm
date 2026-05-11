@@ -45,7 +45,7 @@ class GraniteSpeechPlusCTCEncoder(GraniteSpeechCTCEncoder):
                 hidden_states_mid, _ = self.out(hidden_states_mid)
                 hidden_states_mid = self.softmax(hidden_states_mid)
                 hidden_states_mid, _ = self.out_mid(hidden_states_mid)
-                hidden_states = hidden_states + hidden_states_mid
+                hidden_states += hidden_states_mid
 
         if exported_hidden_states:
             hidden_states = torch.cat([*exported_hidden_states, hidden_states], dim=-1)
