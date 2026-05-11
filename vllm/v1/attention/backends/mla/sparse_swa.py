@@ -113,7 +113,7 @@ class DeepseekSparseSWABackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["DeepseekSparseSWAMetadataBuilder"]:
         if current_platform.is_rocm():
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
             )
 

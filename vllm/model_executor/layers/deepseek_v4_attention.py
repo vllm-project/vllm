@@ -722,7 +722,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         if current_platform.is_rocm():
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterMLASparseBackend,
             )
 
@@ -760,7 +760,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         if current_platform.is_rocm():
-            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterMLASparseImpl,
             )
 
