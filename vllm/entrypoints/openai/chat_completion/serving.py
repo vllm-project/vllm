@@ -1595,6 +1595,11 @@ class OpenAIServingChat(OpenAIServing):
         it is a tool call. If a requested stop interrupts that parsing before a
         tool-call delta is emitted, the serving layer flushes the buffered text
         as normal content to match non-streaming behavior.
+
+        This helper recognizes the parser state fields used by the built-in
+        streaming tool parsers. Parsers that buffer unstreamed text in another
+        shape need to expose equivalent state here, or provide a generic flush
+        hook, so requested-stop handling can preserve their buffered text.
         """
         return bool(
             getattr(tool_parser, "prev_tool_call_arr", None)
