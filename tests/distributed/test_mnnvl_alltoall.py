@@ -488,8 +488,7 @@ def _two_sided_data_worker(rank, world_size):
     from vllm.distributed.parallel_state import get_dp_group
     from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.fused_moe.config import (
-        FusedMoEQuantConfig,
-        FusedMoEQuantDesc,
+        FUSED_MOE_UNQUANTIZED_CONFIG,
     )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
         flashinfer_alltoall_combine,
@@ -538,13 +537,8 @@ def _two_sided_data_worker(rank, world_size):
     )
 
     # Unquantized config: quant_dtype=None means moe_kernel_quantize_input is a no-op
-    no_quant = FusedMoEQuantDesc()
-    quant_config = FusedMoEQuantConfig(
-        _a1=no_quant,
-        _a2=no_quant,
-        _w1=no_quant,
-        _w2=no_quant,
-    )
+    quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
     assert quant_config.quant_dtype is None  # sanity: no quantization
 
     with _make_forward_context(rank, world_size, tokens_per_rank):

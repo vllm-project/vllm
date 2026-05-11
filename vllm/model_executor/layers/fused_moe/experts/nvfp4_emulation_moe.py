@@ -60,8 +60,9 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         self.w1_scale_val = self.quant_config.w1_scale
         self.w2_scale_val = self.quant_config.w2_scale
 
-        self.quant_config._w1.scale = None
-        self.quant_config._w2.scale = None
+        # TODO(bnell): get rid of the need to do this
+        self.quant_config.set_w1_scale(None)
+        self.quant_config.set_w2_scale(None)
 
         self.quantization_emulation = True
 

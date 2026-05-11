@@ -9,8 +9,7 @@ from humming.schema import BaseWeightSchema
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-    FusedMoEQuantDesc,
+    humming_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
@@ -168,12 +167,10 @@ def get_humming_moe_quant_config(layer: FusedMoE):
     input_schema = layer.input_schemas["w13"]
     weight_schema = layer.weight_schemas["w13"]
 
-    a_dtype = input_schema.a_dtype
-    if a_dtype is None or a_dtype.num_bits == 16:
-        a_quant_desc = FusedMoEQuantDesc(dtype=None)
+    if input_schema.a_dtype is None or input_schema.a_dtype.num_bits == 16:
+        q_dtype = None
     else:
-        shape = GroupShape(row=1, col=-1)
-        a_quant_desc = FusedMoEQuantDesc(dtype=str(a_dtype), shape=shape)
+        q_dtype = str(input_schema.a_dtype)
 
     weight_scale_group_size = weight_schema.weight_scale_group_size
     weight_scale_group_size_n = weight_schema.weight_scale_group_size_n
@@ -188,27 +185,16 @@ def get_humming_moe_quant_config(layer: FusedMoE):
     else:
         weight_group_shape = GroupShape(row=weight_scale_group_size, col=1)
 
-    w1_quant_desc = FusedMoEQuantDesc(
-        dtype=str(weight_schema.b_dtype),
-        shape=weight_group_shape,
-        scale=getattr(layer, "w13_weight_scale", None),
-        alpha_or_gscale=getattr(layer, "w13_global_scale", None),
-        zp=getattr(layer, "w13_zero_point", None),
-        bias=getattr(layer, "w13_bias", None),
-    )
-
-    w2_quant_desc = FusedMoEQuantDesc(
-        dtype=str(weight_schema.b_dtype),
-        shape=weight_group_shape,
-        scale=getattr(layer, "w2_weight_scale", None),
-        alpha_or_gscale=getattr(layer, "w2_global_scale", None),
-        zp=getattr(layer, "w2_zero_point", None),
-        bias=getattr(layer, "w2_bias", None),
-    )
-
-    return FusedMoEQuantConfig(
-        _a1=a_quant_desc,
-        _a2=a_quant_desc,
-        _w1=w1_quant_desc,
-        _w2=w2_quant_desc,
+    return humming_moe_quant_config(
+        q_dtype=q_dtype,
+        weight_dtype=str(weight_schema.b_dtype),
+        weight_group_shape=weight_group_shape,
+        w13_scale=getattr(layer, "w13_weight_scale", None),
+        w13_gscale=getattr(layer, "w13_global_scale", None),
+        w13_zp=getattr(layer, "w13_zero_point", None),
+        w13_bias=getattr(layer, "w13_bias", None),
+        w2_scale=getattr(layer, "w2_weight_scale", None),
+        w2_gscale=getattr(layer, "w2_global_scale", None),
+        w2_zp=getattr(layer, "w2_zero_point", None),
+        w2_bias=getattr(layer, "w2_bias", None),
     )
