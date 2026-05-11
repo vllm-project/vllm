@@ -230,6 +230,16 @@ if [ ! -x "${RAY_BIN}" ]; then
 fi
 echo "Using RAY_BIN=${RAY_BIN}"
 
+export HF_HOME="${HF_HOME:-/data/engs-glass/catz0932/hf_cache}"
+export HF_HUB_CACHE="${HF_HOME}/hub"
+export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
+export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
+
+echo "HF_HOME=${HF_HOME}"
+echo "HF_HUB_CACHE=${HF_HUB_CACHE}"
+echo "TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
+
+
 export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
 export VLLM_MOE_USE_DEEP_GEMM="${VLLM_MOE_USE_DEEP_GEMM:-0}"
