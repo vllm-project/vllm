@@ -261,8 +261,9 @@ class TieringOffloadingManager(OffloadingManager):
         elif primary_hit is None:
             return None
         elif hit_tier is not None:
-            self._initiate_promotion(hit_tier, key, req_context)
-            return None
+            if self._initiate_promotion(hit_tier, key, req_context):
+                return None  # promotion started, retry later
+            return False  # primary full, block unavailable
         elif any_none:
             return None
         else:
@@ -273,7 +274,7 @@ class TieringOffloadingManager(OffloadingManager):
         tier: SecondaryTierManager,
         key: OffloadKey,
         req_context: ReqContext,
-    ):
+    ) -> bool:
         """
         Queue a block for promotion from a secondary tier to the primary tier.
 
@@ -287,6 +288,9 @@ class TieringOffloadingManager(OffloadingManager):
             tier: The secondary tier to promote from
             key: Block to promote
             req_context: Per-request context forwarded to primary.prepare_write().
+
+        Returns:
+            True if promotion was initiated, False if primary tier is full.
         """
         # Allocate space in primary tier for promoted block.
         # Must happen immediately so primary.lookup() returns None (in-flight)
@@ -295,8 +299,9 @@ class TieringOffloadingManager(OffloadingManager):
         primary_write_result = self.primary_tier.prepare_write([key], req_context)
 
         if primary_write_result is None:
-            # Cannot allocate space in primary tier (full); retry next step.
-            return
+            # Primary tier is full; caller should treat the block as unavailable
+            # rather than retrying indefinitely.
+            return False
 
         store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
@@ -311,6 +316,7 @@ class TieringOffloadingManager(OffloadingManager):
         entry = tier_pending[ctx_id]
         entry.keys.extend(primary_write_result.keys_to_store)
         entry.block_ids.extend(store_spec.block_ids)
+        return True
 
     def _flush_pending_promotions(self) -> None:
         """Submit one batched submit_load() per (tier, request).
