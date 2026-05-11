@@ -111,7 +111,6 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
                 "SM100 and later, using CUTLASS backend instead",
-                scope="local",
             )
             return FlashinferMoeBackend.CUTLASS
         return backend_map[flashinfer_moe_backend]
@@ -239,7 +238,6 @@ def align_fp4_moe_weights_for_fi(
         "Padding intermediate size from %d to %d for up/down projection weights.",
         intermediate,
         padded_intermediate,
-        scope="local",
     )
 
     up_mult = 2 if is_act_and_mul else 1
@@ -285,7 +283,6 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         "performance degradation.",
         hidden_size,
         padded_hidden_size,
-        scope="local",
     )
 
     padded_w13 = w13.new_zeros((num_experts, gate_up_dim, padded_hidden_size // 2))
@@ -331,7 +328,6 @@ def align_fp8_moe_weights_for_fi(
         "Padding intermediate size from %d to %d for up/down projection weights.",
         intermediate,
         padded_intermediate,
-        scope="local",
     )
 
     up_mult = 2 if is_act_and_mul else 1

@@ -7,7 +7,6 @@ import torch
 from torch.nn import Module
 
 if TYPE_CHECKING:
-    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
     from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
@@ -20,6 +19,10 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import replace_parameter
 
@@ -35,8 +38,10 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         layer: torch.nn.Module,
     ):
         super().__init__(layer.moe_config)
-        self.experts_cls: type[mk.FusedMoEExperts] = select_int8_moe_backend(
+        self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
+            weight_key=kInt8StaticChannelSym,
+            activation_key=kInt8DynamicTokenSym,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
