@@ -39,7 +39,8 @@ th {
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
-| Custom MM | ✅ | ✅ | Local file: `mm_data.jsonl` |
+| Custom Audio | ✅ | ✅ | Local file: `audio_data.jsonl` |
+| Custom Image | ✅ | ✅ | Local file: `image_data.jsonl` |
 
 Legend:
 
@@ -173,9 +174,9 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-#### Custom multimodal dataset
+#### Custom image dataset
 
-If the multimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
+If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `image_data.jsonl`:
 
 ```json
 {"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
@@ -193,8 +194,8 @@ vllm bench serve--save-result --save-detailed \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
-  --dataset-name custom_mm \
-  --dataset-path <path-to-your-mm-data-jsonl> \
+  --dataset-name custom_image \
+  --dataset-path <path-to-your-image-data-jsonl> \
   --allowed-local-media-path /path/to/image/folder
 ```
 
