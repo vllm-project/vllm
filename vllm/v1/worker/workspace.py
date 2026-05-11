@@ -31,7 +31,7 @@ _manager: "WorkspaceManager | None" = None
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages workspace buffers for DBO (Dual Batch Overlap) execution.
+    Manages one workspace buffer per active ubatch slot.
     Can be locked to prevent further growth during execution.
     """
 
@@ -39,7 +39,9 @@ class WorkspaceManager:
         self._device = device
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
-        self._current_workspaces: list[torch.Tensor | None] = [None, None]
+        self._current_workspaces: list[torch.Tensor | None] = [
+            None
+        ] * self._num_ubatches
         self._locked: bool = False
 
     @staticmethod
@@ -159,35 +161,32 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            for ubatch_id in range(self._num_ubatches):
-                current_workspace = self._current_workspaces[ubatch_id]
-                if (
-                    current_workspace is None
-                    or self._workspace_size_bytes(current_workspace) < required_bytes
-                ):
-                    # Delete old tensor before allocating new one to avoid
-                    # memory spike from resize_(). resize_() allocates new
-                    # memory before freeing old, which can cause OOM.
-                    # Must clear the list reference first since local var
-                    # is just a copy of the reference.
-                    self._current_workspaces[ubatch_id] = None
-                    del current_workspace
-                    self._current_workspaces[ubatch_id] = torch.empty(
-                        (required_bytes,), dtype=torch.uint8, device=self._device
-                    )
+            # Only resize the requesting ubatch's workspace.  Other
+            # ubatches resize lazily on their next get_simultaneous call.
+            # Resizing all ubatches here would orphan the other ubatch's
+            # old tensor when it still holds views into it (DBO leak).
+            self._current_workspaces[ubatch_id] = None
+            del current_workspace
+            # Release the freed segment back to CUDA so the caching
+            # allocator can reuse the GPU memory for the larger
+            # allocation below. Without this, each resize may leave a
+            # dead segment in reserved memory which can cause higher peak
+            # memory usage.
+            torch.accelerator.empty_cache()
+            self._current_workspaces[ubatch_id] = torch.empty(
+                (required_bytes,), dtype=torch.uint8, device=self._device
+            )
+            current_workspace = self._current_workspaces[ubatch_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
                     "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "
-                    "%.2f MB (%d ubatches, total memory %.2f MB)",
+                    "%.2f MB (ubatch %d)",
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
-                    self._num_ubatches,
-                    required_bytes * self._num_ubatches / _MB,
+                    ubatch_id,
                 )
-
-            current_workspace = self._current_workspaces[dbo_current_ubatch_id()]
 
         return current_workspace
 
@@ -224,7 +223,7 @@ def init_workspace_manager(
 
     Args:
         device: The device to allocate workspace on.
-        num_ubatches: Number of micro-batches. Defaults to 1.
+        num_ubatches: Number of workspace ubatch slots. Defaults to 1.
     """
     global _manager
     if _manager is not None:

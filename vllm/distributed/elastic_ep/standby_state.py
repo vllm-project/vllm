@@ -38,10 +38,8 @@ def create_standby_groups(
     new_dp_size: int,
     new_world_size_across_dp: int,
     master_ip: str,
-    world_group_ports: list[list[int]],
-    dp_group_ports: list[list[int]],
-    ep_group_ports: list[list[int]],
-    eplb_group_ports: list[list[int]] | None = None,
+    coord_store_port: int,
+    enable_eplb: bool = True,
     backend: str | None = None,
 ) -> None:
     global \
@@ -51,19 +49,23 @@ def create_standby_groups(
         _STANDBY_EP, \
         _STANDBY_EPLB
 
+    from vllm.distributed.utils import get_cached_tcp_store_client
+
     assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size
     world_group = get_world_group()
     assert isinstance(world_group, StatelessGroupCoordinator)
     backend = backend or world_group.backend
 
+    coord_store = get_cached_tcp_store_client(master_ip, coord_store_port)
+
     standby_world_ranks = [list(range(new_world_size_across_dp))]
     _STANDBY_WORLD = _init_stateless_group(
         standby_world_ranks,
         "world",
-        world_group_ports,
         master_ip,
         backend,
         use_device_communicator=False,
+        coord_store=coord_store,
     )
     _STANDBY_WORLD_NODE_COUNT = _node_count(_STANDBY_WORLD.tcp_store_group)
 
@@ -76,7 +78,7 @@ def create_standby_groups(
     standby_dp_ranks = all_ranks.transpose(1, 3).reshape(-1, new_dp_size).unbind(0)
     standby_dp_ranks = [x.tolist() for x in standby_dp_ranks]
     _STANDBY_DP = _init_stateless_group(
-        standby_dp_ranks, "dp", dp_group_ports, master_ip, backend
+        standby_dp_ranks, "dp", master_ip, backend, coord_store=coord_store
     )
 
     standby_ep_ranks = (
@@ -84,12 +86,16 @@ def create_standby_groups(
     )
     standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
     _STANDBY_EP = _init_stateless_group(
-        standby_ep_ranks, "ep", ep_group_ports, master_ip, backend
+        standby_ep_ranks, "ep", master_ip, backend, coord_store=coord_store
     )
 
-    if eplb_group_ports is not None:
+    if enable_eplb:
         _STANDBY_EPLB = _init_stateless_group(
-            standby_ep_ranks, "eplb", eplb_group_ports, master_ip, backend
+            standby_ep_ranks,
+            "eplb",
+            master_ip,
+            backend,
+            coord_store=coord_store,
         )
 
 

@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
-import base64
 import pickle
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pybase64 as base64
 import requests
 import torch
 from torch.multiprocessing.reductions import reduce_tensor
@@ -210,6 +210,11 @@ class IPCWeightTransferEngine(
         Supports two modes:
         - 'ray': Sends weights via Ray RPC to a Ray-based LLM handle
         - 'http': Sends weights via HTTP POST to a vLLM HTTP server
+
+        .. note::
+            This method calls ``update_weights`` internally. The caller must
+            call ``start_weight_update`` before and ``finish_weight_update``
+            after this method.
 
         Args:
             iterator: Iterator of model parameters. Returns (name, tensor) tuples.

@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.abstract import LoadStoreSpec
+from vllm.v1.kv_offload.base import LoadStoreSpec
 
 # a single transfer spec (src_blocks_spec, dst_blocks_spec)
 TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
@@ -68,6 +68,10 @@ class OffloadingHandler(ABC):
         Args:
             job_ids: The set of job IDs to wait for.
         """
+
+    def shutdown(self) -> None:
+        """Shutdown the handler and release any resources."""
+        return
 
 
 class OffloadingWorker:
@@ -166,3 +170,7 @@ class OffloadingWorker:
         """
         for handler in self.handlers:
             handler.wait(job_ids)
+
+    def shutdown(self) -> None:
+        for handler in self.handlers:
+            handler.shutdown()

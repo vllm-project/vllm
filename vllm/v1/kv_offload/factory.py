@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -54,5 +54,5 @@ class OffloadingSpecFactory:
 
 # Register various specs here.
 OffloadingSpecFactory.register_spec(
-    "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu", "CPUOffloadingSpec"
+    "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu.spec", "CPUOffloadingSpec"
 )

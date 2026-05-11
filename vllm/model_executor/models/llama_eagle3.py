@@ -287,13 +287,16 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            quant_config=get_draft_quant_config(vllm_config),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(

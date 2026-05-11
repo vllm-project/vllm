@@ -9,6 +9,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
+from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logger import init_logger
 
@@ -24,7 +25,7 @@ def render(request: Request) -> OpenAIServingRender | None:
 @router.post(
     "/v1/chat/completions/render",
     dependencies=[Depends(validate_json_request)],
-    response_model=list,
+    response_model=GenerateRequest,
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
@@ -44,13 +45,13 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=result.model_dump())
 
 
 @router.post(
     "/v1/completions/render",
     dependencies=[Depends(validate_json_request)],
-    response_model=list,
+    response_model=list[GenerateRequest],
     responses={
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
@@ -67,7 +68,7 @@ async def render_completion(request: CompletionRequest, raw_request: Request):
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
-    return JSONResponse(content=result)
+    return JSONResponse(content=[item.model_dump() for item in result])
 
 
 def attach_router(app: FastAPI) -> None:

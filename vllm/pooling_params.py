@@ -7,8 +7,11 @@ from typing import Any
 import msgspec
 
 from vllm.config import ModelConfig, PoolerConfig
+from vllm.logger import init_logger
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
+
+logger = init_logger(__name__)
 
 
 class LateInteractionParams(
@@ -54,10 +57,6 @@ class PoolingParams(
     dimensions: int | None = None
     # --8<-- [end:embed-pooling-params]
 
-    ## for classification, scoring and rerank
-    # --8<-- [start:classify-pooling-params]
-    # --8<-- [end:classify-pooling-params]
-
     ## for step pooling models
     step_tag_id: int | None = None
     returned_token_ids: list[int] | None = None
@@ -79,7 +78,6 @@ class PoolingParams(
         return {
             "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
-            "score": ["use_activation"],
             "token_embed": ["dimensions", "use_activation"],
             "token_classify": ["use_activation"],
         }
@@ -94,6 +92,10 @@ class PoolingParams(
         if self.task == "plugin":
             if self.skip_reading_prefix_cache is None:
                 self.skip_reading_prefix_cache = True
+            return
+
+        # skipping verify, let plugins configure and validate pooling params
+        if self.task not in self.valid_parameters:
             return
 
         # NOTE: Task validation needs to done against the model instance,
@@ -180,7 +182,7 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score", "token_classify"]:
+        elif self.task in ["classify", "token_classify"]:
             if self.use_activation is None:
                 self.use_activation = True
         else:

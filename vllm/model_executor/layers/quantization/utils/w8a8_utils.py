@@ -8,16 +8,6 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
 
-def sparse_cutlass_supported() -> bool:
-    if not current_platform.is_cuda():
-        return False
-
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-
-    return ops.cutlass_sparse_scaled_mm_supported(capability)
-
-
 def cutlass_fp8_supported() -> bool:
     if not current_platform.is_cuda():
         return False

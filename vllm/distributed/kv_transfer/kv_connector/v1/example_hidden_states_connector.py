@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import safetensors
 import torch
@@ -120,7 +120,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -286,7 +286,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             cached_req = self._active_requests[req_id]
             req_block_ids = self._req_blocks[req_id]
 
-            assert new_block_ids is not None
+            if new_block_ids is None:
+                continue
+
             block_ids = new_block_ids[0]
 
             req_block_ids.extend(block_ids)

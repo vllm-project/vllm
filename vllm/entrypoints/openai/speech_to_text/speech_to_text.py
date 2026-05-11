@@ -5,13 +5,12 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Set
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
-from soundfile import LibsndfileError
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
@@ -39,30 +38,18 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import EncoderDecoderInputs, ProcessorInputs
+from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import split_audio
+from vllm.multimodal.audio import get_audio_duration, split_audio
+from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.import_utils import PlaceholderModule
-
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
-# Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a
-# server error vs a client error (invalid audio file).
-# 1 = unrecognised format      (file is not a supported audio container)
-# 3 = malformed file           (corrupt or structurally invalid audio)
-# 4 = unsupported encoding     (codec not supported by this libsndfile build)
-_BAD_SF_CODES = {1, 3, 4}
+from vllm.utils.async_utils import merge_async_iterators
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
@@ -81,6 +68,17 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
+
+
+def asr_inter_chunk_separator(
+    language: str | None, no_space_languages: Set[str]
+) -> str:
+    """Space to insert between ASR text chunks for streaming and non-streaming join.
+
+    Languages in ``no_space_languages`` (e.g. Chinese, Japanese) use an empty
+    separator; others use a single ASCII space.
+    """
+    return "" if language and language.lower() in no_space_languages else " "
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -166,10 +164,17 @@ class OpenAISpeechToText(OpenAIServing):
             request_id,
         )
 
-        final_output: RequestOutput
-        async for final_output in result_generator:
-            if final_output.finished:
-                break
+        try:
+            final_output: RequestOutput
+            async for final_output in result_generator:
+                if final_output.finished:
+                    break
+        except asyncio.CancelledError:
+            await asyncio.gather(
+                self.engine_client.abort(request_id),
+                return_exceptions=True,
+            )
+            raise
 
         token_ids = list(final_output.outputs[0].token_ids)
         lang = self.model_cls.parse_language_detection_output(
@@ -185,11 +190,10 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[EngineInput], float]:
         # Validate request
-        language = self.model_cls.validate_language(request.language)
-        # Skip to_language validation to avoid extra logging for Whisper.
-        to_language = (
+        request.language = self.model_cls.validate_language(request.language)
+        request.to_language = (
             self.model_cls.validate_language(request.to_language)
             if request.to_language
             else None
@@ -202,20 +206,20 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
-        with io.BytesIO(audio_data) as bytes_:
-            try:
-                # NOTE resample to model SR here for efficiency. This is also a
-                # pre-requisite for chunking, as it assumes Whisper SR.
-                y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-            except LibsndfileError as exc:
-                # Distinguish client errors (invalid audio) from server errors
-                if exc.code in _BAD_SF_CODES:
-                    raise ValueError("Invalid or unsupported audio file.") from exc
-                raise
+        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
+        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
+        # transparently falls back to ffmpeg via an in-memory fd.
+        # NOTE resample to model SR here for efficiency. This is also a
+        # pre-requisite for chunking, as it assumes Whisper SR.
+        try:
+            with io.BytesIO(audio_data) as buf:
+                y, sr = load_audio(buf, sr=self.asr_config.sample_rate)
+        except Exception as exc:
+            raise ValueError("Invalid or unsupported audio file.") from exc
 
-        duration = librosa.get_duration(y=y, sr=sr)
-        do_split_audio = (
-            self.asr_config.allow_audio_chunking
+        duration = get_audio_duration(y=y, sr=sr)
+        do_split_audio = self.asr_config.allow_audio_chunking and (
+            self.asr_config.max_audio_clip_s is not None
             and duration > self.asr_config.max_audio_clip_s
         )
 
@@ -232,28 +236,23 @@ class OpenAISpeechToText(OpenAIServing):
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
 
-        if language is None and getattr(
+        if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
             # Auto-detect language from the first chunk.
-            language = await self._detect_language(
+            request.language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
             )
-            request.language = language
 
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
-            # The model has control over the construction, as long as it
-            # returns a valid PromptType.
-            prompt = self.model_cls.get_generation_prompt(
+            stt_params = request.build_stt_params(
                 audio=chunk,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
-                language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt,
-                to_language=to_language,
             )
+            prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
             if request.response_format == "verbose_json":
@@ -264,9 +263,9 @@ class OpenAISpeechToText(OpenAIServing):
 
             parsed_prompts.append(parsed_prompt)
 
-        engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        return engine_inputs, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -285,7 +284,7 @@ class OpenAISpeechToText(OpenAIServing):
         return prompt
 
     @staticmethod
-    def _get_decoder_prompt_len(engine_prompts: list[ProcessorInputs]) -> int:
+    def _get_decoder_prompt_len(engine_inputs: list[EngineInput]) -> int:
         """Get the length of the decoder prompt. Currently we need to offset
         by the decoder prompt length when running beam search because the mm
         encoder is not currently cached and runs on decode calls; because of
@@ -296,12 +295,13 @@ class OpenAISpeechToText(OpenAIServing):
         encoder/decoder caching is implemented.
         """
         input_len = 0
-        assert len(engine_prompts) > 0
-        first_eng_prompt = engine_prompts[0]
+        assert len(engine_inputs) > 0
+        first_input = engine_inputs[0]
 
-        if first_eng_prompt.get("type") == "enc_dec":
-            first_eng_prompt = cast(EncoderDecoderInputs, first_eng_prompt)
-            input_len = len(first_eng_prompt["decoder_prompt"]["prompt_token_ids"])
+        if first_input.get("type") == "enc_dec":
+            first_input = cast(EncoderDecoderInput, first_input)
+            input_len = len(first_input["decoder_prompt"]["prompt_token_ids"])
+
         return input_len
 
     def _get_verbose_segments(
@@ -391,6 +391,9 @@ class OpenAISpeechToText(OpenAIServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if not request.model:
+            request.model = self.models.model_name()
+
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
@@ -423,7 +426,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        engine_prompts, duration_s = await self._preprocess_speech_to_text(
+        engine_inputs, duration_s = await self._preprocess_speech_to_text(
             request=request,
             audio_data=audio_data,
             request_id=request_id,
@@ -434,7 +437,7 @@ class OpenAISpeechToText(OpenAIServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_prompts)
+            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )
@@ -463,85 +466,115 @@ class OpenAISpeechToText(OpenAIServing):
         if request.response_format == "verbose_json":
             sampling_params.logprobs = 1
 
+        engine_request_ids = [
+            request_id if len(engine_inputs) == 1 else f"{request_id}-{idx}"
+            for idx in range(len(engine_inputs))
+        ]
         list_result_generator = []
-        for i, engine_prompt in enumerate(engine_prompts):
-            request_id_item = f"{request_id}_{i}"
-
-            self._log_inputs(
-                request_id_item,
-                engine_prompt,
-                params=sampling_params,
-                lora_request=lora_request,
-            )
-
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-
-            if isinstance(sampling_params, BeamSearchParams):
-                generator = self.beam_search(
-                    prompt=engine_prompt,
-                    params=sampling_params,
-                    request_id=request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                )
-            else:
-                generator = self.engine_client.generate(
-                    engine_prompt,
-                    sampling_params,
+        try:
+            for request_id_item, engine_input in zip(engine_request_ids, engine_inputs):
+                self._log_inputs(
                     request_id_item,
+                    engine_input,
+                    params=sampling_params,
                     lora_request=lora_request,
-                    trace_headers=trace_headers,
                 )
 
-            list_result_generator.append(generator)
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
+
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.beam_search(
+                        prompt=engine_input,
+                        params=sampling_params,
+                        request_id=request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+                else:
+                    generator = self.engine_client.generate(
+                        engine_input,
+                        sampling_params,
+                        request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+
+                list_result_generator.append(generator)
+        except asyncio.CancelledError:
+            logger.info(
+                "Request %s cancelled; aborting %d transcription engine request(s).",
+                request_id,
+                len(engine_request_ids),
+            )
+            await asyncio.gather(
+                self.engine_client.abort(engine_request_ids),
+                return_exceptions=True,
+            )
+            raise
+
+        separator = asr_inter_chunk_separator(
+            request.language, self.model_cls.no_space_languages
+        )
 
         if request.stream:
             return stream_generator_method(
-                request, list_result_generator, request_id, request_metadata, duration_s
+                request,
+                list_result_generator,
+                request_id,
+                request_metadata,
+                duration_s,
+                separator,
             )
         # Non-streaming response.
-        total_segments = []
-        text_parts = []
         try:
             assert list_result_generator is not None
+            chunk_segment_parts: list[list[SpeechToTextSegment]] = [
+                [] for _ in list_result_generator
+            ]
+            chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
             }
             segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
-            text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
             if chunk_size_in_s is None:
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
-            for idx, result_generator in enumerate(list_result_generator):
+            result_generator = merge_async_iterators(*list_result_generator)
+            async for idx, op in result_generator:
                 start_time = (
                     float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 )
-                async for op in result_generator:
-                    if request.response_format == "verbose_json":
-                        assert op.outputs[0].logprobs
-                        segments: list[SpeechToTextSegment] = (
-                            self._get_verbose_segments(
-                                tokens=tuple(op.outputs[0].token_ids),
-                                segment_class=segment_class,
-                                request=request,
-                                start_time=start_time,
-                                log_probs=op.outputs[0].logprobs,
-                            )
-                        )
+                if request.response_format == "verbose_json":
+                    assert op.outputs[0].logprobs
+                    segments: list[SpeechToTextSegment] = self._get_verbose_segments(
+                        tokens=tuple(op.outputs[0].token_ids),
+                        segment_class=segment_class,
+                        request=request,
+                        start_time=start_time,
+                        log_probs=op.outputs[0].logprobs,
+                    )
 
-                        total_segments.extend(segments)
-                        text_parts.extend([seg.text for seg in segments])
-                    else:
-                        raw_text = op.outputs[0].text
-                        text_parts.append(self.model_cls.post_process_output(raw_text))
-            text = "".join(text_parts)
+                    chunk_segment_parts[idx].extend(segments)
+                    chunk_text_parts[idx].extend([seg.text for seg in segments])
+                else:
+                    raw_text = op.outputs[0].text
+                    chunk_text_parts[idx].append(
+                        self.model_cls.post_process_output(raw_text)
+                    )
+            total_segments = [
+                segment
+                for segment_parts in chunk_segment_parts
+                for segment in segment_parts
+            ]
+            text_parts = [text for text_part in chunk_text_parts for text in text_part]
+            text = separator.join(text_parts)
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
@@ -580,7 +613,16 @@ class OpenAISpeechToText(OpenAIServing):
                     )
             return final_response
         except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
+            logger.info(
+                "Request %s cancelled; aborting %d transcription engine request(s).",
+                request_id,
+                len(engine_request_ids),
+            )
+            await asyncio.gather(
+                self.engine_client.abort(engine_request_ids),
+                return_exceptions=True,
+            )
+            raise
 
     async def _speech_to_text_stream_generator(
         self,
@@ -594,6 +636,7 @@ class OpenAISpeechToText(OpenAIServing):
         | type[TranslationResponseStreamChoice],
         stream_response_class: type[TranscriptionStreamResponse]
         | type[TranslationStreamResponse],
+        separator: str,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         model_name = request.model
@@ -610,6 +653,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         try:
             for result_generator in list_result_generator:
+                beginning_of_chunk = True
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
@@ -626,6 +670,14 @@ class OpenAISpeechToText(OpenAIServing):
                     # Just one output (n=1) supported.
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
+
+                    # dont add separator to the first chunk
+                    if (
+                        result_generator is not list_result_generator[0]
+                        and beginning_of_chunk
+                    ):
+                        output.text = separator + output.text
+                        beginning_of_chunk = False
 
                     # TODO: For models that output structured formats (e.g.,
                     # Qwen3-ASR with "language X<asr_text>" prefix), streaming

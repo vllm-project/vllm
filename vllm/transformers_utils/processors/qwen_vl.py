@@ -31,25 +31,12 @@ class QwenVLProcessor(ProcessorMixin):
 
     def __init__(
         self,
+        image_processor: QwenVLImageProcessorFast,
         tokenizer: QwenVLTokenizer,
-        image_size: int,
-        image_processor: QwenVLImageProcessorFast | None = None,
     ) -> None:
-        self.tokenizer = tokenizer
-        if image_processor is None:
-            image_processor = QwenVLImageProcessorFast(
-                size={"width": image_size, "height": image_size}
-            )
         self.image_processor = image_processor
+        self.tokenizer = tokenizer
 
-    @property
-    def image_start_tag(self) -> str:
-        return self.tokenizer.image_start_tag  # type: ignore[attr-defined]
-
-    @property
-    def image_end_tag(self) -> str:
-        return self.tokenizer.image_end_tag  # type: ignore[attr-defined]
-
-    @property
-    def image_pad_tag(self) -> str:
-        return self.tokenizer.image_pad_tag  # type: ignore[attr-defined]
+        self.image_start_tag = tokenizer.image_start_tag
+        self.image_end_tag = tokenizer.image_end_tag
+        self.image_pad_tag = tokenizer.image_pad_tag

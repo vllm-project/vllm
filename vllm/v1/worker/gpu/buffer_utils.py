@@ -27,12 +27,10 @@ def async_copy_to_gpu(
         assert device is not None
         out = torch.empty_like(x, device=device)
 
-    # CPU-to-CPU copy
-    tmp = x.pin_memory()
-    assert tmp is not x
-
-    # CPU-to-GPU copy
-    return out.copy_(tmp, non_blocking=True)
+    # Copy directly to GPU — explicit pin_memory() causes sporadic stalls
+    # under high concurrency due to CUDA driver contention. The driver
+    # handles the transfer efficiently without manual pinning.
+    return out.copy_(x, non_blocking=True)
 
 
 class UvaBuffer:
@@ -169,7 +167,7 @@ class StagedWriteTensor:
 
         # Special handling for write_contents
         write_contents = async_tensor_h2d(
-            self._staged_write_contents, self.dtype, self.device, pin_memory=True
+            self._staged_write_contents, self.dtype, self.device
         )
 
         # Write diffs to the GPU buffer
