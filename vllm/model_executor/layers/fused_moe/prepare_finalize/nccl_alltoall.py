@@ -248,8 +248,7 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             sent_topk_weights = flat_topk_weights.index_select(0, order)
             send_a1q_scale = None
             if a1q_scale is not None and a1q_scale.ndim != 0:
-                send_a1q_scale = a1q_scale.index_select(0, flat_token_indices)
-                send_a1q_scale = send_a1q_scale.index_select(0, order)
+                send_a1q_scale = a1q_scale.index_select(0, flat_token_indices[order])
 
         send_counts_tensor = torch.bincount(
             dest_ranks, minlength=self.num_dispatchers_
