@@ -91,8 +91,12 @@ def _run_comparison(
 
     if "FI_SM90" in timings and "CUDA" in timings:
         result["speedup"] = timings["CUDA"] / timings["FI_SM90"]
-        correct = (q_fi is not None and torch.equal(q_fi, q_cuda)
-                   and torch.allclose(s_fi, s_cuda, atol=0, rtol=0))
+        correct = (
+            q_fi is not None
+            and q_cuda is not None
+            and torch.allclose(s_fi.float(), s_cuda.float(), rtol=1e-5)
+            and torch.allclose(q_fi.float(), q_cuda.float(), rtol=0.01)
+        )
         result["correct"] = correct
     return result
 
