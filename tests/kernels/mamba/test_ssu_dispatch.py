@@ -13,6 +13,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -27,7 +28,9 @@ except ImportError:
     HAS_FLASHINFER = False
 
 
-def _kv_cache_config_with_ssu(mamba_type: str = "mamba2") -> KVCacheConfig:
+def _kv_cache_config_with_ssu(
+    mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2,
+) -> KVCacheConfig:
     spec = MambaSpec(
         block_size=16,
         shapes=((16, 64),),
@@ -77,7 +80,12 @@ def test_uninitialized_backend_raises():
 
 
 @pytest.mark.parametrize(
-    "mamba_type", ["linear_attention", "gdn_attention", "short_conv"]
+    "mamba_type",
+    [
+        MambaAttentionBackendEnum.LINEAR,
+        MambaAttentionBackendEnum.GDN_ATTN,
+        MambaAttentionBackendEnum.SHORT_CONV,
+    ],
 )
 def test_init_is_noop_for_non_ssu_mamba_type(mamba_type):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
