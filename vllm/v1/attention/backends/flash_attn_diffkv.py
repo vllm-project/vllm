@@ -50,8 +50,9 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
 
     # Do not modify the interface of get_kv_cache_shape,
     # but consider head_size_v when returning result.
-    @staticmethod
+    @classmethod
     def get_kv_cache_shape(
+        cls,
         num_blocks: int,
         block_size: int,
         num_kv_heads: int,
@@ -64,7 +65,7 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
             num_blocks,
             block_size,
             num_kv_heads,
-            head_size + FlashAttentionDiffKVBackend.head_size_v,
+            head_size + cls.head_size_v,
         )
 
     @staticmethod
