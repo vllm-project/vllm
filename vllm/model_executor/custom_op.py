@@ -101,8 +101,6 @@ class PluggableLayer(nn.Module):
             raise TypeError("Decorator can only be applied to classes.")
 
 
-
-
 def _is_trivial_forward_cuda(cls) -> bool:
     """Return True if cls.forward_cuda is a one-liner delegating to forward_native.
 
@@ -229,6 +227,45 @@ class CustomOp(nn.Module):
             # opaque torch custom op (e.g. fused_moe, unified_attention, etc.)
             return self.maybe_compile(self.forward_native, enable=compile_native)
 
+        # Auto-fuse trivial fallbacks when opted in.
+        # Must run before the platform dispatch below: on ROCm, forward_hip
+        # defaults to `return self.forward_cuda(...)`, so the same unfused
+        # pattern exists there and benefits equally from compilation.
+        # Patching forward_native (rather than forward_cuda) means all
+        # dispatch paths — forward_cuda, forward_hip — pick up the compiled
+        # version without needing platform-specific branches here.
+        #
+        # _auto_fused uses three states (None/False/True) to avoid redundant
+        # inspect.getsource calls across instances of the same class:
+        #   None  — not yet checked (first instance of this class)
+        #   False — checked, not a trivial fallback; skip cheaply on future instances
+        #   True  — fused; forward_native already replaced
+        if os.environ.get("VLLM_AUTO_FUSE_OPS") == "1":
+            cls = self.__class__
+            auto_fused = getattr(cls, "_auto_fused", None)
+            if auto_fused is None:
+                # First time we see this class: run the (expensive) source check
+                # and cache the result so subsequent instances skip it.
+                if _is_trivial_forward_cuda(cls):
+                    from vllm.config.compilation import CompilationMode
+                    if compilation_config.mode == CompilationMode.NONE:
+                        _original_native = cls.forward_native
+                        # dynamic=True: handles variable sequence lengths (prefill).
+                        # mode="default": avoids CUDAGraph inside torch.compile,
+                        #   which conflicts with vLLM's own CUDAGraph management.
+                        _compiled = torch.compile(
+                            _original_native, dynamic=True, mode="default"
+                        )
+                        def _fused_forward_native(self, *args, **kwargs):
+                            return _compiled(self, *args, **kwargs)
+                        cls.forward_native = _fused_forward_native
+                        cls._auto_fused = True
+                    else:
+                        cls._auto_fused = False
+                else:
+                    # Not a trivial fallback; mark so future instances skip cheaply.
+                    cls._auto_fused = False
+
         if current_platform.is_rocm():
             return self.forward_hip
         elif current_platform.is_cpu():
@@ -240,31 +277,6 @@ class CustomOp(nn.Module):
         elif current_platform.is_out_of_tree():
             return self.forward_oot
         else:
-            # Auto-fuse trivial forward_cuda fallbacks when opted in.
-            # When VLLM_AUTO_FUSE_OPS=1 and compilation_config.mode == NONE
-            # (enforce_eager=True), ops whose forward_cuda is a one-liner alias
-            # for forward_native produce 6-8 unfused elementwise/reduce kernels
-            # per call. Wrapping forward_native with torch.compile replaces them
-            # with a single fused Triton kernel, reducing GPU kernel time by ~14%.
-            if (
-                os.environ.get("VLLM_AUTO_FUSE_OPS") == "1"
-                and _is_trivial_forward_cuda(self.__class__)
-                and not getattr(self.__class__, "_auto_fused", False)
-            ):
-                from vllm.config.compilation import CompilationMode
-                compilation_config = get_cached_compilation_config()
-                if compilation_config.mode == CompilationMode.NONE:
-                    _original_native = self.__class__.forward_native
-                    # dynamic=True: handles variable sequence lengths (prefill).
-                    # mode="default": avoids CUDAGraph inside torch.compile,
-                    #   which conflicts with vLLM's own CUDAGraph management.
-                    _compiled = torch.compile(
-                        _original_native, dynamic=True, mode="default"
-                    )
-                    def _fused_forward_cuda(self, *args, **kwargs):
-                        return _compiled(self, *args, **kwargs)
-                    self.__class__.forward_cuda = _fused_forward_cuda
-                    self.__class__._auto_fused = True
             return self.forward_cuda
 
     def maybe_compile(self, fn, *, enable: bool = True):
