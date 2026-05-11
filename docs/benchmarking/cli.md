@@ -174,7 +174,6 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-
 #### Custom Audio Dataset
 
 If the audio dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomAudioDataset`. At inference time, use the option `--dataset-name custom_audio`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "audio" fields per entry, e.g., `audio_data.jsonl`:
@@ -184,9 +183,9 @@ If the audio dataset you want to benchmark is not supported yet in vLLM, then yo
 {"prompt": "Transcribe the audio.", "audio": "/path/to/audio_2.wav"}
 ```
 
-* **Supported models:** The `CustomAudioDataset` class supports two types of audio models: ASR models (e.g. Whisper) which do not require a "prompt" field; and multimodal audio-text chat models (e.g. Qwen2-Audio). Since these model types require different arguments at inference, we are giving two examples.
+- **Supported models:** The `CustomAudioDataset` class supports two types of audio models: ASR models (e.g. Whisper) which do not require a "prompt" field; and multimodal audio-text chat models (e.g. Qwen2-Audio). Since these model types require different arguments at inference, we are giving two examples.
 
-* **Example 1: Whisper**
+- **Example 1: Whisper**
 
 Whisper is a dedicated ASR encoder-decoder model, so it uses `--backend openai-audio` and `--endpoint /v1/audio/transcriptions`.
 
@@ -209,7 +208,7 @@ vllm bench serve \
   --result-filename whisper_bench.json
 ```
 
-* **Example 2: Qwen2-Audio**
+- **Example 2: Qwen2-Audio**
 
 Qwen2-Audio is a multimodal chat model that can do ASR and speech analysis, so it uses `--backend openai-chat`, and `--endpoint /v1/chat/completions`. It also requires `--enable-multimodal-chat` to enable multimodal chat transformation.
 
@@ -227,7 +226,6 @@ vllm bench serve \
   --save-detailed \
   --result-filename qwen_bench.json
 ```
-
 
 #### Custom Image Dataset
 
