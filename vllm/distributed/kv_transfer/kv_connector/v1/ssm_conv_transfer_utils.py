@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 
@@ -103,7 +104,7 @@ def derive_mamba_conv_split(
         MambaConvSplitInfo with per-rank x_local, b_local, conv_rows,
         conv_dtype_size, and ssm_sizes (conv_state_bytes, ssm_state_bytes).
     """
-    if mamba_spec.mamba_type != "mamba2":
+    if mamba_spec.mamba_type != MambaAttentionBackendEnum.MAMBA2:
         raise NotImplementedError(
             f"3-read conv transfer only supports Mamba2 models, "
             f"got mamba_type={mamba_spec.mamba_type!r}.  "
