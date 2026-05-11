@@ -2382,8 +2382,8 @@ class CustomAudioDataset(CustomDataset):
     {"prompt": "Transcribe the audio.", "audio": "/path/to/audio.wav"}
 
     Supports both:
-    - Dedicated ASR models (e.g., Whisper) via openai-audio / /v1/audio/transcriptions
-    - Chat-based audio models (e.g., Qwen2-Audio) via openai-chat / /v1/chat/completions
+    - Dedicated ASR models (e.g., Whisper) via 'openai-audio' and '/v1/audio/transcriptions'
+    - Chat-based audio models (e.g., Qwen2-Audio) via 'openai-chat' and '/v1/chat/completions'
     """
 
     IS_MULTIMODAL = True
