@@ -52,6 +52,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Added by the IBM Team, 2024
 
@@ -935,8 +936,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "mamba2"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA2
 
 
 def mamba_mixer2(

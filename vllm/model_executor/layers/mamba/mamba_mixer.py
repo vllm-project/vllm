@@ -42,6 +42,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -476,8 +477,8 @@ class MambaMixer(MambaBase, PluggableLayer):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "mamba1"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA1
 
     def _time_proj_bias(self) -> torch.Tensor | None:
         if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:

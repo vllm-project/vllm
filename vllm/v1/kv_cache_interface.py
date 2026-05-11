@@ -16,6 +16,7 @@ from typing_extensions import Self
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size, nvfp4_kv_cache_full_dim
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -532,7 +533,7 @@ class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
     dtypes: tuple[torch.dtype]
     page_size_padded: int | None = None
-    mamba_type: str = "mamba2"
+    mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
 

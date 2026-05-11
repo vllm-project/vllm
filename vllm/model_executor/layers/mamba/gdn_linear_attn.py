@@ -64,6 +64,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Optional ROCm AITER Triton kernels for the GDN decode fast-path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -237,8 +238,8 @@ class ChunkGatedDeltaRule(CustomOp):
 @PluggableLayer.register("gated_delta_net_attention")
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     @property
-    def mamba_type(self) -> str:
-        return "gdn_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.GDN_ATTN
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
