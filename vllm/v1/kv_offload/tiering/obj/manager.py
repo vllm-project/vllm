@@ -18,32 +18,18 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     """Secondary tier that offloads KV cache blocks to an S3-compatible store.
 
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
-    primary tier (CpuGpuOffloadingHandlers from PR 40020).
+    primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
     def __init__(
         self,
-        model_name: str,
-        gpu_block_size: int,
-        tp_size: int,
-        pp_size: int,
-        pcp_size: int,
-        rank: int,
-        dtype: str,
         obj_config: ObjStoreConfig,
-        key_prefix: str = "",
+        prefix: str = "",
         io_threads: int = 4,
     ):
         self._engine = NixlEngine(obj_config, io_threads=io_threads)
         self._nixl_lookup = NixlLookup(obj_config)
-        prefix = f"{key_prefix}/" if key_prefix else ""
-        self._key_base = (
-            f"{prefix}{model_name}"
-            f"/block_size_{gpu_block_size}"
-            f"/tp_{tp_size}_pp_{pp_size}_pcp_{pcp_size}"
-            f"/rank_{rank}"
-            f"/{dtype}"
-        )
+        self._prefix = f"{prefix}/" if prefix else ""
 
         self._pending_jobs: set[int] = set()
 
@@ -72,7 +58,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def _get_obj_key(self, block_hash: bytes) -> str:
         h = block_hash[-8:].hex()
-        return f"{self._key_base}/{h[:3]}/{h[3:5]}/{h}.bin"
+        return f"{self._prefix}{h[:3]}/{h[3:5]}/{h}.bin"
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         s3_key = self._get_obj_key(get_offload_block_hash(key))
@@ -124,7 +110,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             scheme=config.pop("scheme", "http"),
             ca_bundle=config.pop("ca_bundle", ""),
         )
-        return cls(obj_config=obj_config, **config)
+        prefix = config.pop("prefix", "")
+        io_threads = config.pop("io_threads", 4)
+        return cls(obj_config=obj_config, prefix=prefix, io_threads=io_threads)
 
     @staticmethod
     def get_tier_type() -> str:

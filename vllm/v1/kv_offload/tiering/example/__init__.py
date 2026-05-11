@@ -51,7 +51,6 @@ class ExampleSecondaryTier(SecondaryTierManager):
         primary_kv_view: memoryview,
         max_blocks: int = 1000,
         simulate_async: bool = False,
-        **kwargs,
     ):
         """
         Initialize the example secondary tier.
