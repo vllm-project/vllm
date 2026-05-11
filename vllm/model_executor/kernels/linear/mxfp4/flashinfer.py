@@ -8,7 +8,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     swizzle_mxfp4_scales,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.flashinfer import has_flashinfer_cutedsl
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -22,7 +22,7 @@ class FlashInferMxFp4LinearKernel(MxFp4LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if current_platform.has_device_capability(100) and has_flashinfer():
+        if current_platform.has_device_capability(100) and has_flashinfer_cutedsl():
             return True, None
         return False, "FlashInfer + >=sm_100 (Blackwell) required"
 
