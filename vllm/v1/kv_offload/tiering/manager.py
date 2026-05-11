@@ -99,7 +99,12 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         kv_tensor = self._mmap_region._base.view(
             self._mmap_region.num_blocks, self._mmap_region._row_stride
         )
-        return memoryview(kv_tensor.numpy())
+        np_arr = kv_tensor.numpy()
+        assert np_arr.ctypes.data == self._mmap_region._base.data_ptr(), (
+            "view()/numpy() created a copy instead of sharing the mmap buffer; "
+            "secondary tiers require zero-copy access to primary KV data"
+        )
+        return memoryview(np_arr)
 
 
 class TieringOffloadingManager(OffloadingManager):
