@@ -925,6 +925,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "ibm-granite/granite-speech-3.3-2b",
         extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
     ),
+    "GraniteSpeechPlusForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-speech-4.1-2b-plus",
+    ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
         trust_remote_code=True,
