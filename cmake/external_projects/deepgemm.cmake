@@ -20,7 +20,7 @@ else()
   FetchContent_Declare(
     deepgemm
     GIT_REPOSITORY https://github.com/deepseek-ai/DeepGEMM.git
-    GIT_TAG 477618cd51baffca09c4b0b87e97c03fe827ef03
+    GIT_TAG 891d57b4db1071624b5c8fa0d1e51cb317fa709f
     GIT_SUBMODULES "third-party/cutlass" "third-party/fmt"
     GIT_PROGRESS TRUE
     CONFIGURE_COMMAND ""
@@ -76,7 +76,6 @@ if(DEEPGEMM_ARCHS)
     "${deepgemm_SOURCE_DIR}/third-party/fmt/include")
 
   target_compile_options(_deep_gemm_C PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
     $<$<COMPILE_LANGUAGE:CXX>:-O3>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-psabi>
     $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>)
@@ -117,6 +116,11 @@ if(DEEPGEMM_ARCHS)
 
   install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/legacy/"
     DESTINATION vllm/third_party/deep_gemm/legacy
+    COMPONENT _deep_gemm_C
+    FILES_MATCHING PATTERN "*.py")
+
+  install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/mega/"
+    DESTINATION vllm/third_party/deep_gemm/mega
     COMPONENT _deep_gemm_C
     FILES_MATCHING PATTERN "*.py")
 

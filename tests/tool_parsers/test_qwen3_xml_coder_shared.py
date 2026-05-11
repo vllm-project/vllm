@@ -15,9 +15,12 @@ from collections.abc import Generator
 
 import pytest
 from openai.types.responses.function_tool import FunctionTool
+from xgrammar import StructuralTag
 
 from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedFunction,
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -108,6 +111,27 @@ def sample_tools(request):
 @pytest.fixture
 def parser(parser_cls, qwen3_tokenizer, sample_tools):
     return parser_cls(qwen3_tokenizer, tools=sample_tools)
+
+
+def _as_chat_completion_tools(
+    tools: list[ChatCompletionToolsParam | FunctionTool],
+) -> list[ChatCompletionToolsParam]:
+    normalized: list[ChatCompletionToolsParam] = []
+    for tool in tools:
+        if isinstance(tool, ChatCompletionToolsParam):
+            normalized.append(tool)
+        else:
+            normalized.append(
+                ChatCompletionToolsParam(
+                    type="function",
+                    function={
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                )
+            )
+    return normalized
 
 
 def assert_tool_calls(
@@ -2067,3 +2091,88 @@ def test_anyof_string_null_with_null_literal_returns_none(
             f"anyOf string|null with value {literal!r} was kept as "
             f"{type(args['optional']).__name__}: {args['optional']!r}"
         )
+
+
+def test_get_vllm_registry_structural_tag_returns_structural_tag(
+    parser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    request_tools = _as_chat_completion_tools(sample_tools)
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="auto",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="required",
+    )
+    tag = parser.get_structural_tag(req)
+    assert isinstance(tag, StructuralTag)
+
+    if request_tools:
+        tool = request_tools[0]
+        req = ChatCompletionRequest(
+            messages=[],
+            model="m",
+            tools=request_tools,
+        )
+        req.tool_choice = ChatCompletionNamedToolChoiceParam(
+            function=ChatCompletionNamedFunction(name=tool.function.name)
+        )
+        tag = parser.get_structural_tag(req)
+        assert isinstance(tag, StructuralTag)
+
+
+@pytest.mark.parametrize("include_reasoning", [True, False])
+def test_adjust_request_auto_uses_vllm_registry_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    parser,
+    sample_tools: list[ChatCompletionToolsParam],
+    include_reasoning: bool,
+) -> None:
+    monkeypatch.setattr(
+        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        True,
+    )
+    request_tools = _as_chat_completion_tools(sample_tools)
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="auto",
+        include_reasoning=include_reasoning,
+    )
+    out = parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None
+    assert isinstance(out.structured_outputs.structural_tag, str)
+    loaded = json.loads(out.structured_outputs.structural_tag)
+    assert isinstance(loaded, dict)
+
+
+def test_adjust_request_required_prefers_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    parser,
+    sample_tools: list[ChatCompletionToolsParam],
+) -> None:
+    monkeypatch.setattr(
+        "vllm.tool_parsers.abstract_tool_parser.VLLM_ENFORCE_STRICT_TOOL_CALLING",
+        True,
+    )
+    request_tools = _as_chat_completion_tools(sample_tools)
+    req = ChatCompletionRequest(
+        messages=[],
+        model="m",
+        tools=request_tools,
+        tool_choice="required",
+    )
+    out = parser.adjust_request(req)
+    assert out.structured_outputs is not None
+    assert out.structured_outputs.structural_tag is not None

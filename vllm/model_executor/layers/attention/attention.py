@@ -386,10 +386,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
 
-        # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
-        if kv_cache_dtype.startswith("turboquant_"):
-            self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
-
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
@@ -409,50 +405,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 if is_per_head
                 else GroupShape.PER_TENSOR,
             )
-
-    def _init_turboquant_buffers(
-        self, cache_dtype: str, head_size: int, prefix: str
-    ) -> None:
-        """Initialize TurboQuant centroids for Lloyd-Max quantization."""
-        from vllm.model_executor.layers.quantization.turboquant.centroids import (
-            get_centroids,
-        )
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
-
-        self.register_buffer(
-            "_tq_centroids",
-            get_centroids(head_size, tq_config.centroid_bits),
-        )
-        self._tq_config = tq_config
-
-        # Pre-allocate decode intermediate buffers so model.to(device) moves
-        # them to GPU *before* the memory profiler runs.  Without this the
-        # profiler gives all free memory to KV cache blocks and the first
-        # decode OOMs when these buffers are lazily allocated.
-        _vllm_cfg = get_current_vllm_config()
-        B = _vllm_cfg.scheduler_config.max_num_seqs
-        Hq = self.num_heads
-        S = _vllm_cfg.attention_config.tq_max_kv_splits_for_cuda_graph
-        D = head_size
-        self.register_buffer(
-            "_tq_mid_o_buf",
-            torch.empty(B, Hq, S, D + 1, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_tq_output_buf",
-            torch.empty(B, Hq, D, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_tq_lse_buf",
-            torch.empty(B, Hq, dtype=torch.float32),
-            persistent=False,
-        )
 
     def forward(
         self,
@@ -597,6 +549,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
+                head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
