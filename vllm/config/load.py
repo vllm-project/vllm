@@ -9,6 +9,9 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
+DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
+DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
+
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -79,6 +82,15 @@ class LoadConfig:
       was quantized using torchao and saved using safetensors.
       Needs `torchao >= 0.14.0`.
     """
+    safetensors_prefetch_num_threads: int = Field(
+        default=DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS, ge=1
+    )
+    """Number of worker threads used to prefetch safetensors checkpoint files
+    into the OS page cache when safetensors prefetching is enabled."""
+    safetensors_prefetch_block_size: int = Field(
+        default=DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE, ge=1
+    )
+    """Read size in bytes for each safetensors checkpoint file prefetch."""
     model_loader_extra_config: dict | TensorizerConfig = Field(default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""

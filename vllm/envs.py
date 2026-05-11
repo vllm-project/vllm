@@ -510,7 +510,6 @@ class ConnectorSettings(BaseSettings):
 
     nixl_side_channel_host: str = "localhost"
     nixl_side_channel_port: int = 5600
-    nixl_abort_request_timeout: int = 480
     nixl_ep_max_num_ranks: int = 32
     mooncake_bootstrap_port: int = 8998
     mooncake_abort_request_timeout: int = 480
@@ -886,6 +885,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
+        "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
