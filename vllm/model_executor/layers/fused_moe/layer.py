@@ -29,9 +29,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
 )
-from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-    init_aiter_topK_meta_data,
-)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
