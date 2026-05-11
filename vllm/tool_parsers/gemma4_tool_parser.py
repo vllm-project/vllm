@@ -40,7 +40,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import find_common_prefix, partial_tag_overlap
+from vllm.tool_parsers.utils import partial_tag_overlap
 
 logger = init_logger(__name__)
 
@@ -114,6 +114,62 @@ def _is_unstable_partial_bare_value(value_str: str) -> bool:
     )
 
 
+def _trim_partial_string_overlap(value: str) -> str:
+    overlap = partial_tag_overlap(value, STRING_DELIM)
+    if overlap:
+        return value[:-overlap]
+    return value
+
+
+def _json_closing_syntax_positions(json_text: str) -> set[int]:
+    """Return positions of syntactic closers in a JSON string."""
+    positions: set[int] = set()
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(json_text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+                positions.add(index)
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char in ("}", "]"):
+            positions.add(index)
+
+    return positions
+
+
+def _stable_partial_json_prefix(json_text: str) -> str:
+    """Remove only syntactic trailing closers from partial JSON.
+
+    Streaming tool-call argument deltas are fragments of one final JSON string.
+    For an incomplete Gemma4 tool call, remove closing quotes/brackets/braces
+    that may need to grow when more raw Gemma4 arguments arrive. Closing
+    characters that belong to string content are preserved.
+    """
+    closing_positions = _json_closing_syntax_positions(json_text)
+    end = len(json_text)
+
+    while end > 0:
+        pos = end - 1
+        if json_text[pos].isspace():
+            end = pos
+            continue
+        if pos in closing_positions:
+            end = pos
+            continue
+        break
+
+    return json_text[:end]
+
+
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
@@ -127,9 +183,10 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
 
     Args:
         args_str: The raw Gemma4 argument string.
-        partial: When True (streaming), bare values at end of string are
-            omitted because they may be incomplete and type-unstable
-            (e.g. partial boolean parsed as bare string).
+        partial: When True (streaming), unstable bare values are omitted
+            because they may be incomplete and type-unstable. Partial strings
+            are kept with any trailing delimiter overlap removed so the
+            streaming diff can emit append-only JSON prefixes.
 
     Returns a dict ready for ``json.dumps()``.
     """
@@ -176,8 +233,8 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             val_start = i
             end_pos = args_str.find(STRING_DELIM, i)
             if end_pos == -1:
-                # Unterminated string — take rest
-                result[key] = args_str[val_start:]
+                value = args_str[val_start:]
+                result[key] = _trim_partial_string_overlap(value) if partial else value
                 break
             result[key] = args_str[val_start:end_pos]
             i = end_pos + len(STRING_DELIM)
@@ -271,7 +328,8 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             i += len(STRING_DELIM)
             end_pos = arr_str.find(STRING_DELIM, i)
             if end_pos == -1:
-                items.append(arr_str[i:])
+                value = arr_str[i:]
+                items.append(_trim_partial_string_overlap(value) if partial else value)
                 break
             items.append(arr_str[i:end_pos])
             i = end_pos + len(STRING_DELIM)
@@ -464,8 +522,7 @@ class Gemma4ToolParser(ToolParser):
             token_id in special_token_ids for token_id in delta_token_ids
         )
         if not delta_token_ids or (
-            not has_special_token
-            and (delta_text or not self._inside_tool_call_text())
+            not has_special_token and (delta_text or not self._inside_tool_call_text())
         ):
             return delta_text
 
@@ -578,9 +635,7 @@ class Gemma4ToolParser(ToolParser):
         if not previous_text and not previous_token_ids:
             self._reset_streaming_state()
         previous_text = self._streaming_text
-        delta_text = self._repair_delta_text_from_token_ids(
-            delta_text, delta_token_ids
-        )
+        delta_text = self._repair_delta_text_from_token_ids(delta_text, delta_token_ids)
         current_text = previous_text + delta_text
         self._streaming_text = current_text
 
@@ -674,13 +729,6 @@ class Gemma4ToolParser(ToolParser):
         deltas: list[DeltaToolCall] = []
 
         for index, tool_call in enumerate(tool_calls):
-            # Do not expose partial tool-call arguments. If generation stops
-            # before Gemma4 emits <tool_call|>, streaming clients
-            # cannot retract already-streamed malformed JSON. Buffering until
-            # the complete tool-call marker keeps streamed tool calls valid.
-            if not tool_call.complete:
-                continue
-
             self._ensure_streaming_tool_state(index, tool_call.name)
             state = self._streaming_tool_states[index]
             emit_header = not state.get("name_sent", False)
@@ -727,20 +775,17 @@ class Gemma4ToolParser(ToolParser):
         if arguments_json == prev_streamed:
             return None
 
-        if prev_streamed:
-            prefix = find_common_prefix(prev_streamed, arguments_json)
-            if len(prefix) < len(prev_streamed):
-                self._streamed_args_for_tool[index] = prefix
-                return None
-            diff = arguments_json[len(prev_streamed) :]
-        else:
-            diff = arguments_json
+        if prev_streamed and not arguments_json.startswith(prev_streamed):
+            return None
+
+        diff = arguments_json[len(prev_streamed) :]
 
         if not diff:
             return None
 
         self._streamed_args_for_tool[index] = arguments_json
-        self._streaming_tool_states[index]["arguments"] = json.loads(arguments_json)
+        if tool_call.complete:
+            self._streaming_tool_states[index]["arguments"] = json.loads(arguments_json)
         return diff
 
     def _arguments_json_for_streaming(
@@ -761,7 +806,10 @@ class Gemma4ToolParser(ToolParser):
         if not arguments and not tool_call.complete:
             return None
 
-        return json.dumps(arguments, ensure_ascii=False)
+        arguments_json = json.dumps(arguments, ensure_ascii=False)
+        if not tool_call.complete:
+            return _stable_partial_json_prefix(arguments_json)
+        return arguments_json
 
     def _extract_content(self, current_text: str) -> str | None:
         """Return unsent non-tool-call text, holding partial start tags."""

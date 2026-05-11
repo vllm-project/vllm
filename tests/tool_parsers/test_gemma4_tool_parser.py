@@ -15,6 +15,7 @@ from vllm.tool_parsers.gemma4_tool_parser import (
     Gemma4ToolParser,
     _parse_gemma4_args,
     _parse_gemma4_array,
+    _stable_partial_json_prefix,
 )
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,11 @@ class TestParseGemma4Args:
         assert _parse_gemma4_args("score:108.,next:1", partial=True) == {}
         assert _parse_gemma4_args("score:108.") == {"score": 108.0}
 
+    def test_partial_exponent_withheld(self):
+        assert _parse_gemma4_args("score:1e", partial=True) == {}
+        assert _parse_gemma4_args("score:1e+", partial=True) == {}
+        assert _parse_gemma4_args("score:1e3") == {"score": 1000.0}
+
     def test_boolean_true(self):
         result = _parse_gemma4_args("flag:true")
         assert result == {"flag": True}
@@ -113,6 +119,11 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_partial_bool_withheld(self):
+        assert _parse_gemma4_args("flag:tru", partial=True) == {}
+        assert _parse_gemma4_args("flag:fals", partial=True) == {}
+        assert _parse_gemma4_args("flag:true") == {"flag": True}
+
     def test_null_value(self):
         # Bare `null` must parse as None (Python), not the string "null".
         # Without this, tool_choice=auto would emit `{"param": "null"}`
@@ -120,6 +131,11 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("param:null")
         assert result == {"param": None}
         assert json.dumps(result) == '{"param": null}'
+
+    def test_partial_null_withheld(self):
+        assert _parse_gemma4_args("param:nu", partial=True) == {}
+        assert _parse_gemma4_args("param:nul", partial=True) == {}
+        assert _parse_gemma4_args("param:null") == {"param": None}
 
     def test_mixed_types(self):
         result = _parse_gemma4_args(
@@ -144,6 +160,14 @@ class TestParseGemma4Args:
         """Unterminated strings should take everything after the delimiter."""
         result = _parse_gemma4_args('key:<|"|>unterminated')
         assert result == {"key": "unterminated"}
+
+    def test_partial_unterminated_string_keeps_stable_prefix(self):
+        result = _parse_gemma4_args('key:<|"|>unterminated', partial=True)
+        assert result == {"key": "unterminated"}
+
+    def test_partial_string_delimiter_overlap_withheld(self):
+        result = _parse_gemma4_args('key:<|"|>value<|', partial=True)
+        assert result == {"key": "value"}
 
     def test_empty_value(self):
         """Key with no value after colon."""
@@ -187,6 +211,15 @@ class TestParseGemma4Array:
         assert _parse_gemma4_array("108.,109", partial=True) == []
         assert _parse_gemma4_array("108.") == [108.0]
 
+    def test_partial_bare_literal_withheld(self):
+        assert _parse_gemma4_array("tru", partial=True) == []
+        assert _parse_gemma4_array("nu", partial=True) == []
+        assert _parse_gemma4_array("1e", partial=True) == []
+        assert _parse_gemma4_array("42,tru", partial=True) == [42]
+
+    def test_partial_string_delimiter_overlap_withheld(self):
+        assert _parse_gemma4_array('<|"|>value<|', partial=True) == ["value"]
+
     @pytest.mark.timeout(5)
     def test_string_element_with_closing_bracket(self):
         result = _parse_gemma4_array('[<|"|>a]b<|"|>,<|"|>c<|"|>],<|"|>tail<|"|>')
@@ -196,6 +229,24 @@ class TestParseGemma4Array:
     def test_stray_closing_bracket(self):
         result = _parse_gemma4_array("42,]trailing")
         assert result == [42]
+
+
+class TestStablePartialJsonPrefix:
+    def test_trims_only_syntactic_suffix(self):
+        assert _stable_partial_json_prefix('{"path": "src/main.rs"}') == (
+            '{"path": "src/main.rs'
+        )
+
+    def test_preserves_closing_chars_inside_string_values(self):
+        assert _stable_partial_json_prefix('{"pattern": "value}]"}') == (
+            '{"pattern": "value}]'
+        )
+
+    def test_trims_nested_syntactic_suffix(self):
+        assert (
+            _stable_partial_json_prefix('{"payload": {"path": "src/main.rs"}}')
+            == '{"payload": {"path": "src/main.rs'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +453,23 @@ class TestStreamingExtraction:
                     if arg:
                         args_text += arg
         return args_text
+
+    def _collect_argument_prefixes(self, results):
+        """Collect the assembled argument string after each argument delta."""
+        prefixes: list[str] = []
+        args_text = ""
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        arg = func.get("arguments", "")
+                    else:
+                        arg = getattr(func, "arguments", "") or ""
+                    if arg:
+                        args_text += arg
+                        prefixes.append(args_text)
+        return prefixes
 
     def _collect_tool_calls_by_index(self, results):
         calls: dict[int, dict[str, str | None]] = {}
@@ -835,10 +903,10 @@ class TestStreamingExtraction:
             "epsilon": 30,
         }
 
-    def test_streaming_incomplete_tool_call_emits_no_partial_args(
+    def test_streaming_incomplete_tool_call_emits_stable_partial_args(
         self, parser, mock_request
     ):
-        """Clients cannot retract partial args if generation ends early."""
+        """Incomplete calls may stream append-only stable argument prefixes."""
         chunks = [
             "<|tool_call>",
             "call:first_tool{",
@@ -847,8 +915,72 @@ class TestStreamingExtraction:
 
         results = self._simulate_streaming(parser, mock_request, chunks)
 
-        assert self._collect_arguments(results) == ""
-        assert self._collect_function_name(results) is None
+        assert self._collect_function_name(results) == "first_tool"
+        args_text = self._collect_arguments(results)
+        assert args_text == '{"alpha": 15'
+        assert "beta" not in args_text
+
+    def test_streaming_partial_string_argument_is_append_only(
+        self, parser, mock_request
+    ):
+        """String argument chunks may stream before the closing delimiter."""
+        chunks = [
+            "<|tool_call>",
+            "call:read_file{",
+            'path:<|"|>src/main.',
+            'rs<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        prefixes = self._collect_argument_prefixes(results)
+
+        assert json.loads(args_text) == {"path": "src/main.rs"}
+        assert any(prefix == '{"path": "src/main.' for prefix in prefixes)
+        assert all(args_text.startswith(prefix) for prefix in prefixes)
+
+    def test_streaming_partial_string_delimiter_overlap_is_withheld(
+        self, parser, mock_request
+    ):
+        """Partial string delimiter bytes must not be streamed as arguments."""
+        chunks = [
+            "<|tool_call>",
+            "call:add_note{",
+            'content:<|"|>Buy milk<|',
+            '"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        prefixes = self._collect_argument_prefixes(results)
+
+        assert json.loads(args_text) == {"content": "Buy milk"}
+        assert all("<|" not in prefix for prefix in prefixes)
+        assert all(args_text.startswith(prefix) for prefix in prefixes)
+
+    def test_streaming_nested_partial_args_are_append_only(self, parser, mock_request):
+        """Nested objects and arrays stream only prefixes that can grow."""
+        chunks = [
+            "<|tool_call>",
+            "call:update_item{",
+            'payload:{path:<|"|>src/main.',
+            'rs<|"|>,enabled:true},items:[<|"|>a<|"|>,<|"|>b',
+            'eta<|"|>]}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        prefixes = self._collect_argument_prefixes(results)
+
+        assert json.loads(args_text) == {
+            "payload": {"path": "src/main.rs", "enabled": True},
+            "items": ["a", "beta"],
+        }
+        assert any(prefix == '{"payload": {"path": "src/main.' for prefix in prefixes)
+        assert all(args_text.startswith(prefix) for prefix in prefixes)
 
     def test_streaming_repairs_final_end_marker_from_token_ids(
         self, parser, mock_request
@@ -955,7 +1087,6 @@ class TestStreamingExtraction:
 
         assert args_text
         assert json.loads(args_text) == {"latitude": 108.2, "longitude": 22.8}
-
 
     def test_streaming_split_start_delimiter_after_completed_call(
         self, parser, mock_request
