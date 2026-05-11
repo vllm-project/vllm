@@ -238,7 +238,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
-    "CohereMoeForCausalLM": _HfExamplesInfo(
+    "Cohere2MoeForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
         trust_remote_code=True,
         is_available_online=False,
@@ -1406,6 +1406,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_num_seqs=32,
     ),
     # [Eagle]
+    "EagleCohereForCausalLM": _HfExamplesInfo(
+        "/host/engines/cohere-moe",
+        speculative_model="/host/engines/cohere-moe/eagle",
+        tokenizer="/host/engines/cohere-moe",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
