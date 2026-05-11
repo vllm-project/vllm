@@ -20,6 +20,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -44,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -1265,6 +1267,54 @@ def test_merge_kv_cache_spec():
         same_sliding_window_layer_spec_with_none
     )
     assert merged_layer_spec.sliding_window == 1
+
+
+def test_sliding_window_spec_real_page_size_bytes_nvfp4():
+    """SlidingWindowSpec.real_page_size_bytes must use NVFP4 packed layout
+    when kv_quant_mode is NVFP4. Without this branch, hybrid models such as
+    Gemma 4 (full attention + sliding window layers) compute the wrong page
+    size for the sliding-window layers under NVFP4 KV cache, causing a
+    mismatch with the bytes actually written by the cache writer.
+    """
+    block_size = 16
+    num_kv_heads = 8
+    head_size = 256
+    head_size_v = 128
+
+    # NVFP4 page bytes: K and V each contribute (head_size // 2 fp4 data
+    # + head_size // 16 fp8e4m3 scale) bytes per head, summed over
+    # block_size * num_kv_heads. The bf16 path returns
+    # (head_size + head_size_v) * dtype_size, which would be a different
+    # number of bytes - that mismatch is the bug this guards against.
+    spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        dtype=torch.uint8,
+        sliding_window=1024,
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+
+    expected = (
+        block_size
+        * num_kv_heads
+        * (nvfp4_kv_cache_full_dim(head_size) + nvfp4_kv_cache_full_dim(head_size_v))
+    )
+    assert spec.real_page_size_bytes == expected
+
+    # bf16 (no kv_quant_mode) path should still match the original formula.
+    bf16_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        dtype=torch.bfloat16,
+        sliding_window=1024,
+    )
+    assert bf16_spec.real_page_size_bytes == (
+        block_size * num_kv_heads * (head_size + head_size_v) * 2
+    )
 
 
 def test_is_kv_cache_spec_uniform():
