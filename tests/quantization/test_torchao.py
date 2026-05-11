@@ -401,6 +401,7 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
 
 
 # Zen CPU dispatch unit tests.
+# TODO : unify fixture across test modules.
 
 
 @pytest.fixture
@@ -501,17 +502,14 @@ def _make_int8(n: int = 8, k: int = 16, *, with_act_quant: bool = False):
 
 
 def _wrap_as_layer(weight_tensor: torch.Tensor):
-    """Wrap a tensor in a ``Parameter`` attached to a minimal layer object.
+    """Wrap a tensor in a minimal ``nn.Module`` with a registered weight."""
 
-    A ``SimpleNamespace`` is used instead of ``nn.Module`` so the tests don't
-    have to deal with ``Module.__setattr__`` parameter-registration behavior
-    when ``process_weights_after_loading`` rebinds ``layer.weight``.
-    """
-    from types import SimpleNamespace
-
-    return SimpleNamespace(
-        weight=torch.nn.Parameter(weight_tensor, requires_grad=False)
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight",
+        torch.nn.Parameter(weight_tensor, requires_grad=False),
     )
+    return layer
 
 
 # ----- process_weights_after_loading: success paths ------------------------
