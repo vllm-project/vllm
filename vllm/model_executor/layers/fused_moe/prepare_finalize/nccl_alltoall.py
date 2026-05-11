@@ -312,7 +312,7 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_tokens_meta,
             recv_topk_ids,
             (
-                torch.empty_like(recv_topk_ids, dtype=topk_weights.dtype)
+                torch.ones_like(recv_topk_ids, dtype=topk_weights.dtype)
                 if apply_router_weight_on_input
                 else torch.ones_like(recv_topk_ids, dtype=topk_weights.dtype)
             ),
