@@ -335,7 +335,7 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 
 ## FIPS Compatibility
 
-vLLM does **not** claim FIPS 140-2 or FIPS 140-3 compliance and is not a validated cryptographic module. Recent changes have improved vLLM's *tolerance* of FIPS-enabled hosts — that is, avoiding crashes when non-approved algorithms are blocked — but tolerance is not the same as compliance. Whether a deployment satisfies FIPS requirements depends on the host operating system, the OpenSSL provider backing Python's `hashlib` and `ssl` modules, and which optional dependencies are installed.
+FIPS compliance depends on many factors, so a vLLM deployment is not automatically FIPS compliant. Recent changes have improved vLLM's *tolerance* of FIPS-enabled hosts — that is, avoiding crashes when non-approved algorithms are blocked — but tolerance is not the same as compliance. Whether a deployment satisfies FIPS requirements depends on the host operating system, the OpenSSL provider backing Python's `hashlib` and `ssl` modules, and which optional dependencies are installed.
 
 ### FIPS-relevant configuration
 
