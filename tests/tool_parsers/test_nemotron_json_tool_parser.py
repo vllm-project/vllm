@@ -195,6 +195,51 @@ def test_streaming_handles_multiple_tool_calls(parser, mock_request):
         list(model_output),
         request=mock_request,
         streaming=True,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert content is None
+    assert len(tool_calls) == 2
+    assert tool_calls[0].function.name == "get_weather"
+    assert tool_calls[0].function.arguments == '{"city": "Tokyo"}'
+    assert tool_calls[1].function.name == "lookup_timezone"
+    assert tool_calls[1].function.arguments == '{"city": "Tokyo"}'
+
+
+def test_streaming_single_delta_handles_content_and_tool_call(parser, mock_request):
+    model_output = (
+        "Let me check."
+        '<TOOLCALL>[{"name": "get_weather", '
+        '"arguments": {"city": "Tokyo"}}]</TOOLCALL>'
+    )
+
+    content, tool_calls = run_tool_extraction(
+        parser,
+        [model_output],
+        request=mock_request,
+        streaming=True,
+    )
+
+    assert content == "Let me check."
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == "get_weather"
+    assert tool_calls[0].function.arguments == '{"city": "Tokyo"}'
+
+
+def test_streaming_single_delta_handles_multiple_tool_calls(parser, mock_request):
+    model_output = (
+        '<TOOLCALL>[{"name": "get_weather", '
+        '"arguments": {"city": "Tokyo"}}, '
+        '{"name": "lookup_timezone", '
+        '"arguments": {"city": "Tokyo"}}]</TOOLCALL>'
+    )
+
+    content, tool_calls = run_tool_extraction(
+        parser,
+        [model_output],
+        request=mock_request,
+        streaming=True,
+        assert_one_tool_per_delta=False,
     )
 
     assert content is None

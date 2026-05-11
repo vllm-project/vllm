@@ -210,10 +210,10 @@ class NemotronJSONToolParser(ToolParser):
                 return DeltaMessage(content=content)
             return None
 
+        content_delta: str | None = None
         if self._sent_content_idx < start_idx:
-            content = current_text[self._sent_content_idx : start_idx]
+            content_delta = current_text[self._sent_content_idx : start_idx]
             self._sent_content_idx = start_idx
-            return DeltaMessage(content=content)
 
         payload_start = start_idx + len(self.tool_call_start_token)
         payload_end = current_text.find(self.tool_call_end_token, payload_start)
@@ -245,55 +245,34 @@ class NemotronJSONToolParser(ToolParser):
             self.streamed_args_for_tool.append("")
             self._tool_args_emitted.append(False)
 
-        if self.current_tool_name_sent and self.current_tool_id + 1 < len(
-            parsed_tool_calls
-        ):
+        tool_call_deltas: list[DeltaToolCall] = []
+        while self.current_tool_id < len(parsed_tool_calls):
             current_tool_call = parsed_tool_calls[self.current_tool_id]
-            if isinstance(current_tool_call, dict) and "arguments" in current_tool_call:
-                arguments_delta = self._compute_arguments_delta(
-                    current_tool_call["arguments"], True
-                )
-                if arguments_delta:
-                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
-                    self._tool_args_emitted[self.current_tool_id] = True
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(arguments=arguments_delta),
-                            )
-                        ]
+            if not isinstance(current_tool_call, dict):
+                break
+
+            call_complete = end_of_call or self.current_tool_id + 1 < len(
+                parsed_tool_calls
+            )
+
+            if not self.current_tool_name_sent:
+                function_name = current_tool_call.get("name")
+                if not function_name:
+                    break
+
+                arguments_delta = ""
+                if "arguments" in current_tool_call:
+                    arguments_delta = self._compute_arguments_delta(
+                        current_tool_call["arguments"], call_complete
                     )
+                    if arguments_delta:
+                        self.streamed_args_for_tool[self.current_tool_id] += (
+                            arguments_delta
+                        )
+                        self._tool_args_emitted[self.current_tool_id] = True
 
-            self.current_tool_id += 1
-            self.current_tool_name_sent = False
-            self.streamed_args_for_tool.append("")
-            self._tool_args_emitted.append(False)
-
-        if self.current_tool_id >= len(parsed_tool_calls):
-            return None
-
-        current_tool_call = parsed_tool_calls[self.current_tool_id]
-        if not isinstance(current_tool_call, dict):
-            return None
-
-        if not self.current_tool_name_sent:
-            function_name = current_tool_call.get("name")
-            if not function_name:
-                return None
-
-            arguments_delta = ""
-            if "arguments" in current_tool_call:
-                arguments_delta = self._compute_arguments_delta(
-                    current_tool_call["arguments"], end_of_call
-                )
-                if arguments_delta:
-                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
-                    self._tool_args_emitted[self.current_tool_id] = True
-
-            self.current_tool_name_sent = True
-            return DeltaMessage(
-                tool_calls=[
+                self.current_tool_name_sent = True
+                tool_call_deltas.append(
                     DeltaToolCall(
                         index=self.current_tool_id,
                         id=make_tool_call_id(),
@@ -303,25 +282,36 @@ class NemotronJSONToolParser(ToolParser):
                             arguments=arguments_delta or None,
                         ),
                     )
-                ]
-            )
-
-        if "arguments" not in current_tool_call:
-            return None
-
-        arguments_delta = self._compute_arguments_delta(
-            current_tool_call["arguments"], end_of_call
-        )
-        if not arguments_delta:
-            return None
-
-        self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
-        self._tool_args_emitted[self.current_tool_id] = True
-        return DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=self.current_tool_id,
-                    function=DeltaFunctionCall(arguments=arguments_delta),
                 )
-            ]
-        )
+            elif "arguments" in current_tool_call:
+                arguments_delta = self._compute_arguments_delta(
+                    current_tool_call["arguments"], call_complete
+                )
+                if arguments_delta:
+                    self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
+                    self._tool_args_emitted[self.current_tool_id] = True
+                    tool_call_deltas.append(
+                        DeltaToolCall(
+                            index=self.current_tool_id,
+                            function=DeltaFunctionCall(arguments=arguments_delta),
+                        )
+                    )
+            elif not call_complete:
+                break
+
+            if self.current_tool_id + 1 >= len(parsed_tool_calls):
+                break
+
+            self.current_tool_id += 1
+            self.current_tool_name_sent = False
+            while len(self.streamed_args_for_tool) <= self.current_tool_id:
+                self.streamed_args_for_tool.append("")
+            while len(self._tool_args_emitted) <= self.current_tool_id:
+                self._tool_args_emitted.append(False)
+
+        if content_delta is not None or tool_call_deltas:
+            return DeltaMessage(
+                content=content_delta,
+                tool_calls=tool_call_deltas or None,
+            )
+        return None
