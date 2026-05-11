@@ -53,13 +53,26 @@ class ModelState(ABC):
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
 
+    def remove_request(self, req_id: str) -> None:
+        return None
+
     def apply_staged_writes(self) -> None:
+        return None
+
+    def preprocess_state(
+        self,
+        input_batch: InputBatch,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
         return None
 
     def postprocess_state(
         self,
         input_batch: InputBatch,
         num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
     ) -> None:
         return None
 
