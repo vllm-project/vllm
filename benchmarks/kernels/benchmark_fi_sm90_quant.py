@@ -106,7 +106,7 @@ def parse_args():
         "--num-tokens", type=str,
         default="1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384",
     )
-    p.add_argument("--hidden-dim", type=str, default="3072")
+    p.add_argument("--hidden-dim", type=str, default="3072,6144")
     p.add_argument("--group-size", type=int, default=128)
     p.add_argument("--warmup", type=int, default=10)
     p.add_argument("--iters", type=int, default=200)
