@@ -94,6 +94,15 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+    target_token_ids: list[int] | None = None
+    """Target token IDs for score mode perplexity calculation.
+    When provided, only logprobs for these tokens are extracted on GPU."""
+
+    reference_logits_path: str | None = None
+    """Path to safetensors file with reference logits for KLD mode."""
+
+    reference_logits_key: str | None = None
+    """Key for loading reference logits from safetensors in KLD mode."""
 
     # Per-position mask for mixed-mode inputs (e.g chat completion with
     # prompt_embeds content parts). `True` means the position is a real
@@ -176,6 +185,8 @@ class EngineCoreOutput(
 
     new_logprobs: LogprobsLists | None = None
     new_prompt_logprobs_tensors: LogprobsTensors | None = None
+    new_prompt_logits: torch.Tensor | None = None
+    kld_result: tuple[float, int] | None = None
 
     pooling_output: torch.Tensor | None = None
 

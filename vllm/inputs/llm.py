@@ -115,6 +115,24 @@ class TokensPrompt(_PromptOptions):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
+    target_token_ids: NotRequired[list[int]]
+    """
+    Optional target token IDs for score mode perplexity calculation.
+    When provided, only logprobs for these tokens are extracted on GPU.
+    """
+
+    reference_logits_path: NotRequired[str]
+    """
+    Optional path to safetensors file containing reference logits for KLD mode.
+    When provided with reference_logits_key, enables GPU-side KLD computation.
+    """
+
+    reference_logits_key: NotRequired[str]
+    """
+    Optional key for loading reference logits from the safetensors file.
+    Used with reference_logits_path for KLD mode.
+    """
+
 
 class EmbedsPrompt(_PromptOptions):
     """Schema for a prompt provided via token embeddings."""
