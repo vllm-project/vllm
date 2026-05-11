@@ -22,11 +22,11 @@ We currently support the following OpenAI APIs:
 - [Translation API](./speech_to_text.md#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
 
-## Anthropic-compatible messages API
+## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`)
 
-## Cohere-Compatible Server
+## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
@@ -35,11 +35,11 @@ We currently support the following OpenAI APIs:
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
 
-## SageMaker-compatible
+## SageMaker APIs
 
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 
-## Pooling models APIs
+## Pooling APIs
 
 For further details on pooling models, please refer to [this page](../../models/pooling_models/README.md).
 
@@ -51,8 +51,8 @@ For further details on pooling models, please refer to [this page](../../models/
     - [Openai-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - Scoring Usages
-    - [Score API](../../models/pooling_models/scoring.md#score-api)(/score)
-    - [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (/rerank, /v1/rerank, /v2/rerank)
+    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
+    - [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
@@ -83,7 +83,7 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
     - Only applicable to [classification models](../../models/pooling_models/classify.md).
 - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
-- [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
+- [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
 - [Generative Scoring API](generative_scoring.md#generative-scoring-api) (`/generative_scoring`)
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
