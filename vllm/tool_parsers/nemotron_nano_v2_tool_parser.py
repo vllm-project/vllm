@@ -30,8 +30,8 @@ from vllm.tool_parsers.utils import partial_tag_overlap
 logger = init_logger(__name__)
 
 
-class NemotronJSONToolParser(ToolParser):
-    """Tool parser for Nemotron models that emit <TOOLCALL> JSON payloads."""
+class NemotronNanoV2ToolParser(ToolParser):
+    """Tool parser for Nemotron Nano v2 models that emit <TOOLCALL> JSON."""
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)

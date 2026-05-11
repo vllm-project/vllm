@@ -9,7 +9,7 @@ import jinja2.sandbox
 TEMPLATE_PATH = (
     Path(__file__).resolve().parent.parent.parent
     / "examples"
-    / "tool_chat_template_nemotron_json.jinja"
+    / "tool_chat_template_nemotron_nano_v2.jinja"
 )
 
 

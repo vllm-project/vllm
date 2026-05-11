@@ -29,12 +29,12 @@ def mock_request():
 
 @pytest.fixture
 def parser(mock_tokenizer):
-    parser_cls = ToolParserManager.get_tool_parser("nemotron_json")
+    parser_cls = ToolParserManager.get_tool_parser("nemotron_nano_v2")
     return parser_cls(mock_tokenizer, tools=[])
 
 
-def test_nemotron_json_registered_and_accepts_tools(mock_tokenizer):
-    parser_cls = ToolParserManager.get_tool_parser("nemotron_json")
+def test_nemotron_nano_v2_registered_and_accepts_tools(mock_tokenizer):
+    parser_cls = ToolParserManager.get_tool_parser("nemotron_nano_v2")
 
     parser = parser_cls(mock_tokenizer, tools=[])
 
