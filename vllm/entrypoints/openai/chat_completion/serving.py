@@ -234,6 +234,15 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_chat_completion(request, raw_request), request, raw_request
+        )
+
+    async def _create_chat_completion(
+        self,
+        request: ChatCompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -499,6 +508,9 @@ class OpenAIServingChat(OpenAIServing):
                     # the role
                     role = self.get_chat_request_role(request)
 
+                    # ``res.prompt`` is the rendered chat-templated prompt
+                    prompt_text = res.prompt if request.return_prompt_text else None
+
                     # NOTE num_choices defaults to 1 so this usually executes
                     # once per request
                     for i in range(num_choices):
@@ -524,6 +536,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
+                            prompt_text=prompt_text,
                         )
 
                         # if continuous usage stats are requested, add it
@@ -1362,6 +1375,9 @@ class OpenAIServingChat(OpenAIServing):
         if final_res.prompt_routed_experts is not None:
             prompt_routed_experts = final_res.prompt_routed_experts.tolist()
 
+        # ``final_res.prompt`` is the rendered chat-templated prompt text
+        prompt_text = final_res.prompt if request.return_prompt_text else None
+
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
@@ -1373,6 +1389,7 @@ class OpenAIServingChat(OpenAIServing):
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
+            prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
             prompt_routed_experts=prompt_routed_experts,
         )
