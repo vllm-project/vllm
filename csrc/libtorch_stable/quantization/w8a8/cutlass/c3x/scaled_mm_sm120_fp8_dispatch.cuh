@@ -179,6 +179,26 @@ inline void cutlass_gemm_sm120_fp8_dispatch(torch::stable::Tensor& out,
       out, a, b, std::forward<EpilogueArgs>(args)...);
 }
 
+template <typename InType, typename OutType,
+          template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+inline void cutlass_gemm_sm120_fp8_batch_invariant_dispatch(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, EpilogueArgs&&... args) {
+  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  using Cutlass3xGemmM64 =
+      typename sm120_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
+
+  // keep the CUTLASS config independent of M for batch invariance
+  return cutlass_gemm_caller<Cutlass3xGemmM64>(
+      out, a, b, std::forward<EpilogueArgs>(args)...);
+}
+
 template <template <typename, typename, typename> typename Epilogue,
           typename... EpilogueArgs>
 void cutlass_scaled_mm_sm120_fp8_epilogue(torch::stable::Tensor& out,
@@ -198,6 +218,28 @@ void cutlass_scaled_mm_sm120_fp8_epilogue(torch::stable::Tensor& out,
     STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
     return cutlass_gemm_sm120_fp8_dispatch<cutlass::float_e4m3_t,
                                            cutlass::half_t, Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+  }
+}
+
+template <template <typename, typename, typename> typename Epilogue,
+          typename... EpilogueArgs>
+void cutlass_scaled_mm_sm120_fp8_batch_invariant_epilogue(
+    torch::stable::Tensor& out, torch::stable::Tensor const& a,
+    torch::stable::Tensor const& b, EpilogueArgs&&... epilogue_args) {
+  STD_TORCH_CHECK(a.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+  STD_TORCH_CHECK(b.scalar_type() ==
+                  torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  if (out.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
+    return cutlass_gemm_sm120_fp8_batch_invariant_dispatch<
+        cutlass::float_e4m3_t, cutlass::bfloat16_t, Epilogue>(
+        out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
+  } else {
+    STD_TORCH_CHECK(out.scalar_type() == torch::headeronly::ScalarType::Half);
+    return cutlass_gemm_sm120_fp8_batch_invariant_dispatch<
+        cutlass::float_e4m3_t, cutlass::half_t, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(epilogue_args)...);
   }
 }
