@@ -108,8 +108,6 @@ def test_driver_nixl_side_channel_host_does_not_leak_to_engine_core_actor(
         return [pg], [0]
 
     monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", driver_marker)
-    monkeypatch.setenv("VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", "VLLM_TEST_RUNTIME_ENV_ID")
-    monkeypatch.setenv("VLLM_TEST_RUNTIME_ENV_ID", f"runtime-env-{uuid.uuid4()}")
     monkeypatch.setattr("vllm.v1.engine.core.EngineCoreActor", _StubEngineCoreActor)
     monkeypatch.setattr(
         CoreEngineActorManager,
