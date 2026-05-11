@@ -292,13 +292,13 @@ class TieringOffloadingManager(OffloadingManager):
         # Must happen immediately so primary.lookup() returns None (in-flight)
         # for this key on any subsequent lookup() call within the same step,
         # preventing duplicate promotion attempts.
-        primary_store_result = self.primary_tier.prepare_write([key], req_context)
+        primary_write_result = self.primary_tier.prepare_write([key], req_context)
 
-        if primary_store_result is None:
+        if primary_write_result is None:
             # Cannot allocate space in primary tier (full); retry next step.
             return
 
-        store_spec = primary_store_result.store_spec
+        store_spec = primary_write_result.store_spec
         assert isinstance(store_spec, CPULoadStoreSpec)
         # Defer submit_load to take_events(). Group by (tier, request) so each
         # request's blocks are submitted as one batched job per tier.
@@ -309,7 +309,7 @@ class TieringOffloadingManager(OffloadingManager):
                 keys=[], block_ids=[], req_context=req_context
             )
         entry = tier_pending[ctx_id]
-        entry.keys.extend(primary_store_result.keys_to_store)
+        entry.keys.extend(primary_write_result.keys_to_store)
         entry.block_ids.extend(store_spec.block_ids)
 
     def _flush_pending_promotions(self) -> None:
