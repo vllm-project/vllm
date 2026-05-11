@@ -250,7 +250,9 @@ class FusedMoE(PluggableLayer):
 
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-        # Create ExpertMapManager to handle expert mapping and placement
+        # Create ExpertMapManager to handle expert mapping and placement for EP.
+        # See ExpertMapManager for a detailed description of what it does and when
+        # it is required.
         self.expert_map_manager = ExpertMapManager(
             max_num_batched_tokens=max_num_batched_tokens,
             top_k=top_k,

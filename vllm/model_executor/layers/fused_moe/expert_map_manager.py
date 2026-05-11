@@ -159,6 +159,25 @@ class ExpertMapManager:
     - Manage placement strategies (linear, round_robin)
     - Maintain routing tables for round-robin placement
     - Support dynamic reconfiguration of EP topology
+
+    When expert_map is required:
+    - Expert Parallelism (EP) is enabled, i.e., when ep_size > 1
+    - EP disabled (ep_size == 1): expert_map is None
+      * All experts are local to the current rank
+      * No mapping is needed
+    - EP enabled (ep_size > 1): expert_map is created
+      * Maps global expert IDs to local expert IDs
+      * Shape: (global_num_experts,)
+      * Contains the local expert index for experts on this rank, -1 for experts
+         on other ranks
+      * Used by kernels to handle distributed expert execution
+    - Kernel support varies:
+      * Supports expert_map: fused_moe, fused_marlin_moe, fused_humming_moe,
+        rocm_aiter_fused_moe, deep_gemm_moe, xpu_moe, gpt_oss_triton_kernels_moe
+      * Does not support: flashinfer_cutlass_moe, fused_batched_moe, most cutlass_moe
+        variants, trtllm_* kernels
+      * When kernel doesn't support expert_map: The modular kernel method sets
+        expert_map=None even if EP is enabled
     """
 
     def __init__(
