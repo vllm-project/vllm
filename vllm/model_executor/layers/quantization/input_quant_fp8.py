@@ -194,6 +194,15 @@ class QuantFP8(CustomOp):
             and scale_ub.numel() == 1
         )
 
+        # Use fused Triton FP8 per-token quant (avoids torch.compile
+        # splitting scale compute + quant into two separate kernels)
+        if (
+            scale is None
+            and self.group_shape == GroupShape.PER_TOKEN
+            and scale_ub is None
+        ):
+            return torch.ops.vllm.fused_per_token_quant_fp8(x)
+
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
                 x_max, _ = x.abs().max(dim=-1)
