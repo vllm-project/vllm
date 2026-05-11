@@ -50,7 +50,6 @@ def _capture_routing_op_fake(
 
 
 _MB = 1024 * 1024
-_MAX_ROUTED_EXPERT_BLOCK_CACHE_BLOCKS = 4096
 
 
 class _RoutedExpertsDeviceCache:
@@ -383,7 +382,10 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                 max_blocks = max_num_batched_tokens * (
                     (max_model_len + block_size - 1) // block_size
                 )
-                max_blocks = min(max_blocks, _MAX_ROUTED_EXPERT_BLOCK_CACHE_BLOCKS)
+                max_blocks = min(
+                    max_blocks,
+                    model_config.routed_experts_replay_max_blocks,
+                )
             self.block_cache = _RoutedExpertsBlockCache(max_blocks=max_blocks)
 
             # Same (L, N, K) layout as device_cache.buffer.
