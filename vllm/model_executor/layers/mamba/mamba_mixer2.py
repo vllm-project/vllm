@@ -476,6 +476,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
         )
 
+        self._ssd_kernels_warmed_up = False
+
         # - get hidden_states, B and C after depthwise convolution.
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
@@ -564,10 +566,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
         """Run a minimal SSD forward pass to trigger Triton autotuning
         while GPU memory is still plentiful (before SSM cache allocation).
         """
-        if hasattr(self, "_ssd_kernels_warmed_up"):
+        if self._ssd_kernels_warmed_up:
             return
         self._ssd_kernels_warmed_up = True
-        logger.info("Starting Mamba2 SSD autotuning warmup for layer %s", self.prefix)
+        logger.info_once("Warming up Mamba2 SSD Triton kernels...")
 
         device = projected_states.device
         dtype = projected_states.dtype
@@ -577,26 +579,24 @@ class MambaMixer2(MambaBase, PluggableLayer):
         headdim = self.head_dim
         dstate = self.ssm_state_size
 
-        chunk_size = (
-            self.model_config.get_mamba_chunk_size()
-            if self.model_config is not None
-            else None
-        )
-        if chunk_size is None:
-            chunk_size = 64
+        if self.model_config is None:
+            return
+        chunk_size = self.model_config.get_mamba_chunk_size()
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
         _, ssm_state_dtype = self.get_state_dtype()
 
+        # SSD kernel autotune keys depend on dtype and head dimensions,
+        # not on sequence length or batch size, so a single shape suffices.
         seqlen = chunk_size
         batch = 1
         nchunks = seqlen // chunk_size  # = 1
 
-        x = torch.zeros(seqlen, nheads, headdim, device=device, dtype=dtype)
-        dt = torch.zeros(seqlen, nheads, device=device, dtype=dtype)
-        B = torch.zeros(seqlen, ngroups, dstate, device=device, dtype=dtype)
-        C = torch.zeros(seqlen, ngroups, dstate, device=device, dtype=dtype)
+        x = torch.randn(seqlen, nheads, headdim, device=device, dtype=dtype)
+        dt = torch.randn(seqlen, nheads, device=device, dtype=dtype)
+        B = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
+        C = torch.randn(seqlen, ngroups, dstate, device=device, dtype=dtype)
         cu_seqlens = torch.tensor([0, seqlen], device=device, dtype=torch.int32)
         cu_chunk_seqlens = torch.tensor(
             [i * chunk_size for i in range(nchunks + 1)],
@@ -610,12 +610,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
         out = torch.empty(seqlen, nheads, headdim, device=device, dtype=dtype)
 
         # Two kernels (_state_passing_fwd, _chunk_scan_fwd) use
-        # HAS_INITSTATES as a constexpr, so we must warm up both
-        # code paths: without initial_states (first request) and
-        # with initial_states (subsequent requests).
+        # HAS_INITSTATES as a constexpr, producing separate compiled
+        # binaries. Warm up both code paths so neither triggers
+        # JIT compilation during inference.
         for use_initial_states in (False, True):
             initial_states = (
-                torch.zeros(
+                torch.randn(
                     batch,
                     nheads,
                     headdim,
@@ -657,7 +657,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     exc_info=True,
                 )
 
-        logger.info("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
+        logger.debug("Mamba2 SSD kernel warmup completed for layer %s", self.prefix)
         torch.accelerator.empty_cache()
 
     def conv_ssm_forward(
