@@ -406,7 +406,7 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant
         self.quant_config = quant_config
         self.model = BaiChuanModel(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            prefix=prefix,
             position_embedding=position_embedding,
         )
         self.lm_head = ParallelLMHead(

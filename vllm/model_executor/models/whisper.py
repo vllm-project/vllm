@@ -959,10 +959,7 @@ class WhisperForConditionalGeneration(
             language_targets=WhisperDecoder,
             tower_targets={"audio": WhisperEncoder},
         ):
-            self.model = WhisperModel(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "model"),
-            )
+            self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
 
         self.proj_out = ParallelLMHead(
             config.vocab_size,

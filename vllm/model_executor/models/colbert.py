@@ -30,7 +30,6 @@ from .bert import BertEmbeddingModel, BertModel
 from .interfaces import HasInnerState, IsHybrid, SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 from .lfm2 import Lfm2ForCausalLM, Lfm2Model
-from .utils import maybe_prefix
 
 
 class ColBERTMixin(nn.Module, SupportsLateInteraction):
@@ -283,7 +282,7 @@ class ColBERTModernBertModel(ColBERTMixin, nn.Module):
 
         self.model = ModernBertModel(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            prefix=prefix,
         )
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -361,7 +360,7 @@ class ColBERTJinaRobertaModel(ColBERTMixin, nn.Module):
 
         self.model = JinaRobertaModel(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            prefix=prefix,
         )
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -465,7 +464,7 @@ class ColBERTLfm2Model(ColBERTMixin, nn.Module, HasInnerState, IsHybrid):
 
         self.model = Lfm2Model(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
+            prefix=prefix,
         )
 
         pooler_config = vllm_config.model_config.pooler_config

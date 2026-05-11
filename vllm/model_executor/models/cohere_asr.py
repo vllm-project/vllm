@@ -2157,10 +2157,7 @@ class CohereAsrForConditionalGeneration(
             language_targets=CohereASRDecoder,
             tower_targets={"audio": (ConformerEncoder, CohereASRProjector)},
         ):
-            self.model = CohereASRModel(
-                vllm_config=vllm_config,
-                prefix=maybe_prefix(prefix, "model"),
-            )
+            self.model = CohereASRModel(vllm_config=vllm_config, prefix=prefix)
 
         head_config = config.head
 
