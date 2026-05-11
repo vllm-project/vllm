@@ -8,7 +8,7 @@ token-by-token output in offline inference scenarios. It demonstrates DELTA mode
 streaming where you receive new tokens as they are generated.
 
 Usage:
-    python examples/offline_inference/async_llm_streaming.py
+    python examples/deployment/async_llm_streaming.py
 """
 
 import asyncio

@@ -262,9 +262,11 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # First event is set_xfer_handshake_metadata from initialization, then
+    # on_new_request when the request is enqueued, then
     # get_num_new_matched_tokens and update_state_after_alloc from generate().
-    assert events["storage1-SCHEDULER"][:4] == [
+    assert events["storage1-SCHEDULER"][:5] == [
         "set_xfer_handshake_metadata",
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
@@ -281,8 +283,9 @@ def test_multi_example_connector_consistency():
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:4] == [
+    assert events["storage2-SCHEDULER"][:5] == [
         "set_xfer_handshake_metadata",
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
@@ -310,12 +313,14 @@ def test_multi_example_connector_consistency():
     # connector so update_state_after_alloc will be with allocated blocks
     # on that one but with zero blocks for others (first nonzero match is
     # chosen).
-    assert events["storage1-SCHEDULER"][:3] == [
+    assert events["storage1-SCHEDULER"][:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[7] 96",
         "build_connector_meta",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert events["storage2-SCHEDULER"][:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
@@ -336,12 +341,14 @@ def test_multi_example_connector_consistency():
     # return 0 from the first connector, but the second connector should have
     # a hit, so update_state_after_alloc will only be called with allocated
     # blocks for the second connector.
-    assert events["storage1-SCHEDULER"][:3] == [
+    assert events["storage1-SCHEDULER"][:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert events["storage2-SCHEDULER"][:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[7] 96",
         "build_connector_meta",
