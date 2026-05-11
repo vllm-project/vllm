@@ -43,7 +43,7 @@ from vllm.forward_context import (
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import weak_ref_tensors
+from vllm.utils.torch_utils import weak_ref_tensor, weak_ref_tensors
 
 logger = init_logger(__name__)
 
@@ -95,7 +95,18 @@ def eager_break_during_capture(fn: F) -> F:
             mode = get_forward_context().cudagraph_runtime_mode
             if mode == CUDAGraphMode.FULL:
                 return fn(*args, **kwargs)
-        return capture.add_eager(lambda: fn(*args, **kwargs))
+
+        # Weak-ref args: strong refs in the replay lambda pin cudagraph-pool
+        # slots across batch descriptors. cudagraph owns the slot, so the
+        # weak_ref is safe to deref on replay.
+        weak_args = tuple(
+            weak_ref_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
+        )
+        weak_kwargs = {
+            k: weak_ref_tensor(v) if isinstance(v, torch.Tensor) else v
+            for k, v in kwargs.items()
+        }
+        return capture.add_eager(lambda: fn(*weak_args, **weak_kwargs))
 
     return wrapper  # type: ignore[return-value]
 
