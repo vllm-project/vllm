@@ -7,6 +7,7 @@ import pytest
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.hashing import _xxhash
@@ -62,6 +63,36 @@ def test_prefix_caching_xxhash_from_cli():
     args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash_cbor"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
     assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
+
+
+@pytest.mark.skip_global_cleanup
+def test_plugin_config_from_cli(monkeypatch):
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        ["--plugin-config", '{"example": {"mode": "test", "enabled": true}}']
+    )
+
+    engine_args = EngineArgs.from_cli_args(args=args)
+
+    assert engine_args.plugin_config == {
+        "example": {
+            "mode": "test",
+            "enabled": True,
+        }
+    }
+
+
+@pytest.mark.skip_global_cleanup
+def test_plugin_config_validation(monkeypatch):
+    monkeypatch.setattr(current_platform, "device_type", "cpu")
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--plugin-config", '{"example": 1}'])
+
+    with pytest.raises(
+        ValueError, match="plugin_config must map plugin names to object values"
+    ):
+        EngineArgs.from_cli_args(args=args)
 
 
 def test_defaults_with_usage_context():
