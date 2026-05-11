@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-ethernet-nccl-ib-smoke-2026-05-09-v7"
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-instruct"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
@@ -29,6 +29,7 @@ slurm_debug() {
 # SD = decode / output tokens per request
 SP="${SP:-128}"
 SD="${SD:-128}"
+export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 
 export HEAD_NODE=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
 export WORKER_NODES=$(scontrol show hostnames $SLURM_NODELIST | tail -n+2)
@@ -181,6 +182,35 @@ echo "RAY_PORT=${RAY_PORT} RAY_ADDRESS=${RAY_ADDRESS}"
 module purge
 module load Anaconda3/2025.06-1
 module load CUDA/12.9.0
+
+# === Trace output directory ===
+TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
+TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
+
+mkdir -p "${TRACE_RUN_DIR}/nsight"
+mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
+
+# === Nsight Systems ===
+export NSYS_ENABLE="${NSYS_ENABLE:-1}"
+export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
+export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas,nccl}"
+export NSYS_NCCL_TRACE="${NSYS_NCCL_TRACE:-api,gpu}"
+export NSYS_DELAY="${NSYS_DELAY:-0}"
+
+# === NCCL logs ===
+export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
+export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,P2P,TUNING}"
+export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
+
+echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
+echo "NSYS_DIR=${NSYS_DIR}"
+echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
+echo "NSYS_TRACE=${NSYS_TRACE}"
+echo "NSYS_NCCL_TRACE=${NSYS_NCCL_TRACE}"
+echo "NSYS_DELAY=${NSYS_DELAY}"
+echo "nsys path: $(command -v nsys || echo '<not found>')"
+nsys --version || true
+
 
 if [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
   REPO_ROOT="${SLURM_SUBMIT_DIR}"
@@ -368,18 +398,40 @@ for node in nodes:
     )
 PY
 
-echo "=== vLLM api_server (background process) ==="
-echo "Starting vLLM server on head node..."
-python -m vllm.entrypoints.openai.api_server \
-  --model "${MODEL_ID}" \
-  --host "${HOST}" \
-  --port "${PORT}" \
-  --distributed-executor-backend ray \
-  --tensor-parallel-size "${TP}" \
-  --pipeline-parallel-size "${PP}" \
-  --max-model-len "${MAX_MODEL_LEN}" \
-  --enforce-eager \
-  --disable-custom-all-reduce &
+if [ "${NSYS_ENABLE}" = "1" ]; then
+  echo "Profiling vLLM server with Nsight Systems"
+  echo "Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
+
+  nsys profile \
+    --force-overwrite=true \
+    --trace="${NSYS_TRACE}" \
+    --nccl-trace="${NSYS_NCCL_TRACE}" \
+    --sample=none \
+    --delay="${NSYS_DELAY}" \
+    --output="${NSYS_DIR}/vllm_api_server_${HEAD_NODE}" \
+    python -m vllm.entrypoints.openai.api_server \
+      --model "${MODEL_ID}" \
+      --host "${HOST}" \
+      --port "${PORT}" \
+      --distributed-executor-backend ray \
+      --tensor-parallel-size "${TP}" \
+      --pipeline-parallel-size "${PP}" \
+      --max-model-len "${MAX_MODEL_LEN}" \
+      --enforce-eager \
+      --disable-custom-all-reduce &
+else
+  python -m vllm.entrypoints.openai.api_server \
+    --model "${MODEL_ID}" \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --distributed-executor-backend ray \
+    --tensor-parallel-size "${TP}" \
+    --pipeline-parallel-size "${PP}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --enforce-eager \
+    --disable-custom-all-reduce &
+fi
+
 SERVER_STEP_PID=$!
 echo "Started vLLM server process (pid=${SERVER_STEP_PID}). Waiting for /health ..."
 
