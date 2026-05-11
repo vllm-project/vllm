@@ -91,7 +91,7 @@ def _build_config(
 
 
 @pytest.mark.parametrize(
-    "kv_connector", ["NixlConnector", "MooncakeConnectorV1", "SomeOOTConnector"]
+    "kv_connector", ["NixlConnector", "MooncakeConnector", "SomeOOTConnector"]
 )
 def test_kv_connector_rejects_expandable_segments(monkeypatch, kv_connector):
     """KV connectors that pin KV cache memory (e.g. via ibv_reg_mr) are
@@ -119,6 +119,37 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
     _build_config(kv_connector="NixlConnector", enable_cumem_allocator=True)
 
 
+def test_kv_connector_allows_expandable_segments_with_dma_connector(monkeypatch):
+    """DMA-only connectors (no IB/RDMA memory registration) are not affected
+    by VMM remapping because they access GPU memory through virtual addresses
+    that the kernel transparently updates. Only IB-registered memory regions
+    become stale after a remap."""
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    _build_config(kv_connector="SimpleCPUOffloadConnector")
+
+
+@pytest.mark.parametrize("kv_connector", ["NixlConnector", "MooncakeConnector"])
+def test_kv_connector_rejects_expandable_segments_for_rdma_connectors(
+    monkeypatch, kv_connector
+):
+    """Connectors that register GPU memory with RDMA/IB frameworks are
+    rejected because VMM remapping invalidates their physical-page-based
+    registrations."""
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    with pytest.raises(ValueError, match="expandable_segments"):
+        _build_config(kv_connector=kv_connector)
+
+
+def test_kv_connector_rejects_expandable_segments_for_unregistered_connector(
+    monkeypatch,
+):
+    """OOT / unregistered connectors are conservatively rejected since we
+    cannot determine whether they perform RDMA registration."""
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    with pytest.raises(ValueError, match="expandable_segments"):
+        _build_config(kv_connector="SomeOOTConnector")
+
+
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
     """Other PYTORCH_CUDA_ALLOC_CONF values must not be rejected."""
     monkeypatch.setenv(
@@ -132,6 +163,73 @@ def test_no_kv_connector_ignores_expandable_segments(monkeypatch):
     configured."""
     monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     _build_config(kv_connector=None)
+
+
+class TestSupportsVmmSafeTransfers:
+    """Tests for the SupportsVmmSafeTransfers mixin and helper function."""
+
+    def test_simple_cpu_offload_declares_vmm_safe(self):
+        """SimpleCPUOffloadConnector implements SupportsVmmSafeTransfers."""
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            supports_vmm_safe_transfers,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (  # noqa: E501
+            SimpleCPUOffloadConnector,
+        )
+
+        assert supports_vmm_safe_transfers(SimpleCPUOffloadConnector)
+
+    def test_nixl_does_not_declare_vmm_safe(self):
+        """NixlConnector does NOT implement SupportsVmmSafeTransfers because
+        it registers GPU memory with RDMA/IB."""
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            supports_vmm_safe_transfers,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+            NixlConnector,
+        )
+
+        assert not supports_vmm_safe_transfers(NixlConnector)
+
+    def test_mooncake_does_not_declare_vmm_safe(self):
+        """MooncakeConnector does NOT implement SupportsVmmSafeTransfers."""
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            supports_vmm_safe_transfers,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (  # noqa: E501
+            MooncakeConnector,
+        )
+
+        assert not supports_vmm_safe_transfers(MooncakeConnector)
+
+    def test_custom_dma_connector_can_opt_in(self):
+        """A custom connector can opt in by inheriting the mixin."""
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            supports_vmm_safe_transfers,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            KVConnectorBase_V1,
+            SupportsVmmSafeTransfers,
+        )
+
+        class MyDmaConnector(KVConnectorBase_V1, SupportsVmmSafeTransfers):
+            pass
+
+        assert supports_vmm_safe_transfers(MyDmaConnector)
+
+    def test_custom_rdma_connector_does_not_opt_in(self):
+        """A connector that doesn't implement the mixin is not VMM-safe."""
+        from vllm.distributed.kv_transfer.kv_connector.v1 import (
+            supports_vmm_safe_transfers,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+            KVConnectorBase_V1,
+        )
+
+        class MyRdmaConnector(KVConnectorBase_V1):
+            pass
+
+        assert not supports_vmm_safe_transfers(MyRdmaConnector)
 
 
 def test_kv_offloading_size_only_uses_native_default():
