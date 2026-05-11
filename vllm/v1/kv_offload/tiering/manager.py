@@ -78,26 +78,13 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
-
-    def prepare_write(self, keys, req_context: ReqContext) -> PrepareStoreOutput | None:
-        """Allocate space in primary for a secondary->primary write (promotion)."""
-        return self.prepare_store(keys, req_context)
-
-    def complete_write(
-        self, keys, req_context: ReqContext, success: bool = True
-    ) -> None:
-        """Finalize secondary->primary write, making blocks available."""
-        self.complete_store(keys, req_context, success)
-
-    def prepare_read(self, keys, req_context: ReqContext) -> LoadStoreSpec:
-        """Protect primary blocks for a primary->secondary read (cascade),
-        incrementing ref_cnt."""
-        return self.prepare_load(keys, req_context)
-
-    def complete_read(self, keys, req_context: ReqContext) -> None:
-        """Release protection after primary->secondary read completes,
-        decrementing ref_cnt."""
-        self.complete_load(keys, req_context)
+        # read/write is for CPU<->secondary transfers,
+        # load/store is for CPU<->GPU transfers.
+        # These aliases avoid calling prepare_load inside a store path.
+        self.prepare_read = self.prepare_load
+        self.complete_read = self.complete_load
+        self.prepare_write = self.prepare_store
+        self.complete_write = self.complete_store
 
     def create_kv_memoryview(self) -> memoryview:
         """Create a memoryview over the primary tier's KV cache buffer.
