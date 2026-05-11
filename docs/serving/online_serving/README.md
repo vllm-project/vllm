@@ -31,7 +31,7 @@ We currently support the following OpenAI APIs:
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
     - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
     - Works with any [embedding model](../../models/pooling_models/embed.md#supported-models), including multimodal models.
-- [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
 
@@ -52,7 +52,7 @@ For further details on pooling models, please refer to [this page](../../models/
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - Scoring Usages
     - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
-    - [Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../../models/pooling_models/README.md).
