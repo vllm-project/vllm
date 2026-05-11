@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, TypeVar
+from typing import Any
 
 from tqdm.auto import tqdm
+from typing_extensions import TypeVar
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
