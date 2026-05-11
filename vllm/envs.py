@@ -741,9 +741,10 @@ def resolve_env_name(info: FieldInfo, field_name: str, prefix: str) -> str:
 def _build_registry() -> dict[str, tuple[str, str]]:
     registry: dict[str, tuple[str, str]] = {}
     for sub_attr, sub_field in Settings.model_fields.items():
-        sub_cls = sub_field.annotation
-        if not (isinstance(sub_cls, type) and issubclass(sub_cls, BaseSettings)):
+        annotation = sub_field.annotation
+        if not (isinstance(annotation, type) and issubclass(annotation, BaseSettings)):
             continue
+        sub_cls: type[BaseSettings] = annotation
         prefix = sub_cls.model_config.get("env_prefix", "") or ""
         for field_name, info in sub_cls.model_fields.items():
             env_name = resolve_env_name(info, field_name, prefix)

@@ -123,9 +123,10 @@ def render_env_vars_page() -> str:
     out.write(PAGE_HEADER)
 
     for sub_attr, sub_field in envs.Settings.model_fields.items():
-        sub_cls = sub_field.annotation
-        if not (isinstance(sub_cls, type) and issubclass(sub_cls, BaseSettings)):
+        annotation = sub_field.annotation
+        if not (isinstance(annotation, type) and issubclass(annotation, BaseSettings)):
             continue
+        sub_cls: type[BaseSettings] = annotation
 
         out.write(f"## {sub_cls.__name__}\n\n")
 
