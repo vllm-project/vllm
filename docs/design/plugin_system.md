@@ -143,6 +143,30 @@ Every plugin has three parts:
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
+### Plugin-owned configuration
+
+Plugins can store their own configuration in
+`vllm_config.plugin_config`, a namespaced dictionary owned by plugins rather
+than core vLLM.
+
+Each top-level key is the plugin namespace, and each value must be a JSON
+object or Python dictionary. Plugins should only read from their own namespace.
+For example, a plugin named `my_plugin` should use
+`vllm_config.plugin_config.get("my_plugin", {})`.
+
+Users can provide this configuration through `EngineArgs`, `LLM(...)`, or the
+`vllm serve` CLI with `--plugin-config`. For example:
+
+??? code
+
+    ```bash
+    vllm serve my-model \
+        --plugin-config '{"my_plugin": {"mode": "fast", "enabled": true}}'
+    ```
+
+Core vLLM validates only the outer structure of `plugin_config`. Each plugin is
+responsible for validating the contents of its own namespace.
+
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
