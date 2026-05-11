@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import math
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -146,8 +147,18 @@ class Scheduler(SchedulerInterface):
         assert num_gpu_blocks is not None and num_gpu_blocks > 0
 
         self.block_size = block_size
+        self.hash_block_size = (
+            hash_block_size if hash_block_size is not None else block_size
+        )
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         self.pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self._routing_replay_block_alignment = self.block_size
+        for kv_cache_group in self.kv_cache_config.kv_cache_groups:
+            self._routing_replay_block_alignment = math.lcm(
+                self._routing_replay_block_alignment,
+                kv_cache_group.kv_cache_spec.block_size,
+            )
+        self._routing_replay_block_hashes: set[bytes] = set()
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
@@ -255,6 +266,17 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
+        if (
+            self.vllm_config.model_config.enable_return_routed_experts
+            and self.cache_config.enable_prefix_caching
+        ):
+            logger.warning_once(
+                "enable_return_routed_experts is enabled with prefix caching. "
+                "Prefix-cache hits will be clipped to the longest prefix whose "
+                "routed-expert replay blocks are available; clipped tokens are "
+                "recomputed."
+            )
+
         self._pause_state: PauseState = PauseState.UNPAUSED
 
     def _mamba_block_aligned_split(
@@ -306,6 +328,110 @@ class Scheduler(SchedulerInterface):
                 # prefill the last few tokens
                 pass
         return num_new_tokens
+
+    def _clip_kv_cache_blocks_to_num_tokens(
+        self,
+        blocks: KVCacheBlocks,
+        num_tokens: int,
+    ) -> KVCacheBlocks:
+        if num_tokens <= 0:
+            return self.kv_cache_manager.empty_kv_cache_blocks
+
+        clipped_groups = []
+        for group_blocks, kv_cache_group in zip(
+            blocks.blocks, self.kv_cache_config.kv_cache_groups
+        ):
+            group_block_size = kv_cache_group.kv_cache_spec.block_size
+            num_group_blocks = num_tokens // group_block_size
+            clipped_groups.append(list(group_blocks)[:num_group_blocks])
+        return self.kv_cache_manager.create_kv_cache_blocks(tuple(clipped_groups))
+
+    def _get_num_available_routing_replay_prefix_tokens(
+        self,
+        block_hashes: Sequence[bytes],
+        num_cached_tokens: int,
+    ) -> int:
+        block_size = self.hash_block_size
+        if num_cached_tokens <= 0 or block_size <= 0:
+            return 0
+
+        num_blocks = min(num_cached_tokens // block_size, len(block_hashes))
+        for block_idx in range(num_blocks):
+            if bytes(block_hashes[block_idx]) not in self._routing_replay_block_hashes:
+                return block_idx * block_size
+        return num_blocks * block_size
+
+    def _clip_prefix_cache_hit_for_routing_replay(
+        self,
+        request: Request,
+        new_computed_blocks: KVCacheBlocks,
+        num_new_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+        load_kv_async: bool,
+    ) -> tuple[KVCacheBlocks, int, int, bool]:
+        initial_num_computed_tokens = (
+            num_new_local_computed_tokens + num_external_computed_tokens
+        )
+        if (
+            not self.vllm_config.model_config.enable_return_routed_experts
+            or initial_num_computed_tokens <= 0
+        ):
+            return (
+                new_computed_blocks,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+                load_kv_async,
+            )
+
+        replay_tokens = self._get_num_available_routing_replay_prefix_tokens(
+            block_hashes=request.block_hashes,
+            num_cached_tokens=initial_num_computed_tokens,
+        )
+        final_num_computed_tokens = min(initial_num_computed_tokens, replay_tokens)
+        alignment = self._routing_replay_block_alignment
+        final_num_computed_tokens = (
+            final_num_computed_tokens // alignment * alignment
+        )
+
+        if final_num_computed_tokens >= initial_num_computed_tokens:
+            return (
+                new_computed_blocks,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+                load_kv_async,
+            )
+
+        final_local_computed_tokens = min(
+            num_new_local_computed_tokens,
+            final_num_computed_tokens,
+        )
+        final_external_computed_tokens = max(
+            0,
+            final_num_computed_tokens - final_local_computed_tokens,
+        )
+        if final_local_computed_tokens < num_new_local_computed_tokens:
+            new_computed_blocks = self._clip_kv_cache_blocks_to_num_tokens(
+                new_computed_blocks,
+                final_local_computed_tokens,
+            )
+        if final_external_computed_tokens == 0:
+            load_kv_async = False
+
+        logger.warning(
+            "Clipping prefix-cache hit for routed-expert replay: req_id=%s "
+            "initial_num_computed_tokens=%d final_num_computed_tokens=%d "
+            "delta=%d",
+            request.request_id,
+            initial_num_computed_tokens,
+            final_num_computed_tokens,
+            initial_num_computed_tokens - final_num_computed_tokens,
+        )
+        return (
+            new_computed_blocks,
+            final_local_computed_tokens,
+            final_external_computed_tokens,
+            load_kv_async,
+        )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -593,6 +719,25 @@ class Scheduler(SchedulerInterface):
 
                         num_external_computed_tokens = ext_tokens
 
+                        connector_prefix_cache_queries = (
+                            request.num_tokens - num_new_local_computed_tokens
+                        )
+                        connector_prefix_cache_hits = num_external_computed_tokens
+
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                        load_kv_async,
+                    ) = self._clip_prefix_cache_hit_for_routing_replay(
+                        request,
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                        load_kv_async,
+                    )
+                    request.num_external_computed_tokens = num_external_computed_tokens
+                    if self.connector is not None:
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
@@ -1012,6 +1157,7 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        block_hashes: list[list[bytes]] = []
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1047,6 +1193,7 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            block_hashes.append(list(req.block_hashes))
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1056,6 +1203,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            block_hashes=block_hashes,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1258,6 +1406,11 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            for block_hash in model_runner_output.routing_replay_removed_block_hashes:
+                self._routing_replay_block_hashes.discard(bytes(block_hash))
+            for block_hash in model_runner_output.routing_replay_added_block_hashes:
+                self._routing_replay_block_hashes.add(bytes(block_hash))
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1825,6 +1978,8 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
 
         reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        if reset_successful:
+            self._routing_replay_block_hashes.clear()
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "

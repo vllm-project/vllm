@@ -201,6 +201,10 @@ class ModelRunnerOutput:
     # req_id -> routed experts ndarray of shape (seq_len, num_moe_layers, top_k)
     routed_experts_dict: dict[str, np.ndarray] | None = None
 
+    # Block-hash deltas for routed-expert replay data cached by the model runner.
+    routing_replay_added_block_hashes: list[bytes] = field(default_factory=list)
+    routing_replay_removed_block_hashes: list[bytes] = field(default_factory=list)
+
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
