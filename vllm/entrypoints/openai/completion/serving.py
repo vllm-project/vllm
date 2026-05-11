@@ -149,91 +149,93 @@ class OpenAIServingCompletion(OpenAIServing):
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
+        try:
 
-        # Schedule the request and get the result generator.
-        max_model_len = self.model_config.max_model_len
-        generators: list[AsyncGenerator[RequestOutput, None]] = []
-        for i, engine_input in enumerate(engine_inputs):
-            max_tokens = get_max_tokens(
-                max_model_len,
-                request.max_tokens,
-                self._extract_prompt_len(engine_input),
-                self.default_sampling_params,
-                self.override_max_tokens,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
-            )
-
-            sampling_params: SamplingParams | BeamSearchParams
-            if request.use_beam_search:
-                sampling_params = request.to_beam_search_params(
-                    max_tokens, self.default_sampling_params
-                )
-            else:
-                sampling_params = request.to_sampling_params(
-                    max_tokens,
+            # Schedule the request and get the result generator.
+            max_model_len = self.model_config.max_model_len
+            generators: list[AsyncGenerator[RequestOutput, None]] = []
+            engine_request_ids: list[str] = []
+            for i, engine_input in enumerate(engine_inputs):
+                max_tokens = get_max_tokens(
+                    max_model_len,
+                    request.max_tokens,
+                    self._extract_prompt_len(engine_input),
                     self.default_sampling_params,
+                    self.override_max_tokens,
+                    truncate_prompt_tokens=request.truncate_prompt_tokens,
                 )
 
-            request_id_item = f"{request_id}-{i}"
+                sampling_params: SamplingParams | BeamSearchParams
+                if request.use_beam_search:
+                    sampling_params = request.to_beam_search_params(
+                        max_tokens, self.default_sampling_params
+                    )
+                else:
+                    sampling_params = request.to_sampling_params(
+                        max_tokens,
+                        self.default_sampling_params,
+                    )
 
-            self._log_inputs(
-                request_id_item,
-                engine_input,
-                params=sampling_params,
-                lora_request=lora_request,
-            )
+                request_id_item = f"{request_id}-{i}"
 
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-
-            if isinstance(sampling_params, BeamSearchParams):
-                generator = self.beam_search(
-                    prompt=engine_input,
-                    request_id=request_id,
+                self._log_inputs(
+                    request_id_item,
+                    engine_input,
                     params=sampling_params,
                     lora_request=lora_request,
-                    trace_headers=trace_headers,
-                )
-            else:
-                generator = self.engine_client.generate(
-                    engine_input,
-                    sampling_params,
-                    request_id_item,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=request.priority,
-                    data_parallel_rank=data_parallel_rank,
                 )
 
-            generators.append(generator)
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
 
-        result_generator = merge_async_iterators(*generators)
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.beam_search(
+                        prompt=engine_input,
+                        request_id=request_id,
+                        params=sampling_params,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                    )
+                else:
+                    engine_request_ids.append(request_id_item)
+                    generator = self.engine_client.generate(
+                        engine_input,
+                        sampling_params,
+                        request_id_item,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        priority=request.priority,
+                        data_parallel_rank=data_parallel_rank,
+                    )
 
-        model_name = self.models.model_name(lora_request)
-        num_prompts = len(engine_inputs)
+                generators.append(generator)
 
-        # Streaming response
-        tokenizer = self.renderer.tokenizer
+            result_generator = merge_async_iterators(*generators)
 
-        if request.stream:
-            return self.completion_stream_generator(
-                request,
-                engine_inputs,
-                result_generator,
-                request_id,
-                created_time,
-                model_name,
-                num_prompts=num_prompts,
-                tokenizer=tokenizer,
-                request_metadata=request_metadata,
-            )
+            model_name = self.models.model_name(lora_request)
+            num_prompts = len(engine_inputs)
 
-        # Non-streaming response
-        final_res_batch: list[RequestOutput | None] = [None] * num_prompts
-        try:
+            # Streaming response
+            tokenizer = self.renderer.tokenizer
+
+            if request.stream:
+                return self.completion_stream_generator(
+                    request,
+                    engine_inputs,
+                    result_generator,
+                    request_id,
+                    created_time,
+                    model_name,
+                    num_prompts=num_prompts,
+                    tokenizer=tokenizer,
+                    request_metadata=request_metadata,
+                )
+
+            # Non-streaming response
+            final_res_batch: list[RequestOutput | None] = [None] * num_prompts
             async for i, res in result_generator:
                 final_res_batch[i] = res
 
@@ -258,6 +260,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 request_metadata,
             )
         except asyncio.CancelledError:
+            if engine_request_ids:
+                await asyncio.gather(
+                    self.engine_client.abort(engine_request_ids),
+                    return_exceptions=True,
+                )
             return self.create_error_response("Client disconnected")
 
         # When user requests streaming but we don't stream, we still need to

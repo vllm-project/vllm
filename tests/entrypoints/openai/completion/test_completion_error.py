@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -25,6 +26,11 @@ BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
 ]
+
+
+async def _never_finishes():
+    await asyncio.Event().wait()
+    yield
 
 
 @dataclass
@@ -146,6 +152,51 @@ async def test_completion_error_non_stream():
 
     with pytest.raises(GenerationError):
         await serving_completion.create_completion(request)
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_cancel_aborts_engine_requests():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.generate = MagicMock(
+        side_effect=lambda *_args, **_kwargs: _never_finishes()
+    )
+    mock_engine.abort = AsyncMock()
+
+    serving_completion = _build_serving_completion(mock_engine)
+    serving_completion.render_completion_request = AsyncMock(
+        return_value=[
+            {"prompt_token_ids": [1, 2, 3]},
+            {"prompt_token_ids": [4, 5, 6]},
+        ]
+    )
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["Test prompt 1", "Test prompt 2"],
+        max_tokens=10,
+        stream=False,
+        request_id="outer-request",
+    )
+
+    task = asyncio.create_task(serving_completion.create_completion(request))
+    await asyncio.sleep(0)
+
+    task.cancel()
+    response = await task
+
+    generated_request_ids = [
+        call.args[2] for call in mock_engine.generate.call_args_list
+    ]
+    assert generated_request_ids == [
+        "cmpl-outer-request-0",
+        "cmpl-outer-request-1",
+    ]
+    mock_engine.abort.assert_awaited_once_with(generated_request_ids)
+    assert response.error.message == "Client disconnected"
 
 
 @pytest.mark.asyncio
