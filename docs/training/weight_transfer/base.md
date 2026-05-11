@@ -43,15 +43,13 @@ update_request = WeightTransferUpdateRequest(
 
 ### WeightTransferUpdateInfo
 
-The base `WeightTransferUpdateInfo` includes an `is_checkpoint_format` flag:
+The base `WeightTransferUpdateInfo` is a marker class for backend-specific update info:
 
 ```python
 @dataclass
 class WeightTransferUpdateInfo(ABC):
-    is_checkpoint_format: bool = True
+    pass
 ```
-
-When `is_checkpoint_format=True` (the default), vLLM applies layerwise weight processing (repacking, renaming, etc.) on the received weights before loading them. Set to `False` if the trainer has already converted weights to the kernel format expected by the model.
 
 ## Implementing a Custom Engine
 

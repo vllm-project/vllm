@@ -16,6 +16,11 @@ PoolingTask = Literal[
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
 ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
+SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
+    "embed": "bi-encoder",
+    "classify": "cross-encoder",
+    "token_embed": "late-interaction",
+}
 
 FrontendTask = Literal["render"]
 FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)
