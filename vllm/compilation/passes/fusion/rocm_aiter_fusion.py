@@ -27,8 +27,8 @@ from ..vllm_inductor_pass import (
     VllmInductorPass,
     VllmPatternMatcherPass,
     VllmPatternReplacement,
+    _fx_view_to_reshape,
     fold_consecutive_reshapes,
-    fx_view_to_reshape,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -375,7 +375,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
         def trace_fn(*args, **kwargs):
             gm = pm.fwd_only(*args, **kwargs)
-            fx_view_to_reshape(gm)
+            _fx_view_to_reshape(gm)
             fold_consecutive_reshapes(gm)
             return gm
 
@@ -472,22 +472,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        # The gated RMSNorm pattern uses concrete ints for reshape dimensions
-        # at trace time, but the compiled graph may use torch.SymInt.  Tell
-        # the pattern matcher to treat int/SymInt as wildcards so that
-        # reshape shape arguments don't block matching.
-        _orig_fx_to_pat = pm.fx_to_pattern
-
-        def _relaxed_fx_to_pattern(*a, **kw):
-            kw["ignore_types"] = (int, torch.SymInt)
-            return _orig_fx_to_pat(*a, **kw)
-
-        pm.fx_to_pattern = _relaxed_fx_to_pattern
-        try:
-            self.matched_count = self.patterns.apply(graph)
-        finally:
-            pm.fx_to_pattern = _orig_fx_to_pat
-
+        self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
         )
