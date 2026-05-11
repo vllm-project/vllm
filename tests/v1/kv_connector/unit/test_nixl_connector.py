@@ -1374,9 +1374,11 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
             |  {eventually free blocks}
     """
     model_name = "Qwen/Qwen3-0.6B"
+    timeout = 6
     kv_transfer_config = KVTransferConfig(
         kv_connector="NixlConnector",
         kv_role="kv_both",
+        kv_connector_extra_config={"kv_lease_duration": timeout},
     )
     llm_kwargs = {
         "model": model_name,
@@ -1386,9 +1388,7 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
         "distributed_executor_backend": distributed_executor_backend,
     }
 
-    timeout = 6
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", str(timeout))
 
     def run_test_and_cleanup():
         llm = LLM(**llm_kwargs)
@@ -1403,8 +1403,6 @@ def test_abort_timeout_on_prefiller(monkeypatch, distributed_executor_backend):
             runtime_env = {
                 "working_dir": working_dir,  # ship fake nixl package
                 "env_vars": {
-                    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": str(timeout),
-                    # TODO: for ray to carry over, remove once we set
                     "NIXL_TELEMETRY_ENABLE": "1",
                 },
             }
