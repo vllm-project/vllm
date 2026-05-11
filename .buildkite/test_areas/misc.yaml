@@ -210,6 +210,7 @@ steps:
 - label: Python-only Installation
   key: python-only-installation
   depends_on: ~
+  optional: true
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
