@@ -7,6 +7,8 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
+from vllm.v1.fault_tolerance import FaultSignal
+from vllm.v1.fault_tolerance.errors import DpAllReduceFaultError
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,
@@ -40,6 +42,12 @@ def _run_ar(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
+    """Run the DP synchronization all-reduce.
+
+    Raises ``DpAllReduceFaultError`` (carrying a typed ``FaultSignal``) on
+    collective failure so the supervisor's ``on_step_error`` hook can surface
+    the fault via ``exc.signal`` without parsing the exception message.
+    """
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
@@ -48,7 +56,12 @@ def _run_ar(
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = cudagraph_mode
-    dist.all_reduce(tensor, group=group)
+    try:
+        dist.all_reduce(tensor, group=group)
+    except RuntimeError as e:
+        raise DpAllReduceFaultError(
+            signal=FaultSignal(kind="dp_allreduce_failed", detail=str(e))
+        ) from e
     return tensor
 
 

@@ -343,6 +343,29 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
 
+    def abort(self):
+        """Forcefully abort the NCCL communicator via ncclCommAbort.
+
+        Unlike destroy() (which calls ncclCommDestroy and may trigger an
+        implicit ncclCommFinalize collective that hangs when a peer is
+        dead), abort is unconditionally safe in fault scenarios.
+
+        Sub-communicators (fi_ar_comm, all2all_manager) don't wrap NCCL
+        comms today, but we call abort() for consistency so that the
+        fault path stays correct if they ever gain NCCL dependencies.
+        """
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.abort()
+            self.pynccl_comm = None
+        if self.ca_comm is not None:
+            self.ca_comm = None
+        if self.fi_ar_comm is not None:
+            self.fi_ar_comm.abort()
+            self.fi_ar_comm = None
+        if self.all2all_manager is not None:
+            self.all2all_manager.abort()
+            self.all2all_manager = None  # type: ignore[assignment]
+
     def all_gatherv(
         self,
         input_: torch.Tensor | list[torch.Tensor],
