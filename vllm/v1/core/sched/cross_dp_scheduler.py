@@ -78,7 +78,7 @@ class RequestManager:
 
     def select_dp(self, request: Request, is_long: bool, specify_dp: bool, num_new_tokens: int, rank_budgets: list[int]) -> list[int] | None:
         if len(request.cp_ranks) > 0:
-            if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]):
+            if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]) and all([rank_budgets[rank] >= num_new_tokens for rank in request.cp_ranks]):
                 return request.cp_ranks
             else:
                 return None
@@ -660,6 +660,10 @@ class CrossDPScheduler(Scheduler):
 
         return engine_core_outputs
 
+    def _preempt_request(self, request: Request, timestamp: float) -> None:
+        super()._preempt_request(request, timestamp)
+        request.kv_transfer_params = None
+
     def schedule(self) -> list[SchedulerOutput]:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -691,10 +695,10 @@ class CrossDPScheduler(Scheduler):
         # so their per-rank cost is num_tokens / cp_size.
         rank_budgets = [self.max_num_scheduled_tokens // self.cp_world_size] * self.cp_world_size
 
-        def _get_effective_budget(is_long_seq: bool, cp_ranks: list[int] | None = None) -> int:
+        def _get_effective_budget(is_long_seq: bool, specify_dp: bool, cp_ranks: list[int] | None = None) -> int:
             """Return the max tokens a request on *cp_ranks* can schedule."""
-            if cp_ranks is None:
-                if is_long_seq:
+            if cp_ranks is None or len(cp_ranks) == 0:
+                if is_long_seq and not specify_dp:
                     return min(rank_budgets) * self.cp_world_size
                 else:
                     return max(rank_budgets)
@@ -759,7 +763,7 @@ class CrossDPScheduler(Scheduler):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens,
-                                _get_effective_budget(self.waiting.is_long_request(request), request.cp_ranks))
+                                _get_effective_budget(self.waiting.is_long_request(request), False, request.cp_ranks))
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -794,16 +798,16 @@ class CrossDPScheduler(Scheduler):
                 continue
 
             # Determine the request type: prefill or decode.
-            # prefill: num_computed_tokens < num_prompt_tokens (prompt not fully processed)
-            # decode: num_computed_tokens >= num_prompt_tokens (generating output tokens)
-            req_type = "prefill" if request.num_computed_tokens < request.num_prompt_tokens else "decode"
-            # Enforce batch homogeneity: a batch must be all-prefill or all-decode.
-            if batch_type is None:
-                batch_type = req_type
-            elif batch_type != req_type:
-                # This request's type conflicts with the batch type, skip it.
-                req_index += 1
-                continue
+            kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
+            if kv_role == 'kv_consumer':
+                req_type = "prefill" if request.num_computed_tokens < request.num_prompt_tokens else "decode"
+                # Enforce batch homogeneity: a batch must be all-prefill or all-decode.
+                if batch_type is None:
+                    batch_type = req_type
+                elif batch_type != req_type:
+                    # This request's type conflicts with the batch type, skip it.
+                    req_index += 1
+                    continue
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
@@ -826,18 +830,29 @@ class CrossDPScheduler(Scheduler):
                     if self.policy == SchedulingPolicy.PRIORITY:
                         raise NotImplementedError
                     else:
-                        preempted_req = self.running.pop()
-                        """
-                        TODO(AoChen): Preempted request is also need to be removed from the request manager.
-                        """
+                        # FCFS: find the newest request that shares at least
+                        # one cp_rank with the blocked request, excluding the
+                        # request itself.  Popping an unrelated request wastes
+                        # computation without freeing space on the ranks that
+                        # are actually full.
+                        preempted_req = None
+                        for i in range(len(self.running) - 1, -1, -1):
+                            candidate = self.running[i]
+                            if candidate is not request and any(
+                                r in request.cp_ranks for r in candidate.cp_ranks
+                            ):
+                                preempted_req = self.running.pop(i)
+                                break
+
+                        if preempted_req is None:
+                            # No other request occupies the needed ranks.
+                            break
+
                         self.request_manager.free_req(preempted_req)
                         self.waiting.running_long_count -= 1 if self.waiting.is_long_request(preempted_req) else 0
                         self.waiting.has_slot_for_long_request = self.request_manager.has_slot_for_long_request()
 
                     self._preempt_request(preempted_req, scheduled_timestamp)
-
-                    # if len(preempted_req.cp_ranks) > 1:
-                    #     raise RuntimeError("Preempted request has multiple CP ranks is not supported now.")
 
                     for rank in preempted_req.cp_ranks:
                         preempted_reqs[rank].append(preempted_req)
@@ -982,7 +997,12 @@ class CrossDPScheduler(Scheduler):
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
 
-                    effective_budget = _get_effective_budget(self.waiting.is_long_request(request))
+                    kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
+                    if kv_role == 'kv_consumer' and request.status == RequestStatus.PREEMPTED:
+                        specify_dp = True
+                    else:
+                        specify_dp = False
+                    effective_budget = _get_effective_budget(self.waiting.is_long_request(request), specify_dp)
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if (
@@ -1012,13 +1032,18 @@ class CrossDPScheduler(Scheduler):
                     # Determine the request type for batch homogeneity check.
                     # For waiting requests, use num_computed_tokens (which may
                     # include cached tokens) to determine if it's still in prefill.
-                    req_type = "prefill" if num_computed_tokens < request.num_prompt_tokens else "decode"
-                    if batch_type is None:
-                        batch_type = req_type
-                    elif batch_type != req_type:
-                        # This request's type conflicts with the batch type, skip it.
-                        # Do not pop from waiting queue, just break to stop scheduling.
-                        break
+                    kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
+                    if kv_role == 'kv_consumer':
+                        if request.status == RequestStatus.PREEMPTED:
+                            req_type = "prefill" if (request.num_computed_tokens < request.num_prompt_tokens) else "decode"
+                        else:
+                            req_type = "decode"
+                        if batch_type is None:
+                            batch_type = req_type
+                        elif batch_type != req_type:
+                            # This request's type conflicts with the batch type, skip it.
+                            # Do not pop from waiting queue, just break to stop scheduling.
+                            break
 
                 # [vllm add]
                 if self.need_mamba_block_aligned_split:
@@ -1047,26 +1072,18 @@ class CrossDPScheduler(Scheduler):
                 )
 
                 kv_role = getattr(self.vllm_config.kv_transfer_config, "kv_role", None)
-                if kv_role == 'kv_consumer':
+                if kv_role == 'kv_consumer' and request.status == RequestStatus.PREEMPTED:
                     specify_dp = True
                 else:
                     specify_dp = False
-                if len(request.cp_ranks) == 0:
-                    selected_dp = self.request_manager.select_dp(
-                        request,
-                        self.waiting.is_long_request(request),
-                        specify_dp,
-                        num_new_tokens,
-                        rank_budgets,
-                    )
-                else:
-                    selected_dp = self.request_manager.select_dp(
-                        request,
-                        self.waiting.is_long_request(request),
-                        specify_dp,
-                        num_new_tokens,
-                        rank_budgets,
-                    )
+                
+                selected_dp = self.request_manager.select_dp(
+                    request,
+                    self.waiting.is_long_request(request),
+                    specify_dp,
+                    num_new_tokens,
+                    rank_budgets,
+                )
                 if selected_dp is None:
                     break
 
