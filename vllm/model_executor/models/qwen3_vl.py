@@ -136,6 +136,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -562,6 +563,13 @@ class Qwen3_VisionTransformer(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+
+        # FP8 attention: Q/K/V become independent contiguous tensors
+        # after quantization, so cu_seqlens uses uniform stride (no 3x V).
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            self.num_heads, head_dim
+        )
+
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -776,6 +784,7 @@ class Qwen3_VisionTransformer(nn.Module):
             self.hidden_size,
             self.tp_size,
             device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )
 
         return metadata
@@ -1675,6 +1684,9 @@ class Qwen3VLForConditionalGeneration(
                     )
                     for _ in range(self.deepstack_num_level)
                 ]
+                # Tracks the valid token span currently stored in the buffer.
+                # Zero means there is no active deepstack payload to consume.
+                self.deepstack_input_embeds_num_tokens = 0
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3LLMForCausalLM(
@@ -1702,6 +1714,8 @@ class Qwen3VLForConditionalGeneration(
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
+        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
+            return None
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1733,15 +1747,19 @@ class Qwen3VLForConditionalGeneration(
             self.deepstack_input_embeds[idx][:num_tokens].copy_(
                 deepstack_input_embeds[idx]
             )
+        self.deepstack_input_embeds_num_tokens = num_tokens
 
     def _clear_deepstack_input_embeds(self, num_tokens: int) -> None:
         if not getattr(self, "deepstack_input_embeds", None):
+            return
+        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
             return
 
         # clear deepstack_input_embeds in buffer
         if num_tokens > 0:
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
+            self.deepstack_input_embeds_num_tokens = 0
 
     # -- SupportsEncoderCudaGraph protocol methods --
 

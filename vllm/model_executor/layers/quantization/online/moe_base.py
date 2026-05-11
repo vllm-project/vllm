@@ -130,6 +130,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.is_monolithic
         assert self.moe_kernel is not None
