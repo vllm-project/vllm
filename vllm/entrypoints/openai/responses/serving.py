@@ -324,6 +324,17 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_responses(request, raw_request), request, raw_request
+        )
+
+    async def _create_responses(
+        self, request: ResponsesRequest, raw_request: Request | None = None
+    ) -> (
+        AsyncGenerator[StreamingResponsesResponse, None]
+        | ResponsesResponse
+        | ErrorResponse
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -416,6 +427,9 @@ class OpenAIServingResponses(OpenAIServing):
                 self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=(
+                    -1 if request.truncation != "disabled" else None
+                ),
             )
 
             sampling_params = request.to_sampling_params(
@@ -700,6 +714,9 @@ class OpenAIServingResponses(OpenAIServing):
                     self._extract_prompt_len(engine_input),
                     self.default_sampling_params,  # type: ignore
                     self.override_max_tokens,  # type: ignore
+                    truncate_prompt_tokens=(
+                        -1 if context.request.truncation != "disabled" else None
+                    ),
                 )
 
             # OPTIMIZATION

@@ -185,6 +185,35 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _topk_topp_sample_impl(
+    random_sampled: torch.Tensor,
+    logits_to_return: torch.Tensor | None,
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    logprobs_mode: str,
+    seeds: torch.Tensor | None,
+    lambda_: float = 1.0,
+) -> None:
+    torch.ops._xpu_C.topk_topp_sampler(
+        random_sampled, logits_to_return, logits, k, p, logprobs_mode, seeds, lambda_
+    )
+    return
+
+
+def _topk_topp_sample_fake(
+    random_sampled: torch.Tensor,
+    logits_to_return: torch.Tensor | None,
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    logprobs_mode: str,
+    seeds: torch.Tensor | None,
+    lambda_: float = 1.0,
+) -> None:
+    return
+
+
 def _xpu_mxfp8_quantize_impl(
     x: torch.Tensor, dtype: torch.dtype | None = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -358,14 +387,9 @@ class xpu_ops:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])  # noqa: F841
 
-        # In encode attention, k and v maybe not contiguous and current
-        # kernel can't handle it
-        if block_table is None:
-            k = k.contiguous()
-            v = v.contiguous()
         return flash_attn_varlen_func(
             out=out,
-            q=q.contiguous(),
+            q=q,
             k=k,
             v=v,
             cu_seqlens_q=cu_seqlens_q,
@@ -689,6 +713,12 @@ class xpu_ops:
                 op_func=_gdn_attention_core_xpu_impl,
                 mutates_args=["core_attn_out", "z"],
                 fake_impl=_gdn_attention_core_xpu_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_topk_topp_sampler",
+                op_func=_topk_topp_sample_impl,
+                fake_impl=_topk_topp_sample_fake,
             )
 
             _OPS_REGISTERED = True
