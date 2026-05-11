@@ -167,7 +167,7 @@ cryptography==46.0.5
     #   pyjwt
 cuda-bindings==13.0.3
     # via torch
-cuda-pathfinder==1.3.3
+cuda-pathfinder==1.5.4
     # via cuda-bindings
 cuda-toolkit==13.0.2
     # via torch
