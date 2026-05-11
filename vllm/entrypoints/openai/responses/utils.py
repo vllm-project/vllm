@@ -205,12 +205,6 @@ def _construct_message_from_response_item(
             if previous_reasoning is None:
                 prev_assistant_msg["reasoning"] = reasoning
                 return None
-            logger.warning(
-                "Previous assistant message already contains reasoning. "
-                "Reasoning merging is skipped and a new assistant message is created. "
-                "Item %s",
-                item.id,
-            )
         return {
             "role": "assistant",
             "reasoning": reasoning,
@@ -222,12 +216,6 @@ def _construct_message_from_response_item(
             if previous_content is None:
                 prev_assistant_msg["content"] = output_text
                 return None
-            logger.warning(
-                "Previous assistant message already contains content. "
-                "Content merging is skipped and a new assistant message is created. "
-                "Item %s",
-                item.id,
-            )
         return {
             "role": "assistant",
             "content": output_text,
