@@ -83,7 +83,7 @@ class Step3VLImageEmbeddingInputs(TensorSchema):
     """
 
     type: Literal["image_embeds"] = "image_embeds"
-    data: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
+    image_embeds: Annotated[torch.Tensor, TensorShape("bn", "f", "h")]
 
 
 Step3VLImageInputs: TypeAlias = Step3VLImagePixelInputs | Step3VLImageEmbeddingInputs
@@ -616,14 +616,18 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             image_features = image_input["image_embeds"]
-        else:
-            image_features = self._get_vision_model_output(image_input["pixel_values"])
-            patch_image_features = (
-                self._get_vision_model_output(image_input["patch_pixel_values"])
-                if len(image_input["patch_pixel_values"]) > 0
-                else None
-            )
-            num_patches = image_input["num_patches"]
+            return [
+                image_features[i].view(-1, image_features.shape[-1])
+                for i in range(image_features.shape[0])
+            ]
+
+        image_features = self._get_vision_model_output(image_input["pixel_values"])
+        patch_image_features = (
+            self._get_vision_model_output(image_input["patch_pixel_values"])
+            if len(image_input["patch_pixel_values"]) > 0
+            else None
+        )
+        num_patches = image_input["num_patches"]
 
         image_features = self._process_image_features(image_features)
         patch_image_features = (
