@@ -208,3 +208,25 @@ def test_flat_logprobs_access() -> None:
     assert logprobs_last2.logprobs == [0.4, 0.5, 0.6, 0.1]
     assert logprobs_last2.ranks == [40, 50, 60, 10]
     assert logprobs_last2.decoded_tokens == ["40", "50", "60", "10"]
+
+    logprobs_last1 = logprobs[-1:]
+    assert len(logprobs_last1) == 1
+    assert logprobs_last1[0] == LOGPROBS_ONE_POSITION_0
+    assert logprobs_last1.start_indices == [0]
+    assert logprobs_last1.end_indices == [1]
+    assert logprobs_last1.token_ids == [1]
+    assert logprobs_last1.logprobs == [0.1]
+    assert logprobs_last1.ranks == [10]
+    assert logprobs_last1.decoded_tokens == ["10"]
+
+    empty_logprobs = FlatLogprobs()
+    empty_logprobs.append(None)
+    empty_logprobs_last1 = empty_logprobs[-1:]
+    assert len(empty_logprobs_last1) == 1
+    assert empty_logprobs_last1[0] == {}
+    assert empty_logprobs_last1.start_indices == [0]
+    assert empty_logprobs_last1.end_indices == [0]
+    assert empty_logprobs_last1.token_ids == []
+    assert empty_logprobs_last1.logprobs == []
+    assert empty_logprobs_last1.ranks == []
+    assert empty_logprobs_last1.decoded_tokens == []
