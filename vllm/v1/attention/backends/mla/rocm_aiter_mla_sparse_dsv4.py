@@ -38,8 +38,7 @@ if TYPE_CHECKING:
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     lengths = lengths.to(dtype=torch.int32).contiguous()
-    indptr = torch.empty(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
-    indptr[0] = 0
+    indptr = torch.zeros(lengths.shape[0] + 1, dtype=torch.int32, device=lengths.device)
     torch.cumsum(lengths, dim=0, out=indptr[1:])
     return indptr
 
@@ -135,7 +134,7 @@ def compute_global_topk_ragged_indices_and_indptr(
 
     topk_indptr = _build_indptr_from_lengths(topk_lens)
     global_topk_ragged = torch.empty(
-        int(topk_indptr[-1].item()),
+        num_tokens * topk,
         dtype=torch.int32,
         device=topk_indices.device,
     )
@@ -276,7 +275,7 @@ def combine_topk_swa_indices_ragged(
 
     combined_indptr = _build_indptr_from_lengths(combined_lens)
     combined_ragged = torch.empty(
-        int(combined_indptr[-1].item()),
+        num_tokens * (topk + window_size),
         dtype=torch.int32,
         device=topk_indices.device,
     )

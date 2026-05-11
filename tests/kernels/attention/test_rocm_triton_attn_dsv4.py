@@ -21,58 +21,37 @@ def _ref_global_topk_ragged(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    topk_cpu = topk_indices.reshape(topk_indices.shape[0], -1).cpu()
-    req_cpu = token_to_req_indices.cpu()
-    block_table_cpu = block_table.cpu()
-    valid_cpu = is_valid_token.cpu()
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    topk = topk_indices.reshape(topk_indices.shape[0], -1)
+    valid = (topk >= 0) & is_valid_token[:, None]
+    lens = valid.sum(dim=1, dtype=torch.int32)
+    indptr = torch.zeros(lens.shape[0] + 1, dtype=torch.int32, device=topk.device)
+    torch.cumsum(lens, dim=0, out=indptr[1:])
 
-    ragged: list[int] = []
-    lens: list[int] = []
-    for token_idx, row in enumerate(topk_cpu):
-        if not bool(valid_cpu[token_idx]):
-            lens.append(0)
-            continue
+    safe_topk = torch.clamp(topk, min=0)
+    block_indices = safe_topk // block_size
+    block_offsets = safe_topk % block_size
+    req_indices = token_to_req_indices[:, None].expand_as(topk)
+    slot_ids = block_table[req_indices, block_indices] * block_size + block_offsets
 
-        row_values: list[int] = []
-        req_idx = int(req_cpu[token_idx])
-        for local_idx_tensor in row:
-            local_idx = int(local_idx_tensor)
-            if local_idx < 0:
-                break
-            block_idx = local_idx // block_size
-            block_offset = local_idx % block_size
-            row_values.append(
-                int(block_table_cpu[req_idx, block_idx]) * block_size + block_offset
-            )
-        ragged.extend(row_values)
-        lens.append(len(row_values))
-
-    lens_tensor = torch.tensor(lens, dtype=torch.int32)
-    indptr = torch.empty(len(lens) + 1, dtype=torch.int32)
-    indptr[0] = 0
-    torch.cumsum(lens_tensor, dim=0, out=indptr[1:])
-    return torch.tensor(ragged, dtype=torch.int32), indptr, lens_tensor
+    offsets = torch.arange(topk.shape[1], dtype=torch.int32, device=topk.device)
+    positions = indptr[:-1, None] + offsets[None, :]
+    return slot_ids[valid], positions[valid].to(torch.long), indptr, lens
 
 
 def _ref_sparse_prefill_ragged(
     q: torch.Tensor,
     kv: torch.Tensor,
-    indices: torch.Tensor,
-    indptr: torch.Tensor,
+    rows: list[list[int]],
     scale: float,
     attn_sink: torch.Tensor | None,
 ) -> torch.Tensor:
     q_f32 = q.float()
     kv_f32 = kv.float()
-    indices_cpu = indices.cpu()
-    indptr_cpu = indptr.cpu()
     out = torch.empty_like(q_f32)
 
     for query_idx in range(q.shape[0]):
-        row_start = int(indptr_cpu[query_idx])
-        row_end = int(indptr_cpu[query_idx + 1])
-        row_indices = indices_cpu[row_start:row_end].tolist()
+        row_indices = rows[query_idx]
         for head_idx in range(q.shape[1]):
             if row_indices:
                 selected_kv = kv_f32[row_indices]
@@ -142,38 +121,25 @@ def _read_fp8_ds_mla_cache(
 def _ref_sparse_decode_ragged(
     q: torch.Tensor,
     main_cache: torch.Tensor,
-    main_indices: torch.Tensor,
-    main_indptr: torch.Tensor,
+    main_rows: list[list[int]],
     scale: float,
     attn_sink: torch.Tensor | None,
     block_size: int,
     extra_cache: torch.Tensor | None = None,
-    extra_indices: torch.Tensor | None = None,
-    extra_indptr: torch.Tensor | None = None,
+    extra_rows: list[list[int]] | None = None,
 ) -> torch.Tensor:
     q_f32 = q.float()
-    main_indices_cpu = main_indices.cpu()
-    main_indptr_cpu = main_indptr.cpu()
-    extra_indices_cpu = None if extra_indices is None else extra_indices.cpu()
-    extra_indptr_cpu = None if extra_indptr is None else extra_indptr.cpu()
     out = torch.empty_like(q_f32)
 
     for query_idx in range(q.shape[0]):
-        row_slots = main_indices_cpu[
-            int(main_indptr_cpu[query_idx]) : int(main_indptr_cpu[query_idx + 1])
-        ].tolist()
         row_kv = [
             _read_fp8_ds_mla_cache(main_cache, int(slot), block_size)
-            for slot in row_slots
+            for slot in main_rows[query_idx]
         ]
-        if extra_cache is not None and extra_indices_cpu is not None:
-            assert extra_indptr_cpu is not None
-            extra_slots = extra_indices_cpu[
-                int(extra_indptr_cpu[query_idx]) : int(extra_indptr_cpu[query_idx + 1])
-            ].tolist()
+        if extra_cache is not None and extra_rows is not None:
             row_kv.extend(
                 _read_fp8_ds_mla_cache(extra_cache, int(slot), block_size)
-                for slot in extra_slots
+                for slot in extra_rows[query_idx]
             )
 
         kv = torch.stack(row_kv).to(q.device)
@@ -191,53 +157,43 @@ def _ref_sparse_decode_ragged(
 
 
 def _ref_combine_topk_swa_ragged(
-    topk_indices: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    gather_lens: torch.Tensor,
-    window_size: int,
-    compress_ratio: int,
-    topk: int,
-    M: int,
-    N: int,
+    device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    topk_cpu = topk_indices.reshape(topk_indices.shape[0], -1).cpu()
-    q_start_cpu = query_start_loc.cpu()
-    seq_lens_cpu = seq_lens.cpu()
-    gather_lens_cpu = gather_lens.cpu()
-    base = int(q_start_cpu[0])
-
-    ragged: list[int] = []
-    lens: list[int] = []
-    for batch_idx in range(seq_lens_cpu.shape[0]):
-        query_start = int(q_start_cpu[batch_idx]) - base
-        query_end = int(q_start_cpu[batch_idx + 1]) - base
-        query_len = query_end - query_start
-        seq_len = int(seq_lens_cpu[batch_idx])
-        gather_len = int(gather_lens_cpu[batch_idx])
-        start_pos = seq_len - query_len
-        gather_start = seq_len - gather_len
-
-        for token_idx in range(query_start, query_end):
-            pos = start_pos + token_idx - query_start
-            topk_len = min((pos + 1) // compress_ratio, topk)
-            swa_len = min(pos + 1, window_size)
-            row_values = [
-                int(topk_cpu[token_idx, offset]) + M * batch_idx
-                for offset in range(topk_len)
-            ]
-            row_values.extend(
-                M * batch_idx + N + swa_offset + pos - swa_len + 1 - gather_start
-                for swa_offset in range(swa_len)
-            )
-            ragged.extend(row_values)
-            lens.append(len(row_values))
-
-    lens_tensor = torch.tensor(lens, dtype=torch.int32)
-    indptr = torch.empty(len(lens) + 1, dtype=torch.int32)
-    indptr[0] = 0
-    torch.cumsum(lens_tensor, dim=0, out=indptr[1:])
-    return torch.tensor(ragged, dtype=torch.int32), indptr, lens_tensor
+    expected_ragged = torch.tensor(
+        [
+            100,
+            101,
+            7,
+            8,
+            9,
+            110,
+            111,
+            8,
+            9,
+            10,
+            120,
+            121,
+            122,
+            9,
+            10,
+            11,
+            150,
+            27,
+            28,
+            29,
+            160,
+            161,
+            28,
+            29,
+            30,
+        ],
+        dtype=torch.int32,
+        device=device,
+    )
+    expected_lens = torch.tensor([5, 5, 6, 4, 5], dtype=torch.int32, device=device)
+    expected_indptr = torch.zeros(6, dtype=torch.int32, device=device)
+    torch.cumsum(expected_lens, dim=0, out=expected_indptr[1:])
+    return expected_ragged, expected_indptr, expected_lens
 
 
 @torch.inference_mode()
@@ -277,17 +233,19 @@ def test_compute_global_topk_ragged_indices_and_indptr() -> None:
             is_valid_token,
         )
     )
-    expected_ragged, expected_indptr, expected_lens = _ref_global_topk_ragged(
-        topk_indices,
-        token_to_req_indices,
-        block_table,
-        block_size,
-        is_valid_token,
+    expected_values, expected_positions, expected_indptr, expected_lens = (
+        _ref_global_topk_ragged(
+            topk_indices,
+            token_to_req_indices,
+            block_table,
+            block_size,
+            is_valid_token,
+        )
     )
 
-    torch.testing.assert_close(actual_ragged.cpu(), expected_ragged)
-    torch.testing.assert_close(actual_indptr.cpu(), expected_indptr)
-    torch.testing.assert_close(actual_lens.cpu(), expected_lens)
+    torch.testing.assert_close(actual_ragged[expected_positions], expected_values)
+    torch.testing.assert_close(actual_indptr, expected_indptr)
+    torch.testing.assert_close(actual_lens, expected_lens)
 
 
 @torch.inference_mode()
@@ -315,7 +273,9 @@ def test_sparse_attn_prefill_ragged_kernel() -> None:
         nope_head_dim=NOPE_HEAD_DIM,
         rope_head_dim=ROPE_HEAD_DIM,
     )
-    expected = _ref_sparse_prefill_ragged(q, kv, indices, indptr, scale, attn_sink)
+    expected = _ref_sparse_prefill_ragged(
+        q, kv, [[0, 2], [1, 3, 4], []], scale, attn_sink
+    )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
@@ -357,14 +317,12 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     expected = _ref_sparse_decode_ragged(
         q=q,
         main_cache=main_cache,
-        main_indices=main_indices,
-        main_indptr=main_indptr,
+        main_rows=[[0, 2], [4, 1]],
         scale=scale,
         attn_sink=attn_sink,
         block_size=block_size,
         extra_cache=extra_cache,
-        extra_indices=extra_indices,
-        extra_indptr=extra_indptr,
+        extra_rows=[[1], [3, 0]],
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
@@ -409,17 +367,11 @@ def test_combine_topk_swa_indices_ragged() -> None:
         N,
     )
     expected_ragged, expected_indptr, expected_lens = _ref_combine_topk_swa_ragged(
-        topk_indices,
-        query_start_loc,
-        seq_lens,
-        gather_lens,
-        window_size,
-        compress_ratio,
-        topk,
-        M,
-        N,
+        device
     )
 
-    torch.testing.assert_close(actual_ragged.cpu(), expected_ragged)
-    torch.testing.assert_close(actual_indptr.cpu(), expected_indptr)
-    torch.testing.assert_close(actual_lens.cpu(), expected_lens)
+    torch.testing.assert_close(
+        actual_ragged[: expected_ragged.numel()], expected_ragged
+    )
+    torch.testing.assert_close(actual_indptr, expected_indptr)
+    torch.testing.assert_close(actual_lens, expected_lens)
