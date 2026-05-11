@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
@@ -344,7 +345,7 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        if has_cutedsl():
+        if envs.VLLM_DSV4_USE_CUTEDSL_INDEXER_Q and has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from .fused_indexer_q_cutedsl import (
                 fused_indexer_q_rope_quant_mxfp4_cutedsl,

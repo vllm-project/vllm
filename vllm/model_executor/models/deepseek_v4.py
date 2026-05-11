@@ -1217,10 +1217,33 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-        post_mix: torch.Tensor | None,
-        res_mix: torch.Tensor | None,
-        residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if residual is None and post_mix is None and res_mix is None:
+            residual = x
+            x, post, comb = self.hc_pre(
+                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            )
+            x = self.attn_norm(x)
+            x = self.attn(positions, x, None)
+            x = self.hc_post(x, residual, post, comb)
+
+            residual = x
+            x, post, comb = self.hc_pre(
+                x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+            )
+            x = self.ffn_norm(x)
+            x = self.ffn(x, input_ids)
+            x = self.hc_post(x, residual, post, comb)
+            return x
+
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
@@ -1228,37 +1251,28 @@ class DeepseekV4DecoderLayer(nn.Module):
                 x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
             )
         else:
-            residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
-                x,
+            # Keep the post/pre operations separate here. The fused post_pre
+            # path is faster, but changes DeepSeek V4 Flash FP8 accuracy.
+            residual = self.hc_post(x, residual, post_mix, res_mix)
+            x, post_mix, res_mix = self.hc_pre(
                 residual,
-                post_mix,
-                res_mix,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
                 self.hc_attn_base,
-                self.rms_norm_eps,
-                self.hc_eps,
-                self.hc_eps,
-                self.hc_post_alpha,
-                self.hc_sinkhorn_iters,
             )
 
         x = self.attn_norm(x)
         x = self.attn(positions, x, None)
 
-        residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
-            x,
+        assert residual is not None
+        assert post_mix is not None
+        assert res_mix is not None
+        residual = self.hc_post(x, residual, post_mix, res_mix)
+        x, post_mix, res_mix = self.hc_pre(
             residual,
-            post_mix,
-            res_mix,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
             self.hc_ffn_base,
-            self.rms_norm_eps,
-            self.hc_eps,
-            self.hc_eps,
-            self.hc_post_alpha,
-            self.hc_sinkhorn_iters,
         )
 
         x = self.ffn_norm(x)
@@ -1414,18 +1428,24 @@ class DeepseekV4Model(nn.Module):
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
-        residual, post_mix, res_mix = None, None, None
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states, residual, post_mix, res_mix = layer(
-                hidden_states,
-                positions,
-                input_ids,
-                post_mix,
-                res_mix,
-                residual,
-            )
+        if get_pp_group().world_size == 1:
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                hidden_states = layer(hidden_states, positions, input_ids)
         else:
-            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+            residual, post_mix, res_mix = None, None, None
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                hidden_states, residual, post_mix, res_mix = layer(
+                    hidden_states,
+                    positions,
+                    input_ids,
+                    post_mix,
+                    res_mix,
+                    residual,
+                )
+            else:
+                hidden_states = layer.hc_post(
+                    hidden_states, residual, post_mix, res_mix
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})

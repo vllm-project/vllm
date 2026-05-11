@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_DSV4_USE_CUTEDSL_INDEXER_Q: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -906,6 +907,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default: 512 MB
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
+    ),
+    # Enable the CuteDSL MXFP4 indexer Q kernel for DeepSeek V4 sparse MLA.
+    # The default Triton path preserves the validated DeepSeek V4 Flash
+    # end-to-end FP8 accuracy.
+    "VLLM_DSV4_USE_CUTEDSL_INDEXER_Q": lambda: bool(
+        int(os.getenv("VLLM_DSV4_USE_CUTEDSL_INDEXER_Q", "0"))
     ),
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
