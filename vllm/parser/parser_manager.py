@@ -6,7 +6,7 @@ from __future__ import annotations
 import importlib
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import is_list_of
@@ -159,7 +159,7 @@ class ParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                names = cast(list[str], name)
             else:
                 names = [class_name]
 
@@ -194,11 +194,11 @@ class ParserManager:
         model_name: str | None = None,
     ) -> type[ToolParser] | None:
         """Get the tool parser based on the name."""
-        from vllm.tool_parsers import ToolParserManager
-
         parser: type[ToolParser] | None = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
+        from vllm.tool_parsers import ToolParserManager
+
         logger.info_once('"auto" tool choice has been enabled.')
 
         try:
@@ -225,11 +225,11 @@ class ParserManager:
         reasoning_parser_name: str | None,
     ) -> type[ReasoningParser] | None:
         """Get the reasoning parser based on the name."""
-        from vllm.reasoning import ReasoningParserManager
-
         parser: type[ReasoningParser] | None = None
         if not reasoning_parser_name:
             return None
+        from vllm.reasoning import ReasoningParserManager
+
         try:
             parser = ReasoningParserManager.get_reasoning_parser(reasoning_parser_name)
             assert parser is not None
@@ -262,10 +262,10 @@ class ParserManager:
         Returns:
             A Parser class, or None if neither parser is specified.
         """
-        from vllm.parser.abstract_parser import _WrappedParser
-
         if not tool_parser_name and not reasoning_parser_name:
             return None
+
+        from vllm.parser.abstract_parser import _WrappedParser
 
         # Strategy 1: If both names match, check for a unified parser with that name
         if tool_parser_name and tool_parser_name == reasoning_parser_name:
