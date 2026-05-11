@@ -238,7 +238,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
-    "CohereMoeForCausalLM": _HfExamplesInfo(
+    "Cohere2MoeForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
         trust_remote_code=True,
         is_available_online=False,
@@ -1264,6 +1264,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         tokenizer_mode="mistral",
     ),
+    "QianfanOCRForConditionalGeneration": _HfExamplesInfo(
+        "baidu/Qianfan-OCR",
+        min_transformers_version="5.6.0",
+    ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
         extras={"chat": "Qwen/Qwen-VL-Chat"},
@@ -1402,6 +1406,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_num_seqs=32,
     ),
     # [Eagle]
+    "EagleCohereForCausalLM": _HfExamplesInfo(
+        "/host/engines/cohere-moe",
+        speculative_model="/host/engines/cohere-moe/eagle",
+        tokenizer="/host/engines/cohere-moe",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
@@ -1489,6 +1500,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
         is_available_online=False,
+    ),
+    "Gemma4MTPModel": _HfExamplesInfo(
+        "google/gemma-4-E4B-it",
+        speculative_model="google/gemma-4-E4B-it-assistant",
+        trust_remote_code=True,
+        min_transformers_version="5.8.0",
     ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
