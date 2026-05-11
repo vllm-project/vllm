@@ -65,6 +65,7 @@ def _run_single(
                 x,
                 group_size,
                 column_major_scales=column_major,
+                tma_aligned_scales=column_major,
                 use_ue8m0=scale_ue8m0,
             )
 
@@ -74,6 +75,7 @@ def _run_single(
                     x,
                     group_size,
                     column_major_scales=column_major,
+                    tma_aligned_scales=column_major,
                     use_ue8m0=scale_ue8m0,
                 )
     elif dtype == "int8":
@@ -87,18 +89,44 @@ def _run_single(
     else:
         raise ValueError("dtype must be 'fp8' or 'int8'")
 
-    cuda_ms = _time_cuda(cuda_impl, warmup_iters, bench_iters)
     triton_ms = _time_cuda(triton_impl, warmup_iters, bench_iters)
 
-    speedup = triton_ms / cuda_ms if cuda_ms else math.inf
+    # FI SM90 only applies to FP8 with col_major=True and group_size=128
+    use_fi = dtype == "fp8" and column_major and group_size == 128
+    if use_fi:
+        with patch.object(
+            fp8_utils,
+            "_flashinfer_sm90_per_token_group_quant_fp8",
+            return_value=None,
+        ):
+            cuda_ms = _time_cuda(cuda_impl, warmup_iters, bench_iters)
+        fi_ms = _time_cuda(cuda_impl, warmup_iters, bench_iters)
+        fi_speedup = cuda_ms / fi_ms if fi_ms else math.inf
+    else:
+        cuda_ms = _time_cuda(cuda_impl, warmup_iters, bench_iters)
+        fi_ms = None
+        fi_speedup = None
+
+    vs_triton = triton_ms / cuda_ms if cuda_ms else math.inf
 
     cfg_desc = (
         f"shape={shape}  gs={group_size:<3}  col_major={column_major:<5}  "
         f"ue8m0={scale_ue8m0:<5}  dtype={dtype}"
     )
+
+    cu_s = f"{cuda_ms:7.3f} ms"
+    if fi_ms is not None:
+        fi_s = f"{fi_ms:7.3f} ms"
+        fi_sp = f"x{fi_speedup:5.2f}"
+    else:
+        fi_s = "     n/a"
+        fi_sp = "   n/a"
+    tr_s = f"{triton_ms:7.3f} ms"
+    vt_s = f"x{vs_triton:5.2f}"
+
     print(
-        f"{cfg_desc:55} | CUDA {cuda_ms:7.3f} ms  | Triton {triton_ms:7.3f} ms  | "
-        f"speed-up ×{speedup:5.2f}"
+        f"{cfg_desc:55} | {cu_s:>10} | {fi_s:>10} | "
+        f"{fi_sp:>8} | {tr_s:>10} | {vt_s:>8}"
     )
 
 
@@ -117,7 +145,11 @@ if __name__ == "__main__":
     args = parse_args()
     warmup_iters, bench_iters = args.warmup_iters, args.bench_iters
 
-    shapes = [(32, 128), (64, 256), (16, 512)]
+    shapes = [
+        (32, 128), (64, 256), (16, 512),
+        (16, 3072), (128, 3072), (1024, 3072), (4096, 3072),
+        (16, 6144), (128, 6144), (1024, 6144), (4096, 6144),
+    ]
     group_sizes = [64, 128]
 
     dtypes = ["fp8", "int8"] if args.dtype == "both" else [args.dtype]
@@ -125,11 +157,15 @@ if __name__ == "__main__":
     header = (
         "Configuration".ljust(55)
         + " | "
-        + "CUDA (ms)".center(12)
+        + "CUDA".center(10)
         + " | "
-        + "Triton (ms)".center(13)
+        + "FI/SM90".center(10)
         + " | "
-        + "Speed-up"
+        + "FI spup".center(8)
+        + " | "
+        + "Triton".center(10)
+        + " | "
+        + "vs Triton"
     )
     print(header)
     print("-" * len(header))
