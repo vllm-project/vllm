@@ -1030,7 +1030,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # entry for `w_mxfp4` (w4a16); mixed schemes like `w_mxfp4_a_mxfp6_*`
         # fall through to QuantMethod.NO and raise "Unsupported kernel config
         # for moe heuristic dispatch".
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4",)
+        # NOTE: PR #39801 narrowed this from startswith("w_mxfp4") to an
+        # exact-match list, which inadvertently kicked `w_mxfp4_a_mxfp4`
+        # (used by Kimi-K2.5-MXFP4) into the emulation path.  The emulation
+        # path's `dequant_mxfp4` on the full 384-expert weight tensor
+        # crashes the gfx950 device with a HIP memory access fault, so we
+        # re-add `w_mxfp4_a_mxfp4` here.
+        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4")
         self.emulate = (
             not current_platform.supports_mx()
             or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES

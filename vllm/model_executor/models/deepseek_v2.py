@@ -348,8 +348,18 @@ class DeepseekV2MoE(nn.Module):
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
         ):
+            # `set_out_dtype` was dropped from this constructor by PR #40860
+            # (DSV4 refactor).  When `out_dtype` is left at None, the gate's
+            # forward emits bf16 router logits (it just returns the F.linear
+            # result).  Match that here so the aiter biased_grouped_topk
+            # kernel doesn't see a bf16/fp32 dtype mismatch (which produced
+            # uninitialized topk indices and a multi-GiB grid → HIP memory
+            # access fault on Kimi-K2.5 + ROCm + dflash).
+            target_dtype = self.gate.out_dtype
+            if target_dtype is None:
+                target_dtype = torch.get_default_dtype()
             self.gate.e_score_correction_bias.data = (
-                self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
+                self.gate.e_score_correction_bias.data.to(target_dtype)
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
