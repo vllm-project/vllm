@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:45:00
+#SBATCH --time=01:30:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
