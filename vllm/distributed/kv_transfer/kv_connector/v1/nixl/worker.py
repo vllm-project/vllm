@@ -53,6 +53,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
+    get_representative_spec_type,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
@@ -100,24 +101,24 @@ class NixlConnectorWorker:
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        ratio = physical_blocks_per_logical
-        logical_blocks = num_blocks // ratio
-
         num_fa_descs = num_fa_regions * num_blocks
 
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
+            # NOTE (NickLucche) With HMA, every kv group has the same number of layers
+            # and layers from different groups share the same kv tensor.
+            # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be
+            # read across all regions, same for [3], but group0-group1 blocks will
+            # always differ (different areas). Therefore we can just flatten the
+            # block_ids and compute the descs ids for all groups at once.
             block_arr = np.concatenate(block_ids)[None, :]
             region_ids = np.arange(num_fa_regions)[:, None]
             return (region_ids * num_blocks + block_arr).flatten()
 
-        # NOTE (NickLucche) With HMA, every kv group has the same number
-        # of layers and layers from different groups share the same kv
-        # tensor.  Therefore we compute desc IDs per group using the
-        # right stride:
-        # FA descs have num_blocks entries per region (kernel granularity),
-        # SSM descs have logical_blocks entries per region (no kernel
-        # splitting).
+        # Compute desc ids per group using the right stride: FA descs have
+        # num_blocks entries per region (kernel granularity), SSM descs have
+        # logical_blocks entries per region (no kernel splitting).
+        logical_blocks = num_blocks // physical_blocks_per_logical
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
@@ -197,7 +198,8 @@ class NixlConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
-        if NixlWrapper is None:
+        nixl_wrapper_cls = NixlWrapper
+        if nixl_wrapper_cls is None:
             logger.error("NIXL is not available")
             raise RuntimeError("NIXL is not available")
         logger.info("Initializing NIXL wrapper")
@@ -283,7 +285,7 @@ class NixlConnectorWorker:
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
 
-        self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), config)
+        self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
@@ -411,7 +413,10 @@ class NixlConnectorWorker:
 
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
-        logger.info("Detected attention backend %s", self.backend_name)
+        logger.info(
+            "Detected attention backend(s) %s",
+            [backend.get_name() for backend in self.attn_backends],
+        )
         logger.info("Detected kv cache layout %s", self.kv_cache_layout)
 
         # lazy initialized in register_kv_caches
@@ -426,8 +431,10 @@ class NixlConnectorWorker:
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
+        # Unwrap UniformTypeKVCacheSpecs to get the representative spec type
         self._group_spec_types = tuple(
-            type(g.kv_cache_spec) for g in self.kv_cache_config.kv_cache_groups
+            get_representative_spec_type(g.kv_cache_spec)
+            for g in self.kv_cache_config.kv_cache_groups
         )
 
         # Per-engine TP mappings. Generated during handshake.
@@ -866,9 +873,21 @@ class NixlConnectorWorker:
                 else:
                     self.block_len_per_layer.append(physical_page_size)
 
-                assert cache.shape[0] == num_blocks, (
-                    "All kv cache tensors must have the same number of blocks"
-                )
+                if cache.shape[0] != num_blocks:
+                    raise AssertionError(
+                        "All kv cache tensors must have the same number of "
+                        f"blocks; layer={layer_name}, "
+                        f"expected_num_blocks={num_blocks}, "
+                        f"cache_shape={tuple(cache.shape)}, "
+                        f"cache_stride={tuple(cache.stride())}, "
+                        f"layer_spec={type(layer_spec).__name__}, "
+                        f"backend={self.backend_name}, "
+                        "all_backends="
+                        f"{[backend.get_name() for backend in self.attn_backends]}, "
+                        f"kv_cache_layout={self.kv_cache_layout}, "
+                        "blocks_first="
+                        f"{self.transfer_topo.is_kv_layout_blocks_first}"
+                    )
 
                 if not self.use_mla:
                     # Different kv cache shape is not supported by HeteroTP.
@@ -1259,12 +1278,9 @@ class NixlConnectorWorker:
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
         self.tp_mappings[engine_id] = compute_tp_mapping(
-            transfer_topo.tp_rank,
-            transfer_topo.tp_size,
-            transfer_info.remote_tp_size,
-            transfer_topo.is_mla,
-            transfer_topo.total_num_kv_heads,
-            self._group_spec_types,
+            transfer_topology=transfer_topo,
+            remote_tp_size=remote_tp_size,
+            group_spec_types=self._group_spec_types,
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -1391,7 +1407,8 @@ class NixlConnectorWorker:
         )
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
-        if not self._has_mamba:
+        # MLA models do not need to handle kv replication.
+        if not self.use_mla and not self._has_mamba:
             assert not (
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
@@ -1915,9 +1932,9 @@ class NixlConnectorWorker:
 
         # D may have to perform multiple reads from different remote ranks.
         # MLA opt: when P TP > D TP, only a single read is executed for
-        # the first remote rank (cache is duplicated).
+        # the first remote rank (cache is duplicated)..
         if self.use_mla and tp_ratio < 0:
-            read_specs = read_specs[:1]
+            assert len(read_specs) == 1
 
         for i, spec in enumerate(read_specs):
             remote_block_size = remote_info.remote_block_size
@@ -1959,11 +1976,10 @@ class NixlConnectorWorker:
         if self.use_mla and tp_ratio < 0 and read_specs:
             # ..but we still need to notify the other remote ranks that we
             # have the blocks we need so they can update the request state.
-            notif_id = f"{req_id}:{self.world_size}".encode()
+            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
-            read_ranks = {s.remote_rank for s in read_specs}
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify not in read_ranks:
+                if rank_to_notify != read_specs[0].remote_rank:
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
