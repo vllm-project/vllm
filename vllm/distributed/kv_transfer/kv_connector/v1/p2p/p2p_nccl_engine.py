@@ -26,12 +26,45 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool,
 )
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import (
+    get_ip,
+    is_valid_ipv6_address,
+    join_host_port,
+    make_zmq_path,
+    split_host_port,
+)
 from vllm.utils.torch_utils import current_stream
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MEM_POOL_SIZE_GB = 32
+
+
+def _split_zmq_address(address: str) -> tuple[str, int]:
+    if address.startswith("["):
+        return split_host_port(address)
+
+    # Keep accepting legacy unbracketed IPv6 addresses from existing request ids.
+    host, port = address.rsplit(":", 1)
+    if not host or not port:
+        raise ValueError(f"Invalid P2P ZMQ address: {address}")
+    return host, int(port)
+
+
+def _normalize_zmq_address(address: str) -> str:
+    host, port = _split_zmq_address(address)
+    return join_host_port(host, port)
+
+
+def _make_zmq_tcp_path(address: str) -> str:
+    host, port = _split_zmq_address(address)
+    return make_zmq_path("tcp", host, port)
+
+
+def _enable_ipv6_if_needed(sock: zmq.Socket, address: str) -> None:
+    host, _ = _split_zmq_address(address)
+    if is_valid_ipv6_address(host):
+        sock.setsockopt(zmq.IPV6, 1)
 
 
 @contextmanager
@@ -95,7 +128,7 @@ class P2pNcclEngine:
         self._port = port
 
         # Each card corresponds to a ZMQ address.
-        self.zmq_address = f"{self._hostname}:{self._port}"
+        self.zmq_address = join_host_port(self._hostname, self._port)
 
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
@@ -105,7 +138,7 @@ class P2pNcclEngine:
             self.proxy_address = ""
             self.http_address = ""
         else:
-            self.proxy_address = proxy_ip + ":" + proxy_port
+            self.proxy_address = join_host_port(proxy_ip, int(proxy_port))
             # the `http_port` must be consistent with the port of OpenAI.
             http_port = self.config.get_from_extra_config("http_port", None)
             if http_port is None:
@@ -120,11 +153,12 @@ class P2pNcclEngine:
                     "kv_connector_extra_config.http_port is required. "
                     f"Example: {example}"
                 )
-            self.http_address = f"{self._hostname}:{http_port}"
+            self.http_address = join_host_port(self._hostname, int(http_port))
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
-        self.router_socket.bind(f"tcp://{self.zmq_address}")
+        _enable_ipv6_if_needed(self.router_socket, self.zmq_address)
+        self.router_socket.bind(_make_zmq_tcp_path(self.zmq_address))
 
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
@@ -201,10 +235,12 @@ class P2pNcclEngine:
 
     def create_connect(self, remote_address: str | None = None):
         assert remote_address is not None
+        remote_address = _normalize_zmq_address(remote_address)
         if remote_address not in self.socks:
             sock = self.context.socket(zmq.DEALER)
             sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
-            sock.connect(f"tcp://{remote_address}")
+            _enable_ipv6_if_needed(sock, remote_address)
+            sock.connect(_make_zmq_tcp_path(remote_address))
             self.socks[remote_address] = sock
             if remote_address in self.comms:
                 logger.info(
@@ -576,7 +612,8 @@ class P2pNcclEngine:
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
         logger.debug("ping start, zmq_address:%s", self.zmq_address)
-        sock.connect(f"tcp://{self.proxy_address}")
+        _enable_ipv6_if_needed(sock, self.proxy_address)
+        sock.connect(_make_zmq_tcp_path(self.proxy_address))
         data = {
             "type": "P" if self.config.is_kv_producer else "D",
             "http_address": self.http_address,

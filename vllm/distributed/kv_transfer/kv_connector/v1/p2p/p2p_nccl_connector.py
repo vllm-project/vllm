@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.utils.network_utils import join_host_port
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -203,7 +204,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         for request in metadata.requests:
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, False)
-            remote_address = ip + ":" + str(port + self._rank)
+            remote_address = join_host_port(ip, port + self._rank)
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
 
@@ -299,7 +300,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         for request in connector_metadata.requests:
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
-            remote_address = ip + ":" + str(port + self._rank)
+            remote_address = join_host_port(ip, port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
             self.p2p_nccl_engine.send_tensor(
@@ -512,6 +513,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if match:
             # Extract the ranks
             ip = match.group(1)
+            if ip.startswith("[") and ip.endswith("]"):
+                ip = ip[1:-1]
             port = int(match.group(2))
 
             return ip, port
