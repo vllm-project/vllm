@@ -242,8 +242,7 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 flat_route_topk_ids, num_experts
             )
             order = torch.argsort(dest_ranks)
-            flat_hidden_states = a1q.index_select(0, flat_token_indices)
-            send_hidden_states = flat_hidden_states.index_select(0, order)
+            send_hidden_states = a1q.index_select(0, flat_token_indices[order])
             send_topk_ids = flat_topk_ids.index_select(0, order)
             sent_token_indices = flat_token_indices.index_select(0, order)
             sent_topk_weights = flat_topk_weights.index_select(0, order)
