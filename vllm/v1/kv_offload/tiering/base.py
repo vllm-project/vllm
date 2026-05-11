@@ -70,27 +70,25 @@ class SecondaryTierManager(ABC):
         Submit an async job to store blocks from the primary tier to this
         secondary tier.
 
-        This method is lightweight: it allocates metadata and submits the
-        transfer job, but does NOT perform the actual data transfer on the
+        This method must be lightweight and non-blocking: allocate metadata
+        and submit the transfer, but do NOT perform the data copy on the
         calling thread.
 
-        The caller (TieringOffloadingManager) must have already called
-        primary.prepare_read(keys) to obtain job_metadata.block_ids and
-        to increment ref_cnt on those blocks. ref_cnt will be decremented
-        when get_finished() reports this job_id as complete and
-        primary.unprepare_read() is called.
+        Preconditions (guaranteed by the framework):
+          - ``job_metadata.block_ids`` are valid primary-tier slots, pinned
+            (ref-counted) for the duration of the transfer.
 
-        This method is responsible for:
-          1. Filtering out blocks already present in this secondary tier
-          2. Evicting blocks from this secondary tier if needed (secondary
-             tiers are responsible for their own evictions)
-          3. Allocating space in this secondary tier
-          4. Submitting the async transfer: primary → secondary
+        The implementation is responsible for:
+          1. Filtering out blocks already present in this tier
+          2. Evicting blocks if capacity is needed
+          3. Allocating space in this tier
+          4. Submitting the async transfer (read from primary via block_ids)
+
+        Report completion via ``get_finished()``.
 
         Args:
-            job_metadata: Job metadata including job_id, keys, and
-                          block_ids for reading blocks from the primary tier
-                          (obtained via primary.prepare_read()).
+            job_metadata: Job metadata including job_id, keys, and block_ids
+                          identifying the primary-tier slots to read from.
         """
         pass
 
@@ -100,36 +98,36 @@ class SecondaryTierManager(ABC):
         Submit an async job to load blocks from this secondary tier to the
         primary tier.
 
-        This method is lightweight: it marks blocks as in-flight and submits
-        the transfer job, but does NOT perform the actual data transfer on
-        the calling thread.
+        This method must be lightweight and non-blocking: mark blocks as
+        in-flight and submit the transfer, but do NOT perform the data copy
+        on the calling thread.
 
-        The caller (TieringOffloadingManager) must have already called
-        primary.prepare_write(keys) to obtain job_metadata.block_ids and
-        to allocate space in the primary tier. When get_finished() reports
-        this job_id as complete, primary.complete_write() is called to make
-        the blocks available for GPU loads.
+        Preconditions (guaranteed by the framework):
+          - ``job_metadata.block_ids`` are allocated primary-tier slots
+            ready to receive data.
+
+        The implementation must copy data from this tier into the
+        primary-tier slots identified by ``block_ids``.
+
+        Report completion via ``get_finished()``.
 
         Args:
-            job_metadata: Job metadata including job_id, keys, and
-                          block_ids for writing blocks into the primary tier
-                          (obtained via primary.prepare_write()).
+            job_metadata: Job metadata including job_id, keys, and block_ids
+                          identifying the primary-tier slots to write into.
         """
         pass
 
     @abstractmethod
     def get_finished(self) -> Iterable[JobResult]:
         """
-        Poll for finished async jobs (both loads and stores).
+        Return all jobs (loads and stores) that completed since the last call.
 
-        This is the mechanism by which the TieringOffloadingManager learns
-        that a transfer has finished and can:
-          - Call primary.unprepare_read() to decrement ref_cnt (for stores)
-          - Call primary.complete_write() to make blocks loadable (for loads)
+        The framework uses these results to release resources and finalize
+        transfers.
 
         Returns:
-            Iterable of JobResult objects for all jobs that have
-            finished since the last call.
+            Iterable of JobResult objects for jobs finished since the
+            last call.
         """
         pass
 
@@ -137,7 +135,7 @@ class SecondaryTierManager(ABC):
         """
         Provide a long-lived memoryview of the primary-tier CPU tensor.
 
-        Called once by TieringOffloadingManager during initialisation.
+        Called once during initialisation.
         Override to store the view for use in `submit_store` and `submit_load`.
         Use `view.strides[0]` to obtain the byte stride between block slots.
 
