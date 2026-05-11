@@ -14,6 +14,7 @@ from pydantic import ValidationError
 import vllm.config.vllm as vllm_config_module
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
     KernelConfig,
     ModelConfig,
@@ -33,8 +34,19 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_fp8_per_tensor_cache_dtype():
+    cfg = CacheConfig(cache_dtype="fp8_per_tensor")
+
+    assert cfg.cache_dtype == "fp8_per_tensor"
+    assert (
+        STR_DTYPE_TO_TORCH_DTYPE["fp8_per_tensor"]
+        is STR_DTYPE_TO_TORCH_DTYPE["fp8_inc"]
+    )
 
 
 def test_compile_config_repr_succeeds():

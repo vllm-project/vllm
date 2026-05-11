@@ -22,6 +22,7 @@ CacheDType = Literal[
     "fp8",
     "fp8_e4m3",
     "fp8_e5m2",
+    "fp8_per_tensor",
     "fp8_inc",
     "fp8_ds_mla",
     "turboquant_k8v4",

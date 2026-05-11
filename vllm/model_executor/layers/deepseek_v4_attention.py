@@ -104,6 +104,10 @@ def _normalize_dsv4_kv_cache_dtype(
         assert cache_config is not None
         cache_config.cache_dtype = "fp8_ds_mla"
         return "fp8_ds_mla"
+    if kv_cache_dtype == "fp8_inc":
+        assert cache_config is not None
+        cache_config.cache_dtype = "fp8_per_tensor"
+        return "fp8_per_tensor"
     return kv_cache_dtype
 
 
@@ -113,7 +117,7 @@ def _dsv4_kv_cache_torch_dtype(
 ) -> torch.dtype:
     if kv_cache_dtype == "fp8_ds_mla":
         return torch.uint8
-    if kv_cache_dtype == "fp8_inc":
+    if kv_cache_dtype in ("fp8_per_tensor", "fp8_inc"):
         return torch.float8_e4m3fn
     if kv_cache_dtype == "bfloat16":
         return torch.bfloat16
@@ -124,7 +128,7 @@ def _dsv4_kv_cache_torch_dtype(
     raise ValueError(
         "DeepSeek V4 FlashInfer sparse MLA supports only BF16 or per-tensor "
         f"FP8 E4M3 KV cache; got kv_cache_dtype={kv_cache_dtype}. Use "
-        "`bfloat16`/`auto` for BF16, `fp8_inc` for per-tensor FP8, or "
+        "`bfloat16`/`auto` for BF16, `fp8_per_tensor` for per-tensor FP8, or "
         "`fp8`/`fp8_ds_mla` for the legacy UE8M0 FlashMLA path."
     )
 

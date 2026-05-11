@@ -95,6 +95,7 @@ class FlashMLASparseBackend(AttentionBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "fp8_per_tensor",
         "fp8_inc",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
