@@ -503,16 +503,14 @@ def _flashinfer_sm90_per_token_group_quant_fp8(
     out_q: torch.Tensor | None,
     x_s: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Attempt per-token-group FP8 quantization via FlashInfer SM90 TMA path.
+    """Attempt per-token-group FP8 quant via FlashInfer SM90 TMA path.
 
-    Returns ``(x_q, x_s)`` on success or ``None`` when the preconditions
-    are not met.  The FlashInfer SM90 runner uses TMA for the quantize step
-    which can be significantly faster than the generic CUDA kernel.
+    Returns ``(x_q, x_s)`` on success or ``None`` when preconditions
+    are not met so the caller can fall back to the CUDA kernel.
     """
     if not (
         column_major_scales
         and tma_aligned_scales
-        and not use_ue8m0
         and group_size == 128
         and x.ndim == 2
         and x.dtype == torch.bfloat16
@@ -602,8 +600,7 @@ def per_token_group_quant_fp8(
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
-    # FlashInfer SM90 TMA fast path (Hopper, group_size=128, col-major,
-    # bf16 contiguous input).  Falls through to CUDA/Triton on mismatch.
+    # FlashInfer SM90 TMA fast path; falls back to CUDA on mismatch.
     flashinfer_result = _flashinfer_sm90_per_token_group_quant_fp8(
         x,
         group_size,

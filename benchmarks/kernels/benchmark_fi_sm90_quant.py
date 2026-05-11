@@ -2,11 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Benchmark FlashInfer SM90 vs CUDA per-token-group FP8 quantization.
 
-Compares the two code paths that ``per_token_group_quant_fp8()`` can take
-for col-major block-scale quantization on Hopper:
-  - FI_SM90: FlashInfer TMA-based ``fp8_quantize_1x128``
-  - CUDA:    vLLM custom ``torch.ops._C.per_token_group_fp8_quant``
-
 Run on H100/H200 with ``group_size=128`` and ``col_major_scales=True``.
 """
 
@@ -50,11 +45,12 @@ def _run_comparison(
     q_fi = None
     s_fi = None
 
-    # --- FI path (default) ---
+    # --- FI path ---
     try:
         def fi_impl():
             return fp8_utils.per_token_group_quant_fp8(
                 x, group_size, column_major_scales=True, tma_aligned_scales=True,
+                use_ue8m0=False,
             )
 
         # First call triggers JIT compile; warmup absorbs it
@@ -63,7 +59,7 @@ def _run_comparison(
     except Exception as e:
         print(f"  FI init failed: {e}")
 
-    # --- CUDA path (skip FI) ---
+    # --- CUDA path (skip FI via mock) ---
     try:
         with patch.object(
             fp8_utils,
@@ -74,6 +70,7 @@ def _run_comparison(
             def cuda_impl():
                 return fp8_utils.per_token_group_quant_fp8(
                     x, group_size, column_major_scales=True, tma_aligned_scales=True,
+                    use_ue8m0=False,
                 )
 
             q_cuda, s_cuda = cuda_impl()
