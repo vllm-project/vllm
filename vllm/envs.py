@@ -268,6 +268,7 @@ if TYPE_CHECKING:
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_LORA_USE_ONE_SHOT_MOE: bool = True
 
 
 def get_default_cache_root():
@@ -1789,6 +1790,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # overlap the base layer compute with the LoRA fast path).
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
+    ),
+    # Whether to use the one-shot fused MoE LoRA kernel (combined shrink+expand).
+    # When disabled, falls back to the legacy two-kernel shrink/expand path.
+    # Dual-stream MoE LoRA depends on the one-shot kernel's add_inputs=False
+    # contract, so dual-stream is force-disabled when this is off.
+    "VLLM_LORA_USE_ONE_SHOT_MOE": lambda: bool(
+        int(os.getenv("VLLM_LORA_USE_ONE_SHOT_MOE", "1"))
     ),
 }
 

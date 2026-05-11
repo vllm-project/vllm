@@ -2083,7 +2083,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         #
         # Note on torch.compile :
         # The whole MoE forward is already wrapped in torch.ops.vllm.moe_forward`,
-        # so we don't need to wrapp the following code as custom op
+        # so we don't need to wrap the following code as custom op
         sorted_token_ids_lora = None
         expert_ids_lora = None
         num_tokens_post_padded_lora = None

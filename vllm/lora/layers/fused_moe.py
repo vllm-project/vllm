@@ -58,8 +58,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # the linear-LoRA dual-stream path in
         # vllm/lora/layers/base_linear.py); enabling it for a deployment
         # turns dual-stream on for both linear and MoE LoRA layers in one
-        # switch.
-        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        # switch. Dual-stream relies on the one-shot kernel's
+        # add_inputs=False contract, so it is force-disabled when the
+        # one-shot path is turned off via VLLM_LORA_USE_ONE_SHOT_MOE=0.
+        self._enable_aux_cuda_stream = (
+            envs.VLLM_LORA_ENABLE_DUAL_STREAM and envs.VLLM_LORA_USE_ONE_SHOT_MOE
+        )
         self._init_lora_stream_context()
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)

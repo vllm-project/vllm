@@ -1669,9 +1669,8 @@ def test_fused_moe_lora_kernel_dual_stream_cuda_graph(device):
     out_graph = residual.clone()
     capture_stream = torch.cuda.Stream()
     capture_stream.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(capture_stream):
-        with torch.cuda.graph(g, stream=capture_stream):
-            _run_dual_stream(out_graph)
+    with torch.cuda.stream(capture_stream), torch.cuda.graph(g, stream=capture_stream):
+        _run_dual_stream(out_graph)
     torch.cuda.current_stream().wait_stream(capture_stream)
     torch.cuda.synchronize()
 
