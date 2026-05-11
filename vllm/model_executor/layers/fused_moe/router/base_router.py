@@ -181,19 +181,13 @@ class BaseRouter(FusedMoERouter):
         if self.eplb_state is not None:
             eplb_state = self.eplb_state
             if eplb_state.expert_load_view is None:
-                raise ValueError("enable_eplb=True requires expert_load_view != None")
+                raise ValueError("EPLB requires expert_load_view != None")
             if eplb_state.logical_to_physical_map is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_to_physical_map != None"
-                )
+                raise ValueError("EPLB requires logical_to_physical_map != None")
             if eplb_state.logical_replica_count is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_replica_count != None"
-                )
+                raise ValueError("EPLB requires logical_replica_count != None")
             if eplb_state.should_record_tensor is None:
-                raise ValueError(
-                    "enable_eplb=True requires should_record_tensor != None"
-                )
+                raise ValueError("EPLB requires should_record_tensor != None")
 
     def _get_indices_type(self) -> torch.dtype | None:
         """Get the desired indices dtype from the getter function."""
