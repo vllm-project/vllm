@@ -288,8 +288,7 @@ __global__ void gemm_q4_kernel_rdna3(
   // (the v_dot2_f32_bf16 branch).  The fp16 inner loop still indexes
   // block_a[m][a_off] unconditionally, so for fp16 we MUST stage A through
   // LDS even at M=1 to avoid reading uninitialized shared memory.
-  constexpr bool USE_LDS_A =
-      (M_COUNT > 1) || std::is_same<T, half>::value;
+  constexpr bool USE_LDS_A = (M_COUNT > 1) || std::is_same<T, half>::value;
   if constexpr (USE_LDS_A) {
     if (offset_k + t < end_k) {
 #pragma unroll
