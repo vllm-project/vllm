@@ -275,7 +275,7 @@ def test_prepare_load_preserves_key_order():
         k: int(bid)
         for k, bid in zip(store_output.keys_to_store, store_output.store_spec.block_ids)
     }
-    manager.complete_store([key_a, key_b, key_c])
+    manager.complete_store([key_a, key_b, key_c], _EMPTY_REQ_CTX)
 
     # Forward order: [a, b, c]
     spec_fwd = manager.prepare_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)
@@ -285,7 +285,7 @@ def test_prepare_load_preserves_key_order():
         key_to_block_id[key_b],
         key_to_block_id[key_c],
     ]
-    manager.complete_load([key_a, key_b, key_c])  # order irrelevant
+    manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
     # Arbitrary permutation: [b, c, a]
     spec_perm = manager.prepare_load([key_b, key_c, key_a], _EMPTY_REQ_CTX)
@@ -295,7 +295,7 @@ def test_prepare_load_preserves_key_order():
         key_to_block_id[key_c],
         key_to_block_id[key_a],
     ]
-    manager.complete_load([key_a, key_b, key_c])  # order irrelevant
+    manager.complete_load([key_a, key_b, key_c], _EMPTY_REQ_CTX)  # order irrelevant
 
 
 class TestARCPolicy:
