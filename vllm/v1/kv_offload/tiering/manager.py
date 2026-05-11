@@ -202,16 +202,12 @@ class TieringOffloadingManager(OffloadingManager):
             for completed_job in tier.get_finished():
                 job_id = completed_job.job_id
                 job_metadata = self._transfer_jobs.pop(job_id, None)
+                assert job_metadata is not None, (
+                    f"Finished job_id {job_id} from tier #{i}"
+                    f" ({tier.get_tier_type()}) not in _transfer_jobs"
+                )
 
-                if job_metadata is None:
-                    logger.error(
-                        "Received finished job for unknown job_id %d"
-                        " from tier #%d (%s)",
-                        job_id,
-                        i,
-                        tier.get_tier_type(),
-                    )
-                elif job_metadata.is_promotion:
+                if job_metadata.is_promotion:
                     # secondary→primary transfer (promotion) completed.
                     # Make blocks available in primary tier.
                     self.primary_tier.complete_write(
