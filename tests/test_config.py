@@ -15,6 +15,7 @@ import vllm.config.vllm as vllm_config_module
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    DeviceConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -47,6 +48,16 @@ def test_compile_config_repr_succeeds():
     val = repr(config)
     assert "VllmConfig" in val
     assert "inductor_passes" in val
+
+
+@pytest.mark.skip_global_cleanup
+def test_device_config_uses_platform_cpu_device_hook(monkeypatch):
+    monkeypatch.setattr(current_platform, "uses_cpu_device", lambda: True)
+
+    device_config = DeviceConfig(device="cpu")
+
+    assert device_config.device_type == "cpu"
+    assert device_config.device is None
 
 
 @pytest.mark.skip_global_cleanup
