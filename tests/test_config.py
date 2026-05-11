@@ -5,10 +5,12 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 import pydantic
 import pytest
+import torch
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
@@ -51,13 +53,28 @@ def test_compile_config_repr_succeeds():
 
 
 @pytest.mark.skip_global_cleanup
-def test_device_config_uses_platform_cpu_device_hook(monkeypatch):
+def test_device_config_uses_platform_cpu_device_hook_for_platform_device(
+    monkeypatch,
+):
+    custom_device_type = cast(Any, "custom_device")
+    monkeypatch.setattr(current_platform, "device_type", custom_device_type)
+    monkeypatch.setattr(current_platform, "uses_cpu_device", lambda: True)
+
+    device_config = DeviceConfig(device=custom_device_type)
+
+    assert device_config.device_type == custom_device_type
+    assert device_config.device is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_device_config_keeps_explicit_non_platform_device(monkeypatch):
+    monkeypatch.setattr(current_platform, "device_type", "custom_device")
     monkeypatch.setattr(current_platform, "uses_cpu_device", lambda: True)
 
     device_config = DeviceConfig(device="cpu")
 
     assert device_config.device_type == "cpu"
-    assert device_config.device is None
+    assert device_config.device == torch.device("cpu")
 
 
 @pytest.mark.skip_global_cleanup
