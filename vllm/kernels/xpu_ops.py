@@ -81,6 +81,8 @@ def rotary_embedding(
     is_neox_style: bool,
     offsets: Tensor | None = None,
     cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
 ) -> tuple[Tensor, Tensor]:
     if cos_sin_format == "standard":
         torch.ops._C.rotary_embedding(
@@ -90,6 +92,8 @@ def rotary_embedding(
             head_size,
             cos_sin_cache,
             is_neox_style,
+            rope_dim_offset,
+            inverse,
         )
         return query, key
 

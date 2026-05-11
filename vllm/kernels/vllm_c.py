@@ -63,7 +63,7 @@ def fused_add_rms_norm(
     return x, x_residual
 
 
-def rotary_no_offsets(
+def rotary_c_supported(
     positions: Tensor,
     query: Tensor,
     key: Tensor,
@@ -73,13 +73,19 @@ def rotary_no_offsets(
     is_neox_style: bool,
     offsets: Tensor | None = None,
     cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
 ) -> bool:
-    return offsets is None and cos_sin_format == "standard"
+    # standard: offsets not supported (positions are used directly)
+    # deepseek: offsets are applied to positions before the C call
+    if cos_sin_format == "standard":
+        return offsets is None
+    return cos_sin_format == "deepseek"
 
 
 @ir.ops.rotary_embedding.register_impl(
     "vllm_c",
-    supports_args=rotary_no_offsets,
+    supports_args=rotary_c_supported,
     inplace=True,
 )
 def rotary_embedding(
@@ -92,7 +98,11 @@ def rotary_embedding(
     is_neox_style: bool,
     offsets: Tensor | None = None,
     cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
 ) -> tuple[Tensor, Tensor]:
+    if cos_sin_format == "deepseek" and offsets is not None:
+        positions = torch.add(positions, offsets)
     torch.ops._C.rotary_embedding(
         positions,
         query,
@@ -100,5 +110,7 @@ def rotary_embedding(
         head_size,
         cos_sin_cache,
         is_neox_style,
+        rope_dim_offset,
+        inverse,
     )
     return query, key

@@ -160,8 +160,15 @@ def rotary_no_offsets_16bit_only(
     is_neox_style: bool,
     offsets: Tensor | None = None,
     cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
 ) -> bool:
-    return offsets is None and cos_sin_format == "standard"
+    return (
+        offsets is None
+        and cos_sin_format == "standard"
+        and not inverse
+        and rope_dim_offset == 0
+    )
 
 
 @ir.ops.rotary_embedding.register_impl(
@@ -180,6 +187,8 @@ def rotary_embedding(
     is_neox_style: bool,
     offsets: Tensor | None = None,
     cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
 ) -> tuple[Tensor, Tensor]:
     torch.ops.vllm.rocm_aiter_triton_rotary_embedding(
         positions,
