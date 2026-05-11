@@ -178,6 +178,14 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # Analogous to all_moe_layers / moe_layer_index but for KV cache update ops
+    # (unified_kv_cache_update and unified_mla_kv_cache_update). When set,
+    # those ops receive the sentinel "from_forward_context" instead of a
+    # layer-specific string, enabling Inductor to reuse piecewise CUDA graphs
+    # across all attention layers.
+    all_kv_cache_update_layers: list[str] | None = None
+    kv_cache_update_index: int = 0
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -218,9 +226,17 @@ def create_forward_context(
     else:
         all_moe_layers = None
 
+    if vllm_config.compilation_config.fast_kv_cache_cold_start:
+        all_kv_cache_update_layers = (
+            vllm_config.compilation_config.static_all_kv_cache_update_layers
+        )
+    else:
+        all_kv_cache_update_layers = None
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
+        all_kv_cache_update_layers=all_kv_cache_update_layers,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
