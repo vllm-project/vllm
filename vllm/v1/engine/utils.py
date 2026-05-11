@@ -131,30 +131,52 @@ class CoreEngineProcManager:
         is_dp = vllm_config.parallel_config.data_parallel_size > 1
 
         from vllm.v1.engine.core import EngineCoreProc
+        from vllm.v1.engine.prespawn import take_pending
+
+        # Adopt any pre-spawned children as the first `len(prespawned)` engines.
+        # Falls back to the normal spawn path if the topology doesn't match.
+        prespawned = take_pending()
+        if prespawned and len(prespawned) != local_engine_count:
+            for p in prespawned:
+                p.shutdown()
+            prespawned = []
 
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
+            kwargs = common_kwargs | {
+                "dp_rank": global_index,
+                "local_dp_rank": local_index,
+            }
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
-            self.processes.append(
-                context.Process(
-                    target=EngineCoreProc.run_engine_core,
-                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
-                    kwargs=common_kwargs
-                    | {"dp_rank": global_index, "local_dp_rank": local_index},
+            if index < len(prespawned):
+                # Child was spawned earlier; hand it the kwargs it's blocked on.
+                prespawned[index].send_config(**kwargs)
+                self.processes.append(prespawned[index].proc)
+            else:
+                self.processes.append(
+                    context.Process(
+                        target=EngineCoreProc.run_engine_core,
+                        name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
+                        kwargs=kwargs,
+                    )
                 )
-            )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
         try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+            for index, (proc, local_dp_rank) in enumerate(
+                zip(self.processes, local_dp_ranks)
+            ):
+                if index < len(prespawned):
+                    # Already running (prespawned path).
+                    continue
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
                 # For CUDA platforms, we use torch.accelerator.set_device_index()()

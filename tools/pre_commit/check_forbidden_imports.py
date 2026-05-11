@@ -41,6 +41,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/weight_transfer/ipc_engine.py",
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
+            "vllm/v1/engine/prespawn.py",
             "tests/multimodal/media/test_base.py",
             "tests/tokenizers_/test_hf.py",
             "tests/utils_/test_hashing.py",

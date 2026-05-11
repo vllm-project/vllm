@@ -45,6 +45,18 @@ class ServeSubcommand(CLISubcommand):
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
 
+        # Kick off the EngineCore subprocess now so its imports overlap the
+        # parent's VllmConfig construction. The handle is picked up later
+        # by CoreEngineProcManager. Skipped for headless / gRPC paths.
+        if (
+            envs.VLLM_PRESPAWN_ENGINE
+            and not getattr(args, "grpc", False)
+            and not args.headless
+        ):
+            from vllm.v1.engine.prespawn import prespawn_engine_core
+
+            prespawn_engine_core()
+
         if getattr(args, "grpc", False):
             from vllm.entrypoints.grpc_server import serve_grpc
 

@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
+    VLLM_PRESPAWN_ENGINE: bool = False
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -790,6 +791,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
         "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
     ),
+    # If set, `vllm serve` launches the EngineCore subprocess before parsing
+    # args / building VllmConfig so that its heavy imports overlap parent
+    # startup. Only `data_parallel_size_local == 1` is supported; other
+    # topologies fall back to the normal spawn path.
+    "VLLM_PRESPAWN_ENGINE": lambda: bool(int(os.getenv("VLLM_PRESPAWN_ENGINE", "0"))),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(
         os.getenv(
