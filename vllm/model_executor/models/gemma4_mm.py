@@ -1120,14 +1120,18 @@ class Gemma4ForConditionalGeneration(
         vt = self.vision_tower
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
 
-        # When concurrent requests have different image resolutions,
-        # reduce_data returns a list of per-image tensors instead of
-        # a single stacked tensor. Same-resolution batches may still
-        # arrive as a stacked tensor. Both forms are iterable over the
-        # per-image dimension, so process them uniformly below.
-        # TODO(optimization): Spatially pad images to uniform
-        # (H_max, W_max) in the input processor so the vision tower
-        # can process them in a single batched call.
+        # TODO: Move this per-image loop into the input processor to
+        # reduce dynamism at the model runner / engine core. This
+        # requires spatially padding all images to uniform (H_max,
+        # W_max) in _call_hf_processor() so they arrive as a single
+        # stacked tensor, tracking padded regions via image_sizes
+        # metadata, and validating numerical equivalence with the
+        # current per-image path.
+        #
+        # Concurrent requests with different image resolutions may
+        # arrive as a list of per-image tensors, while same-resolution
+        # batches may arrive as a stacked tensor. Both forms are
+        # iterable over the per-image dimension.
 
         # Process each image individually through the vision tower.
         # The vision tower's forward() strips padding and returns a
