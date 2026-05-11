@@ -461,6 +461,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         num_slices: int,
         fully_sharded: bool,
         use_tuned_config: bool,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,

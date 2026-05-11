@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
     get_kv_transfer_group,
 )
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
 # Importing utils registers TestExampleConnector with the factory
@@ -38,7 +39,10 @@ def test_kv_connector_mixin_clears_metadata():
     vllm_config.kv_transfer_config.kv_connector_extra_config["name"] = "unit"
 
     # Initialize the global connector instance
-    ensure_kv_transfer_initialized(vllm_config)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    ensure_kv_transfer_initialized(vllm_config, kv_cache_config)
 
     try:
         # Minimal scheduler output with empty metadata; mixin should still
