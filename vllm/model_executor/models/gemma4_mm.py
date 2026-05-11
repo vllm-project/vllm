@@ -61,6 +61,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -957,6 +958,14 @@ class Gemma4ForConditionalGeneration(
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            if getattr(config.vision_config, "standardize", False):
+                # std_bias reaches ~5.4e4; `h - std_bias` overflows fp16.
+                safe_dtype = (
+                    torch.bfloat16
+                    if torch.bfloat16 in current_platform.supported_dtypes
+                    else torch.float32
+                )
+                self.vision_tower = self.vision_tower.to(safe_dtype)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config, config.text_config
             )
@@ -1133,9 +1142,10 @@ class Gemma4ForConditionalGeneration(
         # flat tensor of valid tokens. We process per-image to get
         # variable-length outputs matching the dynamic token count
         # from get_image_repl.
+        vt_dtype = next(vt.parameters()).dtype
         per_image_features = []
         for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
+            pv = pixel_values[i].unsqueeze(0).to(vt_dtype)  # (1, max_patches, patch_pixels)
             pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
 
             # Derive the pooler's output_length from the total patch
@@ -1195,6 +1205,7 @@ class Gemma4ForConditionalGeneration(
         frame_counts = video_input["video_frame_counts"]
 
         vt = self.vision_tower
+        vt_dtype = next(vt.parameters()).dtype
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
         target_dtype = self.embed_vision.embedding_projection.weight.dtype
 
@@ -1211,7 +1222,7 @@ class Gemma4ForConditionalGeneration(
         for pv_chunk, pp_chunk in zip(pv_per_video, pp_per_video):
             frame_embs = []
             for i in range(pv_chunk.shape[0]):
-                pv = pv_chunk[i].unsqueeze(0)
+                pv = pv_chunk[i].unsqueeze(0).to(vt_dtype)
                 pp = pp_chunk[i].unsqueeze(0)
 
                 max_patches = pv.shape[1]
