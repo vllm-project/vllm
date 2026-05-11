@@ -68,7 +68,9 @@ For further details on pooling models, please refer to [this page](../../models/
 
 ## Disaggregated APIs
 
-### vLLM render APIs
+### Renderer APIs
+
+For further details on renderer APIs, please refer to [this page](renderer.md).
 
 - [Completions Render API](renderer.md) (`/v1/completions/render`)
     - Render completion requests
