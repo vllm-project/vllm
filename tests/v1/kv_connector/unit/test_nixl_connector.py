@@ -321,6 +321,34 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
+def test_abort_immediately_remote_prefill_enqueues_empty_recv():
+    """A remote-prefill request added with abort_immediately=True should
+    be added to the scheduler's waiting queue then immediately aborted, so the
+    NIXL connector's request_finished hook enqueues an empty recv to notify
+    the prefill instance to free its blocks."""
+    from vllm.v1.request import RequestStatus
+
+    scheduler = create_scheduler(create_vllm_config())
+
+    request = create_request(request_id=42, num_tokens=10, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
+    assert request.kv_transfer_params["do_remote_prefill"] is True
+
+    # Mimic the EngineCore.add_request path for an abort-immediately req.
+    scheduler.add_request(request)
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+
+    scheduler_output = scheduler.schedule()
+    meta = scheduler_output.kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    assert set(meta.reqs_to_recv) == {request.request_id}
+    req_meta = meta.reqs_to_recv[request.request_id]
+    assert req_meta.local_block_ids == []
+    assert req_meta.remote.request_id == f"prefill-{42}"
+    # do_remote_prefill is consumed by request_finished to prevent re-issuing.
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
     FakeNixlWrapper,
