@@ -15,7 +15,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-ethernet-nccl-ib-smoke-2026-05-09-v7"
+SCRIPT_VERSION="arc-ray-qwen-3.6-35b-2026-05-11-v1"
 
 # Set DEBUG_SLURM_SCRIPT=1 for extra diagnostics (DNS probes, PATH, ray location).
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
