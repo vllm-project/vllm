@@ -18,6 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     VLLM_USE_PRECOMPILED=1 \
     VLLM_USE_FLASHINFER_SAMPLER=0 \
     VLLM_WORKER_MULTIPROC_METHOD=spawn \
+    UV_CACHE_DIR=/tmp/uv-cache \
     DAMORK_MODEL=PWLabs/Qwen3.5-0.8B \
     DAMORK_SERVED_MODEL_NAME=damork \
     DAMORK_HOST=0.0.0.0 \
@@ -43,8 +44,8 @@ RUN python3 -m venv /opt/damork-vllm \
 
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --editable . --torch-backend=auto
+RUN uv pip install --editable . --torch-backend=auto \
+    && rm -rf "${UV_CACHE_DIR}"
 
 COPY docker/damork-entrypoint.sh /usr/local/bin/damork-entrypoint
 RUN sed -i 's/\r$//' /usr/local/bin/damork-entrypoint \

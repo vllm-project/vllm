@@ -1,7 +1,10 @@
 /.venv
 /build
 dist
-vllm/*.so
+**/*.so
+**/*.pyd
+**/*.dll
+**/*.dylib
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -9,6 +12,15 @@ __pycache__/
 *$py.class
 
 .mypy_cache
+
+# Large source trees that are not needed for the Damork runtime image.
+/benchmarks/
+/docs/
+/examples/
+/tests/
+/.buildkite/
+/.gemini/
+/.github/
 
 # Distribution / packaging
 .Python
