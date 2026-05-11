@@ -211,6 +211,11 @@ class IPCWeightTransferEngine(
         - 'ray': Sends weights via Ray RPC to a Ray-based LLM handle
         - 'http': Sends weights via HTTP POST to a vLLM HTTP server
 
+        .. note::
+            This method calls ``update_weights`` internally. The caller must
+            call ``start_weight_update`` before and ``finish_weight_update``
+            after this method.
+
         Args:
             iterator: Iterator of model parameters. Returns (name, tensor) tuples.
                      Tensors should be on the same GPU as the inference workers.

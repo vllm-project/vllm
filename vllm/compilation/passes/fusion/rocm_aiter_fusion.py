@@ -321,7 +321,18 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
 
-            for match_aiter_quant in [True, False]:
+            # When quant_fp8 custom ops are disabled, both AITER and native
+            # quant matchers trace through QuantFP8's native implementation.
+            # Registering both variants would create duplicate Inductor
+            # patterns.
+            is_quant_fp8_enabled = config.compilation_config.is_custom_op_enabled(
+                "quant_fp8"
+            )
+            match_aiter_quant_options = (
+                [True, False] if is_quant_fp8_enabled else [False]
+            )
+
+            for match_aiter_quant in match_aiter_quant_options:
                 # Fuse aiter rms_norm + (aiter / vllm built-in)
                 # dynamic per-token fp8 quant
                 AiterRMSNormDynamicQuantPattern(
