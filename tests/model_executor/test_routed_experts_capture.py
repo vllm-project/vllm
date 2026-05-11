@@ -22,15 +22,11 @@ def test_bind_routing_capture_to_model_sets_layer_view(monkeypatch):
         _routing_replay_out: torch.Tensor | None = None
 
     class DummyFusedMoE:
-        def __init__(self, moe_layer_id):
-            self.moe_layer_id = moe_layer_id
+        def __init__(self, name: str):
+            self.layer_name = name
             self.moe_config = _DummyMoEConfig()
             self.quant_method = _DummyQuantMethod()
             self.router = _DummyRouter()
-
-        @property
-        def layer_id(self) -> int:
-            return self.moe_layer_id
 
     monkeypatch.setattr(fused_moe_layer, "FusedMoE", DummyFusedMoE)
 
@@ -45,13 +41,13 @@ def test_bind_routing_capture_to_model_sets_layer_view(monkeypatch):
         def get_device_cache(self):
             return DummyDeviceCache(buffer)
 
-        def map_layer_id(self, id: int) -> int:
-            return id
+        def map_layer_to_id(self, name: str) -> int:
+            return int(name)
 
     monkeypatch.setattr(rec_mod, "get_global_experts_capturer", lambda: DummyCapturer())
 
-    m0 = DummyFusedMoE(moe_layer_id=0)
-    m2 = DummyFusedMoE(moe_layer_id=2)
+    m0 = DummyFusedMoE(name="0")
+    m2 = DummyFusedMoE(name="2")
 
     class DummyModel:
         def modules(self):

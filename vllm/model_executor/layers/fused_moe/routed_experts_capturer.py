@@ -221,7 +221,7 @@ class RoutedExpertsCapturer(ABC):
     def get_device_cache(self):
         raise NotImplementedError
 
-    def map_layer_id(self, layer_id: int) -> int:
+    def map_layer_to_id(self, layer_name: str) -> int:
         raise NotImplementedError
 
 
@@ -296,7 +296,7 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             device=device,
         )
 
-        self._id_map: dict[int, int] = {}
+        self._id_map: dict[str, int] = {}
 
         # ---- Async D2H pipeline (rank-0 only) ----
         # Non-rank-0 workers only need the device buffer for symmetric
@@ -481,12 +481,12 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
     def get_device_cache(self):
         return self.device_cache
 
-    def map_layer_id(self, layer_id: int) -> int:
-        if layer_id not in self._id_map:
+    def map_layer_to_id(self, layer_name: str) -> int:
+        if layer_name not in self._id_map:
             next_id = len(self._id_map)
-            self._id_map[layer_id] = next_id
+            self._id_map[layer_name] = next_id
             return next_id
-        return self._id_map[layer_id]
+        return self._id_map[layer_name]
 
 
 class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
@@ -511,7 +511,7 @@ class _RoutedExpertsCapturerNoop(RoutedExpertsCapturer):
     def get_device_cache(self):
         pass
 
-    def map_layer_id(self, layer_id: int) -> int:
+    def map_layer_to_id(self, layer_name: str) -> int:
         return 0
 
 
@@ -830,7 +830,7 @@ def bind_routing_capture_to_model(model) -> None:
                     f"dp_size={module.moe_config.dp_size})."
                 )
 
-            layer_id = capturer.map_layer_id(module.layer_id)
+            layer_id = capturer.map_layer_to_id(module.layer_name)
             layer_buf = buffer[layer_id]  # (N_max, K)
             module.router._routing_replay_out = layer_buf
             # Mark each per-layer view as static so CUDA graphs don't

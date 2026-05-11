@@ -334,6 +334,8 @@ class FusedMoE(PluggableLayer):
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
 
+        print(f"PREFIX = {prefix}")
+
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
