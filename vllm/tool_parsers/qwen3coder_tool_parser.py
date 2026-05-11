@@ -35,8 +35,6 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
-    supports_required_and_named: bool = False
-
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
