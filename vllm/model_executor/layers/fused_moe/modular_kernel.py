@@ -1090,14 +1090,31 @@ class FusedMoEKernelModularImpl:
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        # Reuse workspace13 for the output since there is only one chunk.
-        max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
-        common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
-            ((max_shape_size,), workspace_dtype),
-            (workspace2_shape, workspace_dtype),
-        )
-        workspace13 = _resize_cache(common_workspace, workspace13_shape)
-        fused_out = _resize_cache(common_workspace, fused_out_shape)
+        if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
+            workspace13 = torch.empty(
+                workspace13_shape,
+                dtype=workspace_dtype,
+                device=device,
+            )
+            workspace2 = torch.empty(
+                workspace2_shape,
+                dtype=workspace_dtype,
+                device=device,
+            )
+            fused_out = torch.empty(
+                fused_out_shape,
+                dtype=out_dtype,
+                device=device,
+            )
+        else:
+            # Reuse workspace13 for the output since there is only one chunk.
+            max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
+            common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
+                ((max_shape_size,), workspace_dtype),
+                (workspace2_shape, workspace_dtype),
+            )
+            workspace13 = _resize_cache(common_workspace, workspace13_shape)
+            fused_out = _resize_cache(common_workspace, fused_out_shape)
 
         return workspace13, workspace2, fused_out
 
