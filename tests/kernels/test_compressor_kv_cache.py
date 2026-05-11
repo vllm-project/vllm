@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Round-trip tests for compressor -> FP8 quant + KV cache insert -> gather + dequant.
+Round-trip tests for compressor → FP8 quant + KV cache insert → gather + dequant.
 
 These tests cover:
   A) DeepseekV4 Attention: head_dim=512 (448 FP8 nope + 64 bf16 rope), quant_block=64
