@@ -4822,6 +4822,21 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
+            # Build per-request mrope_position_deltas for VLM decode-step
+            # position computation in the proposer. Non-MRoPE models get None
+            # and take the existing fallback path unchanged.
+            mrope_position_deltas = None
+            if self.uses_mrope:
+                mrope_position_deltas = torch.tensor(
+                    [
+                        self.requests[self.input_batch.req_ids[i]
+                                      ].mrope_position_delta or 0
+                        for i in range(self.input_batch.num_reqs)
+                    ],
+                    dtype=torch.long,
+                    device=self.device,
+                )
+
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -4833,6 +4848,7 @@ class GPUModelRunner(
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
+                mrope_position_deltas=mrope_position_deltas,
             )
 
         return draft_token_ids
