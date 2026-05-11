@@ -85,6 +85,9 @@ plugins:
         - "vllm.vllm_flash_attn"
         - "re:vllm\\.grpc\\..*_pb2.*"  # Auto-generated protobuf files
         - !ENV [API_AUTONAV_EXCLUDE, "re:^$"]  # Match nothing by default
+  - gen-files:
+      scripts:
+        - docs/mkdocs/plugins/gen_env_vars.py
   - mkdocstrings:
       handlers:
         python:

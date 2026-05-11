@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
+from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,13 @@ class BuildSettings(BaseSettings):
     main_cuda_version: str = "13.0"
     max_jobs: str | None = Field(default=None, alias="MAX_JOBS")
     nvcc_threads: str | None = Field(default=None, alias="NVCC_THREADS")
-    use_precompiled: bool = False
+    use_precompiled: bool = Field(
+        default=False,
+        description=(
+            "Use precompiled binaries (.so) instead of building from source. "
+            "Implicitly enabled when VLLM_PRECOMPILED_WHEEL_LOCATION is set."
+        ),
+    )
     skip_precompiled_version_suffix: bool = False
     docker_build_context: bool = False
     cmake_build_type: Literal["Debug", "Release", "RelWithDebInfo"] | None = Field(
@@ -259,7 +266,13 @@ class DistributedSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
     dp_rank: int = 0
-    dp_rank_local: int = -1
+    dp_rank_local: int = Field(
+        default=-1,
+        description=(
+            "Local data-parallel rank. Defaults to VLLM_DP_RANK when this "
+            "variable is not explicitly set."
+        ),
+    )
     dp_size: int = 1
     dp_master_ip: str = "127.0.0.1"
     dp_master_port: int = 0
@@ -318,7 +331,14 @@ class MediaSettings(BaseSettings):
     video_loader_backend: str = "opencv"
     media_connector: str = "http"
     mm_hasher_algorithm: Literal["blake3", "sha256", "sha512"] = "blake3"
-    object_storage_shm_buffer_name: str | None = None
+    object_storage_shm_buffer_name: str | None = Field(
+        default=None,
+        description=(
+            "Name of the POSIX shared-memory segment used for multimodal "
+            "object storage. When unset, vLLM auto-generates a UUID-suffixed "
+            "name and writes it back to the environment."
+        ),
+    )
     assets_cache_model_clean: bool = False
 
     @field_validator("mm_hasher_algorithm", mode="before")
@@ -539,6 +559,10 @@ class UsageSettings(BaseSettings):
     do_not_track: bool = Field(
         default=False,
         validation_alias=AliasChoices("VLLM_DO_NOT_TRACK", "DO_NOT_TRACK"),
+        description=(
+            "Disable usage stats reporting. Also accepts the legacy "
+            "DO_NOT_TRACK environment variable."
+        ),
     )
     usage_source: str = "production"
     ci_use_s3: bool = False
@@ -688,33 +712,41 @@ class Settings(BaseSettings):
 # ----------------------------------------------------------------------------
 
 
+def resolve_env_name(info: FieldInfo, field_name: str, prefix: str) -> str:
+    """Resolve the canonical environment variable name for a pydantic field.
+
+    Used by the registry builder and the docs generator
+    (docs/mkdocs/plugins/gen_env_vars.py).
+
+    - explicit ``alias=`` wins (used for non-VLLM_ env vars)
+    - ``AliasChoices`` -> first choice (e.g., DO_NOT_TRACK fallback)
+    - sentinel for VLLM_TPU_USING_PATHWAYS -> the canonical name
+    - otherwise: ``prefix + field_name.upper()``
+    """
+    if info.alias is not None:
+        return info.alias
+    va = info.validation_alias
+    if va is None:
+        return prefix + field_name.upper()
+    if isinstance(va, AliasChoices):
+        first = va.choices[0]
+        return first if isinstance(first, str) else str(first)
+    if isinstance(va, str):
+        if va == "__VLLM_TPU_USING_PATHWAYS_UNSET_SENTINEL__":
+            return "VLLM_TPU_USING_PATHWAYS"
+        return va
+    return prefix + field_name.upper()
+
+
 def _build_registry() -> dict[str, tuple[str, str]]:
     registry: dict[str, tuple[str, str]] = {}
-
     for sub_attr, sub_field in Settings.model_fields.items():
         sub_cls = sub_field.annotation
         if not (isinstance(sub_cls, type) and issubclass(sub_cls, BaseSettings)):
             continue
         prefix = sub_cls.model_config.get("env_prefix", "") or ""
         for field_name, info in sub_cls.model_fields.items():
-            env_name: str
-            if info.alias is not None:
-                env_name = info.alias
-            elif info.validation_alias is not None:
-                va = info.validation_alias
-                if isinstance(va, AliasChoices):
-                    first = va.choices[0]
-                    env_name = first if isinstance(first, str) else str(first)
-                elif isinstance(va, str):
-                    if va == "__VLLM_TPU_USING_PATHWAYS_UNSET_SENTINEL__":
-                        env_name = "VLLM_TPU_USING_PATHWAYS"
-                    else:
-                        env_name = va
-                else:
-                    env_name = prefix + field_name.upper()
-            else:
-                env_name = prefix + field_name.upper()
-
+            env_name = resolve_env_name(info, field_name, prefix)
             if env_name in registry:
                 raise RuntimeError(
                     f"Env var {env_name!r} registered by multiple fields: "
@@ -736,6 +768,12 @@ _settings: Settings | None = None
 
 
 def _get_settings() -> Settings:
+    """Return the cached Settings singleton.
+
+    Only used after ``enable_envs_cache()`` has run; otherwise each attribute
+    read constructs a fresh ``Settings`` so subsequent mutations to
+    ``os.environ`` are visible (matching the pre-refactor lambda behavior).
+    """
     global _settings
     if _settings is None:
         _settings = Settings()
@@ -744,7 +782,11 @@ def _get_settings() -> Settings:
 
 def _get_attr(name: str) -> Any:
     sub_attr, field_name = _VAR_TO_PATH[name]
-    settings = _get_settings()
+    # When the cache wrapper is active we read from the cached singleton.
+    # Otherwise construct a fresh Settings each access so subsequent
+    # mutations to os.environ are visible (matching the pre-refactor
+    # lambda behavior of re-evaluating env vars on every read).
+    settings = _get_settings() if _is_envs_cache_enabled() else Settings()
     sub = getattr(settings, sub_attr)
     return getattr(sub, field_name)
 
@@ -752,11 +794,6 @@ def _get_attr(name: str) -> Any:
 # ----------------------------------------------------------------------------
 # Back-compat shim: environment_variables dict
 # ----------------------------------------------------------------------------
-
-# The start-* and end-* markers here are used by the documentation generator
-# to extract the used env vars.
-
-# --8<-- [start:env-vars-definition]
 
 
 def _make_env_getter(name: str) -> Callable[[], Any]:
@@ -766,8 +803,6 @@ def _make_env_getter(name: str) -> Callable[[], Any]:
 environment_variables: dict[str, Callable[[], Any]] = {
     name: _make_env_getter(name) for name in _VAR_TO_PATH
 }
-
-# --8<-- [end:env-vars-definition]
 
 
 # ----------------------------------------------------------------------------

@@ -244,9 +244,19 @@ def test_validate_environ_unknown_var_warns(monkeypatch, caplog):
 
     monkeypatch.setenv("VLLM_DEFINITELY_NOT_REAL", "1")
     envs = _reload_envs()
-    with caplog.at_level(_logging.WARNING, logger="vllm.envs"):
-        envs.validate_environ(hard_fail=False)
-    assert any("VLLM_DEFINITELY_NOT_REAL" in r.message for r in caplog.records)
+
+    # vllm's parent logger has propagate=False (see vllm/logger.py), so
+    # caplog's root-attached handler never sees vllm.envs records. Attach
+    # caplog's handler directly to envs.logger to bypass the propagation
+    # barrier without changing vllm's logging configuration.
+    envs.logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(_logging.WARNING, logger="vllm.envs"):
+            envs.validate_environ(hard_fail=False)
+    finally:
+        envs.logger.removeHandler(caplog.handler)
+
+    assert any("VLLM_DEFINITELY_NOT_REAL" in r.getMessage() for r in caplog.records)
 
 
 def test_validate_environ_unknown_var_raises(monkeypatch):
