@@ -29,7 +29,7 @@ else:
     _ON_GFX950 = False
 
 if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
+    pass
 
 
 @triton.jit
