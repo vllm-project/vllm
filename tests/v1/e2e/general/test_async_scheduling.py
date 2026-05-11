@@ -57,6 +57,8 @@ def test_without_spec_decoding(
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
+        dict(prompt_logprobs=2),
+        dict(prompt_logprobs=2, logprobs=2),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
@@ -126,6 +128,8 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, frequency_penalty=-1.0),
+        dict(prompt_logprobs=2),
+        dict(prompt_logprobs=2, logprobs=2),
         dict(structured_outputs=struct_outputs),
         dict(
             structured_outputs=struct_outputs,
@@ -413,7 +417,12 @@ def _all_logprobs_match(req_a, req_b) -> bool:
     )
 
 
-def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> bool:
+def _logprobs_match(
+    lps_a: dict[int, Logprob] | None,
+    lps_b: dict[int, Logprob] | None,
+) -> bool:
+    if lps_a is None or lps_b is None:
+        return lps_a is lps_b
     rel_tol, abs_tol = 1e-3, 1e-6
     return (
         len(lps_a) == len(lps_b)
