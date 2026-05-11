@@ -324,6 +324,17 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_responses(request, raw_request), request, raw_request
+        )
+
+    async def _create_responses(
+        self, request: ResponsesRequest, raw_request: Request | None = None
+    ) -> (
+        AsyncGenerator[StreamingResponsesResponse, None]
+        | ResponsesResponse
+        | ErrorResponse
+    ):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -416,6 +427,9 @@ class OpenAIServingResponses(OpenAIServing):
                 self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=(
+                    -1 if request.truncation != "disabled" else None
+                ),
             )
 
             sampling_params = request.to_sampling_params(
@@ -456,9 +470,13 @@ class OpenAIServingResponses(OpenAIServing):
                     context = SimpleContext()
 
             if self.parser and self.parser.reasoning_parser_cls is not None:
+                chat_template_kwargs = self._effective_chat_template_kwargs(request)
+                reasoning_parser_kwargs = {
+                    "chat_template_kwargs": chat_template_kwargs,
+                }
                 reasoning_parser = self.parser.reasoning_parser_cls(
                     tokenizer,
-                    chat_template_kwargs=self._effective_chat_template_kwargs(request),
+                    chat_template_kwargs=chat_template_kwargs,
                 )
                 if (
                     isinstance(
@@ -481,6 +499,9 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
+                reasoning_parser_kwargs=reasoning_parser_kwargs
+                if self.parser and self.parser.reasoning_parser_cls is not None
+                else None,
             )
             generators.append(generator)
 
@@ -627,6 +648,7 @@ class OpenAIServingResponses(OpenAIServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
 
@@ -650,6 +672,7 @@ class OpenAIServingResponses(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
             async for res in generator:
@@ -691,6 +714,9 @@ class OpenAIServingResponses(OpenAIServing):
                     self._extract_prompt_len(engine_input),
                     self.default_sampling_params,  # type: ignore
                     self.override_max_tokens,  # type: ignore
+                    truncate_prompt_tokens=(
+                        -1 if context.request.truncation != "disabled" else None
+                    ),
                 )
 
             # OPTIMIZATION

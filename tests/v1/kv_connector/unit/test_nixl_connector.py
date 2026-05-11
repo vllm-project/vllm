@@ -321,6 +321,34 @@ def test_prompt_less_than_block_size():
     assert len(scheduler_output.scheduled_new_reqs) == 0
 
 
+def test_abort_immediately_remote_prefill_enqueues_empty_recv():
+    """A remote-prefill request added with abort_immediately=True should
+    be added to the scheduler's waiting queue then immediately aborted, so the
+    NIXL connector's request_finished hook enqueues an empty recv to notify
+    the prefill instance to free its blocks."""
+    from vllm.v1.request import RequestStatus
+
+    scheduler = create_scheduler(create_vllm_config())
+
+    request = create_request(request_id=42, num_tokens=10, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
+    assert request.kv_transfer_params["do_remote_prefill"] is True
+
+    # Mimic the EngineCore.add_request path for an abort-immediately req.
+    scheduler.add_request(request)
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+
+    scheduler_output = scheduler.schedule()
+    meta = scheduler_output.kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    assert set(meta.reqs_to_recv) == {request.request_id}
+    req_meta = meta.reqs_to_recv[request.request_id]
+    assert req_meta.local_block_ids == []
+    assert req_meta.remote.request_id == f"prefill-{42}"
+    # do_remote_prefill is consumed by request_finished to prevent re-issuing.
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+
+
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
     FakeNixlWrapper,
@@ -527,6 +555,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     block_size=self.block_size,
                     ssm_sizes=(0, 0),
                     attn_backend_name=self.backend_name,
+                    physical_blocks_per_logical_kv_block=1,
                 ),
                 remote_tp_rank=remote_tp_rank,
                 remote_tp_size=remote_tp_size,
@@ -726,6 +755,7 @@ class TestNixlHandshake:
         worker.num_blocks = 1
         worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
         worker.src_blocks_data = [(0, worker.block_len_per_layer[0], worker.tp_rank)]
+        worker.num_descs = len(worker.src_blocks_data)
 
         def check_handshake(remote_tp_size: int):
             tp_ratio = remote_tp_size // local_tp_size
@@ -978,6 +1008,7 @@ class TestNixlHandshake:
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
             )
 
             with pytest.raises(RuntimeError):
@@ -1035,6 +1066,7 @@ class TestNixlHandshake:
                 block_size=worker.block_size,
                 ssm_sizes=(0, 0),
                 attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
             )
 
             # We don't check layout for homogeneous TP and MLA for now, as the
@@ -2354,6 +2386,7 @@ def test_compatibility_hash_validation(
         block_size=prefill_block_size,
         ssm_sizes=(0, 0),
         attn_backend_name=decode_worker.backend_name,
+        physical_blocks_per_logical_kv_block=1,
     )
     handshake_payload = NixlHandshakePayload(
         compatibility_hash=remote_hash,
@@ -2478,4 +2511,123 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
                 port=1234,
                 remote_tp_size=1,
                 expected_engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            )
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_mla_broadcast_notif_uses_remote_request_id(
+        self, default_vllm_config, dist_init
+    ):
+        """MLA + remote TP > local TP: the broadcast notification sent to
+        non-read prefill ranks must be keyed by the prefill-side request
+        id (``meta.remote.request_id``), not the local decode request id.
+
+        Prefill ranks key ``_reqs_to_send`` by their own request id, so a
+        broadcast keyed by the decode id is rejected in
+        ``_get_new_notifs`` with "Potentially invalid KV blocks for
+        unrecognized request" and the blocks only release via the abort
+        timeout. See ``_read_blocks_for_req`` in
+        ``vllm/distributed/kv_transfer/kv_connector/v1/nixl/worker.py``.
+        """
+        decode_tp_size = 1
+        prefill_tp_size = 4
+
+        vllm_config = create_vllm_config()
+        vllm_config.parallel_config.tensor_parallel_size = decode_tp_size
+
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id, hand_shake_latency=0
+        )
+        worker = connector.connector_worker
+
+        # Force the MLA path; only `self.use_mla` gates the branches we
+        # exercise inside `_read_blocks_for_req`.
+        worker.use_mla = True
+
+        # Manually register the remote (P) engine and pre-populate the
+        # per-rank state the handshake would normally fill in. The real
+        # `_nixl_handshake` is unnecessary here — we only need
+        # `transfer_topo` to know `remote_tp_size`, and `_remote_agents`
+        # / `dst_xfer_side_handles` to be keyed by remote rank.
+        remote_engine_id = "remote_engine"
+        worker.transfer_topo.register_remote_engine(
+            remote_engine_id=remote_engine_id,
+            remote_tp_size=prefill_tp_size,
+            remote_block_size=worker.block_size,
+            remote_block_len=worker.block_size * 4096,
+            remote_physical_blocks_per_logical=1,
+            local_block_len=worker.block_size * 4096,
+        )
+        worker._remote_agents[remote_engine_id] = {
+            rank: f"agent_p{rank}" for rank in range(prefill_tp_size)
+        }
+        worker.dst_xfer_side_handles = {
+            remote_engine_id: {rank: 100 + rank for rank in range(prefill_tp_size)}
+        }
+        # Sanity: D TP=1, P TP=4 => tp_ratio = -4 (P > D).
+        assert worker.transfer_topo.tp_ratio(prefill_tp_size) == -prefill_tp_size
+
+        # Distinct ids on each side — that's the whole point of the bug.
+        decode_req_id = "decode-req-AAAA"
+        prefill_req_id = "prefill-req-BBBB"
+        assert decode_req_id != prefill_req_id
+
+        metadata = NixlConnectorMetadata()
+        metadata.add_new_req_to_recv(
+            request_id=decode_req_id,
+            local_block_ids=([0, 1, 2],),
+            kv_transfer_params={
+                "remote_block_ids": ([10, 11, 12],),
+                "remote_engine_id": remote_engine_id,
+                "remote_request_id": prefill_req_id,
+                "remote_host": "localhost",
+                "remote_port": 1234,
+                "remote_tp_size": prefill_tp_size,
+            },
+        )
+        meta = metadata.reqs_to_recv[decode_req_id]
+
+        # Capture broadcast send_notif calls; stub `_read_blocks` so we
+        # don't need a working xfer path. Real `_read_blocks` emits its
+        # auto-notif via `make_prepped_xfer`, not via `send_notif`, so
+        # any captured `send_notif` here is a broadcast.
+        send_notif_calls: list[tuple[str, bytes]] = []
+        worker.nixl_wrapper.send_notif = (  # type: ignore[method-assign]
+            lambda agent_name, notif_msg: send_notif_calls.append(
+                (agent_name, notif_msg)
+            )
+        )
+        worker._read_blocks = MagicMock()  # type: ignore[method-assign]
+
+        worker._read_blocks_for_req(decode_req_id, meta)
+
+        # MLA: read once from rank 0 and broadcast to the other ranks.
+        worker._read_blocks.assert_called_once()
+        assert worker._read_blocks.call_args.kwargs["remote_rank"] == 0
+        assert (
+            worker._read_blocks.call_args.kwargs["remote_request_id"] == prefill_req_id
+        )
+
+        # Broadcast goes to ranks {1, 2, 3} only, never to the read target.
+        expected_recipients = {
+            worker._remote_agents[remote_engine_id][r]
+            for r in range(1, prefill_tp_size)
+        }
+        assert {agent for agent, _ in send_notif_calls} == expected_recipients
+
+        # Every broadcast notif must be keyed by the prefill request id.
+        # Pre-fix this used the *decode* request id, which prefill ranks
+        # didn't recognize.
+        expected_notif = f"{prefill_req_id}:{decode_tp_size}".encode()
+        bad_notif = f"{decode_req_id}:{decode_tp_size}".encode()
+        for agent, notif in send_notif_calls:
+            assert notif == expected_notif, (
+                f"Broadcast notif to {agent!r} must use prefill_req_id; "
+                f"got {notif!r} (expected {expected_notif!r}, "
+                f"buggy form would be {bad_notif!r})"
             )

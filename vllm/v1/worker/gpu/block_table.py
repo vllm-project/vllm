@@ -5,7 +5,6 @@ from collections.abc import Iterable
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
@@ -16,7 +15,7 @@ class BlockTables:
         block_sizes: list[int],
         max_num_reqs: int,
         max_num_batched_tokens: int,
-        max_model_len: int,
+        max_num_blocks_per_group: list[int],
         device: torch.device,
         cp_size: int = 1,
         cp_rank: int = 0,
@@ -25,7 +24,6 @@ class BlockTables:
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.max_model_len = max_model_len
         self.device = device
 
         self.cp_size = cp_size
@@ -33,32 +31,18 @@ class BlockTables:
         self.cp_interleave = cp_interleave
 
         self.num_kv_cache_groups = len(self.block_sizes)
+        assert len(max_num_blocks_per_group) == self.num_kv_cache_groups
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
-            block_size = self.block_sizes[i]
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
+            max_num_blocks = max_num_blocks_per_group[i]
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
                 device=device,
             )
             self.block_tables.append(block_table)
-        self.block_table_ptrs = self._make_ptr_tensor(
-            [b.gpu for b in self.block_tables]
-        )
-        self.block_table_strides = torch.tensor(
-            [b.gpu.stride(0) for b in self.block_tables],
-            dtype=torch.int64,
-            device=self.device,
-        )
 
-        self.block_sizes_tensor = torch.tensor(
-            self.block_sizes, dtype=torch.int32, device=self.device
-        )
         self.num_blocks = UvaBackedTensor(
             (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
@@ -69,7 +53,6 @@ class BlockTables:
         self.input_block_tables: list[torch.Tensor] = [
             torch.zeros_like(b.gpu) for b in self.block_tables
         ]
-        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
         self.slot_mappings = torch.zeros(
             self.num_kv_cache_groups,
@@ -78,11 +61,32 @@ class BlockTables:
             device=self.device,
         )
 
+        self.init_block_table_layout_tensors()
+
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
         # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
         return torch.tensor(
             [t.data_ptr() for t in x], dtype=torch.uint64, device=self.device
         )
+
+    def init_block_table_layout_tensors(self) -> None:
+        # Called at init and after a CuMem kv_cache wake-up. The ptr tensors
+        # cache raw data_ptr() values that go stale once the underlying tensors
+        # are reallocated on wake; block_sizes_tensor needs re-populating
+        # because its storage lives under the kv_cache pool tag and comes back
+        # with undefined contents.
+        self.block_table_ptrs = self._make_ptr_tensor(
+            [b.gpu for b in self.block_tables]
+        )
+        self.block_table_strides = torch.tensor(
+            [b.gpu.stride(0) for b in self.block_tables],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.block_sizes_tensor = torch.tensor(
+            self.block_sizes, dtype=torch.int32, device=self.device
+        )
+        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
         self,
