@@ -611,7 +611,7 @@ def per_token_group_quant_fp8(
         tma_aligned_scales,
         use_ue8m0,
         dtype,
-        out_q,
+        x_q,
         x_s,
     )
     if flashinfer_result is not None:
