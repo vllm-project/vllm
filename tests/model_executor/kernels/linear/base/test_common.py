@@ -1,115 +1,83 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 import vllm.model_executor.kernels.linear.base.common as common
-from vllm.platforms import current_platform
 
-class _AlwaysSupported(common.Kernel):
-    """Kernel stub that always reports itself as supported."""
-
-    @classmethod
-    def is_supported(cls, compute_capability=None):
-        return True, None
-
-    def apply_weights(self, *args, **kwargs):
-        return type(self).apply(*args, **kwargs)
-
-    @staticmethod
-    def apply(*args, **kwargs):
-        return torch.tensor([1.0])
+SENTINEL_PRED = torch.tensor([1.0])
+SENTINEL_TERMINAL = torch.tensor([2.0])
+SENTINEL_NATIVE = torch.tensor([3.0])
 
 
-class _NeverSupported(common.Kernel):
-    """Kernel that always reports itself as unsupported."""
-
-    @classmethod
-    def is_supported(cls, compute_capability=None):
-        return False, "not supported"
-
-    def apply_weights(self, *args, **kwargs):
-        return type(self).apply(*args, **kwargs)
-
-    @staticmethod
-    def apply(*args, **kwargs):
-        return torch.tensor([0.0])
-
-
-class _CannotImplement(common.Kernel):
-    """Kernel that is supported but cannot implement the given config."""
+class PredTrue(common.PredicateKernel):
+    """Default predicate kernel: supported, predicate True, returns SENTINEL_PRED."""
 
     @classmethod
     def is_supported(cls, compute_capability=None):
         return True, None
 
+    @staticmethod
+    def predicate(*args, **kwargs):
+        return True
+
+    @staticmethod
+    def apply(*args, **kwargs):
+        return SENTINEL_PRED
+
+    def apply_weights(self, *args, **kwargs):
+        return type(self).apply(*args, **kwargs)
+
+
+class PredFalse(PredTrue):
+    @staticmethod
+    def predicate(*args, **kwargs):
+        return False
+
+
+class PredUnsupported(PredTrue):
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        return False, "unsupported"
+
+
+class PredCannotImplement(PredTrue):
     @classmethod
     def can_implement(cls, config):
         return False, "cannot implement"
 
-    def apply_weights(self, *args, **kwargs):
-        return type(self).apply(*args, **kwargs)
+
+class _PlainBase(common.Kernel):
+    """Default plain kernel: supported, apply returns SENTINEL_TERMINAL."""
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        return True, None
 
     @staticmethod
     def apply(*args, **kwargs):
-        return torch.tensor([0.0])
+        return SENTINEL_TERMINAL
+
+    def apply_weights(self, *args, **kwargs):
+        return type(self).apply(*args, **kwargs)
 
 
+class PlainTerminal(_PlainBase):
+    pass
 
-class TestResolveDispatchFn:
 
-    def test_supported_kernel_returns_apply(self):
-        fn = common._resolve_dispatch_fn(_AlwaysSupported, config=None)
-        assert fn is _AlwaysSupported.apply
-
-    def test_unsupported_kernel_no_fallback_returns_apply(self):
-        fn = common._resolve_dispatch_fn(_NeverSupported, config=None)
-        assert fn is _NeverSupported.apply
-
-    def test_unsupported_kernel_falls_back(self):
-        _NeverSupported._fallback = _AlwaysSupported
-        try:
-            fn = common._resolve_dispatch_fn(_NeverSupported, config=None)
-            assert fn is _AlwaysSupported.apply
-        finally:
-            del _NeverSupported._fallback
-
-    def test_cannot_implement_falls_back(self):
-        _CannotImplement._fallback = _AlwaysSupported
-        try:
-            fn = common._resolve_dispatch_fn(_CannotImplement, config=None)
-            assert fn is _AlwaysSupported.apply
-        finally:
-            del _CannotImplement._fallback
-
-    def test_multi_level_fallback_chain(self):
-        """Unsupported -> cannot-implement -> supported: resolves to leaf."""
-        _NeverSupported._fallback = _CannotImplement
-        _CannotImplement._fallback = _AlwaysSupported
-        try:
-            fn = common._resolve_dispatch_fn(_NeverSupported, config=None)
-            assert fn is _AlwaysSupported.apply
-        finally:
-            del _NeverSupported._fallback
-            del _CannotImplement._fallback
-
-    def test_dispatch_fn_stolen_from_instance(self):
-        """If the resolved kernel has _dispatch_fn, that is returned instead."""
-        sentinel_fn = lambda *a, **kw: None  # noqa: E731
-
-        class _WithDispatchFn(_AlwaysSupported):
-            def __init__(self, config):
-                self._dispatch_fn = sentinel_fn
-
-        fn = common._resolve_dispatch_fn(_WithDispatchFn, config=None)
-        assert fn is sentinel_fn
+class PlainTerminalUnsupported(_PlainBase):
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        return False, "unsupported"
 
 
 def _simple_dispatcher(predicate, primary, fallback_fn):
-    """Minimal w16a16-style dispatcher for testing."""
+    """Minimal w16a16-style dispatcher used to compose chains in tests."""
+
     def dispatch(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -118,216 +86,207 @@ def _simple_dispatcher(predicate, primary, fallback_fn):
         if predicate(x, weight, bias):
             return primary.apply(x, weight, bias)
         return fallback_fn(x, weight, bias)
+
     return dispatch
 
 
-_OP_COUNTER: dict[str, int] = {}
+def _native_impl(*args, **kwargs):
+    return SENTINEL_NATIVE
 
 
-def _unique_op_name(suffix: str) -> str:
-    _OP_COUNTER[suffix] = _OP_COUNTER.get(suffix, 0) + 1
-    return f"test_predicated_{suffix}_{_OP_COUNTER[suffix]}"
+_OP_COUNTER = 0
 
 
-class TestMakePredicated:
+def _unique_tag(label: str) -> str:
+    """Unique scheme_tag per call to avoid op-name collisions across tests."""
+    global _OP_COUNTER
+    _OP_COUNTER += 1
+    return f"test_{label}_{_OP_COUNTER}"
 
-    def test_predicate_true_routes_to_primary(self):
-        primary_sentinel = torch.tensor([10.0])
-        fallback_sentinel = torch.tensor([20.0])
 
-        class _Primary(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return primary_sentinel
-
-        class _Fallback(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return fallback_sentinel
-
-        @common.make_predicated(
-            name=_unique_op_name("true_routes_primary"),
-            predicate=lambda x, w, b: True,
-            fallback=_Fallback,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_Fallback.apply,
-        )
-        class _Predicated(_Primary):
-            pass
-
-        inst = _Predicated(config=None)
-        result = inst._dispatch_fn(torch.zeros(1, 4), torch.zeros(4, 4), None)
-        assert result is primary_sentinel
-
-    def test_predicate_false_routes_to_fallback(self):
-        primary_sentinel = torch.tensor([10.0])
-        fallback_sentinel = torch.tensor([20.0])
-
-        class _Primary(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return primary_sentinel
-
-        class _Fallback(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return fallback_sentinel
-
-        @common.make_predicated(
-            name=_unique_op_name("false_routes_fallback"),
-            predicate=lambda x, w, b: False,
-            fallback=_Fallback,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_Fallback.apply,
-        )
-        class _Predicated(_Primary):
-            pass
-
-        inst = _Predicated(config=None)
-        result = inst._dispatch_fn(torch.zeros(1, 4), torch.zeros(4, 4), None)
-        assert result is fallback_sentinel
-
-    def test_registration_guard_fires_once(self):
-        register_calls: list[int] = []
-
-        @common.make_predicated(
-            name=_unique_op_name("registration_guard"),
-            predicate=lambda x, w, b: True,
-            fallback=_AlwaysSupported,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_AlwaysSupported.apply,
-        )
-        class _Predicated(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return torch.tensor([1.0])
-
-        # Reset the guard so we can observe it being set on the first call.
-        _Predicated._registered = False
-
-        with patch(
-            "vllm.utils.torch_utils.direct_register_custom_op",
-            side_effect=lambda *a, **kw: register_calls.append(1),
-        ):
-            _Predicated(config=None)
-            _Predicated(config=None)
-            _Predicated(config=None)
-
-        assert len(register_calls) == 1, (
-            "direct_register_custom_op must be called exactly once "
-            "regardless of how many layer instances are created"
-        )
-
-    def test_predicated_kernel_name(self):
-        op_name = _unique_op_name("naming")
-
-        @common.make_predicated(
-            name=op_name,
-            predicate=lambda x, w, b: True,
-            fallback=_AlwaysSupported,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_AlwaysSupported.apply,
-        )
-        class _Predicated(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return torch.tensor([1.0])
-
-        assert _Predicated.__name__ == "_Predicated"
-        assert _Predicated.__module__ == __name__
-
-    def test_fallback_chain_resolved_transitively(self):
-        """Predicate=False on outer + inner resolves to terminal apply."""
-        terminal_sentinel = torch.tensor([99.0])
-
-        class _Terminal(_AlwaysSupported):
-            @staticmethod
-            def apply(x, weight, bias):
-                return terminal_sentinel
-
-        @common.make_predicated(
-            name=_unique_op_name("inner_chain"),
-            predicate=lambda x, w, b: False,
-            fallback=_Terminal,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_Terminal.apply,
-        )
-        class _Inner(_AlwaysSupported):
-            pass
-
-        @common.make_predicated(
-            name=_unique_op_name("outer_chain"),
-            predicate=lambda x, w, b: False,
-            fallback=_Inner,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_Terminal.apply,
-        )
-        class _Outer(_AlwaysSupported):
-            pass
-
-        inst = _Outer(config=None)
-        result = inst._dispatch_fn(torch.zeros(1, 4), torch.zeros(4, 4), None)
-        assert result is terminal_sentinel
-
-    @pytest.mark.skipif(
-        not current_platform.is_cuda_alike(), reason="op is registered for the platform GPU dispatch key"
+def _composite(chain, *, scheme_tag, native_impl=_native_impl):
+    return type(
+        f"_Composite_{scheme_tag}",
+        (common.Composite,),
+        {
+            "_scheme_tag": scheme_tag,
+            "_chain": chain,
+            "_dispatcher_fn": staticmethod(_simple_dispatcher),
+            "_native_impl": staticmethod(native_impl),
+        },
     )
-    def test_make_predicated_registers_in_torch_ops(self):
-        """After instantiation the op is accessible via torch.ops.vllm and
-        produces the same result as the underlying dispatch function."""
-        device = torch.device("cuda")
-        primary_sentinel = torch.tensor([42.0], device=device)
 
-        class _Primary(_AlwaysSupported):
+
+def _config(prefix: str = ""):
+    return SimpleNamespace(prefix=prefix)
+
+
+class TestPredicateKernel:
+    def test_subclass_without_predicate_cannot_be_instantiated(self):
+        class _Missing(common.PredicateKernel):
+            @classmethod
+            def is_supported(cls, compute_capability=None):
+                return True, None
+
+            def apply_weights(self, *a, **kw):
+                return type(self).apply(*a, **kw)
+
             @staticmethod
-            def apply(
-                x: torch.Tensor,
-                weight: torch.Tensor,
-                bias: torch.Tensor | None,
-            ) -> torch.Tensor:
-                return primary_sentinel
+            def apply(*a, **kw):
+                return torch.tensor([0.0])
 
-        class _Fallback(_AlwaysSupported):
-            @staticmethod
-            def apply(
-                x: torch.Tensor,
-                weight: torch.Tensor,
-                bias: torch.Tensor | None,
-            ) -> torch.Tensor:
-                return torch.tensor([0.0], device=device)
+        with pytest.raises(TypeError, match="abstract"):
+            _Missing(config=None)
 
-        op_name = _unique_op_name("torch_ops_reg")
 
-        @common.make_predicated(
-            name=op_name,
-            predicate=lambda x, w, b: True,
-            fallback=_Fallback,
-            dispatcher_fn=_simple_dispatcher,
-            fake_impl=_Fallback.apply,
+class TestCompositeChainValidation:
+    def test_plain_kernel_in_non_terminal_position_raises(self):
+        Comp = _composite(
+            [PredTrue, PlainTerminal, PredTrue],
+            scheme_tag=_unique_tag("plain_in_middle"),
         )
-        class _Predicated(_Primary):
-            pass
+        with pytest.raises(TypeError, match="must be a PredicateKernel"):
+            Comp(_config())
 
-        _Predicated(config=None)
+    def test_terminal_can_be_plain_kernel(self):
+        Comp = _composite(
+            [PredTrue, PlainTerminal], scheme_tag=_unique_tag("plain_term")
+        )
+        Comp(_config())  # no error
 
-        assert hasattr(torch.ops.vllm, op_name)
+    def test_terminal_can_be_predicate_kernel(self):
+        Comp = _composite([PredTrue, PredFalse], scheme_tag=_unique_tag("pred_term"))
+        Comp(_config())  # no error
 
-        x = torch.zeros(1, 4, device=device)
-        w = torch.zeros(4, 4, device=device)
-        assert torch.equal(
-            getattr(torch.ops.vllm, op_name)(x, w, None),
-            primary_sentinel,
+
+class TestCompositeSelectorGating:
+    def test_is_supported_true_when_any_inner_supported(self):
+        Comp = _composite(
+            [PredUnsupported, PredTrue],
+            scheme_tag=_unique_tag("is_sup_any"),
+        )
+        assert Comp.is_supported()[0] is True
+
+    def test_is_supported_false_when_all_inner_unsupported(self):
+        """Selector skips the composite when nothing in the chain is supported."""
+        Comp = _composite(
+            [PredUnsupported, PlainTerminalUnsupported],
+            scheme_tag=_unique_tag("is_sup_none"),
+        )
+        ok, reason = Comp.is_supported()
+        assert ok is False
+        assert "no inner kernel supported" in reason
+
+    def test_can_implement_true_when_any_inner_viable(self):
+        Comp = _composite(
+            [PredTrue, PredCannotImplement],
+            scheme_tag=_unique_tag("can_impl_any"),
+        )
+        assert Comp.can_implement(config=None)[0] is True
+
+    def test_can_implement_false_when_all_inner_unviable(self):
+        """All inner kernels either unsupported or cannot_implement. Composite
+        signals can_implement=False so the selector falls through to the next
+        candidate in _POSSIBLE_*_KERNELS."""
+        Comp = _composite(
+            [PredUnsupported, PredCannotImplement],
+            scheme_tag=_unique_tag("can_impl_none"),
+        )
+        ok, reason = Comp.can_implement(config=None)
+        assert ok is False
+        assert "no inner kernel viable" in reason
+
+
+class TestCompositeDispatch:
+    def test_matching_predicate_runs_over_terminal(self):
+        Comp = _composite(
+            [PredTrue, PlainTerminal],
+            scheme_tag=_unique_tag("matches_over_terminal"),
+        )
+        inst = Comp(_config())
+        assert inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_PRED
+
+    def test_falls_through_to_plain_terminal(self):
+        Comp = _composite(
+            [PredFalse, PredFalse, PlainTerminal],
+            scheme_tag=_unique_tag("falls_to_terminal"),
+        )
+        inst = Comp(_config())
+        assert (
+            inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_TERMINAL
         )
 
-    def test_make_predicated_raises_if_apply_not_overridden(self):
-        """Decorating a kernel that does not override apply raises TypeError."""
-        with pytest.raises(TypeError, match="does not override 'apply'"):
-            @common.make_predicated(
-                name=_unique_op_name("no_apply_guard"),
-                predicate=lambda x, w, b: True,
-                fallback=_AlwaysSupported,
-                dispatcher_fn=_simple_dispatcher,
-                fake_impl=_AlwaysSupported.apply,
-            )
-            class _NoApply(_AlwaysSupported):
-                pass
+    def test_falls_through_to_native_when_no_terminal(self):
+        """All predicates False, no plain Kernel terminal is native_impl."""
+        Comp = _composite(
+            [PredFalse, PredFalse],
+            scheme_tag=_unique_tag("falls_native_no_term"),
+        )
+        inst = Comp(_config())
+        assert (
+            inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_NATIVE
+        )
+
+    def test_falls_through_to_native_when_terminal_unviable(self):
+        """All predicates False, plain terminal unsupported is native_impl."""
+        Comp = _composite(
+            [PredFalse, PredFalse, PlainTerminalUnsupported],
+            scheme_tag=_unique_tag("falls_native_unviable"),
+        )
+        inst = Comp(_config())
+        assert (
+            inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_NATIVE
+        )
+
+    def test_unsupported_predicates_filtered_at_init(self):
+        """A PredicateKernel whose is_supported returns False is excluded at
+        init time, so its (matching) predicate never gets exercised."""
+        Comp = _composite(
+            [PredUnsupported, PredTrue, PlainTerminal],
+            scheme_tag=_unique_tag("filter_unsupported"),
+        )
+        inst = Comp(_config())
+        assert inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_PRED
+
+
+class TestCompositeOpRegistration:
+    def test_op_name_is_scheme_tag_when_no_prefix(self):
+        tag = _unique_tag("name_no_prefix")
+        Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
+        assert Comp(_config())._op_name == tag
+
+    def test_op_name_combines_prefix_and_scheme_tag(self):
+        tag = _unique_tag("name_with_prefix")
+        Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
+        inst = Comp(_config(prefix="model.layers.0.qkv_proj"))
+        assert inst._op_name == f"model_layers_0_qkv_proj_{tag}"
+
+    def test_register_called_per_distinct_op_name(self):
+        """Different prefixes register distinct ops under
+        torch.ops.composed_kernel."""
+        tag = _unique_tag("registration_distinct")
+        Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
+
+        before = len(vars(torch.ops.composed_kernel))
+        Comp(_config(prefix="layer.0"))
+        Comp(_config(prefix="layer.1"))
+        after = len(vars(torch.ops.composed_kernel))
+
+        assert hasattr(torch.ops.composed_kernel, f"layer_0_{tag}")
+        assert hasattr(torch.ops.composed_kernel, f"layer_1_{tag}")
+        assert after - before == 2
+
+    def test_register_skipped_when_op_already_exists(self):
+        """Re-instantiating with the same prefix must not re-register —
+        torch.library rejects duplicate defines, so the second Comp(...) here
+        would raise if the hasattr guard in Composite.__init__ were removed."""
+        tag = _unique_tag("registration_skipped")
+        Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
+
+        Comp(_config(prefix="layer.same"))
+        before = len(vars(torch.ops.composed_kernel))
+        Comp(_config(prefix="layer.same"))
+        after = len(vars(torch.ops.composed_kernel))
+
+        assert hasattr(torch.ops.composed_kernel, f"layer_same_{tag}")
+        assert after == before

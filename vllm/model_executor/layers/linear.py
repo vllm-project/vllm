@@ -212,6 +212,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         config = w16a16.Config(
             weight_dtype=layer.weight.dtype,
             weight_shape=tuple(layer.weight.shape),
+            prefix=layer.prefix,
             batch_invariant=envs.VLLM_BATCH_INVARIANT
             and current_platform.is_cuda_alike(),
             is_weight_meta=layer.weight.is_meta,

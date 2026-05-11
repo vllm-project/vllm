@@ -61,6 +61,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         config = w16a16.Config(
             weight_dtype=layer.weight.dtype,
             weight_shape=tuple(layer.weight.shape),
+            prefix=layer.prefix,
             batch_invariant=envs.VLLM_BATCH_INVARIANT
             and current_platform.is_cuda_alike(),
             is_weight_meta=layer.weight.is_meta,
@@ -246,6 +247,7 @@ class VocabParallelEmbedding(PluggableLayer):
     ):
         super().__init__()
 
+        self.prefix = prefix
         # Keep the input dimensions.
         tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()

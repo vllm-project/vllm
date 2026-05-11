@@ -3,7 +3,6 @@
 # NOTE: do NOT add `from __future__ import annotations` to this file.
 # w16a16_dispatch_fn relies on PEP-3107 runtime annotations for infer_schema.
 
-import functools
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import ClassVar
@@ -48,10 +47,7 @@ class Params:
         )
 
 
-class Kernel(common.Kernel):
-    def __init__(self, config: Config) -> None:
-        self.config = config
-
+class Kernel(common.Kernel[Config]):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -106,9 +102,15 @@ def dispatch_fn(
     return dispatch
 
 
-make_predicated = functools.partial(
-    common.make_predicated,
-    dispatcher_fn=dispatch_fn,
-    fake_impl=Kernel.apply,
-    fallback=Kernel,
-)
+class PredicateKernel(common.PredicateKernel[Config], Kernel):
+    """w16a16 predicate kernel. `predicate` takes (x, weight, bias)."""
+
+    pass
+
+
+class Composite(common.Composite[Config], Kernel):
+    """w16a16-bound Composite. Concrete chains live in
+    ``vllm/model_executor/kernels/linear/composed/``."""
+
+    _dispatcher_fn = staticmethod(dispatch_fn)
+    _native_impl = staticmethod(Kernel.apply)

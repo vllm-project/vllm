@@ -20,18 +20,18 @@ _AITER_SUPPORTED_SHAPES = frozenset(
 )
 
 
-def _fits_aiter_triton(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-) -> bool:
-    n = x.numel() // x.size(-1)
-    m = weight.shape[0]
-    return not (n > 2048 and m > 512)
-
-
-class SkinnyKernel(w16a16.Kernel):
+class SkinnyKernel(w16a16.PredicateKernel):
     """Triton GEMM via aiter for specific weight shapes."""
+
+    @staticmethod
+    def predicate(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> bool:
+        n = x.numel() // x.size(-1)
+        m = weight.shape[0]
+        return not (n > 2048 and m > 512)
 
     @classmethod
     def is_supported(

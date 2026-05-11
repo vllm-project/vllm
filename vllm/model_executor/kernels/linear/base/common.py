@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, ClassVar, TypeVar
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, ClassVar, Generic, TypeVar
 
 import torch
+from torch.library import Library
+
+# Library for composed-kernel ops. Each Composite subclass registers its
+# per-layer dispatch op under torch.ops.composed_kernel.<op_name>.
+composed_kernel_lib = Library("composed_kernel", "FRAGMENT")  # noqa
 
 
+@dataclass
 class Config(ABC):
     """Abstract base class for kernel layer configurations.
 
@@ -15,11 +23,20 @@ class Config(ABC):
     the concrete fields required by their kernels. Passing a typed
     ``Config`` subclass through ``Kernel.__init__`` and ``can_implement``
     ensures that configuration validation is scheme-aware at the call site.
+
+    ``prefix`` is the per-layer state-dict prefix (e.g.
+    ``"model.layers.0.self_attn.qkv_proj"``); ``Composite`` uses it to create a
+    unique torch op name per layer (different layers might construct different
+    predicate chains on init).
     """
-    ...
+
+    prefix: str
 
 
-class Kernel(ABC):
+ConfigT = TypeVar("ConfigT", bound=Config)
+
+
+class Kernel(ABC, Generic[ConfigT]):
     """Abstract base class defining the interface contract for all linear GEMM kernels.
 
     A ``Kernel`` encapsulates a single hardware- or algorithm-specific
@@ -30,10 +47,12 @@ class Kernel(ABC):
 
     The class is structured around two complementary entry points,
     ``apply`` and ``apply_weights``, whose separation is load-bearing for
-    compile-time correctness — see their respective docstrings.
+    compile-time correctness.
     """
 
-    def __init__(self, config: Config) -> None:
+    config: ConfigT
+
+    def __init__(self, config: ConfigT) -> None:
         self.config = config
 
     @classmethod
@@ -48,7 +67,7 @@ class Kernel(ABC):
     ) -> tuple[bool, str | None]: ...
 
     @classmethod
-    def can_implement(cls, config: Config) -> tuple[bool, str | None]:
+    def can_implement(cls, config: ConfigT) -> tuple[bool, str | None]:
         return True, None
 
     def _get_layer_params(self, layer: torch.nn.Module) -> Any:
@@ -92,92 +111,124 @@ class Kernel(ABC):
         ...
 
 
-K = TypeVar('K', bound=Kernel)
+class PredicateKernel(Kernel[ConfigT]):
+    """A Kernel that participates in a predicated chain.
 
-
-def _resolve_dispatch_fn(cls: type[K], config: Config) -> Callable:
-    """Recursively walk the fallback chain to find a supported dispatch callable.
-
-    Starting from ``cls``, checks ``is_supported`` and ``can_implement`` in
-    turn. If either fails, recurses into ``cls._fallback``. If the chain is
-    exhausted, returns ``cls.apply`` directly as the terminal callable.
-    Otherwise instantiates ``cls`` and returns its ``_dispatch_fn`` if present
-    (set by ``make_predicated``), falling back to ``cls.apply``.
+    Subclasses must override ``predicate`` with  check
+    whose signature mirrors ``apply`` for the scheme.
     """
-    ok, _ = cls.is_supported()
-    if ok:
-        ok, _ = cls.can_implement(config)
-    if not ok:
-        fallback = getattr(cls, '_fallback', None)
-        if fallback is not None:
-            return _resolve_dispatch_fn(fallback, config)
-        return cls.apply
-    inst = cls(config)
-    return getattr(inst, '_dispatch_fn', cls.apply)
+
+    @staticmethod
+    @abstractmethod
+    def predicate(*args, **kwargs) -> bool: ...
 
 
-def make_predicated(
-    name: str,
-    predicate: Callable,
-    fallback: type[K],
-    dispatcher_fn: Callable,
-    fake_impl: Callable,
-) -> Callable[[type[K]], type[K]]:
-    """Decorator factory that wraps a kernel class with predicated dispatch.
+class Composite(Kernel[ConfigT]):
+    """Generic dispatching Kernel built from a list of inner kernels.
 
-    Returns a decorator that, when applied to a kernel class ``primary``,
-    produces a ``_PredicatedKernel`` subclass. At layer-initialisation time
-    the subclass resolves the full fallback chain into a single flat dispatch
-    callable and registers it as a ``torch.ops.vllm`` custom op. Subsequent
-    calls to ``apply`` are routed through this op, eliminating Python-level
-    conditionals that would otherwise cause graph breaks under
-    ``torch.compile`` / CUDA graph capture.
-
-    Args:
-        name: The op name to register under ``torch.ops.vllm``.
-        predicate: A callable that returns ``True`` when ``primary`` should
-            be invoked. Forwarded to ``dispatcher_fn``.
-        fallback: The kernel class to fall back to when the predicate is
-            ``False``. May itself be a predicated kernel, in which case the
-            chain is resolved recursively and collapsed into a single op.
-        dispatcher_fn: A scheme-specific factory that, given
-            ``(predicate, primary, fallback_fn)``, returns the typed dispatch
-            closure to register. Must carry concrete type annotations so that
-            ``infer_schema`` can derive the ATen op schema.
-        fake_impl: A callable used as the abstract interpretation of the op
-            during tracing (e.g. ``torch.nn.functional.linear`` for w16a16).
+    Subclasses declare:
+        _scheme_tag    : str — short tag baked into the registered op name
+        _chain         : list[type[Kernel]] — PredicateKernels followed by an
+                         optional plain-Kernel terminal candidate
+        _dispatcher_fn : Callable — scheme-specific dispatch factory; takes
+                         (predicate, primary, fallback_fn) and returns a
+                         typed closure suitable for direct_register_custom_op
+        _native_impl   : Callable — scheme-specific safe-default impl. Used as
+                         (a) the runtime safety net when no PredicateKernel
+                         matches and the plain terminal candidate (if any)
+                         isn't viable for this config, and (b) the fake_impl
+                         passed to direct_register_custom_op for tracing.
     """
-    def decorator(primary: type[K]) -> type[K]:
-        if primary.apply is fake_impl:
-            raise TypeError(
-                f"{primary.__qualname__} does not override 'apply'. "
-                f"Kernels wrapped with make_predicated must define a static "
-                f"'apply' method."
+
+    _scheme_tag: ClassVar[str]
+    _chain: ClassVar[list[type[Kernel]]]
+    _dispatcher_fn: ClassVar[Callable]
+    _native_impl: ClassVar[Callable]
+
+    @classmethod
+    def is_supported(
+        cls,
+        compute_capability: int | None = None,
+    ) -> tuple[bool, str | None]:
+        if any(k.is_supported(compute_capability)[0] for k in cls._chain):
+            return True, None
+        return False, "no inner kernel supported on this platform"
+
+    @classmethod
+    def can_implement(cls, config: ConfigT) -> tuple[bool, str | None]:
+        for k in cls._chain:
+            if k.is_supported()[0] and k.can_implement(config)[0]:
+                return True, None
+        return False, "no inner kernel viable for this config"
+
+    def __init__(self, config: ConfigT) -> None:
+        super().__init__(config)
+        last = self._chain[-1]
+        if issubclass(last, PredicateKernel):
+            predicated, terminal_apply = self._chain, self._native_impl
+        else:
+            predicated = self._chain[:-1]
+            if last.is_supported()[0] and last.can_implement(config)[0]:
+                terminal_apply = last.apply
+            else:
+                terminal_apply = self._native_impl
+
+        viable = [
+            k for k in predicated if k.is_supported()[0] and k.can_implement(config)[0]
+        ]
+
+        # native_impl is always a safe runtime fallback, so dispatch_fn is
+        # guaranteed non-None even if no PredicateKernel matches at apply time.
+        dispatch_fn = terminal_apply
+        for primary in reversed(viable):
+            if not issubclass(primary, PredicateKernel):
+                raise TypeError(
+                    f"{primary.__name__} must be a PredicateKernel; only the last "
+                    f"entry of {type(self).__name__}._chain may be a plain Kernel."
+                )
+            dispatch_fn = self._dispatcher_fn(
+                primary.predicate,
+                primary,
+                dispatch_fn,
             )
 
-        class _PredicatedKernel(primary):
-            _registered: ClassVar[bool] = False
-            _fallback: ClassVar[type] = fallback
+        # Per-layer op name. `config.prefix` comes from the layer (e.g.
+        # "model.layers.0.self_attn.qkv_proj"); dots become underscores so the
+        # name is a valid torch op identifier. When prefix is empty, use the
+        # scheme_tag alone — empty-prefix Composites of the same scheme share
+        # one op (guarded by the hasattr check below, which makes re-init a
+        # no-op rather than a double-define error).
+        prefix_part = config.prefix.replace(".", "_")
+        op_name = (
+            f"{prefix_part}_{self._scheme_tag}" if prefix_part else self._scheme_tag
+        )
+        self._op_name = op_name
+        self._dispatch_fn = dispatch_fn
 
-            def __init__(self, config: Config) -> None:
-                super().__init__(config)
-                fallback_fn = _resolve_dispatch_fn(fallback, config)
-                dispatch_fn = dispatcher_fn(predicate, primary, fallback_fn)
-                self._dispatch_fn = dispatch_fn
-                if not _PredicatedKernel._registered:
-                    from vllm.utils.torch_utils import direct_register_custom_op
-                    direct_register_custom_op(
-                        name, dispatch_fn, fake_impl=fake_impl,
-                    )
-                    _PredicatedKernel._registered = True
+        # Skip re-registration if this (prefix × scheme_tag) op is already in
+        # the library
+        if not hasattr(torch.ops.composed_kernel, op_name):
+            from vllm.utils.torch_utils import direct_register_custom_op
 
-            @staticmethod
-            def apply(*args, **kwargs) -> torch.Tensor:
-                return getattr(torch.ops.vllm, name)(*args, **kwargs)
+            direct_register_custom_op(
+                op_name,
+                dispatch_fn,
+                fake_impl=self._native_impl,
+                target_lib=composed_kernel_lib,
+            )
 
-        _PredicatedKernel.__name__ = primary.__name__
-        _PredicatedKernel.__qualname__ = primary.__qualname__
-        _PredicatedKernel.__module__ = primary.__module__
-        return _PredicatedKernel
+        # Cache the op handle so apply_weights doesn't re-resolve via getattr
+        # on every forward.
+        self._op = getattr(torch.ops.composed_kernel, op_name)
 
-    return decorator
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self._op(x, layer.processed_weight, bias)
+
+    @staticmethod
+    def apply(*args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError
