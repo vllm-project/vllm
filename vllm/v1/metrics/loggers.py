@@ -1194,12 +1194,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_decode_time_request[engine_idx].observe(
                 finished_request.decode_time
             )
-            # Calculate prefill KV compute (excludes cached tokens)
-            prefill_kv_computed = finished_request.num_prompt_tokens - max(
-                finished_request.num_cached_tokens, 0
-            )
             self.histogram_prefill_kv_computed_request[engine_idx].observe(
-                prefill_kv_computed
+                finished_request.num_prefill_kv_computed_tokens
             )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens
