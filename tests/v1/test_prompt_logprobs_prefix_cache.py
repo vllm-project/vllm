@@ -41,7 +41,8 @@ def _score(llm, order):
         for lp_dict, tok_id in zip(
             ro.prompt_logprobs[1:], ro.prompt_token_ids[1:]
         ):
-            vals.append(float(lp_dict[tok_id].logprob))
+            lp = lp_dict.get(tok_id) if lp_dict is not None else None
+            vals.append(float(lp.logprob) if lp is not None else 0.0)
         by_first[int(ro.prompt_token_ids[0])] = torch.tensor(vals)
     return by_first
 
@@ -56,6 +57,10 @@ def test_prompt_logprobs_order_independent(enable_prefix_caching):
         enable_prefix_caching=enable_prefix_caching,
     )
     try:
+        # Warm up the cache with all prompts once.
+        _score(llm, (0, 1, 2))
+
+        # Both runs are now cache hits, ensuring apples-to-apples comparison.
         ref = _score(llm, (0, 1, 2))
         shuffled = _score(llm, (2, 0, 1))
 
