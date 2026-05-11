@@ -72,6 +72,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Only used for type hinting.
 if TYPE_CHECKING:
@@ -478,8 +479,8 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "mamba2"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.MAMBA2
 
 
 def plamo2_mamba_mixer(
