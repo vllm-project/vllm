@@ -42,14 +42,19 @@ LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 # Each entry is keyed by (N, K, group_size, dtype) and maps to (min_M, KPerBlock).
 # Dispatch fires when M >= min_M for this layer — the kernel handles any M >= 1,
 # but min_M sets a lower bound below which fixed launch overhead (~0.4 ms) dominates
-# and Triton is comparable. Above the threshold, CK holds 28-31 TFLOPS uniformly
+# and Triton is comparable. Above the threshold, CK holds 22-31 TFLOPS uniformly
 # across the M dimension (measured M=256-16384 — see AIInfo memory
 # project_aiesw_32176_phase5c_shapes). This handles arbitrary chunked-prefill
 # chunk sizes including the M=1920 second-chunk case for prompt=3968+chunk=2048.
-# Currently only the Qwen3-4B gate_up_proj prefill column (N=19456, K=2560)
-# is wired; other shapes (qkv_proj/o_proj/down_proj) stay on Triton.
+# All four Qwen3-4B prefill linear columns are wired; the same kernel binary
+# handles all shapes (M/N/K are runtime args; only KPerBlock is templated).
+# Each wired layer costs an extra weight copy (~0.92 GB total for the four
+# Qwen3-4B columns on a 36-layer model).
 _CK_W4A16_TARGET_SHAPES: dict[tuple, tuple[int, int]] = {
-    (19456, 2560, 128, torch.float16): (256, 32),
+    (19456, 2560, 128, torch.float16): (256, 32),  # gate_up_proj
+    (6144, 2560, 128, torch.float16): (256, 32),  # qkv_proj (q=4096+k=1024+v=1024)
+    (2560, 4096, 128, torch.float16): (256, 32),  # o_proj
+    (2560, 9728, 128, torch.float16): (256, 32),  # down_proj
 }
 
 
