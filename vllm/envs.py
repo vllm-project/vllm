@@ -1780,6 +1780,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
+    # If set to 1, use Python spinloop extension to poll in a more efficient
+    # way when using the mp backend.
+    "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
 }
 
 
