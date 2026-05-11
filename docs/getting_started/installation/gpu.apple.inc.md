@@ -92,7 +92,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-For more CLI options and usage, see the [vLLM CLI documentation](../../serving/cli.md).
+For more details on the `vllm` CLI commands, see the [OpenAI-compatible server documentation](../../serving/openai_compatible_server.md).
 
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
