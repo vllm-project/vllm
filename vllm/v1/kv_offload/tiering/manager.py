@@ -10,8 +10,8 @@ hierarchical KV cache offloading.
 Key Design Principles:
 1. Always offload to all tiers — When a block is stored to the primary tier,
    it is cascaded to ALL secondary tiers
-2. Primary tier is the gateway — Only the primary tier can directly access
-   GPU memory
+2. Primary tier is the gateway — Secondary tiers cannot access GPU memory
+   directly; all data flows through the CPU primary tier
 3. Staged promotion — Blocks in secondary tiers must be promoted to the
    primary tier before GPU can access them
 4. Transparent retry mechanism — Return None from lookup() to signal
