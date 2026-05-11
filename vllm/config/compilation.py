@@ -1082,6 +1082,17 @@ class CompilationConfig:
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
     ):
+        # Breakable cudagraph replaces FX-level splitting with runtime
+        # stream-capture breaks, so force splitting_ops=[] -- torch.compile
+        # then emits a single callable that one BreakableCUDAGraphWrapper
+        # wraps. cudagraph_mode is left untouched: the wrapper responds to
+        # whatever runtime_mode the dispatcher emits (PIECEWISE or FULL).
+        import vllm.envs as envs
+
+        if envs.VLLM_USE_BREAKABLE_CUDAGRAPH:
+            self.splitting_ops = []
+            return
+
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
         if self.mode != CompilationMode.VLLM_COMPILE:

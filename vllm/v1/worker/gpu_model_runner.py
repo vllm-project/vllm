@@ -21,6 +21,10 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphWrapper,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -3089,8 +3093,6 @@ class GPUModelRunner(
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
-        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
-
         if isinstance(
             self.model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
         ):
@@ -5009,24 +5011,22 @@ class GPUModelRunner(
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
         if (
+            is_breakable_cudagraph_enabled()
+            and cudagraph_mode != CUDAGraphMode.NONE
+            and not self.parallel_config.use_ubatching
+        ):
+            # Breakable owns *all* cudagraph capture: a single wrapper at
+            # the outermost level handles both prefill (PIECEWISE) and
+            # decode (FULL) batches. The wrapper accepts any non-NONE
+            # runtime_mode at dispatch time, so no mode arg here.
+            self.model = BreakableCUDAGraphWrapper(self.model, self.vllm_config)
+        elif (
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
-            from vllm.compilation.breakable_cudagraph import (
-                BreakableCUDAGraphWrapper,
-                is_breakable_cudagraph_enabled,
+            self.model = CUDAGraphWrapper(
+                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
             )
-
-            if is_breakable_cudagraph_enabled():
-                self.model = BreakableCUDAGraphWrapper(
-                    self.model,
-                    self.vllm_config,
-                    runtime_mode=CUDAGraphMode.FULL,
-                )
-            else:
-                self.model = CUDAGraphWrapper(
-                    self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
-                )
         elif self.parallel_config.use_ubatching:
             if cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
@@ -6089,8 +6089,6 @@ class GPUModelRunner(
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
-
         all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
             BreakableCUDAGraphWrapper._all_instances
         )

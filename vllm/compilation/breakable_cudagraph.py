@@ -3,12 +3,12 @@
 """Breakable CUDA graph capture/replay.
 
 This is an alternative to :class:`CUDAGraphWrapper` that replaces vLLM's
-torch.compile-based FX graph splitting with runtime stream-capture breaks.
+torch.compile-based FX graph splitting with runtime stream-capture
+breaks.
 
-The idea (mirroring sgl-project/sglang#19102): instead of splitting the
-model FX graph at attention ops and wrapping each piece in its own
-``torch.cuda.graph()``, we let torch.compile produce a single compiled
-callable for the whole forward (``splitting_ops = []``) and intercept
+The idea (mirroring sgl-project/sglang#19102): instead of pre-splitting
+the model into many pieces at attention boundaries, a
+single capture context drives the whole forward and intercepts
 attention / kv-cache custom ops at the dispatcher to end the current
 stream capture, run the op eagerly, and resume capture.
 
@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import gc
 import threading
 import weakref
 from collections.abc import Callable
@@ -40,6 +41,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import weak_ref_tensors
 
@@ -67,9 +69,21 @@ def eager_break_during_capture(fn: F) -> F:
     This is the only seam ops should touch -- they don't need to import
     or know about :class:`BreakableCUDAGraphCapture` directly.
 
-    Apply as the *outermost* decorator if there are other decorators
-    (e.g. ``@maybe_transfer_kv_layer``) so the wrapped body, including
-    those decorators' setup/teardown, runs inside the eager break.
+    **Decorator order matters.** Apply as the *outermost* decorator if
+    there are other decorators that introduce host-side side effects
+    around the call -- the canonical example is
+    ``@maybe_transfer_kv_layer`` for PD-disaggregation, whose
+    ``wait_for_layer_load`` and ``save_kv_layer`` calls must run in the
+    eager segment, not inside the captured cudagraph. Putting
+    ``@eager_break_during_capture`` *inside* such a decorator would
+    record those side effects into the graph and hang on replay.
+
+    The correct order is::
+
+        @eager_break_during_capture   # outermost
+        @maybe_transfer_kv_layer
+        def unified_attention_with_output(...):
+            ...
     """
 
     @functools.wraps(fn)
@@ -150,20 +164,14 @@ class BreakableCUDAGraphCapture:
         if not self._capturing:
             return
         assert self._current_graph is not None
+        # TODO
         # Some segments are legitimately empty (e.g. between consecutive
         # custom ops with no kernels in between, like kv_cache_update
-        # immediately followed by attention_with_output). PyTorch warns on
-        # those, but they are harmless -- empty replay is a no-op. Suppress
-        # the warning so logs stay clean.
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.filterwarnings(
-                "ignore",
-                message=r".*CUDA Graph is empty.*",
-                category=UserWarning,
-            )
-            self._current_graph.capture_end()
+        # immediately followed by attention_with_output). PyTorch emits a
+        # UserWarning("CUDA Graph is empty") for those. The warning is
+        # informational and we let it through -- if it ever fires from a
+        # segment that should have had work, it points at a real bug.
+        self._current_graph.capture_end()
         self.segments.append(("graph", self._current_graph))
         self._current_graph = None
         self._capturing = False
@@ -247,21 +255,23 @@ class BreakableCUDAGraphWrapper:
         self,
         runnable: Callable[..., Any],
         vllm_config: VllmConfig,
-        runtime_mode: CUDAGraphMode,
     ) -> None:
-        if runtime_mode == CUDAGraphMode.NONE:
-            raise ValueError(
-                "BreakableCUDAGraphWrapper requires a non-NONE runtime mode."
-            )
+        # Unlike the original CUDAGraphWrapper which strictly matches a
+        # single runtime_mode, this wrapper captures whatever the
+        # dispatcher emits (any non-NONE runtime_mode) -- breakable's
+        # capture is identical for prefill and decode, so there's nothing
+        # to dispatch on at the runtime_mode level. Entries are keyed by
+        # BatchDescriptor which already encodes batch shape / uniformity.
         self.runnable = runnable
         self.vllm_config = vllm_config
-        self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         self.entries: dict[BatchDescriptor, _BreakableEntry] = {}
         BreakableCUDAGraphWrapper._all_instances.add(self)
+
+        logger.info_once("[Experimental] Breakable CUDA graph enabled")
 
     # --- vllm-style attribute forwarding ---------------------------------
 
@@ -291,10 +301,11 @@ class BreakableCUDAGraphWrapper:
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
 
-        if (
-            cudagraph_runtime_mode == CUDAGraphMode.NONE
-            or cudagraph_runtime_mode != self.runtime_mode
-        ):
+        # Capture whenever the dispatcher says "some cudagraph mode" --
+        # breakable produces the same artifact regardless of PIECEWISE
+        # vs FULL, so we match either. Entries are keyed by batch
+        # descriptor, which already encodes prefill/decode distinctions.
+        if cudagraph_runtime_mode == CUDAGraphMode.NONE:
             return self.runnable(*args, **kwargs)
 
         assert batch_descriptor is not None
@@ -316,6 +327,8 @@ class BreakableCUDAGraphWrapper:
         kwargs: dict[str, Any],
     ) -> Any:
         validate_cudagraph_capturing_enabled()
+        # TODO: debug, will remove later
+        print(f"Starting breakable cudagraph capture for {entry.batch_descriptor}")
 
         entry.input_addresses = [
             x.data_ptr() for x in args if isinstance(x, torch.Tensor)
@@ -326,13 +339,33 @@ class BreakableCUDAGraphWrapper:
         else:
             set_graph_pool_id(current_platform.graph_pool_handle())
 
+        # Match torch.cuda.graph()'s pre-capture cleanup once per descriptor.
+        # We drive capture_begin/end directly and bypass torch.cuda.graph(),
+        # so its built-in gc + empty_cache never fire. Run them here once
+        # per _capture call -- NOT inside _begin_segment, since this capture
+        # session may issue many begin/end pairs (one per layer's break),
+        # and repeated gc would tank capture time the way it did for the
+        # pre-`gc_disable` piecewise path.
+        gc.collect()
+        torch.accelerator.empty_cache()
+        # Sync the offloader's copy stream before capture so any in-flight
+        # pre-capture prefetches are complete and don't leak into the graph.
+        get_offloader().sync_prev_onload()
+
         capture = BreakableCUDAGraphCapture(pool=self.graph_pool)
         with capture:
             output = self.runnable(*args, **kwargs)
+            # Join the offloader's copy stream while we still hold the last
+            # segment open, so the join is captured into the graph (otherwise
+            # we get an "unjoined stream" error on subsequent forwards).
+            get_offloader().join_after_forward()
+            # Convert output to a weak ref *inside* the capture context so the
+            # strong ref is dropped before the last segment closes, letting
+            # the cudagraph pool reclaim/reuse that memory immediately for
+            # the next batch descriptor's capture.
+            output = weak_ref_tensors(output)
 
         entry.capture = capture
-        # Hold a weak ref to outputs so the cudagraph pool can manage memory,
-        # mirroring CUDAGraphWrapper.weak_ref_output behavior.
         entry.output = weak_ref_tensors(output)
 
         logger.debug(
@@ -340,8 +373,8 @@ class BreakableCUDAGraphWrapper:
             entry.batch_descriptor,
             capture,
         )
-        # Return the strong ref so the caller sees real tensors during the
-        # initial run.
+        # Return the (already-weak) output from the captured run so the
+        # caller of model(...) gets a tensor pointing at the cudagraph pool's memory
         return output
 
     def _replay(self, entry: _BreakableEntry, args: tuple[Any, ...]) -> Any:
@@ -352,6 +385,9 @@ class BreakableCUDAGraphWrapper:
                 f"for {entry.batch_descriptor}. Expected "
                 f"{entry.input_addresses}, got {new_addresses}."
             )
+        # Sync the offloader's copy stream before replay so any external
+        # dependencies from pre-capture prefetches are satisfied.
+        get_offloader().sync_prev_onload()
         assert entry.capture is not None
         entry.capture.replay()
         return entry.output

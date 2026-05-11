@@ -46,9 +46,17 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
+        # Breakable cudagraph replaces FX-level splitting with runtime
+        # stream-capture breaks, so splitting_ops=[] is valid even when
+        # piecewise cudagraphs are requested.
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
         assert (
             not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
+            or is_breakable_cudagraph_enabled()
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "

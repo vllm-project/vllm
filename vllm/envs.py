@@ -628,13 +628,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_PREGRAD_PASSES": lambda: (
         os.environ.get("VLLM_ENABLE_PREGRAD_PASSES", "1") == "1"
     ),
-    # Experimental: replace vLLM's piecewise cudagraph (which relies on
-    # Dynamo/FX graph splitting at attention) with a breakable cudagraph
-    # capture/replay system. When enabled, splitting_ops is forced to []
-    # and a single FULL cudagraph wrapper captures the model forward,
-    # using runtime stream-capture breaks in attention/kv-cache ops.
+    # Experimental: breakable cudagraph does not rely on torch.compile
+    # TODO: disable by default before merging
     "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
-        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
+        os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "1") == "1"
     ),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
