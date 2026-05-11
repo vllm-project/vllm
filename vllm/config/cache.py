@@ -4,6 +4,8 @@
 from dataclasses import field
 from typing import ClassVar, Literal
 
+GpuEvictionPolicy = Literal["lru", "two_queue", "arc"]
+
 from pydantic import Field, SkipValidation, field_validator, model_validator
 
 from vllm.config.utils import config
@@ -175,6 +177,29 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    gpu_eviction_policy: GpuEvictionPolicy = "lru"
+    """Eviction policy for the GPU KV cache block pool.
+
+    - ``"lru"`` — single-queue LRU (default). Preserves the existing vLLM
+      behaviour; no overhead beyond the current implementation.
+    - ``"two_queue"`` — hot/cold two-queue policy. Blocks that survive at
+      least one prefix-cache hit are promoted to a protected "hot" queue.
+      Eviction always drains the "cold" queue (one-time-use blocks) first,
+      preventing burst traffic from evicting frequently-reused prefix blocks
+      (scan pollution). Recommended for workloads with long shared system
+      prompts or RAG context combined with bursty unique-prompt traffic.
+    - ``"arc"`` — Adaptive Replacement Cache (Megiddo & Modha, FAST 2003).
+      Maintains four lists (T1, T2, B1, B2): T1 for recently-accessed blocks,
+      T2 for frequently-accessed blocks, and ghost lists B1/B2 that record
+      hashes of recently evicted blocks.  An adaptive parameter ``p`` (target
+      T1 size) self-tunes based on ghost hits — B1 hits grow T1 (reward
+      recency) while B2 hits shrink T1 (reward frequency).  ARC is
+      scan-resistant, requires no manual tuning, and achieves consistently
+      higher hit rates than pure LRU across mixed workloads.  Slightly higher
+      memory overhead than ``two_queue`` due to ghost lists (~3× more metadata
+      per block), but still negligible compared to GPU KV cache size.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -205,6 +230,8 @@ class CacheConfig:
             "num_cpu_blocks",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # Eviction policy only affects scheduling, not the compute graph
+            "gpu_eviction_policy",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

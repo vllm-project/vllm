@@ -11,6 +11,7 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.eviction_policy import GPUCachePolicy, make_gpu_eviction_policy
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -29,6 +30,24 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+class _FreeBlockQueueShim:
+    """Minimal shim that exposes ``num_free_blocks`` for backward-compat.
+
+    Some external code accesses ``block_pool.free_block_queue.num_free_blocks``
+    directly.  This shim delegates to the underlying GPUCachePolicy so that
+    callers get the correct count regardless of which policy is active.
+    """
+
+    __slots__ = ("_policy",)
+
+    def __init__(self, policy: "GPUCachePolicy") -> None:
+        self._policy = policy
+
+    @property
+    def num_free_blocks(self) -> int:
+        return len(self._policy)
 
 
 class BlockHashToBlockMap:
@@ -144,6 +163,8 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
+        eviction_policy: Name of the GPU eviction policy to use. One of
+            ``"lru"`` (default) or ``"two_queue"``.
     """
 
     def __init__(
@@ -153,6 +174,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        eviction_policy: str = "lru",
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -162,10 +184,26 @@ class BlockPool:
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
-        # Free block queue that constructs and manipulates a doubly linked
-        # list of free blocks (including eviction candidates when caching is
-        # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+
+        # Pluggable eviction policy. LRU is the default and preserves the
+        # original single-queue behaviour.
+        self._policy: GPUCachePolicy = make_gpu_eviction_policy(
+            eviction_policy, capacity=num_gpu_blocks
+        )
+
+        # Seed the policy with all blocks so that the initial pool is ready.
+        # We use a temporary FreeKVCacheBlockQueue to bootstrap the linked
+        # list pointers inside KVCacheBlock, then move the blocks into the
+        # policy.  For LRU the policy wraps its own FreeKVCacheBlockQueue
+        # directly; for TwoQueue we need the pointer bootstrapping regardless.
+        _bootstrap_queue = FreeKVCacheBlockQueue(self.blocks)
+        # Drain the bootstrap queue and feed all blocks into the policy queue.
+        all_blocks: list[KVCacheBlock] = _bootstrap_queue.popleft_n(num_gpu_blocks)
+        self._policy.insert_n(all_blocks)
+
+        # Keep a direct reference to the underlying queue for the null-block
+        # popleft below (works for both LRU and TwoQueue via evict_n).
+        # We use evict_n(1) which is O(1) and policy-agnostic.
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -173,13 +211,19 @@ class BlockPool:
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
         # avoid freeing it.
-        self.null_block = self.free_block_queue.popleft()
+        null_block_list = self._policy.evict_n(1)
+        self.null_block: KVCacheBlock = null_block_list[0]
         self.null_block.is_null = True
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+
+        # Expose free_block_queue for backward-compat with code that reads
+        # num_free_blocks directly.  For LRU, this is the actual queue; for
+        # other policies we provide a lightweight shim.
+        self.free_block_queue = _FreeBlockQueueShim(self._policy)
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -333,7 +377,7 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        ret: list[KVCacheBlock] = self._policy.evict_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -398,9 +442,10 @@ class BlockPool:
         """
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # candidate), so remove it and signal promotion.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                self._policy.remove(block)
+                self._policy.touch(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -417,7 +462,7 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
+        self._policy.insert_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
 
@@ -481,7 +526,7 @@ class BlockPool:
         Returns:
             The number of free blocks.
         """
-        return self.free_block_queue.num_free_blocks
+        return len(self._policy)
 
     def get_usage(self) -> float:
         """Get the KV cache usage.
