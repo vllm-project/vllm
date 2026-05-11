@@ -6,6 +6,7 @@ from typing import Any
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
@@ -29,7 +30,6 @@ from ..vllm_inductor_pass import (
     VllmPatternReplacement,
 )
 from .matcher_utils import (
-    MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherSiluAndMul,
 )
@@ -49,10 +49,6 @@ class AiterRMSNormQuantPattern:
         self.quant_dtype = key.quant.dtype
         self.device = torch.device("cuda")
 
-        if key.fused_add:
-            self.rmsnorm_matcher = MatcherFusedAddRMSNorm(
-                epsilon, match_rocm_aiter=True
-            )
         self.quant_matcher = MatcherQuantFP8(
             key.quant,
             match_rocm_aiter=match_aiter_quant,
@@ -145,7 +141,9 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
             result, scale = self.quant_matcher(result_rms)
 
             return result, residual_out, scale
@@ -163,10 +161,16 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
 
             return result[0], result[1], result[2]
 
+        inputs = [
+            self.empty(5, 16),  # input
+            self.empty(16),  # weight
+            self.empty(5, 16),  # residual
+        ]
+
         pm.register_replacement(
             pattern,
             replacement,
-            self.rmsnorm_matcher.inputs(),
+            inputs,
             pm.fwd_only,
             pm_pass,
         )
@@ -258,7 +262,9 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             weight: torch.Tensor,
             residual: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
             result, scale = self.quant_matcher(result_rms)
 
             return result, residual_out, scale
@@ -279,8 +285,167 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             # result, scale, residual
             return at[0], at[1], at[2]
 
+        inputs = [
+            self.empty(5, 16),  # input
+            self.empty(16),  # weight
+            self.empty(5, 16),  # residual
+        ]
+
+        pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
+
+
+class DoubleAiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
+    """
+    Pattern matching ``rms_norm`` whose output feeds *two* distinct
+    ``rocm_aiter_group_fp8_quant`` consumers, replacing it with two
+    independent fused ``rms_norm_group_fp8_quant`` ops.
+
+    Repeating the rms_norm in the replacement is preferable to leaving
+    the fused 16-bit rms output materialized for two unfused quant
+    consumers, and matches what the previous manual graph surgery
+    achieved by cloning the rms_norm node.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        match_aiter_quant: bool = True,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+
+        super().__init__(epsilon, key, match_aiter_quant)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            result1, scale1 = self.quant_matcher(result_rms)
+            result2, scale2 = self.quant_matcher(result_rms)
+            return result1, scale1, result2, scale2
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            at1 = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                group_size=128,
+            )
+            at2 = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                group_size=128,
+            )
+
+            return at1[0], at1[1], at2[0], at2[1]
+
         pm.register_replacement(
-            pattern, replacement, self.rmsnorm_matcher.inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            # input, weight
+            [self.empty(5, 16), self.empty(16)],
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
+    """
+    View-tolerant variant of ``DoubleAiterRMSFp8GroupQuantPattern``.
+
+    Matches the same 1-to-2 fan-out, but with a ``view``/``reshape`` between
+    the ``rms_norm`` output and the two ``rocm_aiter_group_fp8_quant``
+    consumers::
+
+        rms_norm -> view -> rocm_aiter_group_fp8_quant
+                \\-> view -> rocm_aiter_group_fp8_quant
+
+    This shape arises in DeepSeek-V3.2's MLA indexer q_c norm, where the
+    FP8 linear path's 2D-flatten boilerplate
+    (``Fp8BlockScaledMMLinearKernel.apply_weights``) inserts a view between
+    the rms_norm output and each FP8 group quant op. The non-view sibling
+    pattern silently no-ops on this graph because the pattern matcher
+    requires the in-graph and in-pattern node shapes to align.
+
+    The trace_fn runs Inductor's ``view_to_reshape`` post-grad pass to
+    normalize ``view`` to ``reshape`` in both the pattern and the input
+    graph, widening the match without touching the no-view sibling.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        match_aiter_quant: bool = True,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+
+        super().__init__(epsilon, key, match_aiter_quant)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            view_rms = result_rms.view(-1, result_rms.shape[-1])
+            result1, scale1 = self.quant_matcher(view_rms)
+            result2, scale2 = self.quant_matcher(view_rms)
+            return result1, scale1, result2, scale2
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            at1 = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                group_size=128,
+            )
+            at2 = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                variance_epsilon=self.epsilon,
+                group_size=128,
+            )
+
+            return at1[0], at1[1], at2[0], at2[1]
+
+        def trace_with_view_to_reshape(*args: Any, **kwargs: Any) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            # input, weight
+            [self.empty(5, 16), self.empty(16)],
+            trace_with_view_to_reshape,
+            pm_pass,
         )
 
 
@@ -300,8 +465,24 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         )
 
         # Make sure fused add patterns are before simple rms norm,
-        # as the latter is a subset of the former in torch ops
+        # as the latter is a subset of the former in torch ops.
+        # The DoubleQuant patterns handle 1 rms_norm -> 2 group_fp8_quant
+        # fan-out (e.g. DSv3.2) and must be registered before the single
+        # group-quant pattern so they match first. The view-tolerant variant
+        # additionally covers the rms_norm -> view -> 2x quant shape that
+        # appears when the FP8 linear path inserts a 2D-flatten boilerplate
+        # (DSv3.2 MLA indexer q_c norm).
         for epsilon in [1e-5, 1e-6]:
+            # Fuse aiter rms_norm + 2x aiter group fp8 quant
+            DoubleAiterRMSFp8GroupQuantPattern(
+                epsilon, FP8_DTYPE, GroupShape(1, 128)
+            ).register(self.patterns)
+
+            # View-tolerant sibling for DSv3.2 q_c norm fan-out
+            DoubleAiterRMSFp8GroupQuantViewPattern(
+                epsilon, FP8_DTYPE, GroupShape(1, 128)
+            ).register(self.patterns)
+
             #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
             AiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
@@ -312,7 +493,18 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
 
-            for match_aiter_quant in [True, False]:
+            # When quant_fp8 custom ops are disabled, both AITER and native
+            # quant matchers trace through QuantFP8's native implementation.
+            # Registering both variants would create duplicate Inductor
+            # patterns.
+            is_quant_fp8_enabled = config.compilation_config.is_custom_op_enabled(
+                "quant_fp8"
+            )
+            match_aiter_quant_options = (
+                [True, False] if is_quant_fp8_enabled else [False]
+            )
+
+            for match_aiter_quant in match_aiter_quant_options:
                 # Fuse aiter rms_norm + (aiter / vllm built-in)
                 # dynamic per-token fp8 quant
                 AiterRMSNormDynamicQuantPattern(
@@ -340,6 +532,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSNormDynamicQuantPattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
+            DoubleAiterRMSFp8GroupQuantPattern,
+            DoubleAiterRMSFp8GroupQuantViewPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 
@@ -420,12 +614,15 @@ class AddAiterRMSNormPadPattern:
         self.epsilon = epsilon
         self.hidden_size = hidden_size
         self.x_pad_to_multiple = x_pad_to_multiple
-        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon, match_rocm_aiter=True)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input, weight, residual = self.rmsnorm_matcher.inputs()
-        router_weight = torch.empty([8, 16], dtype=weight.dtype, device=weight.device)
-        router_bias = torch.empty([8], dtype=weight.dtype, device=weight.device)
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        input = torch.empty(5, 16, dtype=dtype, device=device)
+        weight = torch.empty(16, dtype=dtype, device=device)
+        residual = torch.empty(5, 16, dtype=dtype, device=device)
+        router_weight = torch.empty([8, 16], dtype=dtype, device=device)
+        router_bias = torch.empty([8], dtype=dtype, device=device)
         return [input, weight, residual, router_weight, router_bias]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -439,7 +636,9 @@ class AddAiterRMSNormPadPattern:
             pad_size = self.x_pad_to_multiple - (
                 self.hidden_size % self.x_pad_to_multiple
             )
-            result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
             router_logits = torch.ops.vllm.rocm_unquantized_gemm(
                 result_rms, router_weight, router_bias
             )

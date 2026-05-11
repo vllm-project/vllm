@@ -261,11 +261,19 @@ def _rocm_aiter_topk_softmax_impl(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> None:
     from aiter import topk_softmax
 
     topk_softmax(
-        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        num_shared_experts,
+        shared_expert_scoring_func,
     )
 
 
@@ -275,6 +283,8 @@ def _rocm_aiter_topk_softmax_fake(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> None:
     pass
 
@@ -645,58 +655,6 @@ def _rocm_aiter_gemm_a8w8_blockscale_fake(
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
-
-
-def _rocm_aiter_rms_norm_impl(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from aiter import rms_norm
-
-    if x.dim() > 2:
-        x_original_shape = x.shape
-        x = x.reshape(-1, x_original_shape[-1])
-        x = rms_norm(x, weight, variance_epsilon)
-        return x.reshape(x_original_shape)
-
-    return rms_norm(x, weight, variance_epsilon)
-
-
-def _rocm_aiter_rms_norm_fake(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import rmsnorm2d_fwd_with_add
-
-    residual_out = torch.empty_like(residual)
-    out = torch.empty_like(x)
-    rmsnorm2d_fwd_with_add(
-        out,  # output
-        x,  # input
-        residual,  # residual input
-        residual_out,  # residual output
-        weight,
-        variance_epsilon,
-    )
-    return out, residual_out
-
-
-def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    residual_out = torch.empty_like(residual)
-    out = torch.empty_like(x)
-    return out, residual_out
 
 
 def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
@@ -1229,10 +1187,9 @@ class rocm_aiter_ops:
 
         # Check if aiter is enabled before using operations
         if rocm_aiter_ops.is_enabled():
-            result = rocm_aiter_ops.rms_norm(x, weight, epsilon)
+            result = rocm_aiter_ops.per_token_quant(x, FP8_DTYPE)
 
     Operations:
-        - RMS normalization: rms_norm, rms_norm2d_with_add
         - GEMM operations: gemm_a8w8, gemm_a8w8_blockscale
         - Fused MoE: fused_moe, asm_moe_tkw1
         - Routing: topk_softmax, biased_grouped_topk, grouped_topk
@@ -1244,7 +1201,6 @@ class rocm_aiter_ops:
     # Check if the env variable is set
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-    _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -1260,6 +1216,9 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    # Lazily probed: whether aiter.topk_softmax supports the
+    # num_shared_experts / shared_expert_scoring_func args (7-arg form).
+    _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
 
     _ALL_REDUCE_MAX_SIZE: int = 8192 * 1024 * 8 * 2
     _CUSTOM_ALL_REDUCE: AiterCustomAllreduceProto | None = None
@@ -1275,7 +1234,6 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
-        cls._RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -1369,11 +1327,6 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
-    def is_rmsnorm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
-
-    @classmethod
-    @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._FMOE_ENABLED
 
@@ -1381,6 +1334,52 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def topk_softmax_supports_fused_sigmoid(cls) -> bool:
+        """Check if topk_softmax supports fused shared expert activation."""
+        if cls._TOPK_SOFTMAX_FUSED_SIGMOID is None:
+            try:
+                import inspect
+
+                from aiter import topk_softmax
+
+                params = inspect.signature(topk_softmax).parameters
+                if "num_shared_experts" in params:
+                    cls._TOPK_SOFTMAX_FUSED_SIGMOID = True
+                else:
+                    # @compile_ops wrapper loses the original signature.
+                    # Fall back to the torch custom op schema.
+                    import torch
+
+                    schema = getattr(
+                        getattr(torch.ops.aiter, "topk_softmax", None), "default", None
+                    )
+                    schema_str = str(getattr(schema, "_schema", ""))
+                    cls._TOPK_SOFTMAX_FUSED_SIGMOID = "num_shared_experts" in schema_str
+            except (ImportError, ValueError):
+                cls._TOPK_SOFTMAX_FUSED_SIGMOID = False
+        return cls._TOPK_SOFTMAX_FUSED_SIGMOID
+
+    @classmethod
+    @if_aiter_supported
+    def fuse_sigmoid_in_kernel(cls, aiter_topK_meta_data: object) -> bool:
+        """Whether fused shared-expert sigmoid in the topk kernel is usable.
+
+        Combines the cached static capability checks (FSE enabled, fused-moe
+        enabled, topk_softmax supports fused sigmoid) with the runtime
+        readiness check (topK meta-data buffer initialized).
+
+        ``aiter_topK_meta_data`` is accepted as a parameter rather than
+        imported internally so callers cannot hit initialization-order
+        issues where the module-level global has not been set yet.
+        """
+        return (
+            cls.is_fusion_moe_shared_experts_enabled()
+            and cls.topk_softmax_supports_fused_sigmoid()
+            and aiter_topK_meta_data is not None
+        )
 
     @classmethod
     @if_aiter_supported
@@ -1466,6 +1465,25 @@ class rocm_aiter_ops:
         # effective max input size (based on upstream aiter version: v0.1.10.post3)
         # https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/aiter/dist/device_communicators/custom_all_reduce.py#L272-L273
         return int(cls._ALL_REDUCE_MAX_SIZE / 2)
+
+    @classmethod
+    @if_aiter_supported
+    def are_gdn_triton_kernels_available(cls) -> bool:
+        """Check if AITER Triton kernels for GDN attention are importable.
+
+        These are optional Triton kernels (conv1d fast-path, gated delta net)
+        used by GatedDeltaNetAttention's decode fast-path.  They may be absent
+        in older aiter builds.
+        """
+        if not cls._AITER_ENABLED:
+            return False
+        try:
+            import aiter.ops.triton.causal_conv1d_update_single_token  # noqa: F401
+            import aiter.ops.triton.gated_delta_net  # noqa: F401
+
+            return True
+        except (ImportError, ModuleNotFoundError):
+            return False
 
     @staticmethod
     @if_aiter_supported
@@ -1558,19 +1576,6 @@ class rocm_aiter_ops:
                 op_name="rocm_aiter_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_gemm_a8w8_blockscale_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_rms_norm",
-                op_func=_rocm_aiter_rms_norm_impl,
-                fake_impl=_rocm_aiter_rms_norm_fake,
-            )
-
-            direct_register_custom_op(
-                op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
-                op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-                dispatch_key=current_platform.dispatch_key,
             )
 
             direct_register_custom_op(
@@ -1673,14 +1678,6 @@ class rocm_aiter_ops:
             _OPS_REGISTERED = True
 
     @staticmethod
-    def get_rmsnorm_fused_add_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
-
-    @staticmethod
-    def get_rmsnorm_op() -> OpOverload:
-        return torch.ops.vllm.rocm_aiter_rms_norm.default
-
-    @staticmethod
     def get_rmsnorm_fused_add_dynamic_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant.default
 
@@ -1723,23 +1720,6 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm.default
-
-    @staticmethod
-    def rms_norm(
-        x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-    ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_rms_norm(x, weight, variance_epsilon)
-
-    @staticmethod
-    def rms_norm2d_with_add(
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        weight: torch.Tensor,
-        variance_epsilon: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-            x, residual, weight, variance_epsilon
-        )
 
     @staticmethod
     def w8a8_gemm(
@@ -1874,9 +1854,17 @@ class rocm_aiter_ops:
         token_expert_indices: torch.Tensor,
         gating_output: torch.Tensor,
         renormalize: bool,
+        num_shared_experts: int = 0,
+        shared_expert_scoring_func: str = "",
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_softmax(
-            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
         )
         return topk_weights, topk_indices
 
