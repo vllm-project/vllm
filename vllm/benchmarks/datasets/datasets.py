@@ -1401,7 +1401,7 @@ class ShareGPTDataset(BenchmarkDataset):
 
 class TimedTrace(BenchmarkDataset):
     """
-    Implements a base class to replay various time'ed traces.
+    Implements a base class to replay various timed traces.
     Loads data from a JSON file and generates sample requests
     based on the timing information in the traces.
     """
@@ -1560,25 +1560,6 @@ class TimedTrace(BenchmarkDataset):
             )
         return samples
 
-
-class _ValidateDatasetArgs(argparse.Action):
-    """Argparse action to validate dataset name and path compatibility."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        setattr(namespace, self.dest, values)
-
-        # Get current values of both dataset_name and dataset_path
-        dataset_name = getattr(namespace, "dataset_name", "random")
-        dataset_path = getattr(namespace, "dataset_path", None)
-
-        # Validate the combination
-        if dataset_name == "random" and dataset_path is not None:
-            parser.error(
-                "Cannot use 'random' dataset with --dataset-path. "
-                "Please specify the appropriate --dataset-name (e.g., "
-                "'sharegpt', 'custom', 'sonnet') for your dataset file: "
-                f"{dataset_path}"
-            )
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
