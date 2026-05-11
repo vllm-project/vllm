@@ -80,9 +80,16 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         max_output_tokens_param: str | None = None,
     ) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
-        kwargs = {}
-        if max_output_tokens_param is not None:
-            kwargs["max_output_tokens_param"] = max_output_tokens_param
+        if max_output_tokens_param is None:
+            return TokenizeParams(
+                max_total_tokens=max_total_tokens,
+                max_output_tokens=max_output_tokens,
+                truncate_prompt_tokens=self.truncate_prompt_tokens,
+                truncation_side=self.truncation_side,
+                do_lower_case=encoder_config.get("do_lower_case", False),
+                add_special_tokens=add_special_tokens,
+                max_total_tokens_param=max_total_tokens_param,
+            )
 
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
@@ -92,7 +99,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=add_special_tokens,
             max_total_tokens_param=max_total_tokens_param,
-            **kwargs,
+            max_output_tokens_param=max_output_tokens_param,
         )
 
 
