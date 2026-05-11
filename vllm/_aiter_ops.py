@@ -2475,21 +2475,20 @@ class rocm_aiter_ops:
                 ),
             )
 
-        # # AITER's Python wrapper allocates intermediate/output tensors without
-        # # explicit device arguments, so run it under the residual tensor's device.
-        # # else it will throw core dump error
-        # with torch.device(residual_flat.device):
-        post_mix, comb_mix, layer_input = mhc_pre(
-            residual_flat,
-            fn,
-            hc_scale,
-            hc_base,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-        )
+        # AITER's Python wrapper allocates intermediate/output tensors without
+        # explicit device arguments, so run it under the residual tensor's device.
+        with torch.device(residual_flat.device):
+            post_mix, comb_mix, layer_input = mhc_pre(
+                residual_flat,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
         return (
             post_mix.view(*outer_shape, hc_mult, 1),
             comb_mix.view(*outer_shape, hc_mult, hc_mult),

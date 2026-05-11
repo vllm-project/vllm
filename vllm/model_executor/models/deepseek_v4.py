@@ -1604,6 +1604,7 @@ def hc_head(
     outer_shape = hidden_states.shape[:-2]
     hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
     num_tokens = hs_flat.shape[0]
+
     out = torch.empty(
         num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
     )
