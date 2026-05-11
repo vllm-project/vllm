@@ -1550,7 +1550,13 @@ class NemotronH_Nano_VL_V2(
                     assert self.sound_encoder is not None
                     sound_weights.append((name, w.detach().clone()))
 
-        self.language_model.load_weights(llm_weights_gen())
+        # Fully drain the generator so every mm tensor is buffered, even if
+        # the LLM loader stops iterating early.
+        llm_weights_iter = llm_weights_gen()
+        self.language_model.load_weights(llm_weights_iter)
+        for _ in llm_weights_iter:
+            pass
+
         if load_multimodal_weights:
             for trimmed_name, w in adapter_weights:
                 # Load vision-language adapter weights directly
