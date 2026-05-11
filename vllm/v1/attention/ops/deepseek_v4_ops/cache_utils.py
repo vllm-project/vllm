@@ -21,50 +21,6 @@ from vllm.utils.import_utils import has_cutedsl
 
 
 @triton.jit
-def _fp8_per_tensor_quant_kernel(
-    input_ptr,
-    output_ptr,
-    scale_inv_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-
-    values = tl.load(input_ptr + offsets, mask=mask, other=0.0).to(tl.float32)
-    scale_inv = tl.load(scale_inv_ptr)
-    values = tl.clamp(values * scale_inv, -448.0, 448.0)
-    tl.store(output_ptr + offsets, values.to(tl.float8e4nv), mask=mask)
-
-
-def fp8_per_tensor_quant(
-    input_tensor: torch.Tensor,
-    scale_inv: torch.Tensor,
-) -> torch.Tensor:
-    assert input_tensor.dtype == torch.bfloat16
-    assert scale_inv.dtype == torch.float32 and scale_inv.numel() == 1
-
-    input_tensor = input_tensor.contiguous()
-    output = torch.empty_like(input_tensor, dtype=torch.float8_e4m3fn)
-    n_elements = input_tensor.numel()
-    if n_elements == 0:
-        return output
-
-    block_size = 1024
-    grid = (triton.cdiv(n_elements, block_size),)
-    _fp8_per_tensor_quant_kernel[grid](
-        input_tensor,
-        output,
-        scale_inv,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        num_warps=4,
-    )
-    return output
-
-
-@triton.jit
 def _apply_gptj_rope_512(
     values,
     position,
@@ -100,6 +56,11 @@ def _qnorm_rope_kernel(
     q_ptr,
     q_stride0,
     q_stride1,
+    num_q_heads,
+    q_fp8_ptr,
+    q_fp8_stride0,
+    q_fp8_stride1,
+    q_fp8_scale_inv_ptr,
     positions_ptr,
     cos_sin_cache_ptr,
     cos_sin_stride,
@@ -107,11 +68,21 @@ def _qnorm_rope_kernel(
     HEAD_SIZE: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    STORE_Q_FP8: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = offsets < HEAD_SIZE
+
+    if STORE_Q_FP8 and head_idx >= num_q_heads:
+        q_fp8_row = q_fp8_ptr + token_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
+        tl.store(
+            q_fp8_row + offsets,
+            tl.zeros((BLOCK_SIZE,), dtype=tl.float32).to(tl.float8e4nv),
+            mask=mask,
+        )
+        return
 
     q_row = q_ptr + token_idx * q_stride0 + head_idx * q_stride1
     values = tl.load(q_row + offsets, mask=mask, other=0.0).to(tl.float32)
@@ -128,7 +99,16 @@ def _qnorm_rope_kernel(
         ROPE_HEAD_DIM,
         BLOCK_SIZE,
     )
-    tl.store(q_row + offsets, values.to(tl.bfloat16), mask=mask)
+    q_bf16 = values.to(tl.bfloat16)
+    tl.store(q_row + offsets, q_bf16, mask=mask)
+
+    if STORE_Q_FP8:
+        q_fp8_scale_inv = tl.load(q_fp8_scale_inv_ptr)
+        q_fp8_row = q_fp8_ptr + token_idx * q_fp8_stride0 + head_idx * q_fp8_stride1
+        q_fp8_values = tl.clamp(
+            q_bf16.to(tl.float32) * q_fp8_scale_inv, -448.0, 448.0
+        )
+        tl.store(q_fp8_row + offsets, q_fp8_values.to(tl.float8e4nv), mask=mask)
 
 
 @triton.jit
@@ -196,6 +176,8 @@ def qnorm_rope_and_insert_full_k_cache(
     eps: float,
     cache_block_size: int,
     fp8_scale: torch.Tensor,
+    q_fp8: torch.Tensor | None = None,
+    q_fp8_scale_inv: torch.Tensor | None = None,
 ) -> None:
     """Apply DeepSeek V4 Q RMSNorm/RoPE and insert full-width BF16/FP8 KV.
 
@@ -209,12 +191,25 @@ def qnorm_rope_and_insert_full_k_cache(
     assert kv.dtype == torch.bfloat16
     assert k_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
     assert cos_sin_cache.dtype == torch.float32
+    if q_fp8 is not None:
+        assert q_fp8.dtype == torch.float8_e4m3fn
+        assert q_fp8.dim() == 3 and q_fp8.shape[0] == q.shape[0]
+        assert q_fp8.shape[-1] == q.shape[-1]
+        assert q_fp8_scale_inv is not None
+        assert q_fp8_scale_inv.dtype == torch.float32
+        assert q_fp8_scale_inv.numel() == 1
 
     num_tokens_full, num_heads, _ = q.shape
-    _qnorm_rope_kernel[(num_tokens_full, num_heads)](
+    q_heads_for_grid = q_fp8.shape[1] if q_fp8 is not None else num_heads
+    _qnorm_rope_kernel[(num_tokens_full, q_heads_for_grid)](
         q,
         q.stride(0),
         q.stride(1),
+        num_heads,
+        q_fp8 if q_fp8 is not None else q,
+        q_fp8.stride(0) if q_fp8 is not None else q.stride(0),
+        q_fp8.stride(1) if q_fp8 is not None else q.stride(1),
+        q_fp8_scale_inv if q_fp8_scale_inv is not None else fp8_scale,
         positions,
         cos_sin_cache,
         cos_sin_cache.stride(0),
@@ -222,6 +217,7 @@ def qnorm_rope_and_insert_full_k_cache(
         HEAD_SIZE=512,
         ROPE_HEAD_DIM=64,
         BLOCK_SIZE=512,
+        STORE_Q_FP8=q_fp8 is not None,
         num_warps=8,
     )
 
@@ -720,6 +716,251 @@ def compute_global_topk_indices_and_lens(
         TRITON_BLOCK_SIZE=1024,
     )
     return global_topk_indices, topk_lens
+
+
+def build_flashinfer_decode_sparse_indices(
+    swa_indices: torch.Tensor,
+    compressed_indices: torch.Tensor | None,
+    window_size: int,
+) -> torch.Tensor:
+    """Build FlashInfer DSV4 SWA-first sparse indices without torch.cat/pad."""
+    assert swa_indices.dtype == torch.int32
+    assert swa_indices.dim() == 2 and swa_indices.shape[-1] == window_size
+    if compressed_indices is None:
+        return swa_indices
+    assert compressed_indices.dtype == torch.int32
+    assert compressed_indices.dim() == 2
+    assert compressed_indices.shape[0] == swa_indices.shape[0]
+
+    num_tokens = swa_indices.shape[0]
+    compressed_topk = compressed_indices.shape[-1]
+    padded_compressed_topk = (compressed_topk + 3) // 4 * 4
+    sparse_indices = torch.empty(
+        (num_tokens, window_size + padded_compressed_topk),
+        dtype=torch.int32,
+        device=swa_indices.device,
+    )
+    if num_tokens == 0:
+        return sparse_indices
+
+    _merge_flashinfer_sparse_indices_kernel[(num_tokens,)](
+        sparse_indices,
+        sparse_indices.stride(0),
+        swa_indices,
+        swa_indices.stride(0),
+        compressed_indices,
+        compressed_indices.stride(0),
+        WINDOW_SIZE=window_size,
+        COMPRESSED_TOPK=compressed_topk,
+        PADDED_COMPRESSED_TOPK=padded_compressed_topk,
+        BLOCK_SIZE=1024,
+    )
+    return sparse_indices
+
+
+@triton.jit
+def _merge_flashinfer_sparse_indices_kernel(
+    sparse_indices_ptr,
+    sparse_indices_stride,
+    swa_indices_ptr,
+    swa_indices_stride,
+    compressed_indices_ptr,
+    compressed_indices_stride,
+    WINDOW_SIZE: tl.constexpr,
+    COMPRESSED_TOPK: tl.constexpr,
+    PADDED_COMPRESSED_TOPK: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+
+    for i in range(0, WINDOW_SIZE, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < WINDOW_SIZE
+        values = tl.load(
+            swa_indices_ptr + token_idx * swa_indices_stride + offset,
+            mask=mask,
+            other=-1,
+        )
+        tl.store(
+            sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
+            values,
+            mask=mask,
+        )
+
+    for i in range(0, PADDED_COMPRESSED_TOPK, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < PADDED_COMPRESSED_TOPK
+        values = tl.load(
+            compressed_indices_ptr + token_idx * compressed_indices_stride + offset,
+            mask=offset < COMPRESSED_TOPK,
+            other=-1,
+        )
+        tl.store(
+            sparse_indices_ptr
+            + token_idx * sparse_indices_stride
+            + WINDOW_SIZE
+            + offset,
+            values,
+            mask=mask,
+        )
+
+
+def build_flashinfer_prefill_sparse_indices(
+    topk_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    swa_block_table: torch.Tensor,
+    swa_block_size: int,
+    compressed_block_table: torch.Tensor | None,
+    compressed_block_size: int,
+    window_size: int,
+    compress_ratio: int,
+    topk: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Build FlashInfer DSV4 prefill sparse indices from physical KV slots.
+
+    FlashInfer's DSV4 launcher expects the first `window_size` columns to refer
+    to the SWA KV pool and the remaining columns to refer to the compressed KV
+    pool. Unlike FlashMLA prefill, these are physical cache slots rather than
+    offsets into a gathered BF16 workspace.
+    """
+    assert topk_indices.dtype == torch.int32
+    assert query_start_loc.dtype == torch.int32
+    assert seq_lens.dtype == torch.int32
+    assert swa_block_table.dtype == torch.int32
+    assert topk_indices.dim() == 2
+
+    num_tokens = topk_indices.shape[0]
+    num_reqs = seq_lens.shape[0]
+    padded_topk = (topk + 3) // 4 * 4
+    sparse_indices = torch.empty(
+        (num_tokens, window_size + padded_topk),
+        dtype=torch.int32,
+        device=topk_indices.device,
+    )
+    sparse_topk_lens = torch.empty(
+        num_tokens, dtype=torch.int32, device=topk_indices.device
+    )
+    if num_tokens == 0:
+        return sparse_indices, sparse_topk_lens
+
+    if compressed_block_table is None:
+        compressed_block_table = swa_block_table
+    assert compressed_block_table.dtype == torch.int32
+
+    NUM_WORKERS = 128
+    _build_flashinfer_prefill_sparse_indices_kernel[(num_reqs, NUM_WORKERS)](
+        sparse_indices,
+        sparse_indices.stride(0),
+        sparse_topk_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        query_start_loc,
+        seq_lens,
+        swa_block_table,
+        swa_block_table.stride(0),
+        swa_block_size,
+        compressed_block_table,
+        compressed_block_table.stride(0),
+        compressed_block_size,
+        WINDOW_SIZE=window_size,
+        COMPRESS_RATIO=compress_ratio,
+        TOP_K=topk,
+        PADDED_TOP_K=padded_topk,
+        TOPK_STRIDE=topk_indices.shape[-1],
+        BLOCK_SIZE=1024,
+    )
+    return sparse_indices, sparse_topk_lens
+
+
+@triton.jit
+def _build_flashinfer_prefill_sparse_indices_kernel(
+    sparse_indices_ptr,
+    sparse_indices_stride,
+    sparse_topk_lens_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    query_start_loc_ptr,
+    seq_lens_ptr,
+    swa_block_table_ptr,
+    swa_block_table_stride,
+    swa_block_size,
+    compressed_block_table_ptr,
+    compressed_block_table_stride,
+    compressed_block_size,
+    WINDOW_SIZE: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    TOP_K: tl.constexpr,
+    PADDED_TOP_K: tl.constexpr,
+    TOPK_STRIDE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    worker_id = tl.program_id(1)
+    num_workers = tl.num_programs(1)
+
+    query_start = tl.load(query_start_loc_ptr + batch_idx)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    query_len = query_end - query_start
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    start_pos = seq_len - query_len
+
+    for token_idx in range(query_start + worker_id, query_end, num_workers):
+        token_idx_in_query = token_idx - query_start
+        pos = start_pos + token_idx_in_query
+        swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        swa_start_pos = pos - swa_len + 1
+        topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+
+        for i in range(0, WINDOW_SIZE, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < WINDOW_SIZE
+            pos_offset = swa_start_pos + offset
+            block_indices = pos_offset // swa_block_size
+            block_numbers = tl.load(
+                swa_block_table_ptr + batch_idx * swa_block_table_stride + block_indices,
+                mask=mask & (offset < swa_len),
+                other=-1,
+            )
+            block_offsets = pos_offset % swa_block_size
+            slot_ids = block_numbers * swa_block_size + block_offsets
+            slot_ids = tl.where(offset < swa_len, slot_ids, -1)
+            tl.store(
+                sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
+                slot_ids,
+                mask=mask,
+            )
+
+        for i in range(0, PADDED_TOP_K, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < PADDED_TOP_K
+            local_idx = tl.load(
+                topk_indices_ptr + token_idx * topk_indices_stride + offset,
+                mask=(offset < TOPK_STRIDE) & (offset < topk_len),
+                other=-1,
+            )
+            is_valid = local_idx >= 0
+            block_indices = local_idx // compressed_block_size
+            block_numbers = tl.load(
+                compressed_block_table_ptr
+                + batch_idx * compressed_block_table_stride
+                + block_indices,
+                mask=mask & is_valid,
+                other=-1,
+            )
+            block_offsets = local_idx % compressed_block_size
+            slot_ids = block_numbers * compressed_block_size + block_offsets
+            slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
+            tl.store(
+                sparse_indices_ptr
+                + token_idx * sparse_indices_stride
+                + WINDOW_SIZE
+                + offset,
+                slot_ids,
+                mask=mask,
+            )
+
+        tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + topk_len)
 
 
 @triton.jit

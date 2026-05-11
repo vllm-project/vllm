@@ -22,10 +22,11 @@ from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.deepseek_v4_ops import (
+    build_flashinfer_decode_sparse_indices,
+    build_flashinfer_prefill_sparse_indices,
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
-    fp8_per_tensor_quant,
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
@@ -527,13 +528,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             assert self.compressor is not None
             compressor = self.compressor
 
-            def wq_b_kv_insert_and_compress() -> torch.Tensor:
+            def wq_b_kv_insert_and_compress() -> tuple[torch.Tensor, torch.Tensor | None]:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                q_fp8 = self._fused_qnorm_rope_kv_insert(
+                    q, kv, positions, attn_metadata
+                )
                 compressor(kv_score, positions, self.rotary_emb)
-                return q
+                return q, q_fp8
 
-            q, _ = maybe_execute_in_parallel(
+            (q, q_fp8), _ = maybe_execute_in_parallel(
                 wq_b_kv_insert_and_compress,
                 lambda: indexer(
                     hidden_states,
@@ -554,12 +557,14 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             compressor = self.compressor
 
-            def wq_b_kv_insert() -> torch.Tensor:
+            def wq_b_kv_insert() -> tuple[torch.Tensor, torch.Tensor | None]:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-                return q
+                q_fp8 = self._fused_qnorm_rope_kv_insert(
+                    q, kv, positions, attn_metadata
+                )
+                return q, q_fp8
 
-            q, _ = maybe_execute_in_parallel(
+            (q, q_fp8), _ = maybe_execute_in_parallel(
                 wq_b_kv_insert,
                 lambda: compressor(kv_score, positions, self.rotary_emb),
                 self.ln_events[0],
@@ -569,35 +574,42 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         else:
             # SWA-only layer: no compressor, no overlap.
             q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-            self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            q_fp8 = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         # Handle dummy run (no metadata).
         if not isinstance(attn_metadata, dict):
             # Reserve _forward_prefill's bf16-gather workspace; the dummy
             # run returns before mla_attn runs, so without this the shared
-            # workspace locks below the real prefill size.
+            # workspace locks below the real prefill size. The per-tensor FP8
+            # FlashInfer path reads the cache directly and does not need it.
             sub = self.mla_attn
-            swa_only = sub.compress_ratio <= 1
-            N = (
-                0
-                if swa_only
-                else (sub.max_model_len + sub.compress_ratio - 1) // sub.compress_ratio
-            )
-            M = N + sub.window_size + sub.max_num_batched_tokens
-            current_workspace_manager().get_simultaneous(
-                ((PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
-            )
+            if sub.kv_cache_torch_dtype != torch.float8_e4m3fn:
+                swa_only = sub.compress_ratio <= 1
+                N = (
+                    0
+                    if swa_only
+                    else (sub.max_model_len + sub.compress_ratio - 1)
+                    // sub.compress_ratio
+                )
+                M = N + sub.window_size + sub.max_num_batched_tokens
+                current_workspace_manager().get_simultaneous(
+                    ((PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
+                )
             out.zero_()
             return
 
-        # Pad q to FlashMLA-required head count (64 or 128)
-        if self.n_local_heads < self.padded_heads:
+        q_for_attn = q_fp8 if q_fp8 is not None else q
+
+        # Pad q to FlashMLA-required head count (64 or 128). The per-tensor
+        # FP8 FlashInfer path emits a padded q_fp8 tensor directly from the
+        # qnorm/RoPE kernel.
+        if q_fp8 is None and self.n_local_heads < self.padded_heads:
             pad_size = self.padded_heads - self.n_local_heads
-            q = F.pad(q, (0, 0, 0, pad_size), value=0.0)
+            q_for_attn = F.pad(q_for_attn, (0, 0, 0, pad_size), value=0.0)
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
-        self.mla_attn(q, kv, positions, output=out)
+        self.mla_attn(q_for_attn, kv, positions, output=out)
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -607,9 +619,9 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         attn_metadata: (
             dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
         ),
-    ) -> None:
+    ) -> torch.Tensor | None:
         if not isinstance(attn_metadata, dict):
-            return
+            return None
 
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -618,6 +630,13 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
+        q_fp8 = None
+        if swa_kv_cache.dtype == torch.float8_e4m3fn:
+            q_fp8 = torch.empty(
+                (q.shape[0], self.padded_heads, q.shape[-1]),
+                dtype=torch.float8_e4m3fn,
+                device=q.device,
+            )
 
         # Horizontally fused:
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
@@ -647,7 +666,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.eps,
                 swa_metadata.block_size,
                 self.mla_attn._flashinfer_fp8_kv_scale,
+                q_fp8=q_fp8,
+                q_fp8_scale_inv=self.mla_attn._flashinfer_fp8_q_scale_inv,
             )
+        return q_fp8
 
 
 def deepseek_v4_attention(
@@ -864,8 +886,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         assert output.shape == q.shape, (
             f"output buffer shape {output.shape} must match q shape {q.shape}"
         )
-        assert output.dtype == q.dtype, (
-            f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
+        expected_output_dtype = (
+            torch.bfloat16 if q.dtype == torch.float8_e4m3fn else q.dtype
+        )
+        assert output.dtype == expected_output_dtype, (
+            f"output buffer dtype {output.dtype} must match expected attention "
+            f"output dtype {expected_output_dtype} for q dtype {q.dtype}"
         )
 
         if current_platform.is_rocm():
@@ -1076,32 +1102,37 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         if swa_only:
             assert swa_metadata.decode_swa_sparse_topk_lens is not None
             compressed_kv_cache = self.swa_cache_layer.kv_cache
-            sparse_indices = swa_indices_2d
+            sparse_indices = build_flashinfer_decode_sparse_indices(
+                swa_indices_2d,
+                None,
+                self.window_size,
+            )
             sparse_topk_lens = swa_metadata.decode_swa_sparse_topk_lens
         else:
             assert kv_cache is not None
             assert topk_indices is not None
             assert topk_lens is not None
             compressed_kv_cache = kv_cache
-            compressed_indices = topk_indices.view(num_decode_tokens, -1).contiguous()
+            compressed_indices = topk_indices.view(num_decode_tokens, -1)
             sparse_topk_lens = topk_lens
-            sparse_indices = torch.cat((swa_indices_2d, compressed_indices), dim=-1)
-            if sparse_indices.shape[-1] % 4 != 0:
-                pad = 4 - sparse_indices.shape[-1] % 4
-                sparse_indices = F.pad(sparse_indices, (0, pad), value=-1)
-            sparse_indices = sparse_indices.contiguous()
+            sparse_indices = build_flashinfer_decode_sparse_indices(
+                swa_indices_2d,
+                compressed_indices,
+                self.window_size,
+            )
 
         query_start_loc = swa_metadata.query_start_loc[: num_decodes + 1]
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu[: num_decodes + 1]
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_q_len = int(query_lens_cpu.max().item())
 
-        seq_lens = swa_metadata.seq_lens[:num_decodes].to(torch.int32)
+        assert swa_metadata.seq_lens_int32 is not None
+        seq_lens = swa_metadata.seq_lens_int32[:num_decodes]
         query = q
         bmm1_scale: float | torch.Tensor = self.scale
         bmm2_scale: float | torch.Tensor = 1.0
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
-            query = fp8_per_tensor_quant(query, self._flashinfer_fp8_q_scale_inv)
+            assert query.dtype == torch.float8_e4m3fn
             bmm1_scale = self._flashinfer_fp8_bmm1_scale
             bmm2_scale = self._flashinfer_fp8_bmm2_scale
         else:
@@ -1173,6 +1204,67 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
             N = 0
+
+        if (
+            self.kv_cache_torch_dtype == torch.float8_e4m3fn
+            and not current_platform.is_rocm()
+        ):
+            assert q.dtype == torch.float8_e4m3fn
+            assert swa_metadata.prefill_query_start_loc is not None
+            assert swa_metadata.prefill_query_start_loc_cpu is not None
+            assert swa_metadata.seq_lens_int32 is not None
+
+            prefill_query_start_loc = swa_metadata.prefill_query_start_loc
+            prefill_query_start_loc_cpu = swa_metadata.prefill_query_start_loc_cpu
+            query_lens_cpu = (
+                prefill_query_start_loc_cpu[1:] - prefill_query_start_loc_cpu[:-1]
+            )
+            max_q_len = int(query_lens_cpu.max().item())
+            seq_lens_int32 = swa_metadata.seq_lens_int32[
+                num_decodes : num_decodes + num_prefills
+            ]
+            swa_block_table = swa_metadata.block_table[num_decodes:]
+
+            if swa_only:
+                compressed_kv_cache = swa_k_cache
+                compressed_block_table = None
+                compressed_block_size = swa_metadata.block_size
+            else:
+                assert compressed_k_cache is not None
+                assert attn_metadata is not None
+                compressed_kv_cache = compressed_k_cache
+                compressed_block_table = attn_metadata.block_table[num_decodes:]
+                compressed_block_size = attn_metadata.block_size // self.compress_ratio
+
+            sparse_indices, sparse_topk_lens = build_flashinfer_prefill_sparse_indices(
+                topk_indices[:num_prefill_tokens],
+                prefill_query_start_loc,
+                seq_lens_int32,
+                swa_block_table,
+                swa_metadata.block_size,
+                compressed_block_table,
+                compressed_block_size,
+                self.window_size,
+                self.compress_ratio,
+                top_k,
+            )
+
+            flashinfer_trtllm_batch_decode_sparse_mla_dsv4_raw(
+                query=q,
+                swa_kv_cache=swa_k_cache,
+                workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
+                sparse_indices=sparse_indices,
+                compressed_kv_cache=compressed_kv_cache,
+                sparse_topk_lens=sparse_topk_lens,
+                seq_lens=seq_lens_int32,
+                out=output,
+                bmm1_scale=self._flashinfer_fp8_bmm1_scale,
+                bmm2_scale=self._flashinfer_fp8_bmm2_scale,
+                sinks=self.attn_sink,
+                cum_seq_lens_q=prefill_query_start_loc,
+                max_q_len=max_q_len,
+            )
+            return
 
         M = N + self.window_size + self.max_num_batched_tokens
         num_chunks = (num_prefills + PREFILL_CHUNK_SIZE - 1) // PREFILL_CHUNK_SIZE
