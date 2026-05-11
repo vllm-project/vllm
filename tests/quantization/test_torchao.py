@@ -5,6 +5,7 @@ import importlib.util
 import pytest
 import torch
 
+from tests.quantization._zentorch_helpers import zentorch_ops_mock  # noqa: F401
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
@@ -404,62 +405,6 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
 # TODO : unify fixture across test modules.
 
 
-@pytest.fixture
-def _mock_zentorch_ops():
-    """Register stub zentorch ops used by TorchAOLinearMethod dispatch.
-
-    Each op is only defined if it isn't already, so the fixture is a no-op on
-    dev machines that have a real zentorch build.
-    """
-
-    def _dynamic_qlinear_impl(
-        inp,
-        weight,
-        weight_scales,
-        bias=None,
-        zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
-    ):
-        out_features = weight.shape[0]
-        out = torch.zeros(
-            inp.shape[:-1] + (out_features,), dtype=inp.dtype, device=inp.device
-        )
-        if bias is not None:
-            out = out + bias
-        return out
-
-    ops_to_register = [
-        (
-            "zentorch_dynamic_qlinear",
-            "Tensor input, Tensor weight, Tensor weight_scales, "
-            "Tensor? bias=None, "
-            'str zentorch_op_name="zentorch::zentorch_dynamic_qlinear"',
-            _dynamic_qlinear_impl,
-        ),
-    ]
-
-    missing = [
-        (name, schema, impl)
-        for name, schema, impl in ops_to_register
-        if not hasattr(torch.ops.zentorch, name)
-    ]
-
-    lib_def = None
-    lib_impl = None
-    if missing:
-        lib_def = torch.library.Library("zentorch", "FRAGMENT")
-        lib_impl = torch.library.Library("zentorch", "IMPL", "CPU")
-        for name, schema, impl in missing:
-            lib_def.define(f"{name}({schema}) -> Tensor")
-            lib_impl.impl(name, impl)
-
-    yield
-
-    if lib_impl is not None:
-        lib_impl._destroy()
-    if lib_def is not None:
-        lib_def._destroy()
-
-
 def _make_linear_method():
     """Build a ``TorchAOLinearMethod`` without invoking the full config pipeline."""
     from vllm.model_executor.layers.quantization.torchao import (
@@ -519,7 +464,8 @@ def _wrap_as_layer(weight_tensor: torch.Tensor):
     not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available"
 )
 def test_process_weights_after_loading_int8_dynamic_caches_dynamic_attrs(
-    monkeypatch, _mock_zentorch_ops
+    monkeypatch,
+    zentorch_ops_mock,  # noqa: F811
 ):
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
 
@@ -555,7 +501,8 @@ def test_process_weights_after_loading_not_zen_cpu_preserves_weight(monkeypatch)
 
 
 def test_process_weights_after_loading_non_matching_weight_preserves_weight(
-    monkeypatch, _mock_zentorch_ops
+    monkeypatch,
+    zentorch_ops_mock,  # noqa: F811
 ):
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
 
@@ -574,7 +521,8 @@ def test_process_weights_after_loading_non_matching_weight_preserves_weight(
     not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available"
 )
 def test_process_weights_after_loading_int8_without_act_kwargs_preserves_weight(
-    monkeypatch, _mock_zentorch_ops
+    monkeypatch,
+    zentorch_ops_mock,  # noqa: F811
 ):
     """Weight-only ``Int8Tensor`` (no ``act_quant_kwargs``)."""
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
@@ -590,7 +538,10 @@ def test_process_weights_after_loading_int8_without_act_kwargs_preserves_weight(
 # ----- apply(): zentorch dispatch ------------------------------------------
 
 
-def test_apply_dispatches_to_zentorch_dynamic_qlinear(monkeypatch, _mock_zentorch_ops):
+def test_apply_dispatches_to_zentorch_dynamic_qlinear(
+    monkeypatch,
+    zentorch_ops_mock,  # noqa: F811
+):
     from types import SimpleNamespace
 
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)

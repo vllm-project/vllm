@@ -52,10 +52,10 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
           * Zen CPU + ``zentorch_dynamic_qlinear`` registered.
           * Dynamic activation scheme (``not is_static_input_scheme``).
           * Symmetric activations (``input_symmetric``).
-          * Weight scale shape can be reduced to ``(N,)``: either already
-            channelwise, or fused-module per-tensor (which we expand to
-            per-channel via ``convert_to_channelwise``). Non-fused per-tensor
-            cannot be reduced and is rejected.
+          * Per-channel weight quantization. Per-tensor weights (fused or
+            non-fused) are rejected: zentorch's per-channel kernel adds no
+            benefit over oneDNN's per-tensor path and forging a fake
+            per-channel scale from a per-tensor one misrepresents the model.
         """
         if not has_zentorch_op("zentorch_dynamic_qlinear"):
             return False
@@ -63,10 +63,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             return False
         if not self.config.input_symmetric:
             return False
-
-        is_fused = len(layer.logical_widths) > 1
-        # Non-fused per-tensor: would produce a 0-d scale after squeeze.
-        return self.config.is_channelwise or is_fused
+        return self.config.is_channelwise
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # zentorch path: dynamic-symmetric W8A8 on AMD Zen CPUs
@@ -94,10 +91,9 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def _process_weights_for_zentorch(self, layer: torch.nn.Module) -> None:
         """Prepare weights for ``zentorch_dynamic_qlinear``.
 
-        Keeps weight in [N, K] layout and converts the per-channel scale to
-        bf16 with shape (N,). For fused modules (QKV, MLP) with per-tensor
-        weight scales, scales are first expanded to per-channel so the shape
-        matches the weight's N dim.
+        Keeps weight in [N, K] layout and converts the per-channel weight
+        scale to bf16 with shape ``(N,)``. Per-tensor schemes are filtered
+        out by the eligibility predicate and never reach this function.
         """
         w_q_name, w_s_name, _, _, _ = self.layer_param_names
         weight = getattr(layer, w_q_name)
@@ -109,10 +105,6 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
         weight_scale = getattr(layer, w_s_name)
-        is_fused_module = len(layer.logical_widths) > 1
-        if is_fused_module and not self.config.is_channelwise:
-            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
-
         ws = weight_scale.data
         if ws.dim() == 2 and ws.shape[-1] == 1:
             ws = ws.squeeze(-1)
