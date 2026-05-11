@@ -154,7 +154,6 @@ class DeepseekSparseSWAMetadata:
     slot_mapping: torch.Tensor
     block_size: int
     seq_lens: torch.Tensor | None = None  # [num_seqs]
-    seq_lens_int32: torch.Tensor | None = None  # [num_seqs]
     query_start_loc: torch.Tensor | None = None  # [num_seqs + 1]
     query_start_loc_cpu: torch.Tensor | None = None  # [num_seqs + 1]
 
@@ -173,8 +172,6 @@ class DeepseekSparseSWAMetadata:
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
-    prefill_query_start_loc: torch.Tensor | None = None
-    prefill_query_start_loc_cpu: torch.Tensor | None = None
 
     # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
     # per present DeepseekV4 layer type, shared across all ~60 layers of that type
@@ -291,9 +288,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        seq_lens_int32 = seq_lens if seq_lens.dtype == torch.int32 else seq_lens.to(
-            torch.int32
-        )
+        assert seq_lens.dtype == torch.int32
 
         # Split into decode and prefill portions using configurable threshold
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
@@ -333,9 +328,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         deepseek_v4_fields = self._build_deepseek_v4_metadata(
             num_decodes,
             num_prefills,
-            seq_lens_int32,
+            seq_lens,
             query_start_loc,
-            query_start_loc_cpu,
         )
 
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
@@ -346,7 +340,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
-            seq_lens_int32=seq_lens_int32,
             query_start_loc=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             block_table=block_table,
@@ -404,7 +397,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         num_prefills: int,
         seq_lens: torch.Tensor,
         query_start_loc: torch.Tensor,
-        query_start_loc_cpu: torch.Tensor,
     ) -> dict[str, torch.Tensor | None]:
         """Pre-compute DeepseekV4 prefill metadata during the metadata build phase.
 
@@ -433,18 +425,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
-            prefill_query_start_loc = query_start_loc[
-                num_decodes : num_decodes + num_prefills + 1
-            ]
-            prefill_query_start_loc_cpu = query_start_loc_cpu[
-                num_decodes : num_decodes + num_prefills + 1
-            ]
-            result["prefill_query_start_loc"] = (
-                prefill_query_start_loc - prefill_query_start_loc[0]
-            )
-            result["prefill_query_start_loc_cpu"] = (
-                prefill_query_start_loc_cpu - prefill_query_start_loc_cpu[0]
-            )
 
         return result
 

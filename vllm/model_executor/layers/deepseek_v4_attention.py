@@ -4,7 +4,6 @@
 DeepseekV4 MLA Attention Layer
 """
 
-import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
@@ -90,25 +89,11 @@ logger = init_logger(__name__)
 
 _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
-_DEFAULT_FLASHINFER_DSV4_FP8_SCALE = 1.0 / 32.0
 
 # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
 # workspace allocated at _forward_prefill (and the matching profile-time
 # reservation in attention_impl's dummy-run branch).
 PREFILL_CHUNK_SIZE = 4
-
-
-def _get_dsv4_flashinfer_fp8_scale(kind: str) -> float:
-    specific_name = f"VLLM_DSV4_FLASHINFER_FP8_{kind.upper()}_SCALE"
-    for env_name in (specific_name, "VLLM_DSV4_FLASHINFER_FP8_SCALE"):
-        value = os.environ.get(env_name)
-        if value is None:
-            continue
-        scale = float(value)
-        if scale <= 0.0:
-            raise ValueError(f"{env_name} must be positive, got {value!r}")
-        return scale
-    return _DEFAULT_FLASHINFER_DSV4_FP8_SCALE
 
 
 def _normalize_dsv4_kv_cache_dtype(
@@ -817,8 +802,10 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         fp8_q_scale = 1.0
         fp8_kv_scale = 1.0
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
-            fp8_q_scale = _get_dsv4_flashinfer_fp8_scale("q")
-            fp8_kv_scale = _get_dsv4_flashinfer_fp8_scale("kv")
+            # TODO: load the per-tensor FP8 Q and KV scales from checkpoint
+            # weights. Use unit scales until the scale tensor names are wired.
+            fp8_q_scale = 1.0
+            fp8_kv_scale = 1.0
         self.register_buffer(
             "_flashinfer_fp8_q_scale",
             torch.tensor([fp8_q_scale], dtype=torch.float32),
@@ -925,7 +912,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
 
-        if self.kv_cache_torch_dtype != torch.uint8 and not current_platform.is_rocm():
+        if self.kv_cache_torch_dtype != torch.uint8:
+            if current_platform.is_rocm():
+                raise NotImplementedError(
+                    "DeepSeek V4 BF16/per-tensor FP8 FlashInfer sparse MLA "
+                    "cache path is CUDA-only."
+                )
             self._forward_flashinfer(
                 q=q,
                 kv_cache=self_kv_cache,
@@ -1094,7 +1086,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         if num_tokens == 0:
             return
 
-        assert swa_metadata.seq_lens_int32 is not None
+        assert swa_metadata.seq_lens is not None
         assert swa_metadata.query_start_loc is not None
         assert swa_metadata.query_start_loc_cpu is not None
         assert swa_metadata.token_to_req_indices is not None
@@ -1179,7 +1171,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu[: num_reqs + 1]
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_q_len = int(query_lens_cpu.max().item())
-        seq_lens = swa_metadata.seq_lens_int32[:num_reqs]
+        seq_lens = swa_metadata.seq_lens[:num_reqs]
+        assert seq_lens.dtype == torch.int32
         sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
             decode_swa_indices,
             decode_compressed_indices,
@@ -1298,7 +1291,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
-                    fp8_scale=self._flashinfer_fp8_kv_scale,
                 )
 
             # Gather SWA KV
@@ -1311,7 +1303,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
-                fp8_scale=self._flashinfer_fp8_kv_scale,
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
