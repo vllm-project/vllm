@@ -252,6 +252,8 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    engine_core_launcher_cls: str = "vllm.v1.engine.utils.CoreEngineLauncher"
+    """The full name of the engine core launcher class to use."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""

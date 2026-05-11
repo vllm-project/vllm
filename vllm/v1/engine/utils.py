@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -991,6 +992,65 @@ def get_engine_zmq_addresses(
 
 @contextlib.contextmanager
 def launch_core_engines(
+    vllm_config: VllmConfig,
+    executor_class: type[Executor],
+    log_stats: bool,
+    addresses: EngineZmqAddresses,
+    num_api_servers: int = 1,
+) -> Iterator[
+    tuple[
+        CoreEngineProcManager | CoreEngineActorManager | None,
+        DPCoordinator | None,
+        EngineZmqAddresses,
+        Queue | None,
+    ]
+]:
+    """Launch engine and DP coordinator processes as needed."""
+    launcher_cls = resolve_obj_by_qualname(
+        vllm_config.parallel_config.engine_core_launcher_cls
+    )
+    launcher: CoreEngineLauncher = launcher_cls()
+    with launcher.launch_core_engines(
+        vllm_config,
+        executor_class,
+        log_stats,
+        addresses,
+        num_api_servers,
+    ) as launched:
+        yield launched
+
+
+class CoreEngineLauncher:
+    """Default engine-core launcher extension point."""
+
+    @contextlib.contextmanager
+    def launch_core_engines(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+        addresses: EngineZmqAddresses,
+        num_api_servers: int = 1,
+    ) -> Iterator[
+        tuple[
+            CoreEngineProcManager | CoreEngineActorManager | None,
+            DPCoordinator | None,
+            EngineZmqAddresses,
+            Queue | None,
+        ]
+    ]:
+        with _launch_core_engines(
+            vllm_config,
+            executor_class,
+            log_stats,
+            addresses,
+            num_api_servers,
+        ) as launched:
+            yield launched
+
+
+@contextlib.contextmanager
+def _launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool,
