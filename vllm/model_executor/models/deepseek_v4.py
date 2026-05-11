@@ -738,12 +738,22 @@ def _deepseek_v4_mega_moe_op(
     overlap_token_threshold = _DEEPSEEK_V4_OVERLAP_TOKEN_THRESHOLD.get(
         self.intermediate_size
     )
+    # mega_moe is an EP collective (NVSHMEM symm buffer); the overlap branch
+    # also caps deep_gemm's SM count. Both must be chosen identically on every
+    # EP rank or the symm-memory handshake deadlocks. With DP+EP, per-rank
+    # `hidden_states.shape[0]` differs, so route the decision through the
+    # DP-symmetric token count.
+    dp_metadata = get_forward_context().dp_metadata
+    if dp_metadata is not None:
+        decision_num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max().item())
+    else:
+        decision_num_tokens = hidden_states.shape[0]
     overlap_enabled = (
         overlap_token_threshold is not None
         and self.shared_experts is not None
         and self._overlap_stream is not None
         and not envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM
-        and hidden_states.shape[0] <= overlap_token_threshold
+        and decision_num_tokens <= overlap_token_threshold
     )
 
     if not overlap_enabled:
