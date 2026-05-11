@@ -1446,6 +1446,23 @@ class NixlConnectorWorker:
                 tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
 
+        remote_physical_per_logical = (
+            nixl_agent_meta.physical_blocks_per_logical_kv_block
+        )
+        if (
+            self._has_mamba
+            and remote_physical_per_logical
+            != self._physical_blocks_per_logical_kv_block
+            and self.vllm_config.cache_config.enable_prefix_caching
+        ):
+            raise RuntimeError(
+                "Prefix caching with heterogeneous physical_blocks_per_logical "
+                "is not supported for Mamba hybrid models. "
+                f"Local: {self._physical_blocks_per_logical_kv_block}, "
+                f"Remote: {remote_physical_per_logical}. "
+                "Disable prefix caching with --no-enable-prefix-caching."
+            )
+
         if self._is_hma_required:
             assert block_size_ratio == 1, (
                 "HMA does not support different remote block size yet"
@@ -2184,50 +2201,9 @@ class NixlConnectorWorker:
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        # Partial prefix cache hit: just read uncomputed blocks.
-        # Skip mamba groups — their blocks represent full state (conv+ssm),
-        # not per-token data, so trimming would corrupt the transfer.
-        remote_block_ids = list(remote_block_ids)
-        if not self._has_mamba:
-            for i, remote_group in enumerate(remote_block_ids):
-                num_local_blocks = len(local_block_ids[i])
-                assert num_local_blocks <= len(remote_group)
-                if num_local_blocks < len(remote_group):
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
-        else:
-            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support
-            # so far. Heterogeneous TP can cause
-            # different kernel block counts due to logical block rounding.
-            # Example: 640 prompt tokens, kernel_block_size=64
-            #   remote physical_per_logical=10, local physical_per_logical=6
-            #   remote logical ids from kv_transfer_params = [0]
-            #   local logical ids allocated = [0, 1]
-            #   remote kernel blocks: [0..9]  (1*10=10)
-            #   local kernel blocks:  [0..11] (2*6=12)
-            #   actual data blocks = ceil(640/64) = 10, trim both to 10
-            # Vice versa (remote physical_per_logical=6, local=10):
-            #   remote logical ids = [0, 1], local logical ids = [0]
-            #   remote kernel blocks: [0..11] (2*6=12)
-            #   local kernel blocks:  [0..9]  (1*10=10)
-            #   actual data blocks = ceil(640/64) = 10, trim both to 10
-            local_block_ids = list(local_block_ids)
-            for i, remote_group in enumerate(remote_block_ids):
-                num_local_blocks = len(local_block_ids[i])
-                num_remote_blocks = len(remote_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
-                    assert num_local_blocks == num_remote_blocks
-                else:
-                    max_padding = max(
-                        self._physical_blocks_per_logical_kv_block,
-                        remote_physical_per_logical,
-                    )
-                    assert abs(num_local_blocks - num_remote_blocks) < max_padding, (
-                        f"Group {i}: |{num_local_blocks} - "
-                        f"{num_remote_blocks}| >= {max_padding}"
-                    )
-                    num_blocks = min(num_local_blocks, num_remote_blocks)
-                    local_block_ids[i] = local_block_ids[i][:num_blocks]
-                    remote_block_ids[i] = remote_group[:num_blocks]
+        local_block_ids, remote_block_ids = self._align_block_ids_for_transfer(
+            local_block_ids, remote_block_ids, remote_physical_per_logical
+        )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
@@ -2324,6 +2300,67 @@ class NixlConnectorWorker:
             for i, group in enumerate(block_ids)
         ]
 
+    def _align_block_ids_for_transfer(
+        self,
+        local_block_ids: BlockIds,
+        remote_block_ids: BlockIds,
+        remote_physical_per_logical: int,
+    ) -> tuple[BlockIds, list]:
+        """Align local and remote block IDs for transfer.
+
+        For non-Mamba models (prefix caching supported): end-trim remote
+        to match local count, so that cached prefix blocks are skipped.
+
+        For Mamba hybrid (no prefix caching): front-trim both to min
+        count to handle kernel block count discrepancy from logical
+        block rounding in heterogeneous TP.
+        """
+        # Partial prefix cache hit: just read uncomputed blocks.
+        # Skip mamba groups — their blocks represent full state (conv+ssm),
+        # not per-token data, so trimming would corrupt the transfer.
+        remote_block_ids = list(remote_block_ids)
+        if not self._has_mamba:
+            for i, remote_group in enumerate(remote_block_ids):
+                num_local_blocks = len(local_block_ids[i])
+                assert num_local_blocks <= len(remote_group)
+                if num_local_blocks < len(remote_group):
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+        else:
+            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support
+            # so far. Heterogeneous TP can cause
+            # different kernel block counts due to logical block rounding.
+            # Example: 640 prompt tokens, kernel_block_size=64
+            #   remote physical_per_logical=10, local physical_per_logical=6
+            #   remote logical ids from kv_transfer_params = [0]
+            #   local logical ids allocated = [0, 1]
+            #   remote kernel blocks: [0..9]  (1*10=10)
+            #   local kernel blocks:  [0..11] (2*6=12)
+            #   actual data blocks = ceil(640/64) = 10, trim both to 10
+            # Vice versa (remote physical_per_logical=6, local=10):
+            #   remote logical ids = [0, 1], local logical ids = [0]
+            #   remote kernel blocks: [0..11] (2*6=12)
+            #   local kernel blocks:  [0..9]  (1*10=10)
+            #   actual data blocks = ceil(640/64) = 10, trim both to 10
+            local_block_ids = list(local_block_ids)
+            for i, remote_group in enumerate(remote_block_ids):
+                num_local_blocks = len(local_block_ids[i])
+                num_remote_blocks = len(remote_group)
+                if _is_ssm_spec(self._group_spec_types[i]):
+                    assert num_local_blocks == num_remote_blocks
+                else:
+                    max_padding = max(
+                        self._physical_blocks_per_logical_kv_block,
+                        remote_physical_per_logical,
+                    )
+                    assert abs(num_local_blocks - num_remote_blocks) < max_padding, (
+                        f"Group {i}: |{num_local_blocks} - "
+                        f"{num_remote_blocks}| >= {max_padding}"
+                    )
+                    num_blocks = min(num_local_blocks, num_remote_blocks)
+                    local_block_ids[i] = local_block_ids[i][:num_blocks]
+                    remote_block_ids[i] = remote_group[:num_blocks]
+        return local_block_ids, remote_block_ids
+
     def _logical_to_remote_kernel_block_ids(
         self, block_ids: BlockIds, remote_physical_per_logical: int
     ) -> BlockIds:
@@ -2345,7 +2382,7 @@ class NixlConnectorWorker:
             return block_ids
         remote_arange = np.arange(remote_physical_per_logical).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
-        return [
+        result = [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
                 remote_physical_per_logical,
@@ -2355,6 +2392,7 @@ class NixlConnectorWorker:
             else group
             for i, group in enumerate(block_ids)
         ]
+        return result
 
     def get_backend_aware_kv_block_len(
         self, layer_idx: int, first_split: bool = True, mamba_view: bool = False
