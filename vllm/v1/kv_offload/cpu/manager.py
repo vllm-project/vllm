@@ -237,30 +237,27 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
     def reset_cache(self) -> None:
-        # Evict only blocks with ref_cnt == 0.  Live blocks (ref_cnt > 0 for
-        # in-flight loads, ref_cnt == -1 for in-flight stores) stay in the
-        # policy and are freed lazily in complete_load / complete_store.
-        evicted = self._policy.clear()
-        for _, block in evicted:
-            self._free_block(block)
+        # Clear ALL blocks unconditionally. The scheduler's _job_reset_counter
+        # guarantees that complete_load / complete_store are never called for
+        # pre-reset jobs, so no lazy cleanup is needed. The scheduler also
+        # flushes in-flight load job IDs to the workers before any new stores
+        # can begin, preventing a cross-direction (cpu_to_gpu vs gpu_to_cpu)
+        # data race on reused CPU block IDs.
+        all_blocks = self._policy.clear()
 
-        # Any key still present in the policy has an active reference.
-        # Mark it for removal so complete_load / complete_store clean it up.
-        self._pending_removal.update(key for key, _ in self._policy.all_items())
+        # Only emit "removed" events for blocks that were fully stored
+        # (ref_cnt >= 0). In-flight stores (ref_cnt == -1) were never committed
+        # so they should not appear as "removed" from the external view.
+        stored_keys = [key for key, block in all_blocks if block.ref_cnt >= 0]
 
-        if not self._pending_removal:
-            # No live blocks: the ID watermark can be fully reset.
-            self._free_list.clear()
-            self._num_allocated_blocks = 0
-        # If live blocks exist, _free_list already holds the freed IDs added by
-        # _free_block() above, and _num_allocated_blocks stays at its current
-        # value.  This prevents _allocate_blocks from issuing fresh IDs that
-        # collide with the still-live block IDs.
+        self._pending_removal.clear()
+        self._free_list.clear()
+        self._num_allocated_blocks = 0
 
-        if evicted and self.events is not None:
+        if stored_keys and self.events is not None:
             self.events.append(
                 OffloadingEvent(
-                    keys=[k for k, _ in evicted],
+                    keys=stored_keys,
                     medium=self.medium,
                     removed=True,
                 )

@@ -95,22 +95,13 @@ class ARCCachePolicy(CachePolicy):
                 self.b2.move_to_end(key)
 
     def clear(self) -> list[tuple[OffloadKey, BlockStatus]]:
-        evicted: list[tuple[OffloadKey, BlockStatus]] = []
-        for partition in (self.t1, self.t2):
-            for key, block in list(partition.items()):
-                if block.ref_cnt == 0:
-                    del partition[key]
-                    evicted.append((key, block))
-        # Ghost lists and adaptive state are always reset — they are policy
-        # metadata, not block content, so resetting them is safe regardless of
-        # whether live blocks remain.
+        items = list(self.t1.items()) + list(self.t2.items())
+        self.t1.clear()
+        self.t2.clear()
         self.b1.clear()
         self.b2.clear()
         self.target_t1_size = 0.0
-        return evicted
-
-    def all_items(self) -> list[tuple[OffloadKey, BlockStatus]]:
-        return list(self.t1.items()) + list(self.t2.items())
+        return items
 
     def evict(
         self, n: int, protected: set[OffloadKey]

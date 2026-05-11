@@ -78,19 +78,7 @@ class CachePolicy(ABC):
     @abstractmethod
     def clear(self) -> list[tuple[OffloadKey, BlockStatus]]:
         """
-        Remove all blocks with ref_cnt == 0 and return (key, block) pairs.
+        Remove ALL blocks regardless of ref_cnt and return (key, block) pairs.
 
-        Blocks with active references (ref_cnt > 0 for in-flight loads,
-        ref_cnt == -1 for in-flight stores) are left in the policy so their
-        transfers can complete normally.  Ghost lists and adaptive state are
-        also reset.
-        """
-
-    @abstractmethod
-    def all_items(self) -> list[tuple[OffloadKey, BlockStatus]]:
-        """Return all (key, block) pairs currently held in the policy.
-
-        Does not modify any state.  Used by reset_cache to discover which
-        blocks could not be safely evicted and must be tracked for deferred
-        removal.
+        Ghost lists and adaptive state are also reset.
         """
