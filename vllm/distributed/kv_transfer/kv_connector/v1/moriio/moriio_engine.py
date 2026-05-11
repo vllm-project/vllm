@@ -379,8 +379,16 @@ class MoRIIOWrapper:
     def set_backend_type(self, backend_type):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
         if backend_type == BackendType.XGMI:
+            logger.info("Using MoRIIO backend: XGMI")
             self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
         else:
+            logger.info(
+                "Using MoRIIO backend: RDMA "
+                "(qp_per_transfer=%d, post_batch_size=%d, num_workers=%d)",
+                envs.VLLM_MORIIO_QP_PER_TRANSFER,
+                envs.VLLM_MORIIO_POST_BATCH_SIZE,
+                envs.VLLM_MORIIO_NUM_WORKERS,
+            )
             rdma_cfg = RdmaBackendConfig(
                 envs.VLLM_MORIIO_QP_PER_TRANSFER,
                 envs.VLLM_MORIIO_POST_BATCH_SIZE,
