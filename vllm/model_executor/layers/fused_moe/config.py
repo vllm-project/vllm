@@ -228,7 +228,110 @@ class FusedMoEWeightDesc:
 
 
 @dataclass
-class FusedMoEQuantConfig:
+class FusedMoERuntimeQuantConfig:
+    _a1_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
+    _a2_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
+    _w1_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
+    _w2_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
+
+    @property
+    def a1_scale(self) -> torch.Tensor | None:
+        assert self._a1_w.scale is None or isinstance(self._a1_w.scale, torch.Tensor)
+        return self._a1_w.scale
+
+    @property
+    def a1_gscale(self) -> torch.Tensor | None:
+        return self._a1_w.alpha_or_gscale
+
+    # Activation properties
+    @property
+    def is_scale_swizzled(self) -> bool:
+        return self._a1_w.is_scale_swizzled
+
+    @property
+    def gemm1_alpha(self) -> float | None:
+        return self._a1_w.gemm_alpha
+
+    @property
+    def gemm1_beta(self) -> float | None:
+        return self._a1_w.gemm_beta
+
+    @property
+    def gemm1_clamp_limit(self) -> float | None:
+        return self._a1_w.gemm_clamp_limit
+
+    @property
+    def a2_scale(self) -> torch.Tensor | None:
+        assert self._a2_w.scale is None or isinstance(self._a2_w.scale, torch.Tensor)
+        return self._a2_w.scale
+
+    @property
+    def a2_gscale(self) -> torch.Tensor | None:
+        return self._a2_w.alpha_or_gscale
+
+    @property
+    def w1_scale(self) -> torch.Tensor | None:
+        assert self._w1_w.scale is None or isinstance(self._w1_w.scale, torch.Tensor)
+        return self._w1_w.scale
+
+    @property
+    def w1_zp(self) -> torch.Tensor | None:
+        return self._w1_w.zp
+
+    @property
+    def w1_bias(self) -> torch.Tensor | None:
+        return self._w1_w.bias
+
+    @property
+    def w1_precision(self) -> "PrecisionConfig | None":
+        assert self._w1_w.scale is None or isinstance(self._w1_w.scale, PrecisionConfig)
+        return self._w1_w.scale
+
+    @property
+    def g1_alphas(self) -> torch.Tensor | None:
+        return self._w1_w.alpha_or_gscale
+
+    @property
+    def w2_scale(self) -> torch.Tensor | None:
+        assert self._w2_w.scale is None or isinstance(self._w2_w.scale, torch.Tensor)
+        return self._w2_w.scale
+
+    @property
+    def w2_zp(self) -> torch.Tensor | None:
+        return self._w2_w.zp
+
+    @property
+    def w2_bias(self) -> torch.Tensor | None:
+        return self._w2_w.bias
+
+    @property
+    def w2_precision(self) -> "PrecisionConfig | None":
+        assert self._w2_w.scale is None or isinstance(self._w2_w.scale, PrecisionConfig)
+        return self._w2_w.scale
+
+    @property
+    def g2_alphas(self) -> torch.Tensor | None:
+        return self._w2_w.alpha_or_gscale
+
+    # TODO(bnell): get rid of the need for setters.
+    # This are needed because of the order in which the quant config
+    # and process_weights_after_loading are called. The runtime quant
+    # config should be created post-process_weights_after_loading.
+    def set_w1_scale(self, scale: torch.Tensor | None):
+        self._w1_w.scale = scale
+
+    def set_w1_bias(self, bias: torch.Tensor | None):
+        self._w1_w.bias = bias
+
+    def set_w2_scale(self, scale: torch.Tensor | None):
+        self._w2_w.scale = scale
+
+    def set_w2_bias(self, bias: torch.Tensor | None):
+        self._w2_w.bias = bias
+
+
+@dataclass
+class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
     """
     The FusedMoEQuantConfig contains all the quantization parameters for
     a single FusedMoEMethodBase operation.  It consists of four
@@ -262,16 +365,10 @@ class FusedMoEQuantConfig:
       so that only the required quantization parameters are used/stored.
     """
 
-    # TODO(bnell) make sure a1_scales/a2_scales don't interfere with chunking
     _a1: FusedMoEQuantDesc = FusedMoEQuantDesc()
     _a2: FusedMoEQuantDesc = FusedMoEQuantDesc()
     _w1: FusedMoEQuantDesc = FusedMoEQuantDesc()
     _w2: FusedMoEQuantDesc = FusedMoEQuantDesc()
-
-    _a1_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
-    _a2_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
-    _w1_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
-    _w2_w: FusedMoEWeightDesc = FusedMoEWeightDesc()
 
     mx_alignment: int = 0
     ocp_mx_scheme: str | None = None
@@ -435,11 +532,9 @@ class FusedMoEQuantConfig:
     def w2_group_shape(self) -> GroupShape | None:
         return self._w2.shape
 
-    # TODO(bnell): get rid of the need to do this
     def set_w2_scale(self, scale: torch.Tensor | None):
         self._w2_w.scale = scale
 
-    # TODO(bnell): get rid of the need to do this
     def set_w2_bias(self, bias: torch.Tensor | None):
         self._w2_w.bias = bias
 
