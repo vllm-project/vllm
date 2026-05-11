@@ -146,7 +146,7 @@ class WindowQFormerDownsampler(nn.Module):
         self.qformer = Blip2QFormerModel(
             qformer_config,
             vllm_config=vllm_config,
-            prefix=f"{prefix}.qformer",
+            prefix=maybe_prefix(prefix, "qformer"),
         )
 
         self.image_side = (

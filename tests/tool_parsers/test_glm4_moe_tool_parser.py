@@ -801,6 +801,36 @@ def test_extract_tool_calls_numeric_deserialization(glm4_moe_tool_parser, mock_r
     assert isinstance(args["enabled"], bool)
 
 
+def test_whitespace_preserved_in_arg_values(glm4_moe_tokenizer):
+    """Test that string arguments preserve leading and trailing whitespace."""
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="apply_diff",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "s": {"type": "string"},
+                    },
+                    "required": ["s"],
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    model_output = """<tool_call>apply_diff
+<arg_key>s</arg_key>
+<arg_value>    indented code    </arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+
+    assert args["s"] == "    indented code    "
+
+
 def test_zero_argument_tool_call(glm4_moe_tool_parser, mock_request):
     """Regression: zero-argument tool call crash (PR #32321)."""
     model_output = """<tool_call>get_time

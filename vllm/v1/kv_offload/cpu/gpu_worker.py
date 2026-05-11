@@ -313,10 +313,22 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
+        # CPU->GPU reads from host pinned memory, which is never written
+        # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
+        # safe and lets the driver pipeline source reads. GPU->CPU reads
+        # from the live GPU KV cache, which the compute stream keeps
+        # writing; we must keep STREAM ordering so source reads are gated
+        # by the transfer stream's wait_stream(compute) barrier.
+        is_src_access_order_any = not self.gpu_to_cpu
         with torch.cuda.stream(stream):
             start_event.record(stream)
             if num_copy_ops > 0:
-                ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
+                ops.swap_blocks_batch(
+                    batch_src,
+                    batch_dst,
+                    batch_sizes,
+                    is_src_access_order_any=is_src_access_order_any,
+                )
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
