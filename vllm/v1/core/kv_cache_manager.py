@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
@@ -117,6 +118,8 @@ class KVCacheManager:
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        tlru_xi_tokens: int | None = None,
+        tlru_qhat_tokens: int = 200,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -134,6 +137,21 @@ class KVCacheManager:
         # potential configs we could expose in the future.
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
+        # T-LRU: convert tokens → blocks.  block_size is taken from the first
+        # KV cache group (they must all share the same block_size for now).
+        if tlru_xi_tokens is not None and kv_cache_config.kv_cache_groups:
+            _block_size = kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+            # Use ceil for xi so we are conservative (a partial block
+            # still counts toward the SLA budget).  Use ceil for qhat
+            # so the estimated prompt length is not under-counted.
+            tlru_xi_blocks: int | None = math.ceil(
+                tlru_xi_tokens / _block_size)
+            tlru_qhat_blocks: int = math.ceil(
+                tlru_qhat_tokens / _block_size)
+        else:
+            tlru_xi_blocks = None
+            tlru_qhat_blocks = 0
+
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -145,6 +163,8 @@ class KVCacheManager:
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
+            tlru_xi_blocks=tlru_xi_blocks,
+            tlru_qhat_blocks=tlru_qhat_blocks,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool

@@ -153,11 +153,24 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        tlru_xi_blocks: int | None = None,
+        tlru_qhat_blocks: int = 0,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+
+        # T-LRU parameters.  When tlru_xi_blocks is None, T-LRU is disabled
+        # and behaviour is identical to the original LRU eviction.
+        self.tlru_xi_blocks: int | None = tlru_xi_blocks
+        self.tlru_qhat_blocks: int = tlru_qhat_blocks
+        # TEL-safe eviction queue (Phase 1): holds blocks whose position in
+        # the conversation is beyond the TEL-safe cap.  Eviction always drains
+        # this queue before touching the normal LRU free_block_queue.
+        # Uses FreeKVCacheBlockQueue (doubly-linked list) for O(1) removal in
+        # touch(), matching the data structure used by free_block_queue.
+        self.tel_safe_queue = FreeKVCacheBlockQueue([])
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -333,7 +346,22 @@ class BlockPool:
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        # T-LRU Phase 1: try to allocate from the TEL-safe queue first.  Only
+        # blocks in the normal free_block_queue are candidates for prefix-cache
+        # prefetch; tel_safe blocks are not cached but can supply raw memory.
+        ret: list[KVCacheBlock] = []
+        while len(ret) < num_blocks and self.tel_safe_queue.num_free_blocks > 0:
+            block = self.tel_safe_queue.popleft()
+            # The block may have been re-touched (ref_cnt > 0) since it was
+            # queued; skip it in that case.  We must still clear the TEL-safe
+            # tag so it is not lost.
+            block.is_tel_safe = False
+            if block.ref_cnt == 0 and not block.is_null:
+                ret.append(block)
+        # Fall back to normal LRU queue for the remaining blocks.
+        remaining = num_blocks - len(ret)
+        if remaining > 0:
+            ret.extend(self.free_block_queue.popleft_n(remaining))
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -366,6 +394,9 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
 
+        # T-LRU: clear the safe tag so that re-use starts fresh.
+        block.is_tel_safe = False
+
         block_hash = block.block_hash
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
@@ -397,10 +428,16 @@ class BlockPool:
             blocks: A list of blocks to touch.
         """
         for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # ref_cnt=0 means this block is in a free queue (i.e. eviction
+            # candidate), so remove it from whichever queue it is in.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                if block.is_tel_safe:
+                    # Block is in tel_safe_queue.  Remove it (O(1) via
+                    # doubly-linked list) and clear the T-LRU tag.
+                    self.tel_safe_queue.remove(block)
+                    block.is_tel_safe = False
+                else:
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -420,6 +457,57 @@ class BlockPool:
         self.free_block_queue.append_n(
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
+
+    def free_blocks_tlru(
+        self,
+        ordered_blocks: Iterable[KVCacheBlock],
+        req_total_blocks: int,
+    ) -> None:
+        """T-LRU variant of free_blocks.  Call this instead of free_blocks()
+        when T-LRU is enabled.  Blocks whose position (0-indexed from the
+        start of the request's block list) is beyond the TEL-safe cap
+        B = max(0, req_total_blocks + tlru_qhat_blocks - tlru_xi_blocks) are
+        routed to tel_safe_queue; the rest go to the normal LRU free queue.
+
+        Args:
+            ordered_blocks: Blocks in eviction priority order (suffix first,
+                as produced by reversed(req_to_blocks[req_id])).
+            req_total_blocks: Total number of blocks in the request
+                (= H in the paper, measured at free time so it includes
+                the just-generated response).
+        """
+        assert self.tlru_xi_blocks is not None, (
+            "free_blocks_tlru called but T-LRU is not enabled"
+        )
+        B = max(0, req_total_blocks + self.tlru_qhat_blocks - self.tlru_xi_blocks)
+        # ordered_blocks arrives suffix-first (reversed), so the first element
+        # is at position req_total_blocks-1, the second at req_total_blocks-2,
+        # etc.  Blocks at position >= B (i.e. the last req_total_blocks - B
+        # blocks) are TEL-safe.
+        num_tel_safe = req_total_blocks - B  # == max(0, H - B)
+
+        blocks_list = list(ordered_blocks)
+        for block in blocks_list:
+            block.ref_cnt -= 1
+
+        tel_safe_blocks: list[KVCacheBlock] = []
+        normal_blocks: list[KVCacheBlock] = []
+        for idx, block in enumerate(blocks_list):
+            if block.ref_cnt != 0 or block.is_null:
+                continue
+            # idx=0 → position req_total_blocks-1, idx=1 → position
+            # req_total_blocks-2, …  So position = req_total_blocks-1-idx.
+            # The block is TEL-safe iff position >= B,
+            # i.e. req_total_blocks-1-idx >= B,
+            # i.e. idx <= req_total_blocks-1-B = num_tel_safe-1.
+            if idx < num_tel_safe:
+                block.is_tel_safe = True
+                tel_safe_blocks.append(block)
+            else:
+                normal_blocks.append(block)
+
+        self.tel_safe_queue.append_n(tel_safe_blocks)
+        self.free_block_queue.append_n(normal_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -458,6 +546,18 @@ class BlockPool:
             )
             return False
 
+        # T-LRU: move all TEL-safe blocks back to the normal LRU queue and
+        # clear their tags.  After a cache reset the TEL-safe distinction is
+        # meaningless, and leaving blocks in tel_safe_queue with stale
+        # is_tel_safe=True flags would confuse touch() and get_new_blocks().
+        drained: list[KVCacheBlock] = []
+        while self.tel_safe_queue.num_free_blocks > 0:
+            block = self.tel_safe_queue.popleft()
+            block.is_tel_safe = False
+            if not block.is_null:
+                drained.append(block)
+        self.free_block_queue.append_n(drained)
+
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
 
@@ -479,9 +579,10 @@ class BlockPool:
         """Get the number of free blocks in the pool.
 
         Returns:
-            The number of free blocks.
+            The number of free blocks (normal LRU queue + TEL-safe queue).
         """
-        return self.free_block_queue.num_free_blocks
+        return (self.free_block_queue.num_free_blocks
+                + self.tel_safe_queue.num_free_blocks)
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

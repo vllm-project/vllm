@@ -175,6 +175,20 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    # ---------------------------------------------------------------------------
+    # Tail-Optimized LRU (T-LRU) caching policy
+    # ---------------------------------------------------------------------------
+    tlru_xi_tokens: int | None = None
+    """Enable Tail-Optimized LRU (T-LRU) eviction.  When set, blocks whose
+    position index is >= max(0, H + Q_hat - xi) (where H is the total number
+    of blocks for the request and Q_hat = tlru_qhat_tokens // block_size)
+    are placed in a fast-eviction TEL-safe queue and evicted before normal
+    LRU blocks.  Set to None (default) to use the standard LRU policy."""
+    tlru_qhat_tokens: int = 200
+    """Estimated typical query length in tokens, used to compute the T-LRU
+    TEL-safe cap.  Only meaningful when `tlru_xi_tokens` is set.
+    Defaults to 200 tokens."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -205,6 +219,9 @@ class CacheConfig:
             "num_cpu_blocks",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # T-LRU eviction policy — purely runtime, no graph impact
+            "tlru_xi_tokens",
+            "tlru_qhat_tokens",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -233,6 +250,17 @@ class CacheConfig:
             object.__setattr__(self, "user_specified_block_size", True)
         if self.mamba_block_size is not None:
             object.__setattr__(self, "user_specified_mamba_block_size", True)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tlru_requires_prefix_caching(self) -> "CacheConfig":
+        if self.tlru_xi_tokens is not None and not self.enable_prefix_caching:
+            raise ValueError(
+                "T-LRU eviction (--tlru-xi-tokens) requires prefix caching "
+                "to be enabled (--enable-prefix-caching). T-LRU classifies "
+                "cached prefix blocks as TEL-safe or protected; without "
+                "prefix caching there are no cached blocks to classify."
+            )
         return self
 
     @field_validator("calculate_kv_scales", mode="after")
