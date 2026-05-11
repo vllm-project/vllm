@@ -12,7 +12,6 @@ import torch
 from nixl._api import nixl_agent, nixl_agent_config, nixl_xfer_handle
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.tiering.obj.nixl_lookup import obj_key_to_dev_id
 
 from vllm.v1.kv_offload.tiering.obj.obj_store_config import ObjStoreConfig
 
@@ -64,7 +63,7 @@ class NixlEngine:
             for bid in block_ids
         ]
         nixl_files = [
-            (0, self._stride, obj_key_to_dev_id(key), key) for key in s3_keys
+            (0, self._stride, 0, key) for key in s3_keys
         ]
 
         xfer_desc = self._agent.get_xfer_descs(blocks_data, "DRAM")
