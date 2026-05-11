@@ -193,16 +193,6 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         _MAMBA_ATTN_OVERRIDES.pop(self, None)
 
 
-MAMBA_TYPE_TO_BACKEND_MAP = {
-    "mamba1": MambaAttentionBackendEnum.MAMBA1.name,
-    "mamba2": MambaAttentionBackendEnum.MAMBA2.name,
-    "short_conv": MambaAttentionBackendEnum.SHORT_CONV.name,
-    "linear_attention": MambaAttentionBackendEnum.LINEAR.name,
-    "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN.name,
-    "custom": MambaAttentionBackendEnum.CUSTOM.name,
-}
-
-
 _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}
 _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
