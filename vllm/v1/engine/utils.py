@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -130,7 +131,9 @@ class CoreEngineProcManager:
 
         is_dp = vllm_config.parallel_config.data_parallel_size > 1
 
-        from vllm.v1.engine.core import EngineCoreProc
+        engine_core_proc_cls = resolve_obj_by_qualname(
+            vllm_config.parallel_config.engine_core_proc_cls
+        )
 
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
@@ -142,7 +145,7 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=EngineCoreProc.run_engine_core,
+                    target=engine_core_proc_cls.run_engine_core,
                     name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
                     | {"dp_rank": global_index, "local_dp_rank": local_index},
@@ -345,14 +348,17 @@ class CoreEngineActorManager:
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
-
         dp_size = vllm_config.parallel_config.data_parallel_size
-        actor_class = (
-            DPMoEEngineCoreActor
-            if dp_size > 1 and vllm_config.model_config.is_moe
-            else EngineCoreActor
+        uses_dp_actor = (
+            vllm_config.parallel_config.dp_engine_core_actor_cls
+            != "vllm.v1.engine.core.DPMoEEngineCoreActor"
         )
+        actor_cls_qualname = (
+            vllm_config.parallel_config.dp_engine_core_actor_cls
+            if dp_size > 1 and (vllm_config.model_config.is_moe or uses_dp_actor)
+            else vllm_config.parallel_config.engine_core_actor_cls
+        )
+        actor_class = resolve_obj_by_qualname(actor_cls_qualname)
 
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
@@ -763,13 +769,16 @@ class CoreEngineActorManager:
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
-
-        actor_class = (
-            DPMoEEngineCoreActor
-            if cur_vllm_config.model_config.is_moe
-            else EngineCoreActor
+        uses_dp_actor = (
+            cur_vllm_config.parallel_config.dp_engine_core_actor_cls
+            != "vllm.v1.engine.core.DPMoEEngineCoreActor"
         )
+        actor_cls_qualname = (
+            cur_vllm_config.parallel_config.dp_engine_core_actor_cls
+            if cur_vllm_config.model_config.is_moe or uses_dp_actor
+            else cur_vllm_config.parallel_config.engine_core_actor_cls
+        )
+        actor_class = resolve_obj_by_qualname(actor_cls_qualname)
 
         cur_data_parallel_size = len(self.local_engine_actors) + len(
             self.remote_engine_actors

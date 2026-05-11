@@ -37,6 +37,7 @@ from vllm.utils.gc_utils import (
     maybe_attach_gc_debug_callback,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
@@ -1100,10 +1101,19 @@ class EngineCoreProc(EngineCore):
                 )
 
             parallel_config.data_parallel_index = dp_rank
-            if data_parallel and vllm_config.model_config.is_moe:
+            uses_dp_engine_core = (
+                parallel_config.dp_engine_core_proc_cls
+                != "vllm.v1.engine.core.DPEngineCoreProc"
+            )
+            if data_parallel and (
+                vllm_config.model_config.is_moe or uses_dp_engine_core
+            ):
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
-                engine_core = DPEngineCoreProc(*args, **kwargs)
+                engine_core_cls = resolve_obj_by_qualname(
+                    parallel_config.dp_engine_core_proc_cls
+                )
+                engine_core = engine_core_cls(*args, **kwargs)
             else:
                 # Non-MoE DP ranks are completely independent, so treat like DP=1.
                 # Note that parallel_config.data_parallel_index will still reflect
@@ -1111,7 +1121,10 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_size = 1
                 parallel_config.data_parallel_size_local = 1
                 parallel_config.data_parallel_rank = 0
-                engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+                engine_core_cls = resolve_obj_by_qualname(
+                    parallel_config.engine_core_proc_cls
+                )
+                engine_core = engine_core_cls(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
 
@@ -1637,8 +1650,13 @@ class DPEngineCoreProc(EngineCoreProc):
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
-        assert vllm_config.model_config.is_moe, (
-            "DPEngineCoreProc should only be used for MoE models"
+        uses_dp_engine_core = (
+            vllm_config.parallel_config.dp_engine_core_proc_cls
+            != "vllm.v1.engine.core.DPEngineCoreProc"
+        )
+        assert vllm_config.model_config.is_moe or uses_dp_engine_core, (
+            "DPEngineCoreProc should only be used for MoE models or a selected "
+            "DP engine-core subclass"
         )
 
         # Counts forward-passes of the model so that we can synchronize

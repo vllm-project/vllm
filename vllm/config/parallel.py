@@ -252,6 +252,16 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    engine_core_cls: str = "vllm.v1.engine.core.EngineCore"
+    """The full name of the in-process engine core class to use."""
+    engine_core_proc_cls: str = "vllm.v1.engine.core.EngineCoreProc"
+    """The full name of the multiprocessing engine core class to use."""
+    dp_engine_core_proc_cls: str = "vllm.v1.engine.core.DPEngineCoreProc"
+    """The full name of the data-parallel engine core process class to use."""
+    engine_core_actor_cls: str = "vllm.v1.engine.core.EngineCoreActor"
+    """The full name of the Ray engine core actor class to use."""
+    dp_engine_core_actor_cls: str = "vllm.v1.engine.core.DPMoEEngineCoreActor"
+    """The full name of the data-parallel Ray engine core actor class to use."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
