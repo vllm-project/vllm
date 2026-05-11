@@ -178,6 +178,131 @@ def mhc_pre_big_fuse_tilelang(
         T.pdl_trigger()
 
 
+@tilelang.jit(
+    pass_configs={
+        tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
+        tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
+        tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL: 10,
+    },
+)
+def mhc_fused_tilelang(
+    comb_mix,
+    residual_in,
+    post_mix,
+    x_in,
+    weight_t,
+    yp_out,
+    rp_out,
+    residual_out,
+    hc: int,
+    hidden: int,
+    n_out: int,
+    n_thr: int = 256,
+    h_blk: int = 256,
+    tile_n: int = 1,
+    split_k: int = 1,
+) -> tilelang.JITKernel:
+    """Fused mhc post-mapping + pre-norm GEMM FMA"""
+    m = T.dynamic("num_tokens")
+    split_k = T.dynamic("split_k")
+    h = hidden
+    h_blk = math.gcd(hidden, h_blk)
+    h_per_split = h // split_k
+    n_tiles = n_out // tile_n
+
+    comb_mix: T.Tensor((m, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
+    residual_in: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    post_mix: T.Tensor((m, hc), T.float32)  # type: ignore[no-redef, valid-type]
+    x_in: T.Tensor((m, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    weight_t: T.Tensor((n_out, hc, h), T.float32)  # type: ignore[no-redef, valid-type]
+    yp_out: T.Tensor((split_k, m, n_out), T.float32)  # type: ignore[no-redef, valid-type]
+    rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type]
+    residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+
+    h_iters = h_per_split // n_thr
+    num_warps = n_thr // 32
+
+    with T.Kernel(m, n_tiles, split_k, threads=n_thr) as (i_n, i_nt, i_ks):
+        tid = T.get_thread_binding()
+        warp_id = T.get_warp_idx()
+        lane = T.get_lane_idx()
+
+        s_warp = T.alloc_shared((num_warps, tile_n + 1), T.float32)
+        s_post = T.alloc_shared((hc,), T.float32)
+        s_comb = T.alloc_shared((hc, hc), T.float32)
+
+        pm = T.alloc_local((hc,), T.float32)
+        cm = T.alloc_local((hc, hc), T.float32)
+        acc = T.alloc_local((tile_n,), T.float32)
+        sqr = T.alloc_local((1,), T.float32)
+        new_r = T.alloc_local((hc,), T.float32)
+
+        T.clear(acc)
+        T.clear(sqr)
+        h_split_start = i_ks * h_per_split
+
+        T.pdl_sync()
+
+        T.copy(post_mix[i_n, 0], s_post)
+        T.copy(comb_mix[i_n, 0, 0], s_comb)
+
+        for j in T.unroll(hc):
+            pm[j] = s_post[j]
+        for j in T.unroll(hc):
+            for k in T.unroll(hc):
+                cm[k, j] = s_comb[k, j]
+
+        # Each thread owns h_iters elements of the k-split's h slice.
+        for it in T.serial(h_iters):
+            h_idx = h_split_start + it * n_thr + tid
+
+            # Compute new residual from layer output and past residual
+            for j in T.unroll(hc):
+                new_r[j] = pm[j] * x_in[i_n, h_idx]
+                for k in T.unroll(hc):
+                    new_r[j] += cm[k, j] * residual_in[i_n, k, h_idx]
+
+            # populate residual_out and compute sqr sum
+            if i_nt == 0:
+                for j in T.unroll(hc):
+                    residual_out[i_n, j, h_idx] = new_r[j]
+                    sqr[0] += new_r[j] * new_r[j]
+
+            # Per-thread FMA into acc[n]
+            for n in T.unroll(tile_n):
+                for j in T.unroll(hc):
+                    acc[n] += weight_t[i_nt * tile_n + n, j, h_idx] * new_r[j]
+
+        for n in T.unroll(tile_n):
+            acc[n] = T.warp_reduce_sum(acc[n])
+        if i_nt == 0:
+            sqr[0] = T.warp_reduce_sum(sqr[0])
+
+        # Cross-warp reduce via shared mem
+        if lane == 0:
+            for n in T.unroll(tile_n):
+                s_warp[warp_id, n] = acc[n]
+            if i_nt == 0:
+                s_warp[warp_id, tile_n] = sqr[0]
+        T.sync_threads()
+
+        # Warp 0 does the final cross-warp sum and writes outputs
+        if warp_id == 0:
+            if lane < tile_n:
+                v = T.alloc_var(T.float32, init=0.0)
+                for w in T.unroll(num_warps):
+                    v += s_warp[w, lane]
+                yp_out[i_ks, i_n, i_nt * tile_n + lane] = v
+
+            if i_nt == 0 and lane == 0:
+                v2 = T.alloc_var(T.float32, init=0.0)
+                for w in T.unroll(num_warps):
+                    v2 += s_warp[w, tile_n]
+                rp_out[i_ks, i_n] = v2
+
+        T.pdl_trigger()
+
+
 def mhc_pre(
     residual: torch.Tensor,
     fn: torch.Tensor,
