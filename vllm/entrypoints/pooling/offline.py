@@ -45,12 +45,12 @@ _O = TypeVar(
 class PoolingOfflineMixin(ABC):
     """Offline inference for pooling models"""
 
-    model_config: ModelConfig
+    renderer: BaseRenderer
     llm_engine: "LLMEngine"
+    model_config: ModelConfig
+    runner_type: str
     chat_template: str
     supported_tasks: tuple[SupportedTask, ...]
-    runner_type: str
-    renderer: BaseRenderer
 
     def __init__(self):
         self.pooling_task = self.model_config.get_pooling_task(self.supported_tasks)
