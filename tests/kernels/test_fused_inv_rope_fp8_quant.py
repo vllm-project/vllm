@@ -725,13 +725,12 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     This catches stride/layout bugs that only manifest when the einsum
     kernel actually consumes the quantized activations.
     """
-    from deep_gemm.utils.math import ceil_div
-
     from vllm.utils.deep_gemm import (
         fp8_einsum,
         per_block_cast_to_fp8,
         transform_sf_into_required_layout,
     )
+    from vllm.utils.math_utils import cdiv
 
     heads_per_group = num_heads // n_groups
     d = heads_per_group * HEAD_DIM
@@ -753,8 +752,8 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     w_fp8 = torch.empty_like(w, dtype=torch.float8_e4m3fn)
     w_scale = torch.empty(
         n_groups,
-        ceil_div(o_lora_rank, 128),
-        ceil_div(d, 128),
+        cdiv(o_lora_rank, 128),
+        cdiv(d, 128),
         device=device,
         dtype=torch.float32,
     )
@@ -809,7 +808,7 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
     # Einsum output: Triton and CUDA both rotate in fp32 now, so diffs
     # come from fp32 ordering and UE8M0 boundary shifts only.
     # Use relative diff (same metric as test_fp8_einsum.py).
-    from deep_gemm.testing import calc_diff
+    from vllm.third_party.deep_gemm.testing import calc_diff
 
     z_diff = calc_diff(z_fused, z_ref)
     assert z_diff < 0.01, (
