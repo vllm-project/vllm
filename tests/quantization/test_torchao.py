@@ -5,8 +5,8 @@ import importlib.util
 import pytest
 import torch
 
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -14,6 +14,7 @@ DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
 TORCHAO_VERSION_AT_LEAST_0_17_0 = torchao_version_at_least("0.17.0")
+
 
 @pytest.mark.skipif(
     current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
@@ -409,8 +410,14 @@ def _mock_zentorch_ops():
     Each op is only defined if it isn't already, so the fixture is a no-op on
     dev machines that have a real zentorch build.
     """
-    def _dynamic_qlinear_impl(inp, weight, weight_scales, bias=None,
-                              zentorch_op_name="zentorch::zentorch_dynamic_qlinear"):
+
+    def _dynamic_qlinear_impl(
+        inp,
+        weight,
+        weight_scales,
+        bias=None,
+        zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
+    ):
         out_features = weight.shape[0]
         out = torch.zeros(
             inp.shape[:-1] + (out_features,), dtype=inp.dtype, device=inp.device
@@ -424,7 +431,7 @@ def _mock_zentorch_ops():
             "zentorch_dynamic_qlinear",
             "Tensor input, Tensor weight, Tensor weight_scales, "
             "Tensor? bias=None, "
-            "str zentorch_op_name=\"zentorch::zentorch_dynamic_qlinear\"",
+            'str zentorch_op_name="zentorch::zentorch_dynamic_qlinear"',
             _dynamic_qlinear_impl,
         ),
     ]
@@ -510,7 +517,9 @@ def _wrap_as_layer(weight_tensor: torch.Tensor):
 # ----- process_weights_after_loading: success paths ------------------------
 
 
-@pytest.mark.skipif(not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available")
+@pytest.mark.skipif(
+    not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available"
+)
 def test_process_weights_after_loading_int8_dynamic_caches_dynamic_attrs(
     monkeypatch, _mock_zentorch_ops
 ):
@@ -563,7 +572,9 @@ def test_process_weights_after_loading_non_matching_weight_preserves_weight(
     assert not hasattr(layer, "_zentorch_dynamic_qlinear_weight")
 
 
-@pytest.mark.skipif(not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available")
+@pytest.mark.skipif(
+    not TORCHAO_VERSION_AT_LEAST_0_17_0, reason="torchao is not available"
+)
 def test_process_weights_after_loading_int8_without_act_kwargs_preserves_weight(
     monkeypatch, _mock_zentorch_ops
 ):
@@ -581,9 +592,7 @@ def test_process_weights_after_loading_int8_without_act_kwargs_preserves_weight(
 # ----- apply(): zentorch dispatch ------------------------------------------
 
 
-def test_apply_dispatches_to_zentorch_dynamic_qlinear(
-    monkeypatch, _mock_zentorch_ops
-):
+def test_apply_dispatches_to_zentorch_dynamic_qlinear(monkeypatch, _mock_zentorch_ops):
     from types import SimpleNamespace
 
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
@@ -595,8 +604,13 @@ def test_apply_dispatches_to_zentorch_dynamic_qlinear(
 
     captured: dict = {}
 
-    def spy(inp, weight, weight_scales, bias=None,
-            zentorch_op_name="zentorch::zentorch_dynamic_qlinear"):
+    def spy(
+        inp,
+        weight,
+        weight_scales,
+        bias=None,
+        zentorch_op_name="zentorch::zentorch_dynamic_qlinear",
+    ):
         captured["called"] = True
         captured["op_name"] = zentorch_op_name
         return torch.zeros(inp.shape[:-1] + (weight.shape[0],), dtype=inp.dtype)

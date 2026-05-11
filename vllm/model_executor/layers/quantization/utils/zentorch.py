@@ -18,6 +18,7 @@ monkeypatch ``current_platform.is_zen_cpu`` and (occasionally) the op
 namespace; a module-level cache would freeze those decisions for the
 remainder of the process.
 """
+
 from __future__ import annotations
 
 import torch

@@ -47,6 +47,7 @@ def torchao_version_at_least(torchao_version: str) -> bool:
 if torchao_version_at_least("0.17.0"):
     from torchao.quantization.granularity import PerRow
     from torchao.quantization.quantize_.workflows import Int8Tensor
+
     _ZENTORCH_TORCHAO_ENABLED = True
 else:
     Int8Tensor = None  # type: ignore[assignment]
@@ -438,9 +439,7 @@ class TorchAOLinearMethod(LinearMethodBase):
         # the final packed tensor, regardless of checkpoint source.
         self._process_weights_after_loading_zentorch(layer)
 
-    def _process_weights_after_loading_zentorch(
-        self, layer: torch.nn.Module
-    ) -> None:
+    def _process_weights_after_loading_zentorch(self, layer: torch.nn.Module) -> None:
         """Cache zentorch-ready tensors on ``layer`` for the Zen CPU fast path.
 
         Bit-for-bit no-op on any non-eligible configuration (non-Zen, no

@@ -65,10 +65,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             return False
 
         is_fused = len(layer.logical_widths) > 1
-        if not self.config.is_channelwise and not is_fused:
-            # Non-fused per-tensor: would produce a 0-d scale after squeeze.
-            return False
-        return True
+        # Non-fused per-tensor: would produce a 0-d scale after squeeze.
+        return self.config.is_channelwise or is_fused
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # zentorch path: dynamic-symmetric W8A8 on AMD Zen CPUs

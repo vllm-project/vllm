@@ -28,7 +28,7 @@ def _import_unpack_from_int32():
             unpack_from_int32,
         )
     except ImportError:
-        from compressed_tensors.compressors.quantized_compressors.pack_quantized import (  # type: ignore[import-not-found]
+        from compressed_tensors.compressors.quantized_compressors.pack_quantized import (  # type: ignore[import-not-found]  # noqa: E501
             unpack_from_int32,
         )
     return unpack_from_int32
@@ -167,9 +167,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         Constraints (any failure -> legacy ``ops.cpu_gemm_wna16`` path with
         ``layer`` untouched).
         """
-        if not has_zentorch_op(
-            "zentorch_woq_repack_weight", "zentorch_woq_linear"
-        ):
+        if not has_zentorch_op("zentorch_woq_repack_weight", "zentorch_woq_linear"):
             return False
         if hasattr(layer, "weight_g_idx") or getattr(self.config, "has_g_idx", False):
             return False
@@ -191,10 +189,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         # 4-bit -> 8 values per int32; in_features must be divisible by num_groups.
         in_features = weight_packed.shape[1] * 8
         num_groups = weight_scale.shape[1]
-        if num_groups <= 0 or in_features % num_groups != 0:
-            return False
-
-        return True
+        return num_groups > 0 and in_features % num_groups == 0
 
 
     def _process_weights_for_zentorch_woq(self, layer: torch.nn.Module) -> None:
@@ -210,8 +205,8 @@ class CPUWNA16LinearKernel(MPLinearKernel):
         unpack_from_int32 = _import_unpack_from_int32()
         repack_op = torch.ops.zentorch.zentorch_woq_repack_weight.default
 
-        weight_packed = layer.weight_packed   # (out, in/8) compressed-tensors
-        weight_scale = layer.weight_scale     # (out, num_groups)
+        weight_packed = layer.weight_packed  # (out, in/8) compressed-tensors
+        weight_scale = layer.weight_scale  # (out, num_groups)
         out_features = weight_scale.shape[0]
         num_groups = weight_scale.shape[1]
         in_features = weight_packed.shape[1] * 8
