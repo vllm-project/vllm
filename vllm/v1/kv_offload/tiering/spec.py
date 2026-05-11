@@ -3,7 +3,7 @@
 """
 TieringOffloadingSpec: Spec for multi-tier KV cache offloading.
 
-This spec creates a TieringOffloadingManager with a CPU-based primary tier
+This spec creates a TieringOffloadingManager with a CPU primary tier
 and configurable secondary tiers (e.g., Storage, Network).
 
 Configuration via kv_connector_extra_config:
@@ -56,12 +56,12 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     Spec for multi-tier KV cache offloading.
 
     Creates a TieringOffloadingManager with:
-    - Primary tier: CPU-based (LRU or ARC eviction policy)
+    - Primary tier: CPU (LRU or ARC eviction policy)
     - Secondary tiers: Configurable via extra_config
 
-    The primary tier has direct GPU access and serves as the gateway for all
-    GPU↔offload operations. Secondary tiers cannot directly access GPU memory
-    and must coordinate with the primary tier for data transfers.
+    The CPU primary tier has direct GPU access and serves as the gateway for
+    all GPU↔offload operations. Secondary tiers cannot directly access GPU
+    memory and must transfer data through the primary tier.
     """
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
@@ -82,7 +82,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         Get the TieringOffloadingManager.
 
         Creates a TieringOffloadingManager with:
-        - Primary tier: CPU-based (LRU or ARC)
+        - Primary tier: CPU (LRU or ARC)
         - Secondary tiers: As configured in extra_config
 
         Returns:

@@ -3,15 +3,15 @@
 """
 TieringOffloadingManager: Multi-tier KV cache offloading orchestrator.
 
-This manager coordinates between a primary tier (with GPU access, currently
-CPU-based) and zero or more secondary tiers (Storage, Network, etc.) to
-provide hierarchical KV cache offloading.
+This manager coordinates between a CPU primary tier (with direct GPU access)
+and zero or more secondary tiers (Storage, Network, etc.) to provide
+hierarchical KV cache offloading.
 
 Key Design Principles:
 1. Always offload to all tiers — When a block is stored to the primary tier,
    it is cascaded to ALL secondary tiers
 2. Primary tier is the gateway — Only the primary tier can directly access
-   GPU memory (currently implemented using CPU memory)
+   GPU memory
 3. Staged promotion — Blocks in secondary tiers must be promoted to the
    primary tier before GPU can access them
 4. Transparent retry mechanism — Return None from lookup() to signal
@@ -119,9 +119,9 @@ class TieringOffloadingManager(OffloadingManager):
     """
     Orchestrates multi-tier KV cache offloading.
 
-    This manager coordinates between a primary tier (with GPU access, currently
-    CPU-based) and zero or more secondary tiers (Storage, Network, etc.) to
-    provide hierarchical KV cache offloading.
+    This manager coordinates between a CPU primary tier (with direct GPU access)
+    and zero or more secondary tiers (Storage, Network, etc.) to provide
+    hierarchical KV cache offloading.
 
     Key internal state:
       - Minimal state tracking; relies on secondary tiers to report completion

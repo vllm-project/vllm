@@ -39,9 +39,9 @@ class SecondaryTierManager(ABC):
     Abstract interface for managing a single non-primary offloading tier.
 
     Secondary tiers cannot directly access GPU memory. All data transfers
-    must go through the primary tier (implemented as CPU in current version):
-      - Store: GPU → primary → secondary  (cascade)
-      - Load:  secondary → primary → GPU  (promotion)
+    must go through the CPU (primary) tier:
+      - Store: GPU → CPU (primary) → secondary  (cascade)
+      - Load:  secondary → CPU (primary) → GPU  (promotion)
 
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
