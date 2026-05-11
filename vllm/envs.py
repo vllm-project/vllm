@@ -53,6 +53,13 @@ def _tpu_pathways_default() -> bool:
 
 _MCP_LABEL_CHOICES = {"container", "code_interpreter", "web_search_preview"}
 
+# Sentinel `validation_alias` used to keep VLLM_TPU_USING_PATHWAYS off the
+# pydantic-settings env-loading path. The field's value is computed by a
+# default_factory from JAX_PLATFORMS, not from VLLM_TPU_USING_PATHWAYS itself.
+# A string is required because pydantic-settings only accepts str-typed
+# validation_alias values.
+_TPU_PATHWAYS_SENTINEL = "__VLLM_TPU_USING_PATHWAYS_UNSET_SENTINEL__"
+
 
 def maybe_convert_bool(value: str | None) -> bool | None:
     """Back-compat shim: used by tests/ci_envs.py."""
@@ -398,7 +405,7 @@ class TpuXpuSettings(BaseSettings):
     tpu_most_model_len: int | None = None
     tpu_using_pathways: bool = Field(
         default_factory=_tpu_pathways_default,
-        validation_alias="__VLLM_TPU_USING_PATHWAYS_UNSET_SENTINEL__",
+        validation_alias=_TPU_PATHWAYS_SENTINEL,
     )
     xpu_enable_xpu_graph: bool = False
     xpu_use_sampler_kernel: bool = True
@@ -732,7 +739,7 @@ def resolve_env_name(info: FieldInfo, field_name: str, prefix: str) -> str:
         first = va.choices[0]
         return first if isinstance(first, str) else str(first)
     if isinstance(va, str):
-        if va == "__VLLM_TPU_USING_PATHWAYS_UNSET_SENTINEL__":
+        if va == _TPU_PATHWAYS_SENTINEL:
             return "VLLM_TPU_USING_PATHWAYS"
         return va
     return prefix + field_name.upper()
@@ -769,12 +776,7 @@ _settings: Settings | None = None
 
 
 def _get_settings() -> Settings:
-    """Return the cached Settings singleton.
-
-    Only used after ``enable_envs_cache()`` has run; otherwise each attribute
-    read constructs a fresh ``Settings`` so subsequent mutations to
-    ``os.environ`` are visible (matching the pre-refactor lambda behavior).
-    """
+    """Return the cached Settings singleton (lazily constructed)."""
     global _settings
     if _settings is None:
         _settings = Settings()
