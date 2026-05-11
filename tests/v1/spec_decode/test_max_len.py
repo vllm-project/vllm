@@ -35,6 +35,29 @@ def test_ngram_max_len(num_speculative_tokens: int):
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
+def test_ngram_gpu_max_len(num_speculative_tokens: int):
+    """V2 GPU n-gram counterpart of ``test_ngram_max_len``.
+
+    Verifies that the V2 model runner with ``method="ngram_gpu"`` correctly
+    handles the ``max_model_len`` boundary across various speculative-token
+    counts.
+    """
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=100,
+        enforce_eager=True,  # For faster initialization.
+        speculative_config={
+            "method": "ngram_gpu",
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    )
+    sampling_params = SamplingParams(max_tokens=100, ignore_eos=True)
+    llm.generate(_PROMPTS, sampling_params)
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 def test_eagle_max_len(
     monkeypatch: pytest.MonkeyPatch, num_speculative_tokens: int, attn_backend: str
