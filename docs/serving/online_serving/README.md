@@ -98,7 +98,7 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 - `/version` - Version information
 - `/load` - Server load metrics
 
-## Sleep Mode
+## Sleep Mode APIs
 
 For further details on sleep mode, please refer to [this page](../../features/sleep_mode.md).
 
