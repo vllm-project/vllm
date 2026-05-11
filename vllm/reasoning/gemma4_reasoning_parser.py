@@ -20,6 +20,14 @@ if TYPE_CHECKING:
 _THOUGHT_PREFIX = "thought\n"
 
 
+def _last_index(input_ids: Sequence[int], token_id: int) -> int:
+    """Return the last index of token_id in input_ids, or -1."""
+    for i in range(len(input_ids) - 1, -1, -1):
+        if input_ids[i] == token_id:
+            return i
+    return -1
+
+
 class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Google Gemma4 thinking models.
@@ -74,27 +82,37 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         return "<channel|>"
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        start_token_id = self.start_token_id
-        end_token_id = self.end_token_id
-        new_turn_token_id = self.new_turn_token_id
-        tool_call_token_id = self.tool_call_token_id
-        tool_response_token_id = self.tool_response_token_id
+        """Return whether the current Gemma4 turn has left reasoning mode.
 
-        # Search from the end of input_ids to find the last match.
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == start_token_id:
+        Gemma4 may emit a tool-call section immediately after a thinking channel:
+
+            <|channel>thought\n...<channel|><|tool_call>...<|tool_response>
+
+        In streaming/MTP chunks the trailing ``<|tool_response>`` can arrive in
+        the same delta as ``<|tool_call>``. The tool-call token is still the
+        handoff boundary for the current turn, so do not let the later tool
+        response sentinel mask it.
+        """
+        for token_id in reversed(input_ids):
+            if token_id in (self.new_turn_token_id, self.start_token_id):
                 return False
-            if input_ids[i] == tool_call_token_id:
-                # We're generating a tool call, so reasoning must be ended.
-                return True
-            if input_ids[i] in (new_turn_token_id, tool_response_token_id):
-                # We found a new turn or tool response token so don't consider
-                # reasoning ended yet, since the model starts new reasoning
-                # after these tokens.
-                return False
-            if input_ids[i] == end_token_id:
+            if token_id in (self.end_token_id, self.tool_call_token_id):
                 return True
         return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        return self.is_reasoning_end(delta_ids)
+
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        result = super().extract_content_ids(input_ids)
+        if result:
+            return result
+        tool_call_index = _last_index(input_ids, self.tool_call_token_id)
+        if tool_call_index != -1:
+            return input_ids[tool_call_index:]
+        return []
 
     # ------------------------------------------------------------------
     # Non-streaming path
