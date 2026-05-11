@@ -170,7 +170,7 @@ export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eno,ens,enp,eth,ib}"
 export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
 
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
-export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET}"
+export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,P2P,TUNING}"
 
 export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-OFF}"
 export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-1}"
@@ -194,19 +194,16 @@ mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas,nccl}"
-export NSYS_NCCL_TRACE="${NSYS_NCCL_TRACE:-api,gpu}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
 
 # === NCCL logs ===
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
-export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL,P2P,TUNING}"
 export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
 
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
 echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
 echo "NSYS_TRACE=${NSYS_TRACE}"
-echo "NSYS_NCCL_TRACE=${NSYS_NCCL_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
@@ -398,6 +395,9 @@ for node in nodes:
     )
 PY
 
+echo "=== vLLM api_server (background process) ==="
+echo "Starting vLLM server on head node..."
+
 if [ "${NSYS_ENABLE}" = "1" ]; then
   echo "Profiling vLLM server with Nsight Systems"
   echo "Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
@@ -405,7 +405,6 @@ if [ "${NSYS_ENABLE}" = "1" ]; then
   nsys profile \
     --force-overwrite=true \
     --trace="${NSYS_TRACE}" \
-    --nccl-trace="${NSYS_NCCL_TRACE}" \
     --sample=none \
     --delay="${NSYS_DELAY}" \
     --output="${NSYS_DIR}/vllm_api_server_${HEAD_NODE}" \
