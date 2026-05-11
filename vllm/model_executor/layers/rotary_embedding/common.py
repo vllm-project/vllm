@@ -135,8 +135,6 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        # Skip flash_attn import for CPU environments as flash-attn
-        # doesn't provide CPU implementations
         if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
