@@ -1407,6 +1407,10 @@ def wait_for_gpu_memory_to_clear(
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
                 gb_total = mem_info["vram_total"] / 2**10
+            elif current_platform.is_xpu():
+                free_mem, total_mem = torch.xpu.mem_get_info(device)
+                gb_used = (total_mem - free_mem) / 2**30
+                gb_total = total_mem / 2**30
             else:
                 dev_handle = nvmlDeviceGetHandleByIndex(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
