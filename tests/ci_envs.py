@@ -20,6 +20,7 @@ def _maybe_convert_bool(value: str | None) -> bool | None:
         return None
     return bool(int(value))
 
+
 environment_variables: dict[str, Callable[[], Any]] = {
     # A model family has many models with the same architecture.
     # By default, a model family tests only one model.

@@ -8,9 +8,8 @@ and assert structural properties of the output.
 
 from __future__ import annotations
 
-import regex as re
-
 import pytest
+import regex as re
 
 import vllm.envs as envs
 
