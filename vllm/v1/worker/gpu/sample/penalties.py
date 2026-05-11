@@ -58,8 +58,7 @@ class PenaltiesState:
             idx_mapping = async_tensor_h2d(
                 self._new_penalties_reqs,
                 dtype=torch.int32,
-                target_device=self.device,
-                pin_memory=True,
+                device=self.device,
             )
 
             prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
@@ -284,8 +283,10 @@ def bincount(
     output_bin_counts: torch.Tensor,
     max_prefill_len: int,
 ) -> None:
-    prompt_bin_mask[expanded_idx_mapping] = 0
-    output_bin_counts[expanded_idx_mapping] = 0
+    # Use index_fill_ instead of `tensor[idx] = 0` to avoid sync.
+    idx_long = expanded_idx_mapping.long()
+    prompt_bin_mask.index_fill_(0, idx_long, 0)
+    output_bin_counts.index_fill_(0, idx_long, 0)
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
