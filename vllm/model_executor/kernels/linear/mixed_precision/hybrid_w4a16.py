@@ -39,14 +39,17 @@ MAX_SKINNY_BATCH_SIZE = 5
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 
 # AIESW-32176: shapes routed to the CK WMMA b_scale GEMM op (gfx1151 only).
-# Each entry is keyed by (M, N, K, group_size, dtype) and maps to the
-# CK kernel's KPerBlock used at build time. Currently only the Qwen3-4B
-# gate_up_proj prefill shape at M=3968 is wired; other shapes stay on Triton.
-# To add a shape: tune a CK kernel for it (see Phase 1 sweep methodology in
-# AIInfo memory project_aiesw_32176_phase1_2_results), instantiate it as a
-# new device-op in csrc/rocm/ck_w4a16.cu, and register it here.
-_CK_W4A16_TARGET_SHAPES: dict[tuple, int] = {
-    (3968, 19456, 2560, 128, torch.float16): 32,
+# Each entry is keyed by (N, K, group_size, dtype) and maps to a tuple of
+# (list_of_validated_M_values, KPerBlock). The same kernel handles any M >= 1
+# but only the listed M values have been measured to outperform Triton — see
+# the multi-shape sweep in AIInfo memory project_aiesw_32176_phase5c_shapes.
+# Currently only the Qwen3-4B gate_up_proj prefill column (N=19456, K=2560)
+# is wired; other shapes (qkv_proj/o_proj/down_proj) stay on Triton.
+# 3968 is the Qwen3-4B prompt length (with --max-num-batched-tokens 4096); 2048
+# is the default chunked-prefill chunk size — both hit ~30 TFLOPS standalone
+# (~78% of the 38.6 TFLOPS hipBLASLt fp16 roofline).
+_CK_W4A16_TARGET_SHAPES: dict[tuple, tuple[list[int], int]] = {
+    (19456, 2560, 128, torch.float16): ([2048, 3968], 32),
 }
 
 
@@ -62,16 +65,13 @@ def _is_gfx1151() -> bool:
 
 def _lookup_ck_target(
     N: int, K: int, group_size: int, dtype: torch.dtype
-) -> tuple[int, int] | None:
+) -> tuple[list[int], int] | None:
     """Find a registered CK target for this layer's (N, K, group, dtype).
-    Returns (M_target, KPerBlock) if any, else None. Called once per layer at
+    Returns (M_targets, KPerBlock) if any, else None. Called once per layer at
     load time (Python ints, not SymInts) — so dict lookup is safe."""
     if not _is_gfx1151():
         return None
-    for (m_t, n_t, k_t, g_t, dt_t), kpb in _CK_W4A16_TARGET_SHAPES.items():
-        if (n_t, k_t, g_t, dt_t) == (N, K, group_size, dtype):
-            return m_t, kpb
-    return None
+    return _CK_W4A16_TARGET_SHAPES.get((N, K, group_size, dtype))
 
 
 def _has_ck_w4a16_op() -> bool:
@@ -447,7 +447,7 @@ def _hybrid_w4a16_apply_impl(
     cu_count: int,
     group_size: int,
     w_q_ck: torch.Tensor | None = None,
-    ck_target_m: int = 0,
+    ck_target_ms: list[int] | None = None,
     w_scaled_zp_ck: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch between skinny GEMM, CK W4A16 b_scale (sym/asym), and Triton.
@@ -461,7 +461,7 @@ def _hybrid_w4a16_apply_impl(
                single format: dequant = (nibble - zp_raw) * scale.
 
     AIESW-32176: w_q_ck is the same weights repacked into CK pk_i4 layout
-    [K0, N, K1//2] int8. When non-None and M matches ck_target_m the CK
+    [K0, N, K1//2] int8. When non-None and M is in ck_target_ms the CK
     GEMM kernel is used instead of Triton:
       - symmetric (w_zp is None): ck_w4a16_b_scale_gemm
       - asymmetric (w_zp set, w_scaled_zp_ck = (zp-8)*scale precomputed at
@@ -488,8 +488,8 @@ def _hybrid_w4a16_apply_impl(
 
     # AIESW-32176: CK W4A16 b_scale path (sym or asym). Conditional is inside
     # the custom op so it's opaque to dynamo and the runtime M check is a plain
-    # Python int compare.
-    if w_q_ck is not None and ck_target_m > 0 and ck_target_m == M:
+    # Python int membership test against a small list of validated M values.
+    if w_q_ck is not None and ck_target_ms and M in ck_target_ms:
         ctx = (
             nullcontext()
             if torch.compiler.is_compiling()
@@ -549,7 +549,7 @@ def _hybrid_w4a16_apply_fake(
     cu_count: int,
     group_size: int,
     w_q_ck: torch.Tensor | None = None,
-    ck_target_m: int = 0,
+    ck_target_ms: list[int] | None = None,
     w_scaled_zp_ck: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M = x_2d.size(0)
@@ -694,14 +694,14 @@ class HybridW4A16LinearKernel(MPLinearKernel):
             # once, AND the asymmetric CK op must be present in this build.
             asym_ok = (not c.zero_points) or _has_ck_w4a16_zp_op()
             if target is not None and asym_ok:
-                M_target, kperblock = target
+                M_targets, kperblock = target
                 w_q_ck = _repack_vllm_to_ck_b_scale(w_q_skinny_i32, kperblock)
                 layer.register_parameter(
                     "_hybrid_w_q_ck",
                     torch.nn.Parameter(w_q_ck, requires_grad=False),
                 )
-                # Plain Python int — safe to compare against SymInt M at apply.
-                layer._hybrid_ck_M = int(M_target)
+                # Plain Python ints — safe to compare against SymInt M at apply.
+                layer._hybrid_ck_Ms = [int(m) for m in M_targets]
 
                 if c.zero_points:
                     # AIESW-32176: precompute scaled_zp = (zp - 8) * scale.
@@ -738,11 +738,11 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         N = w_q.shape[0]
         out_shape = x.shape[:-1] + (N,)
 
-        # AIESW-32176: pass CK-format weights + target M (and scaled_zp for
+        # AIESW-32176: pass CK-format weights + target Ms (and scaled_zp for
         # asymmetric) to the custom op if registered for this layer. Dispatch
         # decision happens INSIDE the custom op (opaque to dynamo).
         w_q_ck = getattr(layer, "_hybrid_w_q_ck", None)
-        ck_target_m = getattr(layer, "_hybrid_ck_M", 0)
+        ck_target_ms = getattr(layer, "_hybrid_ck_Ms", None)
         w_scaled_zp_ck = getattr(layer, "_hybrid_w_scaled_zp_ck", None)
 
         cu_count = num_compute_units()
@@ -756,7 +756,7 @@ class HybridW4A16LinearKernel(MPLinearKernel):
             cu_count,
             c.group_size,
             w_q_ck,
-            ck_target_m,
+            ck_target_ms,
             w_scaled_zp_ck,
         )
         return output.reshape(out_shape)
