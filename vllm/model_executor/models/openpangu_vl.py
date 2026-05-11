@@ -857,7 +857,7 @@ class OpenPanguVLForConditionalGeneration(
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                prefix=maybe_prefix("openpangu", "language_model"),
+                prefix=maybe_prefix(prefix, "openpangu.language_model"),
                 architectures=["PanguEmbeddedForCausalLM"],
             )
 

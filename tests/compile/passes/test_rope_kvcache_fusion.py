@@ -34,7 +34,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
@@ -102,13 +101,8 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         # Initialize attn MetadataBuilder
-        self.builder = self.attn.attn_backend.get_builder_cls()(
-            kv_cache_spec=AttentionSpec(
-                block_size=self.block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=head_size,
-                dtype=self.kv_cache_dtype,
-            ),
+        self.builder = self.attn_backend.get_builder_cls()(
+            kv_cache_spec=self.attn.get_kv_cache_spec(vllm_config),
             layer_names=[self.attn.layer_name],
             vllm_config=vllm_config,
             device=device,
@@ -126,12 +120,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         num_blocks = batch_size * max_blocks
 
         # Fetch the attention backend and kv cache shape and stride order
-        attn_backend = self.attn.attn_backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size
         )
         try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
