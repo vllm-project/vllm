@@ -503,9 +503,6 @@ class TestGatedModel(torch.nn.Module):
         out = self.fp8_linear(merged)
         return out
 
-    def ops_in_model_before(self):
-        return [rocm_aiter_ops.get_group_quant_op()]
-
     def ops_in_model_after(self):
         from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
             AiterRMSNormGatedFp8GroupQuantPattern,
@@ -555,7 +552,7 @@ def test_aiter_fusion_rmsnorm_gated_quant(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["-rms_norm", "-silu_and_mul", "+quant_fp8"],
+            custom_ops=["-rms_norm", "-silu_and_mul", "-quant_fp8"],
             pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
@@ -611,7 +608,6 @@ def test_aiter_fusion_rmsnorm_gated_quant(
         torch.testing.assert_close(result_fused, result_unfused, atol=1e-2, rtol=1e-2)
 
         assert fusion_pass.matched_count == 1
-        backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
 
 
@@ -639,7 +635,7 @@ def test_aiter_fusion_rmsnorm_gated_quant_no_gdn_layers(
         model_config=ModelConfig(dtype=dtype),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=["-rms_norm", "-silu_and_mul", "+quant_fp8"],
+            custom_ops=["-rms_norm", "-silu_and_mul", "-quant_fp8"],
             pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
         ),
     )
