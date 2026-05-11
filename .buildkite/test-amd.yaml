@@ -3218,7 +3218,7 @@ steps:
 
 - label: Quantization # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdpropyteduction, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
