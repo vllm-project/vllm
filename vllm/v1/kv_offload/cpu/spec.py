@@ -59,8 +59,15 @@ class CPUOffloadingSpec(OffloadingSpec):
             enable_events = (
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
+
+            # store_threshold: how many times a block must appear in lookup()
+            # before it is eligible for CPU offloading.  Values < 2 disable
+            # filtering (a threshold of 1 equals no filter; 0 is the default).
             store_threshold = int(self.extra_config.get("store_threshold", 0))
+
+            # Maximum entries in the internal tracker's LRU table.
             max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
+
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]

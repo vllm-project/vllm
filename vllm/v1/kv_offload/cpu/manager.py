@@ -55,6 +55,8 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
+
+        # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
