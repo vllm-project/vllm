@@ -1016,18 +1016,14 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
         draft_sample_method="probabilistic",
     )
     hidden_size = proposer.hidden_size
+    expanded_total_tokens = total_tokens + batch_size
 
     model_mock = mock.MagicMock()
     forward_returns = []
     logits_returns = []
     for step in range(num_speculative_tokens):
-        token_count = total_tokens if step == 0 else batch_size
-        forward_returns.append(
-            (
-                torch.zeros(token_count, hidden_size, device=device),
-                torch.zeros(token_count, hidden_size, device=device),
-            )
-        )
+        token_count = expanded_total_tokens if step == 0 else batch_size
+        forward_returns.append(torch.zeros(token_count, hidden_size, device=device))
         logits = torch.full((batch_size, vocab_size), -10.0, device=device)
         logits[0, step + 1] = 5.0
         logits[1, step + 3] = 4.0
