@@ -1206,7 +1206,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         post_mix: torch.Tensor | None,
         res_mix: torch.Tensor | None,
         residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
