@@ -298,9 +298,7 @@ def fp8_paged_mqa_logits_torch(
         else:
             context_limit = context_len.to(device=q.device, dtype=torch.int32)
             q_offsets = context_limit - 1
-        weight_slice = (
-            weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
-        )
+        weight_slice = weights[i * next_n : (i + 1) * next_n, :].contiguous()
         max_context_len = int(context_limit.max().item())
         for block_rk in range(cdiv(max_context_len, block_size)):
             block_idx = block_tables[i][block_rk]
@@ -311,15 +309,13 @@ def fp8_paged_mqa_logits_torch(
             mask = (k_offsets[None, :] < context_limit[:, None]) & (
                 k_offsets[None, :] <= q_offsets[:, None]
             )
-            s = torch.where(
-                mask[None, :, :],
-                (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
-                    logits.dtype
-                ),
-                float("-inf"),
+            scores = (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
+                logits.dtype
             )
-            s = torch.relu(s) * weight_slice[..., None]
-            s = s.sum(dim=0)
+            scores = scores.transpose(0, 1)
+            s = torch.where(mask.unsqueeze(1), scores, float("-inf"))
+            s = torch.relu(s) * weight_slice.unsqueeze(-1)
+            s = s.sum(dim=1)
             logits[
                 i * next_n : (i + 1) * next_n,
                 block_rk * block_size : (block_rk + 1) * block_size,
@@ -393,7 +389,7 @@ def rocm_fp8_paged_mqa_logits(
             out_logits = torch.full(
                 [batch_size * next_n, max_model_len],
                 float("-inf"),
-                device="cuda",
+                device=q_fp8.device,
                 dtype=torch.float32,
             )
             deepgemm_fp8_paged_mqa_logits(
@@ -417,7 +413,7 @@ def rocm_fp8_paged_mqa_logits(
         out_qk = torch.full(
             (heads, batch_size * next_n, max_model_len),
             float("-inf"),
-            device="cuda",
+            device=q_fp8.device,
             dtype=torch.float32,
         )
         deepgemm_fp8_paged_mqa_logits_stage1(
@@ -468,10 +464,10 @@ def fp8_mqa_logits_torch(
     q = q.to(torch.bfloat16)
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(0, seq_len_kv, device=q.device)[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(0, seq_len_kv, device=q.device)[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -1006,7 +1002,9 @@ def rocm_dequantize_blocked_k_cache(
         cur_nope = input_nope[
             ..., tile_idx * tile_size : (tile_idx + 1) * tile_size
         ].to(torch.bfloat16)
-        cur_scales = input_scale[:, :, tile_idx].to(torch.bfloat16).unsqueeze(-1)
+        cur_scales = _decode_e8m0_scales(input_scale[:, :, tile_idx]).to(
+            torch.bfloat16
+        ).unsqueeze(-1)
         result[..., tile_idx * tile_size : (tile_idx + 1) * tile_size] = (
             cur_nope * cur_scales
         ).unsqueeze(2)

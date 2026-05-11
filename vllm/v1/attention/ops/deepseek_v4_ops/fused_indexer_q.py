@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
@@ -88,6 +89,7 @@ def _fused_indexer_q_rope_quant_kernel(
     index_weights_head_scale,
     index_weights_out_ptr,
     index_weights_out_stride,
+    IS_FNUZ: tl.constexpr = False,
 ):
     # Layout matches the unfused reference (DeepseekV4ScalingRotaryEmbedding
     # + per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the
@@ -138,16 +140,22 @@ def _fused_indexer_q_rope_quant_kernel(
     if INDEX_Q_NOPE_DIM > 0:
         tl.store(
             fp8_base_ptr + nope_offset,
-            tl.div_rn(x_nope, index_q_scale).to(tl.float8e4nv),
+            tl.div_rn(x_nope, index_q_scale).to(
+                tl.float8e4b8 if IS_FNUZ else tl.float8e4nv
+            ),
         )
     fp8_rot_base = fp8_base_ptr + INDEX_Q_NOPE_DIM
     tl.store(
         fp8_rot_base + half_offset * 2,
-        tl.div_rn(r_even, index_q_scale).to(tl.float8e4nv),
+        tl.div_rn(r_even, index_q_scale).to(
+            tl.float8e4b8 if IS_FNUZ else tl.float8e4nv
+        ),
     )
     tl.store(
         fp8_rot_base + half_offset * 2 + 1,
-        tl.div_rn(r_odd, index_q_scale).to(tl.float8e4nv),
+        tl.div_rn(r_odd, index_q_scale).to(
+            tl.float8e4b8 if IS_FNUZ else tl.float8e4nv
+        ),
     )
 
     # FP8 weight-fold contract:
@@ -397,7 +405,7 @@ def fused_indexer_q_rope_quant(
             index_q_scale.view(torch.int32).squeeze(-1),
         ), index_weights_out
 
-    index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
+    index_q_fp8 = torch.empty_like(index_q, dtype=current_platform.fp8_dtype())
     _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
         positions,
         index_q,
@@ -416,6 +424,7 @@ def fused_indexer_q_rope_quant(
         index_weights_head_scale,
         index_weights_out,
         index_weights_out.stride(0),
+        current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         num_warps=1,  # TODO: Tune this
     )
     return index_q_fp8, index_weights_out
