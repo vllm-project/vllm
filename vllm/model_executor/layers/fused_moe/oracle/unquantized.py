@@ -116,7 +116,7 @@ def backend_to_kernel_cls(
         return TritonExperts
 
     elif backend == UnquantizedMoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 
