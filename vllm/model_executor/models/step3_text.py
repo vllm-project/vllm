@@ -520,7 +520,10 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.vllm_config = vllm_config
 
-        self.model = Step3TextModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = Step3TextModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
 
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
