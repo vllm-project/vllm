@@ -25,7 +25,7 @@ API documentation for vLLM's configuration classes.
 
 LLM Class.
 
-- [vllm.entrypoints.pooling.PoolingOfflineMixin][]
+- [vllm.entrypoints.pooling.offline.PoolingOfflineMixin][]
 - [vllm.LLM][]
 
 Prompt schema for LLM APIs.
