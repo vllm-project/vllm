@@ -12,6 +12,7 @@ from collections import Counter, deque
 from datetime import datetime
 from enum import Enum
 from http import HTTPStatus
+from queue import Empty
 from statistics import mean
 from typing import NamedTuple
 
@@ -1045,9 +1046,12 @@ async def main_mp(
 
     # Queues should be closed, required to avoid hang at interpreter shutdown
     unfinished_tasks = 0
-    while not task_queue.empty():
-        task_queue.get()
-        unfinished_tasks += 1
+    while True:
+        try:
+            task_queue.get_nowait()
+            unfinished_tasks += 1
+        except Empty:
+            break
 
     if unfinished_tasks > 0:
         # Can happen if not all tasks (conversations) have finished.
@@ -1055,8 +1059,9 @@ async def main_mp(
         # or if an error occurred in one of the clients.
         logger.debug(f"Discarding {unfinished_tasks} unfinished tasks")
 
+    # The producer feeder may still hold discarded tasks; do not wait for it to flush.
+    task_queue.cancel_join_thread()
     task_queue.close()
-    task_queue.join_thread()
 
     result_queue.close()
     result_queue.join_thread()
