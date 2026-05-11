@@ -1122,16 +1122,12 @@ class Gemma4ForConditionalGeneration(
 
         # When concurrent requests have different image resolutions,
         # reduce_data returns a list of per-image tensors instead of
-        # a single stacked tensor. Normalize to a list either way.
+        # a single stacked tensor. Same-resolution batches may still
+        # arrive as a stacked tensor. Both forms are iterable over the
+        # per-image dimension, so process them uniformly below.
         # TODO(optimization): Spatially pad images to uniform
         # (H_max, W_max) in the input processor so the vision tower
         # can process them in a single batched call.
-        if isinstance(pixel_values, torch.Tensor):
-            pixel_values = [pixel_values[i] for i in range(pixel_values.shape[0])]
-        if isinstance(pixel_position_ids, torch.Tensor):
-            pixel_position_ids = [
-                pixel_position_ids[i] for i in range(pixel_position_ids.shape[0])
-            ]
 
         # Process each image individually through the vision tower.
         # The vision tower's forward() strips padding and returns a
