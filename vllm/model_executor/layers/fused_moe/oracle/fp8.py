@@ -123,7 +123,7 @@ def backend_to_kernel_cls(
         return [TrtLlmFp8ExpertsMonolithic, TrtLlmFp8ExpertsModular]
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -144,14 +144,14 @@ def backend_to_kernel_cls(
         return [BatchedDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
         return [MarlinExperts]
 
     elif backend == Fp8MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
@@ -165,7 +165,7 @@ def backend_to_kernel_cls(
         return [BatchedTritonExperts]
 
     elif backend == Fp8MoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
@@ -569,7 +569,7 @@ def make_fp8_moe_quant_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_shape,
-            is_nvfp4_scale_swizzled=False,
+            is_scale_swizzled=False,
         )
 
     # All other backends use normal config.
