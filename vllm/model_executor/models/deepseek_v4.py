@@ -1203,23 +1203,53 @@ class DeepseekV4DecoderLayer(nn.Module):
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> torch.Tensor:
-        residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
+        if residual is None:
+            # Run standalone hc_pre on first layer
+            residual = x
+            x, post_mix, res_mix = self.hc_pre(
+                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            )
+        else:
+            residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+            )
+
         x = self.attn_norm(x)
         x = self.attn(positions, x, None)
-        x = self.hc_post(x, residual, post, comb)
 
-        residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
         )
+
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
-        x = self.hc_post(x, residual, post, comb)
-        return x
+        return x, residual, post_mix, res_mix
 
 
 @support_torch_compile
@@ -1369,12 +1399,19 @@ class DeepseekV4Model(nn.Module):
 
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
+
+        residual, post_mix, res_mix = None, None, None
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states = layer(
+            hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
                 input_ids,
+                post_mix,
+                res_mix,
+                residual,
             )
+        else:
+            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
