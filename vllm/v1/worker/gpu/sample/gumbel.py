@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.sampling_params import _SAMPLING_EPS
 from vllm.triton_utils import tl, triton
 
 
@@ -17,7 +18,7 @@ def _temperature_kernel(
     token_idx = tl.program_id(0)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
-    if temperature == 0.0 or temperature == 1.0:
+    if tl.abs(temperature) < _SAMPLING_EPS or tl.abs(temperature - 1.0) < _SAMPLING_EPS:
         # Early return to avoid loading logits.
         return
 
@@ -82,7 +83,7 @@ def gumbel_block_argmax(
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
+    if abs(temp) > _SAMPLING_EPS and APPLY_TEMPERATURE:
         # Apply temperature.
         # NOTE(woosuk): Match the behavior of _temperature_kernel.
         # E.g., if the kernel uses tl.div_rn, we should use tl.div_rn here too.
@@ -104,7 +105,7 @@ def gumbel_block_argmax(
         )
 
     logits = logits.to(tl.float64)
-    if temp != 0.0:
+    if abs(temp) > _SAMPLING_EPS:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
         pos = tl.load(pos_ptr + token_idx)

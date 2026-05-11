@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
@@ -68,7 +68,9 @@ class SamplingStates:
         idx_mapping_np: np.ndarray,
     ) -> None:
         temp_np = self.temperature.np[idx_mapping_np]
-        if np.all((temp_np == 0.0) | (temp_np == 1.0)):
+        if np.all(
+            (np.abs(temp_np) < _SAMPLING_EPS) | (np.abs(temp_np - 1.0) < _SAMPLING_EPS)
+        ):
             # No request requires temperature. Skip the kernel launch.
             return
 
@@ -80,7 +82,7 @@ class SamplingStates:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> None:
-        if np.all(self.min_p.np[idx_mapping_np] == 0.0):
+        if np.all(self.min_p.np[idx_mapping_np] < _SAMPLING_EPS):
             # No request uses min_p. Skip the kernel launch.
             return
         apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
@@ -92,7 +94,7 @@ class SamplingStates:
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
         do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
-        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
+        do_top_p = np.any(np.abs(self.top_p.np[idx_mapping_np] - 1.0) > _SAMPLING_EPS)
         if not (do_top_k or do_top_p):
             return logits
 

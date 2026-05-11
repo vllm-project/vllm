@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.sampling_params import _SAMPLING_EPS
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand64
 
@@ -93,7 +94,7 @@ def _compute_block_stats_kernel(
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block_offsets < vocab_size
 
-    if temp == 0.0:
+    if abs(temp) < _SAMPLING_EPS:
         # Greedy sampling. Only the target max/argmax are needed.
         target_logits = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
@@ -218,7 +219,7 @@ def _probabilistic_rejection_kernel(
         if accepted:
             logit_idx = start_idx + i
             draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1)
-            if temp == 0.0:
+            if abs(temp) < _SAMPLING_EPS:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
                 # can be skipped upon rejection.
@@ -331,7 +332,7 @@ def _resample_kernel(
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_bonus = resample_token_idx == end_idx - 1
-    if temp == 0.0 and not is_bonus:
+    if abs(temp) < _SAMPLING_EPS and not is_bonus:
         # Greedy + non-bonus token. No resampling needed because
         # the target argmax is already in the sampled tensor.
         return
@@ -445,7 +446,7 @@ def _insert_resampled_kernel(
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_bonus = resample_token_idx == end_idx - 1
-    if temp == 0.0 and not is_bonus:
+    if abs(temp) < _SAMPLING_EPS and not is_bonus:
         # Greedy + non-bonus token. The target argmax is already
         # in the sampled tensor.
         return
