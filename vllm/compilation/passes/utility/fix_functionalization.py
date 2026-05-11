@@ -181,6 +181,45 @@ class FixFunctionalizationPass(VllmInductorPass):
                     2: "key",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "fused_rope_unified_mla_kv_cache_update")
+                and at_target
+                == torch.ops.vllm.fused_rope_unified_mla_kv_cache_update.default
+            ):
+                # AOTAutograd functionalizes `q[..., nope_dim:] = rope_result` into
+                # a sequence of aten ops on q: view+slice+copy+slice_scatter.
+                # Since the fused MLA RoPE op mutates q_pe in-place, we can remove
+                # the redundant copy and slice_scatter ops during defunctionalization.
+                getitem_nodes = self.getitem_users(node)
+                q_pe_out = getitem_nodes[1]
+
+                for user in list(q_pe_out.users):
+                    if is_func(user, torch.ops.aten.copy.default):
+                        copy_temp = user
+                slice_temp = copy_temp.args[0]
+                for user in list(copy_temp.users):
+                    if is_func(user, torch.ops.aten.slice_scatter.default):
+                        slice_scatter_temp = user
+                view_temp = slice_scatter_temp.args[0]
+
+                view_orig = slice_temp.args[0]
+                slice_scatter_temp.replace_all_uses_with(view_orig)
+                self._remove(slice_scatter_temp)
+                self._remove(copy_temp)
+                self._remove(slice_temp)
+                self._remove(view_temp)
+                self._remove(q_pe_out)
+
+                # defunctionalize k_pe manually; self.replace_users_with_mutated_args
+                # does not support only replacing specific kwargs
+                k_pe_in = node.kwargs["k_pe"]
+                k_pe_out = getitem_nodes[2]
+                k_pe_out.replace_all_uses_with(k_pe_in)
+                self._remove(k_pe_out)
+
+                self.insert_defunctionalized(graph, node)
+                self._remove(node)
+
             # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn
             elif (
                 hasattr(torch.ops.vllm, "function_with_mutated_args_and_return")
