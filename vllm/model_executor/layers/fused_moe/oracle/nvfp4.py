@@ -89,7 +89,7 @@ def backend_to_kernel_cls(
         ]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -117,7 +117,7 @@ def backend_to_kernel_cls(
         return [CutlassExpertsFp4]
 
     elif backend == NvFp4MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
@@ -461,7 +461,7 @@ def make_nvfp4_moe_quant_config(
         # NOTE(rob): this is a hack until the MoE kernels
         # create their own quant configs. TRTLLM kernel
         # does not accept swizzled input quant scales.
-        is_nvfp4_scale_swizzled=(
+        is_scale_swizzled=(
             backend
             not in (
                 NvFp4MoeBackend.FLASHINFER_TRTLLM,

@@ -52,3 +52,10 @@ class MoELoRAContext:
     # events[2,3] for w2, so the two pairs do not race on the same event.
     aux_stream: torch.cuda.Stream | None = None
     events: tuple[torch.cuda.Event, ...] | None = None
+
+    # Per-rank token→LoRA mapping after EP dispatch. Set by
+    # FusedMoEPrepareAndFinalizeModular.prepare() when EP+LoRA is active, read
+    # by LoRAExpertsMixin helpers in place of punica_wrapper's global mapping.
+    # None means no dispatch happened (non-EP path), in which case callers
+    # fall back to punica_wrapper.token_mapping_meta.
+    local_token_lora_mapping: torch.Tensor | None = None

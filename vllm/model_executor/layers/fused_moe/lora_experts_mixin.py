@@ -72,6 +72,7 @@ class LoRAExpertsMixin:
             lora_context.fully_sharded,
             lora_context.use_tuned_config,
             add_inputs=add_inputs,
+            token_lora_mapping=lora_context.local_token_lora_mapping,
         )
 
     def apply_w2_lora(
