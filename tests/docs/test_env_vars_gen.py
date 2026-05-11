@@ -8,7 +8,7 @@ and assert structural properties of the output.
 
 from __future__ import annotations
 
-import re
+import regex as re
 
 import pytest
 

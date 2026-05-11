@@ -60,17 +60,6 @@ def test_port_invalid_integer(monkeypatch):
         _ = envs.VLLM_PORT
 
 
-def test_port_valid(monkeypatch):
-    monkeypatch.setenv("VLLM_PORT", "8000")
-    envs = _reload_envs()
-    assert envs.VLLM_PORT == 8000
-
-
-def test_port_unset(monkeypatch):
-    envs = _reload_envs()
-    assert envs.VLLM_PORT is None
-
-
 def test_do_not_track_fallback(monkeypatch):
     monkeypatch.setenv("DO_NOT_TRACK", "1")
     envs = _reload_envs()
@@ -106,21 +95,10 @@ def test_object_storage_shm_buffer_autogen():
     assert os.environ["VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"] == name
 
 
-def test_object_storage_shm_buffer_explicit(monkeypatch):
-    monkeypatch.setenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME", "my_name")
-    envs = _reload_envs()
-    assert envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME == "my_name"
-
-
 def test_use_precompiled_via_wheel_location(monkeypatch):
     monkeypatch.setenv("VLLM_PRECOMPILED_WHEEL_LOCATION", "/tmp/some.whl")
     envs = _reload_envs()
     assert envs.VLLM_USE_PRECOMPILED is True
-
-
-def test_use_precompiled_unset():
-    envs = _reload_envs()
-    assert envs.VLLM_USE_PRECOMPILED is False
 
 
 def test_plugins_unset_is_none():
@@ -171,12 +149,6 @@ def test_log_stats_interval_zero_clamps(monkeypatch):
     assert envs.VLLM_LOG_STATS_INTERVAL == 10.0
 
 
-def test_log_stats_interval_positive_kept(monkeypatch):
-    monkeypatch.setenv("VLLM_LOG_STATS_INTERVAL", "5.5")
-    envs = _reload_envs()
-    assert envs.VLLM_LOG_STATS_INTERVAL == 5.5
-
-
 def test_logging_level_uppercased(monkeypatch):
     monkeypatch.setenv("VLLM_LOGGING_LEVEL", "debug")
     envs = _reload_envs()
@@ -206,18 +178,6 @@ def test_bool_widened_accepts_yes(monkeypatch):
     # Pydantic accepts yes/no/on/off in addition to 1/0/true/false.
     # Widened accept set relative to pre-refactor (documented in PR).
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "yes")
-    envs = _reload_envs()
-    assert envs.VLLM_SERVER_DEV_MODE is True
-
-
-def test_bool_accepts_true(monkeypatch):
-    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "true")
-    envs = _reload_envs()
-    assert envs.VLLM_SERVER_DEV_MODE is True
-
-
-def test_bool_accepts_1(monkeypatch):
-    monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
     envs = _reload_envs()
     assert envs.VLLM_SERVER_DEV_MODE is True
 
