@@ -3,6 +3,7 @@
 
 from .cache_utils import (
     build_flashinfer_decode_sparse_indices,
+    build_flashinfer_mixed_sparse_indices,
     build_flashinfer_prefill_sparse_indices,
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
@@ -17,6 +18,7 @@ from .fused_qk_rmsnorm import fused_q_kv_rmsnorm
 __all__ = [
     "MXFP4_BLOCK_SIZE",
     "build_flashinfer_decode_sparse_indices",
+    "build_flashinfer_mixed_sparse_indices",
     "build_flashinfer_prefill_sparse_indices",
     "combine_topk_swa_indices",
     "compute_global_topk_indices_and_lens",
