@@ -27,8 +27,8 @@ from ..vllm_inductor_pass import (
     VllmInductorPass,
     VllmPatternMatcherPass,
     VllmPatternReplacement,
-    _fx_view_to_reshape,
     fold_consecutive_reshapes,
+    fx_view_to_reshape,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
@@ -45,11 +45,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 class AiterRMSNormQuantPattern:
     def __init__(
-        self,
-        epsilon: float,
-        key: FusedRMSQuantKey,
-        use_triton: bool = False,
-        match_rocm_aiter_quant: bool = True,
+        self, epsilon: float, key: FusedRMSQuantKey, match_aiter_quant: bool = True
     ):
         self.epsilon = epsilon
         self.quant_dtype = key.quant.dtype
@@ -57,8 +53,7 @@ class AiterRMSNormQuantPattern:
 
         self.quant_matcher = MatcherQuantFP8(
             key.quant,
-            match_rocm_aiter=match_rocm_aiter_quant,
-            use_triton=use_triton,
+            match_rocm_aiter=match_aiter_quant,
         )
 
     def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
@@ -77,8 +72,7 @@ class AiterRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
         self,
         epsilon: float,
         quant_dtype: torch.dtype,
-        use_triton: bool = False,
-        match_rocm_aiter_quant: bool = True,
+        match_aiter_quant: bool = True,
         group_shape: GroupShape = GroupShape.PER_TOKEN,
         symmetric: bool = True,
     ) -> None:
@@ -88,12 +82,7 @@ class AiterRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(
-            epsilon,
-            key,
-            use_triton=use_triton,
-            match_rocm_aiter_quant=match_rocm_aiter_quant,
-        )
+        super().__init__(epsilon, key, match_aiter_quant)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -136,8 +125,7 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
         self,
         epsilon: float,
         quant_dtype: torch.dtype,
-        use_triton: bool = False,
-        match_rocm_aiter_quant: bool = True,
+        match_aiter_quant: bool = True,
         group_shape: GroupShape = GroupShape.PER_TOKEN,
         symmetric: bool = True,
     ) -> None:
@@ -147,12 +135,7 @@ class AiterFusedAddRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(
-            epsilon,
-            key,
-            use_triton=use_triton,
-            match_rocm_aiter_quant=match_rocm_aiter_quant,
-        )
+        super().__init__(epsilon, key, match_aiter_quant)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -208,7 +191,6 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         epsilon: float,
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
-        use_triton: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -217,7 +199,7 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, use_triton=use_triton)
+        super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -264,7 +246,6 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         epsilon: float,
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
-        use_triton: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -273,7 +254,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
 
-        super().__init__(epsilon, key, use_triton=use_triton)
+        super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -334,7 +315,6 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         group_shape: GroupShape,
         num_heads: int,
         head_dim: int,
-        use_triton: bool = False,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -342,12 +322,11 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             fused_add=False,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
-        super().__init__(epsilon, key, use_triton=use_triton)
+        super().__init__(epsilon, key)
         self.rmsnorm_gated_matcher = MatcherRMSNormGated(epsilon)
         self.quant_matcher = MatcherQuantFP8(
             quant_key=kFp8Dynamic128Sym,
             match_rocm_aiter=True,
-            use_triton=use_triton,
         )
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -396,7 +375,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
 
         def trace_fn(*args, **kwargs):
             gm = pm.fwd_only(*args, **kwargs)
-            _fx_view_to_reshape(gm)
+            fx_view_to_reshape(gm)
             fold_consecutive_reshapes(gm)
             return gm
 
@@ -413,7 +392,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
-    It also supports fused_add_rms_norm and gated rms_norm (RMSNormGated).
+    It also supports fused_add_rms_norm.
     """
 
     @enable_fake_mode
@@ -440,12 +419,12 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
-            # Group quant patterns only work with the aiter quant op
-            # (kFp8Dynamic128Sym is not in QUANT_OPS on ROCm).
+            #  Fuse aiter rms_norm + aiter dynamic group fp8 quant
             AiterRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
 
+            # Fuse aiter fused_add_rms_norm + aiter dynamic group fp8 quant
             AiterFusedAddRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128)
             ).register(self.patterns)
@@ -462,17 +441,16 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             )
 
             for match_aiter_quant in match_aiter_quant_options:
+                # Fuse aiter rms_norm + (aiter / vllm built-in)
+                # dynamic per-token fp8 quant
                 AiterRMSNormDynamicQuantPattern(
-                    epsilon,
-                    FP8_DTYPE,
-                    match_rocm_aiter_quant=match_aiter_quant,
+                    epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
                 ).register(self.patterns)
 
-                # Fuse aiter fused_add_rms_norm + dynamic per-token fp8 quant
+                # Fuse aiter fused_add_rms_norm + (aiter / vllm built-in)
+                # dynamic per-token fp8 quant
                 AiterFusedAddRMSNormDynamicQuantPattern(
-                    epsilon,
-                    FP8_DTYPE,
-                    match_rocm_aiter_quant=match_aiter_quant,
+                    epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
                 ).register(self.patterns)
 
             # Fuse decomposed RMSNormGated + group fp8 quant.
@@ -480,6 +458,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # an aiter version that includes the GDN triton kernel renames.
             if gated_norm_shapes and rocm_aiter_ops.are_gdn_triton_kernels_available():
                 for num_heads, head_dim in gated_norm_shapes:
+                    if head_dim != 128:
+                        continue
                     AiterRMSNormGatedFp8GroupQuantPattern(
                         epsilon,
                         FP8_DTYPE,
@@ -509,7 +489,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             pm.fx_to_pattern = _orig_fx_to_pat
 
         logger.debug(
-            "%s replaced %s patterns", self.__class__.__name__, self.matched_count
+            "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
         )
 
     def uuid(self) -> str:
