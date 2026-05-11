@@ -21,7 +21,7 @@ def test_out_of_vocab_token():
 
 def test_require_mm_embeds():
     llm = LLM(
-        model="llava-hf/llava-1.5-7b-hf",
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
         enforce_eager=True,
         enable_mm_embeds=False,
     )

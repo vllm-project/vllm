@@ -71,6 +71,7 @@ async def test_basic_audio(mary_had_lamb, model_name, rocm_aiter_fa_attention):
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
+        server_args += ["--max-model-len", "4096"]
 
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
