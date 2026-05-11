@@ -971,8 +971,24 @@ def finish_materialized_sparse_mla_scores_with_sink(
 
     num_tokens, _, num_candidates = scores.shape
     head_dim = kv.shape[2]
+    # Clamp BLOCK_D to the smallest power-of-2 >= head_dim (among the allowed
+    # {64, 128, 256, 512}). Without this, a caller-supplied value_block_size
+    # larger than head_dim wastes work on masked-off positions — e.g. DSv4
+    # head_dim=192 with value_block_size=512 masks off 62.5% of D-axis work
+    # in every program. Smaller caller values (intentional fine-grained
+    # splits along D) are respected.
+    def _smallest_block_d_covering(hd: int) -> int:
+        for cand in (64, 128, 256, 512):
+            if cand >= hd:
+                return cand
+        return 512  # head_dim > 512: BLOCK_D=512, grid splits along D
+
     if candidate_block_size is not None:
-        block_d = value_block_size if value_block_size is not None else 128
+        target_block_d = _smallest_block_d_covering(head_dim)
+        if value_block_size is None:
+            block_d = target_block_d
+        else:
+            block_d = min(value_block_size, target_block_d)
         candidate_grid = (num_tokens, active_heads, triton.cdiv(head_dim, block_d))
         _finish_materialized_scores_with_sink_candidate_block_kernel[candidate_grid](
             scores,
