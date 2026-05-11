@@ -10,16 +10,23 @@ import json
 import os
 import pathlib
 import textwrap
-from collections.abc import Callable, Mapping, Sequence, Set
+from collections.abc import Callable, Generator, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Protocol,
+    TypeVar,
+    cast,
+    overload,
+)
 
 import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 from pydantic.fields import Field as PydanticField
-from pydantic.fields import FieldInfo
+from pydantic.fields import FieldInfo as PydanticFieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
 
 import vllm.envs as envs
@@ -71,7 +78,9 @@ def config(
         merged_config.update(config)
 
     def decorator(cls: type[ConfigT]) -> type[ConfigT]:
-        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
+        processed = dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
+        _inject_runtime_default_methods(processed)
+        return processed  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:
@@ -96,7 +105,7 @@ def get_field(cls: ConfigType, name: str) -> Any:
     init = named_field.init
 
     # Handle pydantic.Field
-    if isinstance(default, FieldInfo):
+    if isinstance(default, PydanticFieldInfo):
         if default.init is not None:
             init = default.init
         if default.default_factory is not None:
@@ -235,6 +244,15 @@ def normalize_value(x):
     # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
+
+    # RuntimeDefault sentinel: a field was never initialized before compute_hash()
+    # was called.  This is always a bug — surface it clearly.
+    if isinstance(x, _RuntimeDefaultValue):
+        raise TypeError(
+            f"normalize_value: encountered uninitialized runtime default field "
+            f"({x!r}).  Call initialize_runtime_default_fields() on the containing "
+            "config before computing hashes."
+        )
 
     # Enums: tag with FQN to avoid primitive collisions.
     # Ex: Enum(1) vs int(1) -> ("module.QualName", value).
@@ -465,3 +483,215 @@ def set_from_deprecated_env_if_set(
         elif to_int:
             field_value = int(env_value)
         setattr(config, field_name, field_value)
+
+
+# ---------------------------------------------------------------------------
+# RuntimeDefault field initialization
+#
+# Fields whose values cannot be determined at dataclass construction time
+# are declared using one of three forms:
+#
+#     field_name: bool = RuntimeDefault()
+#         # No fallback — must be set by the caller (e.g. optimization-level
+#         # table).  Validation raises if still unset after __post_init__.
+#
+#     field_name: bool = RuntimeDefault(False)
+#         # Static fallback — resolved to False if not set by the caller.
+#
+#     field_name: bool = RuntimeDefault(lambda cfg: cfg.parallel_config.tp > 1)
+#         # Computed fallback — factory is called with the VllmConfig instance
+#         # if the field has not been set by the caller.
+#
+# Mechanism:
+#   RuntimeDefault(...) returns a pydantic Field whose default is a _RuntimeDefaultValue
+#   sentinel (validate_default=False skips type coercion of the sentinel).
+#   _RuntimeDefaultValue is falsy, so __post_init__ guards that read runtime default
+#   fields before initialization behave as if the value were falsy/None.
+#
+#   The @config decorator calls _inject_runtime_default_methods() after pydantic
+#   processes each class.  If the class declares any RuntimeDefault() field, two
+#   methods are attached directly to the class:
+#     • initialize_runtime_default_fields(vllm_config)  — replaces every
+#       _RuntimeDefaultValue still present with its resolved value (static or
+#       factory-computed).  Fields already set by the caller are left alone.
+#     • validate_runtime_default_fields_initialized()   — raises ValueError listing
+#       any field that still holds a _RuntimeDefaultValue sentinel.
+#
+#   VllmConfig.__post_init__ calls these methods on itself and on every
+#   sub-config attribute that satisfies the HasRuntimeDefaultFields protocol
+#   (detected via isinstance checks).  validate_runtime_default_fields_initialized()
+#   is always called last to assert no sentinels remain.
+# ---------------------------------------------------------------------------
+
+
+class _RuntimeDefaultValue:
+    """Per-field sentinel that doubles as an optional factory carrier.
+
+    Each ``RuntimeDefault(...)`` call produces one ``_RuntimeDefaultValue`` instance
+    that becomes the pydantic default for that field.  Embedding the factory
+    in the default value means:
+
+    * Detection uses only ``isinstance(value, _RuntimeDefaultValue)`` on the live
+      field value — no dependency on ``FieldInfo.metadata`` or pydantic
+      internals.
+    * ``__bool__`` returns ``False`` so guards in ``__post_init__`` that read
+      runtime default fields before initialization treat them as falsy, matching the
+      behaviour of the old ``None`` sentinel.
+    * When no factory is provided (``MISSING``), the field has no fallback and
+      must be set by the user or the optimization-level table; validation will
+      fail if it remains unset.
+    """
+
+    def __init__(self, factory: "Callable[[Any], Any] | Any" = MISSING) -> None:
+        self.factory = factory
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __copy__(self) -> "_RuntimeDefaultValue":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "_RuntimeDefaultValue":
+        # _RuntimeDefaultValue is a sentinel whose identity matters.  Pydantic
+        # deepcopies mutable defaults when creating each model instance;
+        # returning self preserves factory identity so that ``is MISSING``
+        # checks and __repr__ work correctly on every instance.
+        return self
+
+    def __repr__(self) -> str:
+        if self.factory is MISSING:
+            return "<RuntimeDefault()>"
+        factory_name = getattr(self.factory, "__name__", repr(self.factory))
+        return f"<RuntimeDefault({factory_name})>"
+
+
+def RuntimeDefault(factory: "Callable[[Any], Any] | Any" = MISSING) -> Any:
+    """Declare a config field whose value is resolved in VllmConfig.__post_init__.
+
+    Returns a pydantic Field whose default is a ``_RuntimeDefaultValue`` instance.
+    The declared annotation is the true runtime type — no ``| None`` needed.
+    ``validate_default=False`` tells pydantic to skip coercion of the sentinel
+    through the field's type validator.
+
+    When called with no argument, the field has no fallback: it must be set by
+    the user or the optimization-level table, or validation will raise.  Pass a
+    factory only when a last-resort fallback is genuinely needed (e.g. for
+    fields absent from the optimization-level tables).
+
+    Args:
+        factory: Optional static fallback value (e.g. ``False``) or a callable
+                 that accepts a VllmConfig instance and returns the value.
+                 Omit to require the field to be set externally.
+
+    Example::
+
+        @config
+        class MyConfig:
+            required_flag: bool = RuntimeDefault()  # must be set by table/user
+            fallback_flag: bool = RuntimeDefault(False)  # falls back to False
+            tp_flag: bool = RuntimeDefault(lambda cfg: cfg.parallel_config.tp > 1)
+    """
+    return PydanticField(  # type: ignore[call-overload]
+        default=_RuntimeDefaultValue(factory),
+        validate_default=False,
+    )
+
+
+@runtime_checkable
+class HasRuntimeDefaultFields(Protocol):
+    """Structural interface satisfied by any ``@config`` class that declares at
+    least one ``RuntimeDefault()`` field.
+
+    The ``@config`` decorator injects ``initialize_runtime_default_fields`` and
+    ``validate_runtime_default_fields_initialized`` automatically — no inheritance is
+    required.  ``VllmConfig.__post_init__`` uses
+    ``isinstance(v, HasRuntimeDefaultFields)`` to discover sub-configs that need
+    initialization.
+    """
+
+    def initialize_runtime_default_fields(self, vllm_config: Any) -> None: ...
+    def validate_runtime_default_fields_initialized(self) -> None: ...
+
+
+def _impl_initialize_runtime_default_fields(self: Any, vllm_config: Any) -> None:
+    """Injected as ``initialize_runtime_default_fields`` by the ``@config`` decorator.
+
+    Replaces every field still holding a ``_RuntimeDefaultValue`` with its resolved
+    value.  Fields explicitly set by the caller (e.g. the optimization-level
+    table) are left unchanged; only sentinel-valued fields are touched.
+    """
+    for dc_field in fields(self):  # type: ignore[arg-type]
+        current = getattr(self, dc_field.name)
+        if isinstance(current, _RuntimeDefaultValue) and current.factory is not MISSING:
+            factory = current.factory
+            value = factory(vllm_config) if callable(factory) else factory
+            setattr(self, dc_field.name, value)
+
+
+def _impl_validate_runtime_default_fields_initialized(self: Any) -> None:
+    """Injected as ``validate_runtime_default_fields_initialized`` by ``@config``.
+
+    Asserts that no field still holds a ``RuntimeDefaultValue``.  Called
+    automatically by ``VllmConfig.__post_init__`` via auto-discovery.
+    Raises ``ValueError`` listing every offending field name.
+    """
+    uninitialized = [
+        dc_field.name
+        for dc_field in fields(self)  # type: ignore[arg-type]
+        if isinstance(getattr(self, dc_field.name), _RuntimeDefaultValue)
+    ]
+    if uninitialized:
+        raise ValueError(
+            f"{type(self).__name__}: runtime default fields were never initialized: "
+            f"{uninitialized}. This is a bug in VllmConfig initialization."
+        )
+
+
+def _walk_runtime_default(obj: Any) -> Generator[Any, None, None]:
+    """Depth-first generator over *obj* and all nested dataclass children."""
+    yield obj
+    if is_dataclass(obj):
+        for f in fields(obj):  # type: ignore[arg-type]
+            child = getattr(obj, f.name)
+            if child is not None and child is not obj and is_dataclass(child):
+                yield from _walk_runtime_default(child)
+
+
+def initialize_runtime_default_fields_recursive(obj: Any, vllm_config: Any) -> None:
+    """Initialize runtime default fields in *obj* and all nested ``@config``
+    dataclasses."""
+    for node in _walk_runtime_default(obj):
+        if isinstance(node, HasRuntimeDefaultFields):
+            node.initialize_runtime_default_fields(vllm_config)
+
+
+def validate_runtime_default_fields_recursive(obj: Any) -> None:
+    """Validate runtime default fields in *obj* and all nested ``@config``
+    dataclasses."""
+    for node in _walk_runtime_default(obj):
+        if isinstance(node, HasRuntimeDefaultFields):
+            node.validate_runtime_default_fields_initialized()
+
+
+def _inject_runtime_default_methods(cls: type) -> None:
+    """Attach runtime default field methods to *cls* if it declares any
+    ``RuntimeDefault()`` fields.
+
+    Called by the ``@config`` decorator after pydantic has finished processing
+    the class.  Uses ``dataclasses.fields()`` + ``PydanticFieldInfo.default``
+    for detection so that it works regardless of pydantic-internal changes.
+    """
+    if not is_dataclass(cls):
+        return
+    has_runtime_default = any(
+        isinstance(f.default, PydanticFieldInfo)
+        and isinstance(f.default.default, _RuntimeDefaultValue)
+        for f in fields(cls)  # type: ignore[arg-type]
+    )
+    if has_runtime_default:
+        cls.initialize_runtime_default_fields = (  # type: ignore[attr-defined]
+            _impl_initialize_runtime_default_fields
+        )
+        cls.validate_runtime_default_fields_initialized = (  # type: ignore[attr-defined]
+            _impl_validate_runtime_default_fields_initialized
+        )

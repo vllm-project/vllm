@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -47,7 +47,14 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import (
+    SupportsHash,
+    _RuntimeDefaultValue,
+    config,
+    initialize_runtime_default_fields_recursive,
+    replace,
+    validate_runtime_default_fields_recursive,
+)
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -223,6 +230,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_minimax_qk_norm": True,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
@@ -637,7 +645,13 @@ class VllmConfig:
             key: Attribute name.
             value: Default value (static or callable).
         """
-        if getattr(config_obj, key) is None:
+        current = getattr(config_obj, key)
+        # Apply the default when the field is unset (None) or still holds its
+        # RuntimeDefault sentinel (a _RuntimeDefaultValue produced by
+        # RuntimeDefault(factory)).
+        # Without the _RuntimeDefaultValue check, optimization-level defaults would
+        # never be applied to runtime default fields because their sentinel is not None.
+        if current is None or isinstance(current, _RuntimeDefaultValue):
             # Some config values are known before initialization and are
             # hard coded.
             # Other values depend on the user given configuration, so they are
@@ -954,7 +968,8 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
 
         if self.compilation_config.backend == "eager" or (
-            self.compilation_config.mode is not None
+            not isinstance(self.compilation_config.mode, _RuntimeDefaultValue)
+            and self.compilation_config.mode is not None
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.warning(
@@ -982,14 +997,18 @@ class VllmConfig:
 
         current_platform.apply_config_platform_defaults(self)
 
-        if self.compilation_config.mode is None:
+        if self.compilation_config.mode is None or isinstance(
+            self.compilation_config.mode, _RuntimeDefaultValue
+        ):
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
         # By default, enable torch wrapping only when using custom Inductor lowering
-        if self.compilation_config.ir_enable_torch_wrap is None:
+        if self.compilation_config.ir_enable_torch_wrap is None or isinstance(
+            self.compilation_config.ir_enable_torch_wrap, _RuntimeDefaultValue
+        ):
             self.compilation_config.ir_enable_torch_wrap = (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
                 and self.compilation_config.backend == "inductor"
@@ -1011,6 +1030,15 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+
+        # Initialize runtime default fields in all nested sub-configs (must run after
+        # the optimization-level table is applied so the table's explicit values
+        # take priority over the RuntimeDefault fallbacks).
+        for _f in fields(self):  # type: ignore[arg-type]
+            _v = getattr(self, _f.name)
+            if _v is not None:
+                initialize_runtime_default_fields_recursive(_v, self)
+
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
@@ -1144,6 +1172,8 @@ class VllmConfig:
 
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            self.compilation_config.max_cudagraph_capture_size = 0
+            self.compilation_config.cudagraph_capture_sizes = []
 
         if self.cache_config.kv_sharing_fast_prefill:
             if (
@@ -1400,6 +1430,15 @@ class VllmConfig:
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
 
+        # Validate that every sub-config with RuntimeDefault() fields had them all
+        # initialized before __post_init__ completed.  The recursive walk means
+        # new @config classes with RuntimeDefault() fields nested at any depth are
+        # covered automatically without touching this code.
+        for _f in fields(self):  # type: ignore[arg-type]
+            _value = getattr(self, _f.name)
+            if _value is not None:
+                validate_runtime_default_fields_recursive(_value)
+
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
@@ -1526,7 +1565,9 @@ class VllmConfig:
             max_cudagraph_capture_size = (
                 self.compilation_config.max_cudagraph_capture_size
             )
-            if max_cudagraph_capture_size is None:
+            if max_cudagraph_capture_size is None or isinstance(
+                max_cudagraph_capture_size, _RuntimeDefaultValue
+            ):
                 decode_query_len = 1
                 if (
                     self.speculative_config
@@ -1545,7 +1586,7 @@ class VllmConfig:
             )
 
             # determine the cudagraph_capture_sizes
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if isinstance(self.compilation_config.cudagraph_capture_sizes, list):
                 assert len(self.compilation_config.cudagraph_capture_sizes) > 0, (
                     "cudagraph_capture_sizes should contain at least one element "
                     "when using cuda graph."
@@ -1600,12 +1641,12 @@ class VllmConfig:
                 cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
             )
             if (
-                self.compilation_config.max_cudagraph_capture_size is not None
+                isinstance(self.compilation_config.max_cudagraph_capture_size, int)
                 and self.compilation_config.max_cudagraph_capture_size != valid_max_size
             ):
                 # raise error only when both two flags are user-specified
                 # and they are inconsistent with each other
-                if self.compilation_config.cudagraph_capture_sizes is not None:
+                if isinstance(self.compilation_config.cudagraph_capture_sizes, list):
                     raise ValueError(
                         "customized max_cudagraph_capture_size"
                         f"(={self.compilation_config.max_cudagraph_capture_size}) "
@@ -1620,9 +1661,11 @@ class VllmConfig:
             # always set the final max_cudagraph_capture_size
             self.compilation_config.max_cudagraph_capture_size = valid_max_size
 
-            if self.compilation_config.cudagraph_capture_sizes is not None and len(
-                cudagraph_capture_sizes
-            ) < len(self.compilation_config.cudagraph_capture_sizes):
+            if isinstance(
+                self.compilation_config.cudagraph_capture_sizes, list
+            ) and len(cudagraph_capture_sizes) < len(
+                self.compilation_config.cudagraph_capture_sizes
+            ):
                 # If users have specified capture sizes, we only need to
                 # compare the lens before and after modification since the modified
                 # list is only the subset of the original list.
