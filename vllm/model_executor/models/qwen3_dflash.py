@@ -68,7 +68,6 @@ class DFlashQwen3Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_name = prefix
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -92,14 +91,12 @@ class DFlashQwen3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             bias=attention_bias,
-            quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=attention_bias,  # DFlash has o_proj bias when using attention bias
-            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -157,7 +154,6 @@ class DFlashQwen3DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         attn_type = AttentionType.DECODER
@@ -179,7 +175,6 @@ class DFlashQwen3DecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
-            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)

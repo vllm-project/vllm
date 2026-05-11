@@ -10,7 +10,7 @@ from torch import nn
 from transformers import GraniteMoeHybridConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.attention import Attention
@@ -24,7 +24,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -57,12 +56,13 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
         self,
         config: GraniteMoeHybridConfig,
         layer_idx: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.hidden_size = config.hidden_size
         self.residual_multiplier = config.residual_multiplier

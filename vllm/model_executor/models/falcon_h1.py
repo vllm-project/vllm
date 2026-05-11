@@ -10,7 +10,7 @@ from torch import nn
 from transformers import FalconH1Config
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -105,12 +105,13 @@ class FalconH1SSMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -351,7 +352,7 @@ class FalconH1ParallelHybrid(nn.Module):
         # Instantiate the SSM branch
         self.mamba = FalconH1SSMDecoderLayer(
             config=config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=ssm_prefix,
         )
         self.ssm_out_multiplier = config.ssm_out_multiplier

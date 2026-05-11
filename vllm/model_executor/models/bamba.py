@@ -10,7 +10,7 @@ from torch import nn
 from transformers import BambaConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -97,12 +97,13 @@ class BambaMixerDecoderLayer(nn.Module):
         self,
         config: BambaConfig,
         layer_idx: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.config = config
         self.mamba = MambaMixer2(
             hidden_size=config.hidden_size,
