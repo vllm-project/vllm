@@ -77,6 +77,13 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+// Adapted from sglang: FP8 W8A16 kernel
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
+                             at::Tensor& scales2,
+                             std::vector<int64_t> block_size,
+                             const std::optional<at::Tensor>& bias,
+                             at::ScalarType out_dtype, bool is_vnni);
+
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
     at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
@@ -101,7 +108,9 @@ void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 torch::Tensor& key_cache,
                                 torch::Tensor& value_cache,
                                 const torch::Tensor& slot_mapping,
-                                const std::string& isa);
+                                const std::string& isa, const double k_scale,
+                                const double v_scale,
+                                const std::string& kv_cache_dtype);
 
 void cpu_attention_with_kv_cache(
     const torch::Tensor& query, const torch::Tensor& key_cache,
@@ -112,7 +121,8 @@ void cpu_attention_with_kv_cache(
     const int64_t sliding_window_left, const int64_t sliding_window_right,
     const torch::Tensor& block_table, const double softcap,
     const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux);
+    const std::optional<torch::Tensor>& s_aux, const double k_scale,
+    const double v_scale, const std::string& kv_cache_dtype);
 
 // Note: just for avoiding importing errors
 void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
@@ -268,8 +278,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
-#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
-    defined(__powerpc64__)
+#if defined(__AVX512F__) || defined(__AVX2__) || \
+    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -373,6 +383,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
       "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
   ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
+
+  // Adapted from sglang: FP8 W8A16 kernel
+  ops.def(
+      "fp8_scaled_mm_cpu(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!) "
+      "scales2, SymInt[] block_size, Tensor? bias, ScalarType out_dtype, "
+      "bool is_vnni) -> Tensor");
+  ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 #endif
 
   // CPU attention kernels
@@ -384,15 +401,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
-      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
-      "isa) -> ()",
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str isa, "
+      "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
+      "()",
       &cpu_attn_reshape_and_cache);
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, "
+      "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
+      "()",
       &cpu_attention_with_kv_cache);
 
   // placeholders

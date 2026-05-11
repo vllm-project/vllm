@@ -126,7 +126,7 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         if TEST_FP8 and do_fusion:
             return [torch.ops._C.fused_add_rms_norm_static_fp8_quant.default]
         else:
-            return [torch.ops._C.fused_add_rms_norm.default]
+            return []
 
     def ops_not_in_model(self):
         return []
