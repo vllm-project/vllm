@@ -109,7 +109,7 @@ When a request has multiple completions (`n > 1`), each completion shares the sa
 ```text
 Forward Pass                    Async D2H Pipeline              Output
 ─────────────                   ──────────────────              ──────
-FusedMoE layer                  After forward pass:             On request finish:
+FusedMoERouter                  After forward pass:             On request finish:
 writes topk_ids    ──────►     D2H copy to pinned     ──────►  Extract from host cache
 to device buffer               staging buffer                   Split at prompt_len
 (L, N, K) int16                 (via CUDA stream)                Trim gen to output len
@@ -125,7 +125,9 @@ A pre-allocated GPU buffer with layout `(L, N, K)` where:
 - `N` = `max_num_batched_tokens`
 - `K` = `num_experts_per_tok` (top-k)
 
-The `(L, N, K)` layout ensures that `buffer[layer_id]` gives a contiguous `(N, K)` view per layer. Each `FusedMoE` layer gets a persistent reference to its slice via `module._routing_replay_out = buffer[layer_id]`.
+The `(L, N, K)` layout ensures that `buffer[layer_id]` gives a contiguous `(N, K)` view per layer. Each `FusedMoERouter` layer gets a persistent reference to its slice via `router._routing_replay_out = buffer[layer_id]`.
+
+The `layer_id`s are managed by `RoutedExpertsCapturer` and keyed by `FusedMoE.layer_name`.
 
 **Dtype**: `int16` — sufficient for expert IDs (max ~512 experts in practice) and half the memory of `int32`.
 
@@ -146,7 +148,7 @@ This design ensures the D2H copy overlaps with the next forward pass, minimizing
 
 CUDA graph compatibility requires two mechanisms:
 
-1. **Persistent tensor attribute**: Each `FusedMoE` layer stores a reference to its buffer slice as `module._routing_replay_out`. Because `torch.compile` captures module attributes by reference, graph replay always writes to the live buffer — not a stale snapshot.
+1. **Persistent tensor attribute**: Each `FusedMoERouter` stores a reference to its buffer slice as `router._routing_replay_out`. Because `torch.compile` captures module attributes by reference, graph replay always writes to the live buffer — not a stale snapshot.
 
 2. **Static marking**: Both the full `(L, N, K)` buffer and each per-layer `(N, K)` view are marked with `cudagraph_mark_tensor_static()`. This prevents CUDA graphs from snapshot/restore behavior that would zero the buffer on replay.
 
