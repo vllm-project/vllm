@@ -171,7 +171,7 @@ def _silu_mul_quant_fp8_packed_kernel(
 
     pid_pack = tl.program_id(0)
     pid_m = tl.program_id(1)
-    m_offset = pid_m * BLOCK_M
+    m_offset = pid_m.to(tl.int64) * BLOCK_M
 
     if m_offset >= M:
         return
@@ -321,8 +321,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     pid_n = tl.program_id(1)
     N_2 = N // 2
 
-    m_offset = pid_m * BLOCK_M
-    n_offset = pid_n * BLOCK_N
+    m_offset = pid_m.to(tl.int64) * BLOCK_M
+    n_offset = pid_n.to(tl.int64) * BLOCK_N
     if m_offset >= M:
         return
 
