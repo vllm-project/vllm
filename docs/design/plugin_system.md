@@ -143,6 +143,38 @@ Every plugin has three parts:
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
+### Advanced engine-core launcher extension point
+
+Platform plugins can also replace the class that owns the
+`launch_core_engines(...)` flow for V1 engine startup. This hook is intended
+for platforms that need to customize engine-process launch or topology setup
+without forking `vllm.v1.engine.utils`.
+
+Set `vllm_config.parallel_config.engine_core_launcher_cls` from
+[`Platform.check_and_update_config`][vllm.platforms.interface.Platform.check_and_update_config]
+to the fully qualified name of a launcher class.
+
+The selected class must provide a `launch_core_engines(...)` context manager
+with the same signature and return value shape as
+`vllm.v1.engine.utils.CoreEngineLauncher.launch_core_engines`.
+
+The default value is `vllm.v1.engine.utils.CoreEngineLauncher`, which
+preserves the current built-in launch behavior.
+
+For example, a platform plugin can redirect engine launch like this:
+
+??? code
+
+    ```python
+    class MyPlatform(Platform):
+
+        @classmethod
+        def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+            vllm_config.parallel_config.engine_core_launcher_cls = (
+                "my_plugin.engine.MyCoreEngineLauncher"
+            )
+    ```
+
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
