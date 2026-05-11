@@ -209,6 +209,7 @@ class NixlConnectorScheduler:
                     encoded_data,
                     ready_event,
                     self._stop_event,
+                    self.side_channel_host,
                     self.side_channel_port,
                 ),
                 daemon=True,
@@ -222,6 +223,7 @@ class NixlConnectorScheduler:
         encoded_data: dict[int, Any],
         ready_event: threading.Event,
         stop_event: threading.Event,
+        host: str,
         port: int,
     ):
         """Background thread for getting new NIXL handshakes."""
@@ -229,7 +231,6 @@ class NixlConnectorScheduler:
         # to a better approach via HTTP endpoint soon.
 
         # Listen for new requests for metadata.
-        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         path = make_zmq_path("tcp", host, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:

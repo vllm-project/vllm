@@ -355,7 +355,11 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in ("max_num_batched_tokens", "kv_cache_memory_bytes"):
+            elif name in (
+                "max_num_batched_tokens",
+                "kv_cache_memory_bytes",
+                "safetensors_prefetch_block_size",
+            ):
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -424,6 +428,8 @@ class EngineArgs:
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
     safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
+    safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
+    safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -843,6 +849,14 @@ class EngineArgs:
         load_group.add_argument("--download-dir", **load_kwargs["download_dir"])
         load_group.add_argument(
             "--safetensors-load-strategy", **load_kwargs["safetensors_load_strategy"]
+        )
+        load_group.add_argument(
+            "--safetensors-prefetch-num-threads",
+            **load_kwargs["safetensors_prefetch_num_threads"],
+        )
+        load_group.add_argument(
+            "--safetensors-prefetch-block-size",
+            **load_kwargs["safetensors_prefetch_block_size"],
         )
         load_group.add_argument(
             "--model-loader-extra-config", **load_kwargs["model_loader_extra_config"]
@@ -1584,6 +1598,8 @@ class EngineArgs:
             load_format=self.load_format,
             download_dir=self.download_dir,
             safetensors_load_strategy=self.safetensors_load_strategy,
+            safetensors_prefetch_num_threads=self.safetensors_prefetch_num_threads,
+            safetensors_prefetch_block_size=self.safetensors_prefetch_block_size,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
