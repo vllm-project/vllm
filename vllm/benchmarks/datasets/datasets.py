@@ -1847,8 +1847,8 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
     elif args.dataset_name in ("custom_image", "custom_mm"):
         if args.dataset_name == "custom_mm":
             logger.warning(
-                "Dataset name 'custom_mm' is deprecated and will be removed "
-                "in 3 minor versions. Use '--dataset-name custom_image' instead."
+                "Dataset name 'custom_mm' is deprecated and will be removed in v0.24. "
+                "Use '--dataset-name custom_image' instead."
             )
         dataset = CustomImageDataset(
             dataset_path=args.dataset_path,
