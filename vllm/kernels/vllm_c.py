@@ -102,7 +102,7 @@ def rotary_embedding(
     rope_dim_offset: int = 0,
 ) -> tuple[Tensor, Tensor]:
     if cos_sin_format == "deepseek" and offsets is not None:
-        positions = torch.add(positions, offsets)
+        positions = torch.add(positions.flatten(), offsets.flatten())
     torch.ops._C.rotary_embedding(
         positions,
         query,
@@ -114,3 +114,52 @@ def rotary_embedding(
         inverse,
     )
     return query, key
+
+
+def rotary_query_only_c_supported(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
+) -> bool:
+    if cos_sin_format == "standard":
+        return offsets is None
+    return cos_sin_format == "deepseek"
+
+
+@ir.ops.rotary_embedding_query_only.register_impl(
+    "vllm_c",
+    supports_args=rotary_query_only_c_supported,
+    inplace=True,
+)
+def rotary_embedding_query_only(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
+) -> Tensor:
+    if cos_sin_format == "deepseek" and offsets is not None:
+        positions = torch.add(positions.flatten(), offsets.flatten())
+    torch.ops._C.rotary_embedding(
+        positions,
+        query,
+        None,
+        head_size,
+        cos_sin_cache,
+        is_neox_style,
+        rope_dim_offset,
+        inverse,
+    )
+    return query

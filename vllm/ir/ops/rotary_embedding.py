@@ -84,6 +84,7 @@ def _apply_standard_rope(
 
 def _apply_deepseek_rope(
     x: Tensor,
+    num_tokens: int,
     rotary_dim: int,
     head_size: int,
     cos: Tensor,
@@ -91,6 +92,8 @@ def _apply_deepseek_rope(
     is_neox_style: bool,
     rope_dim_offset: int = 0,
 ) -> Tensor:
+    x_shape = x.shape
+    x = x.view(num_tokens, -1, head_size)
     orig_dtype = x.dtype
     x_before = x[..., :rope_dim_offset]
     x_rot = x[..., rope_dim_offset : rope_dim_offset + rotary_dim]
@@ -99,7 +102,7 @@ def _apply_deepseek_rope(
     # cos/sin may be higher precision (e.g. fp32) than x (e.g. bf16).
     # Let type promotion handle the upcast; cast result back to orig_dtype.
     x_rot = _rotate_with_cos_sin(x_rot, cos, sin, is_neox_style).to(orig_dtype)
-    return torch.cat((x_before, x_rot, x_after), dim=-1)
+    return torch.cat((x_before, x_rot, x_after), dim=-1).reshape(x_shape)
 
 
 @register_op(activations=["query", "key"], allow_inplace=True)
@@ -117,8 +120,12 @@ def rotary_embedding(
     rope_dim_offset: int = 0,
 ) -> tuple[Tensor, Tensor]:
     """Apply rotary position embedding to query and key."""
+    positions = positions.flatten()
+    num_tokens = positions.shape[0]
+    if offsets is not None:
+        offsets = offsets.flatten()
+
     if cos_sin_format == "standard":
-        positions = positions.flatten()
         cos_sin = cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if inverse:
@@ -127,7 +134,7 @@ def rotary_embedding(
         sin = sin.unsqueeze(-2)
         query_out = _apply_standard_rope(
             query,
-            positions.shape[0],
+            num_tokens,
             head_size,
             rotary_dim,
             cos,
@@ -137,7 +144,7 @@ def rotary_embedding(
         )
         key_out = _apply_standard_rope(
             key,
-            positions.shape[0],
+            num_tokens,
             head_size,
             rotary_dim,
             cos,
@@ -159,6 +166,7 @@ def rotary_embedding(
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
         query_out = _apply_deepseek_rope(
             query,
+            num_tokens,
             rotary_dim,
             head_size,
             cos,
@@ -168,6 +176,7 @@ def rotary_embedding(
         )
         key_out = _apply_deepseek_rope(
             key,
+            num_tokens,
             rotary_dim,
             head_size,
             cos,
@@ -180,7 +189,7 @@ def rotary_embedding(
     return query_out, key_out
 
 
-@register_op
+@register_op(activations=["query"], allow_inplace=True)
 def rotary_embedding_query_only(
     positions: Tensor,
     query: Tensor,
@@ -194,8 +203,12 @@ def rotary_embedding_query_only(
     rope_dim_offset: int = 0,
 ) -> Tensor:
     """Apply rotary position embedding to query only."""
+    positions = positions.flatten()
+    num_tokens = positions.shape[0]
+    if offsets is not None:
+        offsets = offsets.flatten()
+
     if cos_sin_format == "standard":
-        positions = positions.flatten()
         cos_sin = cos_sin_cache.index_select(0, positions)
         cos, sin = cos_sin.chunk(2, dim=-1)
         if inverse:
@@ -204,7 +217,7 @@ def rotary_embedding_query_only(
         sin = sin.unsqueeze(-2)
         return _apply_standard_rope(
             query,
-            positions.shape[0],
+            num_tokens,
             head_size,
             rotary_dim,
             cos,
@@ -226,6 +239,7 @@ def rotary_embedding_query_only(
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
         return _apply_deepseek_rope(
             query,
+            num_tokens,
             rotary_dim,
             head_size,
             cos,

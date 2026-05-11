@@ -109,3 +109,51 @@ def rotary_embedding(
         rotary_dim,
         is_neox_style,
     )
+
+
+def _rotary_query_only_xpu_supported(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
+) -> bool:
+    # XPU deepseek kernel requires a key tensor; only support standard format
+    # for query-only (deepseek falls back to native Python impl).
+    return cos_sin_format == "standard" and offsets is None
+
+
+@ir.ops.rotary_embedding_query_only.register_impl(
+    "xpu_kernels",
+    supports_args=_rotary_query_only_xpu_supported,
+    supported=XPU_KERNELS_SUPPORTED,
+    inplace=True,
+)
+def rotary_embedding_query_only(
+    positions: Tensor,
+    query: Tensor,
+    head_size: int,
+    rotary_dim: int,
+    cos_sin_cache: Tensor,
+    is_neox_style: bool,
+    offsets: Tensor | None = None,
+    cos_sin_format: str = "standard",
+    inverse: bool = False,
+    rope_dim_offset: int = 0,
+) -> Tensor:
+    torch.ops._C.rotary_embedding(
+        positions,
+        query,
+        None,
+        head_size,
+        cos_sin_cache,
+        is_neox_style,
+        rope_dim_offset,
+        inverse,
+    )
+    return query
