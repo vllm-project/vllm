@@ -661,7 +661,6 @@ def get_attention_context(
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
 
 
-@eager_break_during_capture
 def unified_kv_cache_update(
     key: torch.Tensor,
     value: torch.Tensor,

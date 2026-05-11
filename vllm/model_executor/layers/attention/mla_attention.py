@@ -997,7 +997,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             out.copy_(out_new)  # Copy result
 
 
-@eager_break_during_capture
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,

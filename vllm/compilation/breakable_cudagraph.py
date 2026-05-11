@@ -91,6 +91,10 @@ def eager_break_during_capture(fn: F) -> F:
         capture = BreakableCUDAGraphCapture.current()
         if capture is None:
             return fn(*args, **kwargs)
+        if is_forward_context_available():
+            mode = get_forward_context().cudagraph_runtime_mode
+            if mode == CUDAGraphMode.FULL:
+                return fn(*args, **kwargs)
         return capture.add_eager(lambda: fn(*args, **kwargs))
 
     return wrapper  # type: ignore[return-value]
@@ -343,8 +347,6 @@ class BreakableCUDAGraphWrapper:
         kwargs: dict[str, Any],
     ) -> Any:
         validate_cudagraph_capturing_enabled()
-        # TODO: debug, will remove later
-        print(f"Starting breakable cudagraph capture for {entry.batch_descriptor}")
 
         entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
