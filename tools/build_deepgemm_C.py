@@ -60,7 +60,7 @@ cmd = [
     os.environ.get("CXX", "g++"),
     "-shared",
     "-fPIC",
-    "-std=c++17",
+    "-std=c++20",
     "-O3",
     "-g0",
     "-Wno-psabi",
