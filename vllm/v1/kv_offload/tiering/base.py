@@ -23,6 +23,7 @@ class JobMetadata:
     job_id: JobId
     keys: Collection[OffloadKey]
     block_ids: np.ndarray
+    is_promotion: bool
     req_context: ReqContext = field(default_factory=ReqContext)
 
 

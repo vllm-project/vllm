@@ -114,6 +114,7 @@ class TestExampleSecondaryTier:
                 job_id=1,
                 keys=[new_block],
                 block_ids=np.array([0], dtype=np.int64),
+                is_promotion=False,
             )
         )
 
@@ -142,6 +143,7 @@ class TestExampleSecondaryTier:
                 job_id=1,
                 keys=blocks,
                 block_ids=np.array([0, 1], dtype=np.int64),
+                is_promotion=False,
             )
         )
 

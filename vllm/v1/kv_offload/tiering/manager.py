@@ -144,11 +144,11 @@ class TieringOffloadingManager(OffloadingManager):
         self._job_id_counter: int = 0
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
 
-        # Job tracking: maps job_id to metadata for each transfer direction
-        # Store jobs: primary → secondary transfers
-        self._store_jobs: dict[JobId, JobMetadata] = {}
-        # Load jobs: secondary → primary transfers (promotions)
-        self._load_jobs: dict[JobId, JobMetadata] = {}
+        # Job tracking: maps job_id to metadata for all in-flight transfers.
+        # JobMetadata.is_promotion distinguishes direction:
+        #   True:  secondary → primary (promotion)
+        #   False: primary → secondary (cascade)
+        self._transfer_jobs: dict[JobId, JobMetadata] = {}
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in take_events().
@@ -201,32 +201,29 @@ class TieringOffloadingManager(OffloadingManager):
         for i, tier in enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished():
                 job_id = completed_job.job_id
+                job_metadata = self._transfer_jobs.pop(job_id, None)
 
-                # Determine job type by checking which dictionary contains the job_id
-                if job_id in self._store_jobs:
-                    # primary→secondary transfer completed.
-                    # Decrement ref_cnt on primary blocks.
-                    job_metadata = self._store_jobs.pop(job_id)
-                    self.primary_tier.complete_read(
-                        job_metadata.keys, job_metadata.req_context
-                    )
-                elif job_id in self._load_jobs:
-                    # secondary→primary transfer (promotion) completed.
-                    # Make blocks available in primary tier.
-                    job_metadata = self._load_jobs.pop(job_id)
-                    self.primary_tier.complete_write(
-                        job_metadata.keys,
-                        job_metadata.req_context,
-                        completed_job.success,
-                    )
-                else:
-                    # Job ID not found in either dictionary - this shouldn't happen
+                if job_metadata is None:
                     logger.error(
                         "Received finished job for unknown job_id %d"
                         " from tier #%d (%s)",
                         job_id,
                         i,
                         tier.get_tier_type(),
+                    )
+                elif job_metadata.is_promotion:
+                    # secondary→primary transfer (promotion) completed.
+                    # Make blocks available in primary tier.
+                    self.primary_tier.complete_write(
+                        job_metadata.keys,
+                        job_metadata.req_context,
+                        completed_job.success,
+                    )
+                else:
+                    # primary→secondary transfer completed.
+                    # Decrement ref_cnt on primary blocks.
+                    self.primary_tier.complete_read(
+                        job_metadata.keys, job_metadata.req_context
                     )
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -335,9 +332,10 @@ class TieringOffloadingManager(OffloadingManager):
                     job_id=job_id,
                     keys=entry.keys,
                     block_ids=np.array(entry.block_ids, dtype=np.int64),
+                    is_promotion=True,
                     req_context=entry.req_context,
                 )
-                self._load_jobs[job_id] = job_metadata
+                self._transfer_jobs[job_id] = job_metadata
                 tier.submit_load(job_metadata)
 
         self._pending_load_submissions.clear()
@@ -470,9 +468,10 @@ class TieringOffloadingManager(OffloadingManager):
                 job_id=job_id,
                 keys=keys,
                 block_ids=primary_blocks_spec.block_ids,
+                is_promotion=False,
                 req_context=req_context,
             )
-            self._store_jobs[job_id] = job_metadata
+            self._transfer_jobs[job_id] = job_metadata
 
             tier.submit_store(job_metadata)
 
