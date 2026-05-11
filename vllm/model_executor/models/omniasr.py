@@ -4,10 +4,17 @@ from collections.abc import Iterable, Mapping, Sequence
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 
+from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import (
+    MultiModalDataDict,
+    PromptType,
+    TokensPrompt,
+)
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -38,6 +45,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.omniasr import OmniASRConfig
 
 from .interfaces import (
@@ -46,12 +54,17 @@ from .interfaces import (
     SupportsTranscription,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .whisper import ISO639_1_SUPPORTED_LANGS
+
+MAX_AUDIO_CLIP_S = 40
 
 
 class OmniASRModel(nn.Module):
-    """Full OmniASR: encoder + projection + LLaMA decoder.
+    """
+    Full OmniASR model: encoder + projection + LLaMA decoder.
 
-    TODO: Integrate with vLLM's LlamaForCausalLM for decoder.
+    This class encapsulates the audio encoder (Wav2Vec2), the projection layer
+    to match decoder dimensions, and the text/language embeddings.
     """
 
     def __init__(self, config: OmniASRConfig):
@@ -61,8 +74,6 @@ class OmniASRModel(nn.Module):
         self.encoder_proj = ColumnParallelLinear(
             config.encoder_embed_dim, config.projection_dim, bias=True
         )
-        # TODO: Replace with vLLM's LlamaForCausalLM
-        # self.language_model = LlamaForCausalLM(vllm_config)
         self.text_frontend = VocabParallelEmbedding(
             config.target_vocab_size + config.n_special_tokens,
             config.text_config.hidden_size,
@@ -71,13 +82,32 @@ class OmniASRModel(nn.Module):
             config.num_languages, config.text_config.hidden_size
         )
 
-    def forward(self, audio):
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass of the OmniASR model.
+
+        Args:
+            audio: [batch_size, num_samples] - input audio waveform.
+
+        Returns:
+            [batch_size, seq_len, projection_dim] - encoder output projected to
+            decoder hidden size.
+        """
         x = self.encoder_frontend(audio)
         x = self.encoder(x)
         x, _ = self.encoder_proj(x)
         return x  # [batch, seq, config.projection_dim] ready for LLaMA decoder
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """
+        Load weights for the OmniASR model.
+
+        Args:
+            weights: An iterable of (name, loaded_weight) tuples.
+
+        Returns:
+            A set of parameter names that were loaded.
+        """
         stacked_params_mapping = [
             (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
             (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
@@ -86,9 +116,6 @@ class OmniASRModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params = set()
         for name, loaded_weight in weights:
-            # TODO:llama decoder implementation
-            if name.startswith("llama_decoder"):
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -107,6 +134,10 @@ class OmniASRModel(nn.Module):
 
 
 class Wav2Vec2FeatureExtractor(nn.Module):
+    """
+    Wav2Vec2 feature extractor consisting of multiple 1D convolutional layers.
+    """
+
     def __init__(self, config: OmniASRConfig):
         super().__init__()
         self.layers = nn.ModuleList()
@@ -125,7 +156,16 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             self.layers.append(nn.ModuleDict({"conv": conv, "layer_norm": layer_norm}))
             in_ch = out_ch
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Apply convolutional layers to input waveform.
+
+        Args:
+            x: [batch_size, 1, num_samples] - input audio waveform.
+
+        Returns:
+            [batch_size, feature_dim, seq_len] - extracted features.
+        """
         for layer in self.layers:
             x = layer["conv"](x)
             x = x.transpose(1, 2)
@@ -135,6 +175,15 @@ class Wav2Vec2FeatureExtractor(nn.Module):
         return x
 
     def get_seq_len(self, num_samples: int) -> int:
+        """
+        Compute output sequence length for a given number of input samples.
+
+        Args:
+            num_samples: Number of input audio samples.
+
+        Returns:
+            Resulting sequence length after convolution layers.
+        """
         seq_len = num_samples
         for layer in self.layers:
             conv = layer["conv"]
@@ -149,7 +198,9 @@ class Wav2Vec2FeatureExtractor(nn.Module):
 
 
 class Wav2Vec2Attention(nn.Module):
-    """Self-attention with separate q/k/v/output projections (matching checkpoint)"""
+    """
+    Self-attention with separate q/k/v/output projections (matching checkpoint).
+    """
 
     def __init__(self, config: OmniASRConfig):
         super().__init__()
@@ -183,7 +234,16 @@ class Wav2Vec2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for Wav2Vec2 attention.
+
+        Args:
+            x: [batch_size, seq_len, hidden_size] - input hidden states.
+
+        Returns:
+            [batch_size, seq_len, hidden_size] - output of attention layer.
+        """
         qkv, _ = self.qkv_proj(x)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         attn_output = self.attn(q, k, v)
@@ -192,6 +252,10 @@ class Wav2Vec2Attention(nn.Module):
 
 
 class Wav2Vec2FFN(nn.Module):
+    """
+    Feed-forward network for Wav2Vec2 encoder layer.
+    """
+
     def __init__(
         self,
         config: OmniASRConfig,
@@ -213,7 +277,16 @@ class Wav2Vec2FFN(nn.Module):
             quant_config=quant_config,
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass for Wav2Vec2 FFN.
+
+        Args:
+            x: [batch_size, seq_len, hidden_size] - input hidden states.
+
+        Returns:
+            [batch_size, seq_len, hidden_size] - output of FFN.
+        """
         x, _ = self.inner_proj(x)
         x = nn.functional.gelu(x)
         x, _ = self.output_proj(x)
@@ -221,6 +294,14 @@ class Wav2Vec2FFN(nn.Module):
 
 
 class Wav2Vec2EncoderLayer(nn.Module):
+    """
+    A single Transformer encoder layer for Wav2Vec2.
+
+    Each layer consists of a self-attention mechanism and a feed-forward
+    network, with LayerNorm applied before each and residual connections
+    after each.
+    """
+
     def __init__(self, config: OmniASRConfig):
         super().__init__()
         embed_dim = config.encoder_embed_dim
@@ -229,7 +310,7 @@ class Wav2Vec2EncoderLayer(nn.Module):
         self.ffn_layer_norm = nn.LayerNorm(embed_dim)
         self.ffn = Wav2Vec2FFN(config)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         x = self.self_attn_layer_norm(x)
         x = self.self_attn(x)
@@ -242,6 +323,14 @@ class Wav2Vec2EncoderLayer(nn.Module):
 
 
 class Wav2Vec2Frontend(nn.Module):
+    """
+    Frontend for Wav2Vec2 including feature extraction and positional encoding.
+
+    This module handles the initial processing of raw audio waveforms,
+    including convolutional feature extraction, layer normalization,
+    and additive positional embeddings.
+    """
+
     def __init__(self, config: OmniASRConfig):
         super().__init__()
         feature_dim = config.feature_dim
@@ -267,8 +356,13 @@ class Wav2Vec2Frontend(nn.Module):
             }
         )
 
-    def forward(self, audio):
-        x = self.feature_extractor(audio)
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        x = audio.to(
+            self.feature_extractor.layers[0]["conv"].weight.dtype
+        )  # add dtype conversion
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        x = self.feature_extractor(x)
         x = x.transpose(1, 2)
         x = self.post_extract_layer_norm(x)
         x = self.model_dim_proj(x)
@@ -279,7 +373,13 @@ class Wav2Vec2Frontend(nn.Module):
 
 
 class Wav2Vec2TransformerEncoder(nn.Module):
-    """encoder.* keys"""
+    """
+    Transformer encoder for Wav2Vec2.
+
+    Comprises multiple stackable Transformer encoder layers followed by
+    a final LayerNorm. Processes extracted audio features into high-level
+    representations.
+    """
 
     def __init__(self, config: OmniASRConfig):
         super().__init__()
@@ -288,7 +388,7 @@ class Wav2Vec2TransformerEncoder(nn.Module):
         )
         self.layer_norm = nn.LayerNorm(config.encoder_embed_dim)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
             x = layer(x)
         x = self.layer_norm(x)
@@ -296,6 +396,13 @@ class Wav2Vec2TransformerEncoder(nn.Module):
 
 
 class OmniASRProcessingInfo(BaseProcessingInfo):
+    """
+    Processing information for the OmniASR model.
+
+    Provides metadata and helper methods for handling audio inputs,
+    including sequence length computation and feature extractor access.
+    """
+
     def get_hf_config(self) -> PretrainedConfig:
         return self.ctx.get_hf_config()
 
@@ -318,6 +425,13 @@ class OmniASRProcessingInfo(BaseProcessingInfo):
 
 
 class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
+    """
+    Multi-modal processor for the OmniASR model.
+
+    Extends EncDecMultiModalProcessor to handle audio modality inputs
+    and coordinate prompt updates for speech-to-text tasks.
+    """
+
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
@@ -358,7 +472,9 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
             "input_ids": [0],
         }
 
-    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+    def _get_mm_fields_config(
+        self, hf_inputs: BatchFeature, hf_processor_mm_kwargs: Mapping[str, object]
+    ):
         return dict(
             input_features=MultiModalFieldConfig.batched("audio"),
             length=MultiModalFieldConfig.batched("audio"),
@@ -386,42 +502,30 @@ class OmniASRMultiModalProcessor(EncDecMultiModalProcessor):
 
 
 class OmniASRDummyInputsBuilder(BaseDummyInputsBuilder[OmniASRProcessingInfo]):
+    """
+    Dummy input builder for OmniASR.
+
+    Generates synthetic audio and text data for testing and
+    initialization purposes.
+    """
+
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return ""
+        num_audios = mm_counts.get("audio", 0)
+        return "<s>" * num_audios
 
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options=None,
-        mm_processor_kwargs=None,
+        mm_options: Mapping[str, BaseDummyOptions] = None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
-        audio_len = sampling_rate * 30  # 30 seconds max
+        audio_len = sampling_rate * MAX_AUDIO_CLIP_S
         num_audios = mm_counts.get("audio", 0)
         return {
             "audio": self._get_dummy_audios(length=audio_len, num_audios=num_audios)
         }
-
-
-# TODO:Add all supported languages
-ISO639_1_SUPPORTED_LANGS = {
-    "en": "English",
-    "fr": "French",
-    "de": "German",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "it": "Italian",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "el": "Greek",
-    "ar": "Arabic",
-    "ko": "Korean",
-    "ja": "Japanese",
-    "vi": "Vietnamese",
-    "zh": "Chinese",
-}
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -432,10 +536,11 @@ ISO639_1_SUPPORTED_LANGS = {
 class OmniAsrForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
-    """OmniASR: Wav2Vec2 encoder + projection + LLaMA decoder.
+    """
+    OmniASR model for conditional generation (speech-to-text).
 
-    TODO:
-    - Integrate LLaMA decoder via vLLM's LlamaForCausalLM
+    This model integrates a Wav2Vec2-based audio tower with a LLaMA-based
+    language model for generating transcriptions from audio input.
     """
 
     supports_transcription_only = True
@@ -468,29 +573,32 @@ class OmniAsrForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def get_encoder_outputs(
-        self, audio: torch.Tensor, lengths: torch.Tensor
-    ) -> torch.Tensor:
-        return self.model.forward(audio)
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         input_features = kwargs.pop("input_features", None)
-        length = kwargs.pop("length", None)
-        return self.get_encoder_outputs(input_features, length)
+        if input_features is None:
+            return []
+        if isinstance(input_features, list):
+            results = []
+            for feat in input_features:
+                out = self.model.forward(feat.unsqueeze(0))
+                results.append(out.squeeze(0))
+            return tuple(results)
+        encoder_out = self.model.forward(input_features)
+        return encoder_out.unbind(dim=0)
 
     def get_language_model(self) -> nn.Module:
-        # TODO: return self.model.language_model once LLaMA is integrated
         return self.language_model
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors=None,
-        encoder_outputs: list[torch.Tensor] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        inputs_embeds = None if intermediate_tensors is not None else None
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        if intermediate_tensors is not None:
+            inputs_embeds = None
         hidden_states = self.language_model.model(
             input_ids,
             positions,
@@ -499,9 +607,66 @@ class OmniAsrForConditionalGeneration(
         )
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.final_proj, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["language_model"])
-        return loader.load_weights(weights)
+        def transform(inputs):
+            name, loaded_weight = inputs
+
+            if name.startswith("llama_decoder.layer_norm"):
+                name = name.replace(
+                    "llama_decoder.layer_norm", "language_model.model.norm"
+                )
+            elif name.startswith("llama_decoder."):
+                name = name.replace("llama_decoder.", "language_model.model.")
+                name = name.replace(".self_attn_layer_norm", ".input_layernorm")
+                name = name.replace(".ffn_layer_norm", ".post_attention_layernorm")
+                name = name.replace(".self_attn.output_proj", ".self_attn.o_proj")
+                name = name.replace(".ffn.inner_proj", ".mlp.up_proj")
+                name = name.replace(".ffn.output_proj", ".mlp.down_proj")
+                name = name.replace(".ffn.gate_proj", ".mlp.gate_proj")
+            # elif name.startswith("text_frontend"):
+            #    name = name.replace(
+            #        "text_frontend", "language_model.model.embed_tokens"
+            #    )
+            elif name.startswith("final_proj"):
+                name = name.replace("final_proj", "language_model.lm_head")
+            else:
+                name = "model." + name
+
+            return name, loaded_weight
+
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(map(transform, weights))
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        sampling_rate = model_config.hf_config.sampling_rate
+        assert sampling_rate == 16000
+        return SpeechToTextConfig(
+            max_audio_clip_s=MAX_AUDIO_CLIP_S,
+            sample_rate=sampling_rate,
+        )
+
+    @classmethod
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
+        # TODO: Add language conditioning support.
+        # OmniASR uses a separate lang_embeddings layer (not text tokens).
+        # Need to: map ISO 639-1 → OmniASR lang_id, pass through
+        # lang_embeddings, and insert into decoder input sequence.
+        # Currently uses audio-only mode (valid for 20% of training data).
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        return TokensPrompt(
+            prompt_token_ids=[0],
+            multi_modal_data={"audio": (audio, stt_config.sample_rate)},
+        )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("audio"):
+            return None
+        raise ValueError("Only audio modality is supported")
