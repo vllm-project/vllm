@@ -18,6 +18,11 @@ nvidia-cudnn-frontend>=1.13.0,<1.19.0
 # Required for faster safetensors model loading
 fastsafetensors >= 0.2.2
 
+# cuda-pathfinder>=1.5.0 required by cuda.core (nccl4py dep):
+# cuda.core._linker imports cuda.pathfinder._optional_cuda_import which was
+# added in 1.5.0; older versions cause nccl4py import to fail silently.
+cuda-pathfinder>=1.5.0
+
 # QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
 nvidia-cutlass-dsl>=4.4.2
 quack-kernels>=0.3.3
