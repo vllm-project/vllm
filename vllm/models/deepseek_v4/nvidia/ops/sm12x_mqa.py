@@ -317,7 +317,20 @@ def fp8_paged_mqa_logits_triton(
     context_lens_2d = context_lens.reshape(batch_size, -1)
     if context_lens_2d.shape[1] == 1 and next_n != 1:
         context_lens_2d = context_lens_2d.expand(batch_size, next_n).contiguous()
-    grid = (triton.cdiv(num_rows, 4), triton.cdiv(token_count, 64))
+    # Adaptive BLOCK_M: the kernel masks off positions >= num_rows, so a fixed
+    # BLOCK_M=4 wastes ~75% of M-axis work in the common single-stream decode
+    # case (num_rows=1). Pick the smallest power-of-2 tile that still covers
+    # num_rows so we keep one grid-program for typical decode while still
+    # benefiting from larger tiles when batch / MTP push num_rows higher.
+    if num_rows <= 1:
+        block_m = 1
+    elif num_rows <= 2:
+        block_m = 2
+    elif num_rows <= 4:
+        block_m = 4
+    else:
+        block_m = 8
+    grid = (triton.cdiv(num_rows, block_m), triton.cdiv(token_count, 64))
     _fp8_paged_mqa_logits_kernel[grid](
         q,
         kv_values,
@@ -350,7 +363,7 @@ def fp8_paged_mqa_logits_triton(
         block_tables.stride(1),
         logits.stride(0),
         logits.stride(1),
-        BLOCK_M=4,
+        BLOCK_M=block_m,
         BLOCK_N=64,
         BLOCK_D=64,
         num_warps=4,
