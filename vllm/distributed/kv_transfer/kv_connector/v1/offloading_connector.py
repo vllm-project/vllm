@@ -175,10 +175,9 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         return "HND"
 
     def reset_cache(self) -> bool | None:
-        if self.connector_scheduler is not None:
-            self.connector_scheduler.reset_cache()
-            return True
-        return None
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.reset_cache()
+        return True
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:

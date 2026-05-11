@@ -223,6 +223,7 @@ class OffloadingConnectorScheduler:
 
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
+        self._job_reset_counter: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -802,6 +803,8 @@ class OffloadingConnectorScheduler:
             meta = OffloadingWorkerMetadata()
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
+            if job_id < self._job_reset_counter:
+                continue
             job_status = self._jobs[job_id]
             job_status.pending_count -= count
             if job_status.pending_count > 0:
@@ -888,10 +891,17 @@ class OffloadingConnectorScheduler:
         for status in self._req_status.values():
             for group_state in status.group_states:
                 group_state.next_stored_block_idx = 0
-        if self._blocks_being_loaded is not None:
+        if self._blocks_being_loaded:
             self._blocks_being_loaded.clear()
-        self._current_batch_load_jobs.clear()
-        self._current_batch_jobs_to_flush.clear()
+        if self._current_batch_load_jobs:
+            self._current_batch_load_jobs.clear()
+        if self._current_batch_jobs_to_flush:
+            self._current_batch_jobs_to_flush.clear()
+        if self._block_id_to_pending_jobs:
+            self._block_id_to_pending_jobs.clear()
+        if self._jobs:
+            self._jobs.clear()
+        self._job_reset_counter = self._job_counter
 
     def shutdown(self) -> None:
         self.manager.shutdown()
