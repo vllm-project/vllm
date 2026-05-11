@@ -2005,6 +2005,8 @@ class EngineCoreActorMixin:
         vllm_config.parallel_config.data_parallel_index = dp_rank
         vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank
 
+        self._set_nixl_side_channel_host()
+
         # Set CUDA_VISIBLE_DEVICES as early as possible in actor life cycle
         # NOTE: in MP we set CUDA_VISIBLE_DEVICES at process creation time,
         # and this cannot be done in the same way for Ray because:
@@ -2023,6 +2025,16 @@ class EngineCoreActorMixin:
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
         self._set_visible_devices(vllm_config, local_dp_rank)
+
+    @staticmethod
+    def _set_nixl_side_channel_host():
+        import ray
+
+        # The driver-side value is excluded from Ray actor env propagation.
+        # Fill in an actor-local default while preserving explicit overrides.
+        os.environ.setdefault(
+            "VLLM_NIXL_SIDE_CHANNEL_HOST", ray.util.get_node_ip_address()
+        )
 
     def _set_visible_devices(self, vllm_config: VllmConfig, local_dp_rank: int):
         from vllm.platforms import current_platform
