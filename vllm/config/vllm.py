@@ -155,6 +155,15 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if use_inductor_graph_partition is enabled."""
+
+    return (
+        cfg.compilation_config.use_inductor_graph_partition
+        or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+    )
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
 
@@ -184,6 +193,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
+            "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -204,6 +214,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
+            "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -226,6 +237,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -248,6 +260,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -1724,6 +1737,41 @@ class VllmConfig:
                         "rope+kvcache fusion enabled for num_tokens <= %d.",
                         compile_range_end,
                     )
+
+        if compilation_config.pass_config.fuse_aiter_qk_rope_kvcache_mla:
+            pass_config = compilation_config.pass_config
+            max_token_num = pass_config.aiter_qk_rope_kvcache_fusion_max_token_num
+            if max_token_num is None:
+                # Auto-derive the decode-bucket upper bound: the largest batch
+                # that can be all-decode is one token per running sequence
+                # times (1 + num_speculative_tokens) for spec-decode. This
+                # matches CudaGraphManager._init_candidates' classification
+                # for decode-mode captures, keeping the lift/fusion passes
+                # active across exactly the same set of compile ranges that
+                # the runtime considers "decode". Explicit values override.
+                decode_query_len = 1 + self.num_speculative_tokens
+                max_token_num = (
+                    self.scheduler_config.max_num_seqs * decode_query_len
+                )
+                pass_config.aiter_qk_rope_kvcache_fusion_max_token_num = (
+                    max_token_num
+                )
+                logger.debug(
+                    "Auto-derived aiter_qk_rope_kvcache_fusion_max_token_num="
+                    "%d (max_num_seqs=%d, decode_query_len=%d).",
+                    max_token_num,
+                    self.scheduler_config.max_num_seqs,
+                    decode_query_len,
+                )
+            if compile_range_end is not None and max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
+            else:
+                logger.debug(
+                    "Max num batched tokens below AITER QK-RoPE+KVCache "
+                    "fusion threshold, AITER MLA fusion enabled for "
+                    "num_tokens <= %d.",
+                    compile_range_end,
+                )
 
         if compilation_config.pass_config.fuse_minimax_qk_norm:
             from vllm.compilation.passes.fusion.minimax_qk_norm_fusion import (

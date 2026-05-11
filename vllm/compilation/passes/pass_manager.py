@@ -32,7 +32,12 @@ if rocm_aiter_ops.is_enabled():
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
+    from .fusion.mla_aiter_qk_rope_kvcache_fusion import (
+        MLAAiterQkRopeKVCacheFusionPass,
+    )
     from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
+    from .fusion.mla_decode_q_prep_lift import MLADecodeQPrepLiftPass
+    from .fusion.mla_rope_kvcache_cat_fusion import MLARoPEKVCacheCatFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -173,6 +178,19 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [ScatterSplitReplacementPass(config)]
                 self.passes += [RopeKVCacheFusionPass(config)]
+
+            if self.pass_config.fuse_rope_kvcache_cat_mla:
+                self.passes += [MLARoPEKVCacheCatFusionPass(config)]
+                if self.pass_config.fuse_aiter_qk_rope_kvcache_mla:
+                    # Order matters: lift pass first (introduces
+                    # mla_decode_q_prep), then AITER fusion pass (matches the
+                    # pair of fused_rope_unified_mla_kv_cache_update +
+                    # mla_decode_q_prep). Both are decode-bucket-only via
+                    # is_applicable_for_range.
+                    self.passes += [
+                        MLADecodeQPrepLiftPass(config),
+                        MLAAiterQkRopeKVCacheFusionPass(config),
+                    ]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnQuantFusionPass(config)]

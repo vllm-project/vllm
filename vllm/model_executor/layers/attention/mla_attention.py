@@ -345,6 +345,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: object | None = None,
         **extra_impl_args,
@@ -374,14 +375,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
 
         dtype = torch.get_default_dtype()
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            dtype,
-            kv_cache_dtype,
-            use_mla=True,
-            use_sparse=use_sparse,
-            num_heads=self.num_heads,
-        )
+        if attn_backend is not None:
+            assert attn_backend.is_mla(), (
+                f"MLAAttention: attn_backend must be an MLA backend, "
+                f"got {attn_backend.get_name()} instead"
+            )
+            self.attn_backend = attn_backend
+        else:
+            self.attn_backend = get_attn_backend(
+                self.head_size,
+                dtype,
+                kv_cache_dtype,
+                use_mla=True,
+                use_sparse=use_sparse,
+                num_heads=self.num_heads,
+            )
 
         # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
         # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
@@ -520,6 +528,136 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return self._chunked_prefill_workspace_size
 
+    def do_decode_q_prep_inputs(
+        self, q: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Decode q-prep BMM only, no cat / quant.
+
+        Returns ``(ql_nope, q_pe)`` where ``ql_nope`` has shape
+        ``[T, num_heads, kv_lora_rank]`` (post q-absorb BMM) and ``q_pe`` has
+        shape ``[T, num_heads, qk_rope_head_dim]`` (raw, pre-RoPE).
+
+        Used by the AITER fused-QK-RoPE+KVCache kernel which performs the cat
+        and FP8 quant itself. INVARIANT: must process every row of ``q``;
+        no internal slicing on attention metadata, so the output batch dim
+        is always exactly ``q.size(0)``.
+        """
+        q_nope, q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        # Convert from (B, N, P) to (N, B, P) for the BMM.
+        q_nope_t = q_nope.transpose(0, 1)
+
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+            # AITER fusion does its own quant on the cat output, so don't
+            # pre-quant here even if fp8_attention is on. The non-fused
+            # do_decode_q_prep still pre-quants because it has no fused-quant
+            # downstream.
+            ql_nope = batched_gemm_a16wfp4(
+                q_nope_t,
+                self.W_K,
+                self.W_K_scale,
+                transpose_bm=True,
+                prequant=True,
+                y_scale=None,
+            )
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                q_nope_t,
+                self.W_K,
+                self.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            N, B, P = q_nope_t.shape
+            _, _, L = self.W_UK_T.shape
+            ql_nope = q_nope_t.new_empty((N, B, L))
+            torch.bmm(q_nope_t, self.W_UK_T, out=ql_nope)
+            ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
+
+    def do_decode_q_prep(
+        self, q: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Decode q-prep: q-absorb BMM + (when fp8_attention) cat + FP8 quant.
+
+        Returns either:
+        - a single concatenated FP8 tensor of shape
+          ``[T, num_heads, kv_lora_rank + qk_rope_head_dim]`` when
+          ``fp8_attention and supports_quant_query_input`` (the path the
+          AITER fused kernel maps to), or
+        - a tuple ``(ql_nope, q_pe)`` otherwise (which downstream
+          ``forward_mqa`` already handles by concatenating internally).
+
+        INVARIANT (no shape lying): processes every row of ``q``. NEVER slices
+        on ``num_decode_tokens`` or any attention-metadata-derived count.
+        Honoring this is what makes the ``mla_decode_q_prep`` fake_impl shape
+        match the real output and keeps CUDA-graph capture safe (the
+        discarded-PR fault on the (4682, 16384) range was caused by
+        violating this rule).
+        """
+        fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        q_nope, q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        q_nope_t = q_nope.transpose(0, 1)
+
+        if self.q_pad_num_heads is not None:
+            B, N, L = q_pe.shape
+            pe_padded = q_pe.new_empty((B, self.q_pad_num_heads, L))
+            pe_padded.resize_((B, N, L))
+            pe_padded.copy_(q_pe)
+            q_pe = pe_padded
+
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+            ql_nope = batched_gemm_a16wfp4(
+                q_nope_t,
+                self.W_K,
+                self.W_K_scale,
+                transpose_bm=True,
+                prequant=True,
+                y_scale=self._q_scale if fp8_attention else None,
+            )
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                q_nope_t,
+                self.W_K,
+                self.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            N, B, P = q_nope_t.shape
+            _, _, L = self.W_UK_T.shape
+            if self.q_pad_num_heads is not None:
+                ql_nope = q_nope_t.new_empty((self.q_pad_num_heads, B, L))
+                ql_nope.resize_((N, B, L))
+            else:
+                ql_nope = q_nope_t.new_empty((N, B, L))
+            torch.bmm(q_nope_t, self.W_UK_T, out=ql_nope)
+            ql_nope = ql_nope.transpose(0, 1)
+
+        if fp8_attention and self.impl.supports_quant_query_input:
+            assert ql_nope.shape[0] == q_pe.shape[0]
+            assert ql_nope.shape[1] == q_pe.shape[1]
+            return self._decode_concat_quant_fp8_op(ql_nope, q_pe, self._q_scale)
+        return (ql_nope, q_pe)
+
+    def do_decode_q_prep_concat(self, q: torch.Tensor) -> torch.Tensor:
+        """Always-concatenated variant of ``do_decode_q_prep`` used by the
+        ``mla_decode_q_prep`` custom op. Returns shape
+        ``[q.size(0), num_heads, kv_lora_rank + qk_rope_head_dim]``.
+        """
+        out = self.do_decode_q_prep(q)
+        if isinstance(out, tuple):
+            return torch.cat(out, dim=-1)
+        return out
+
     def forward(
         self,
         q: torch.Tensor,
@@ -605,6 +743,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        q_prepped: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -690,73 +829,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
-            mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
 
-            mqa_q_nope, mqa_q_pe = mqa_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
-
-            # Convert from (B, N, P) to (N, B, P)
-            mqa_q_nope = mqa_q_nope.transpose(0, 1)
-
-            if self.q_pad_num_heads is not None:
-                B, N, L = mqa_q_pe.shape
-                mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
-                mqa_pe_padded.resize_((B, N, L))
-                mqa_pe_padded.copy_(mqa_q_pe)
-                mqa_q_pe = mqa_pe_padded
-
-            if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
-
-                mqa_ql_nope = batched_gemm_a16wfp4(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    transpose_bm=True,
-                    prequant=True,
-                    y_scale=self._q_scale if fp8_attention else None,
-                )
-            elif self.is_aiter_triton_fp8_bmm_enabled:
-                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    mqa_q_nope,
-                    self.W_K,
-                    self.W_K_scale,
-                    group_size=128,
-                    transpose_bm=True,
-                )
+            if q_prepped is None:
+                mqa_q = self.do_decode_q_prep(q[:num_mqa_tokens])
             else:
-                # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = mqa_q_nope.shape
-                _, _, L = self.W_UK_T.shape
+                # The lift pass (MLADecodeQPrepLiftPass) ran q-prep upfront
+                # on the full compile-bucket-sized q. Take the decode rows.
+                # In a clean pure-decode bucket this is a no-op, but the slice
+                # keeps semantics aligned in case of bucket bleed-through.
+                mqa_q = q_prepped[:num_mqa_tokens]
 
-                if self.q_pad_num_heads is not None:
-                    mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
-                    mqa_ql_nope.resize_((N, B, L))
-                else:
-                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-
-                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
-
-                # Convert from (N, B, L) to (B, N, L)
-                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
-
-            if fp8_attention and self.impl.supports_quant_query_input:
-                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
-            else:
-                mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
-                # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
+                # In the non-fp8 path do_decode_q_prep returns a tuple
+                # (ql_nope, q_pe) — concatenate before all-gather.
+                if isinstance(mqa_q, tuple):
+                    mqa_q = torch.cat(mqa_q, dim=-1)
+                # All-gather in head dim across DCP ranks.
                 mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
@@ -1008,23 +1098,9 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    forward_context = get_forward_context()
-    attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache
-
-    # This needs to run even when we don't have metadata yet, so that the op
-    # is correctly captured.
-    if kv_cache.numel() == 0:
-        # Can't update an empty KV cache.
-        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-
-    slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
-    layer_slot_mapping = slot_mapping.get(layer_name)
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        attn_layer.impl.do_kv_cache_update(
+        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
             kv_cache,
@@ -1053,6 +1129,65 @@ direct_register_custom_op(
 )
 
 
+def mla_decode_q_prep(
+    q: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    """Decode-side q-prep custom op: q-absorb BMM + cat with q_pe + optional
+    FP8 quant. Output shape ``[q.size(0), num_heads, kv_lora + qk_rope]``.
+
+    INVARIANT 1 (no shape lying): processes every row of ``q``. The output's
+    batch dim equals ``q.size(0)`` exactly. NEVER slice ``q[:num_decode_tokens]``
+    inside ``do_decode_q_prep`` — that is the fake/real shape mismatch that
+    caused the discarded PR's CUDA-graph capture fault on the
+    (4682, 16384) compile range.
+
+    INVARIANT 2 (gating): this op is ONLY inserted into FX graphs by
+    ``MLADecodeQPrepLiftPass``, which runs only for compile ranges where
+    ``compile_range.end <= max_decode_tokens``. No prefill or large-batch
+    graph contains this op, so allocating ``[T, num_heads, kv_lora + pe]``
+    is always memory-safe.
+
+    The op is a pure function (not mutating), modeled like
+    ``unified_mla_kv_cache_update``: it reads layer state via
+    ``forward_context``.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    fc = get_forward_context()
+    layer = fc.no_compile_layers[layer_name]
+    return layer.do_decode_q_prep_concat(q)
+
+
+def mla_decode_q_prep_fake(
+    q: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    layer_name = _resolve_layer_name(layer_name)
+    fc = get_forward_context()
+    layer = fc.no_compile_layers[layer_name]
+    fp8_attention = is_quantized_kv_cache(layer.kv_cache_dtype)
+    out_dtype = (
+        _FP8_DTYPE
+        if (fp8_attention and layer.impl.supports_quant_query_input)
+        else q.dtype
+    )
+    return torch.empty(
+        q.size(0),
+        layer.num_heads,
+        layer.kv_lora_rank + layer.qk_rope_head_dim,
+        device=q.device,
+        dtype=out_dtype,
+    )
+
+
+direct_register_custom_op(
+    op_name="mla_decode_q_prep",
+    op_func=mla_decode_q_prep,
+    mutates_args=[],
+    fake_impl=mla_decode_q_prep_fake,
+)
+
+
 @maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
@@ -1067,6 +1202,7 @@ def unified_mla_attention_with_output(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    q_prepped: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1087,6 +1223,7 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        q_prepped=q_prepped,
     )
 
 
@@ -1103,6 +1240,7 @@ def unified_mla_attention_with_output_fake(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    q_prepped: torch.Tensor | None = None,
 ) -> None:
     return
 
@@ -1113,6 +1251,7 @@ direct_register_custom_op(
     mutates_args=["output", "output_block_scale"],
     fake_impl=unified_mla_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.flexible_layout,),
 )
 
 

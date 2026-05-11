@@ -136,8 +136,10 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
-    enable_qk_norm_rope_fusion: bool = False
+    enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
+    fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
+    """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
@@ -146,11 +148,31 @@ class PassConfig:
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
+    fuse_aiter_qk_rope_kvcache_mla: bool = None  # type: ignore[assignment]
+    """Fuse decode-side MLA RoPE + KV cache write + q-absorb BMM + q concat
+    + q FP8 quant into AITER's ``fused_qk_rope_concat_and_cache_mla`` kernel.
+    Requires ``fuse_rope_kvcache_cat_mla`` (the chain runs on top of PR #40392's
+    fused-RoPE+KVCache pass). ROCm + AITER only."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
     """
+
+    aiter_qk_rope_kvcache_fusion_max_token_num: int | None = None
+    """Compile-range upper bound for the AITER MLA QK-RoPE+KVCache+q-prep
+    fusion. Both ``MLADecodeQPrepLiftPass`` and ``MLAAiterQkRopeKVCacheFusionPass``
+    only run for compile ranges with ``end <= this`` (decode-bucket only).
+    Crucial for memory bounding and CUDA-graph capture safety: the lift op is
+    literally absent from prefill / large-batch graphs.
+
+    When ``None`` (default), the value is auto-derived in
+    :py:meth:`VllmConfig._set_compile_ranges` as
+    ``scheduler_config.max_num_seqs * (1 + num_speculative_tokens)`` — the same
+    formula :py:class:`CudaGraphManager` uses to classify decode-mode
+    CUDA-graph captures, so the gate is exactly aligned with the largest
+    possible all-decode batch. Set explicitly to override (e.g. for ablation
+    or to match a specific ``compile_size``)."""
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -228,6 +250,8 @@ class PassConfig:
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
+        "fuse_rope_kvcache_cat_mla",
+        "fuse_aiter_qk_rope_kvcache_mla",
         mode="wrap",
     )
     @classmethod
@@ -285,6 +309,28 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False
+        if self.fuse_rope_kvcache_cat_mla and not current_platform.is_cuda_alike():
+            logger.warning_once(
+                "MLA KV cache update with RoPE fusion enabled but the "
+                "current platform is not CUDA or ROCm. The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache_cat_mla = False
+        if self.fuse_aiter_qk_rope_kvcache_mla:
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if not (current_platform.is_rocm() and rocm_aiter_ops.is_enabled()):
+                logger.warning_once(
+                    "AITER MLA QK-RoPE+KVCache fusion requires ROCm + AITER. "
+                    "The fusion will be disabled."
+                )
+                self.fuse_aiter_qk_rope_kvcache_mla = False
+            elif not self.fuse_rope_kvcache_cat_mla:
+                logger.warning_once(
+                    "AITER MLA QK-RoPE+KVCache fusion requires "
+                    "fuse_rope_kvcache_cat_mla=True (it chains on top of that "
+                    "pass). Auto-enabling fuse_rope_kvcache_cat_mla."
+                )
+                self.fuse_rope_kvcache_cat_mla = True
 
     def log_enabled_passes(self) -> None:
         """
@@ -943,6 +989,17 @@ class CompilationConfig:
         ):
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+
+        if (
+            (
+                self.pass_config.fuse_rope_kvcache_cat_mla
+                or self.pass_config.fuse_aiter_qk_rope_kvcache_mla
+            )
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # The MLA RoPE+KVCache pattern matches RotaryEmbedding's custom-op
+            # form. Force-enable it so the pattern actually fires.
             self.custom_ops.append("+rotary_embedding")
 
         if (
