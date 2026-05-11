@@ -1055,13 +1055,19 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
         q + query_start_off * q_stride + wg_start_head_idx * HEAD_SIZE;
     const _B16x8* q_ptrh8 = reinterpret_cast<const _B16x8*>(q_ptr);
     const int qhead_elemh8 = laneid / 4;
+    const bool qhead_elemh8_in_range = qhead_elemh8 < (HEAD_SIZE / 8);
 
     for (int h = 0; h < QHLOOP - 1; h++) {
       const int qhead_idx = h * 4 + lane4id;
-      Qlocal[h] = q_ptrh8[qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
+      if (qhead_elemh8_in_range) {
+        Qlocal[h] = q_ptrh8[qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
+      } else {
+        Qlocal[h].xy[0] = {0};
+        Qlocal[h].xy[1] = {0};
+      }
     }
     const int final_qhead_idx = 4 * (QHLOOP - 1) + lane4id;
-    if (final_qhead_idx < GQA_RATIO) {
+    if (final_qhead_idx < GQA_RATIO && qhead_elemh8_in_range) {
       Qlocal[QHLOOP - 1] =
           q_ptrh8[final_qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
     } else {
