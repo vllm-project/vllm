@@ -489,7 +489,7 @@ class Molmo2VisionTransformer(nn.Module):
         self.transformer = Molmo2VisionBlockCollection(
             config,
             quant_config,
-            prefix=f"{prefix}.transformer",
+            prefix=maybe_prefix(prefix, "transformer"),
         )
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
