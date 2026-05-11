@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# once we have more CuteDSL kernels in vLLM, we can refactor small helper functions
-# to a separate file
 from functools import cache
 
 import cutlass
@@ -9,10 +7,16 @@ import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
 from cutlass import BFloat16, Float32, Int64, Uint8, Uint32, const_expr
-from cutlass._mlir.dialects import llvm
-from cutlass.cutlass_dsl import T, dsl_user_op
 from quack.compile_utils import make_fake_tensor
 
+from vllm.v1.attention.ops.deepseek_v4_ops.cutedsl_utils import (
+    _bf16x2_abs,
+    _bf16x2_max,
+    _bf16x2_to_fp32,
+    _fp32x2_to_bf16x2,
+    _fp32x8_to_fp4x8,
+    _recast_val,
+)
 from vllm.vllm_flash_attn.cute import utils as cute_utils
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
@@ -59,94 +63,6 @@ def fused_indexer_q_rope_quant_mxfp4_cutedsl(
         index_weights_out,
         scale,
     )
-
-
-@dsl_user_op
-def _recast_val(x, dtype, *, loc=None, ip=None):
-    return dtype(llvm.bitcast(dtype.mlir_type, x.ir_value(loc=loc, ip=ip)))
-
-
-@dsl_user_op
-def _fp32x2_to_bf16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "cvt.rn.bf16x2.f32 $0, $2, $1;",
-        "=r,f,f",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
-
-
-@dsl_user_op
-def _bf16x2_to_fp32(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
-    out = llvm.inline_asm(
-        llvm.StructType.get_literal([T.f32(), T.f32()]),
-        [data.ir_value(loc=loc, ip=ip)],
-        "shl.b32 $0, $2, 16;\n\tand.b32 $1, $2, 0xFFFF0000;\n",
-        "=f,=f,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return (
-        Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
-        Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
-    )
-
-
-@dsl_user_op
-def _bf16x2_abs(a: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip)],
-        "abs.bf16x2 $0, $1;",
-        "=r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
-
-
-@dsl_user_op
-def _bf16x2_max(a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint32:
-    out = llvm.inline_asm(
-        T.i32(),
-        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
-        "max.bf16x2 $0, $1, $2;",
-        "=r,r,r",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
-
-
-@dsl_user_op
-def _fp32x8_to_fp4x8(
-    vals: cute.Tensor,
-    offset: cutlass.Constexpr[int],
-    *,
-    loc=None,
-    ip=None,
-) -> Uint32:
-    # Pack eight scaled FP32 values into four E2M1x2 bytes, returned as one b32.
-    assert vals.element_type is Float32
-    out = llvm.inline_asm(
-        T.i32(),
-        [vals[offset + i].ir_value(loc=loc, ip=ip) for i in range(8)],
-        "{\n\t"
-        ".reg .b8 x0, x1, x2, x3;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 x0, $2, $1;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 x1, $4, $3;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 x2, $6, $5;\n\t"
-        "cvt.rn.satfinite.e2m1x2.f32 x3, $8, $7;\n\t"
-        "mov.b32 $0, {x0, x1, x2, x3};\n\t"
-        "}\n",
-        "=r,f,f,f,f,f,f,f,f",
-        has_side_effects=False,
-        is_align_stack=False,
-    )
-    return Uint32(out)
 
 
 class IndexerQMxFp4Kernel:
