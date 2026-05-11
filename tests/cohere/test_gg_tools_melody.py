@@ -259,7 +259,7 @@ async def run_tool_chat_completions_tests(args):
         '{"reasoning_start_str": "<|START_THINKING|>", '
         '"reasoning_end_str": "<|END_THINKING|>"}',
         "--structured-outputs-config",
-        '{"backend": "xgrammar"}',
+        '{"backend": "xgrammar", "enable_in_reasoning":true}',
         "--reasoning-parser",
         "cohere_command4",
         # tool_choice="auto" with Cohere needs ToolParser; vLLM only loads it when

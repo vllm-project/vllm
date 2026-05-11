@@ -104,7 +104,7 @@ def _server_args(args: argparse.Namespace) -> list[str]:
         '{"reasoning_start_str": "<|START_THINKING|>", '
         '"reasoning_end_str": "<|END_THINKING|>"}',
         "--structured-outputs-config",
-        '{"backend": "xgrammar"}',
+        '{"backend": "xgrammar", "enable_in_reasoning":true}',
         "--reasoning-parser",
         "cohere_command4",
     ]
