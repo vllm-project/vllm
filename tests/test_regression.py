@@ -56,9 +56,10 @@ def test_gc():
 
 
 def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
-    # model: https://modelscope.cn/models/qwen/Qwen1.5-0.5B-Chat/summary
+    # model: https://www.modelscope.ai/models/qwen/Qwen1.5-0.5B-Chat
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")
+        m.setenv("MODELSCOPE_DOMAIN", "www.modelscope.ai")
         # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
         # with 400 Client Error: Bad Request.
         m.setenv("HF_TOKEN", "")
