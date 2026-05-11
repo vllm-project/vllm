@@ -1454,7 +1454,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--self-timed",
         action="store_true",
-        default=False,
+        default=True,
         help="Use timing information from the traces instead of the configuration."
         "This is useful when replaying traces faithfully based on their timestamps.",
     )
