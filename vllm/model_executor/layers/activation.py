@@ -712,6 +712,7 @@ _ACTIVATION_REGISTRY = LazyDict(
         "relu": lambda: nn.ReLU(),
         "relu2": lambda: ReLUSquaredActivation(),
         "silu": lambda: nn.SiLU(),
+        "swish": lambda: nn.SiLU(),
         "quick_gelu": lambda: QuickGELU(),
         "tanh": lambda: nn.Tanh(),
         "sigmoid": lambda: nn.Sigmoid(),
@@ -751,7 +752,9 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
 _ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
     {
         "gelu": lambda: GeluAndMul(),
+        "gelu_pytorch_tanh": lambda: GeluAndMul(approximate="tanh"),
         "silu": lambda: SiluAndMul(),
+        "swish": lambda: SiluAndMul(),
         "geglu": lambda: GeluAndMul(),
         "swigluoai": lambda: SwigluOAIAndMul(),
     }

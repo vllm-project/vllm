@@ -199,6 +199,9 @@ def test_update_weights_calls_engine():
             WeightTransferInitRequest(init_info={"test_param": "init"})
         )
 
+        # Start weight update (required before update_weights)
+        llm.start_weight_update(is_checkpoint_format=True)
+
         # Call update_weights
         test_names = ["layer.weight", "layer.bias"]
         test_dtypes = ["float32", "float32"]
@@ -229,10 +232,14 @@ def test_update_weights_calls_engine():
             assert dtypes == test_dtypes
             assert shapes == test_shapes
 
+        # Finish weight update
+        llm.finish_weight_update()
+
 
 @create_new_process_for_each_test()
 def test_full_weight_transfer_flow():
-    """Test the complete weight transfer flow: init -> update."""
+    """Test the complete weight transfer flow:
+    init -> start -> update -> finish."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
@@ -253,12 +260,15 @@ def test_full_weight_transfer_flow():
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
         )
 
-        # Step 1: Initialize
+        # Step 1: Initialize weight transfer engine
         llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "flow_test"})
         )
 
-        # Step 2: Update weights
+        # Step 2: Start weight update
+        llm.start_weight_update(is_checkpoint_format=True)
+
+        # Step 3: Update weights
         llm.update_weights(
             WeightTransferUpdateRequest(
                 update_info={
@@ -268,6 +278,9 @@ def test_full_weight_transfer_flow():
                 }
             )
         )
+
+        # Step 4: Finish weight update
+        llm.finish_weight_update()
 
         # Verify the full flow completed
         def check_flow(self):

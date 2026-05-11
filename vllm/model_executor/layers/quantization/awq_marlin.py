@@ -763,7 +763,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             )
 
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             BatchedMarlinExperts,
             MarlinExperts,
         )
