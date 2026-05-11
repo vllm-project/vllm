@@ -5,19 +5,16 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
-from typing import Any, cast
 from unittest.mock import patch
 
 import pydantic
 import pytest
-import torch
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
-    DeviceConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
