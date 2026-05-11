@@ -276,7 +276,13 @@ def has_flashinfer_b12x_gemm() -> bool:
     if not has_flashinfer_cutedsl():
         return False
     mod = _get_submodule("flashinfer.gemm")
-    return mod is not None and hasattr(mod, "Sm120BlockScaledDenseGemmKernel")
+    if mod is None:
+        return False
+    # FlashInfer 0.6.11 renamed Sm120BlockScaledDenseGemmKernel ->
+    # Sm120B12xBlockScaledDenseGemmKernel (commit 223f2a49). Accept either.
+    return hasattr(mod, "Sm120B12xBlockScaledDenseGemmKernel") or hasattr(
+        mod, "Sm120BlockScaledDenseGemmKernel"
+    )
 
 
 @functools.cache
