@@ -143,6 +143,53 @@ Every plugin has three parts:
 
 7. (optional) Implement other pluggable modules, such as lora, graph backend, quantization, mamba attention backend, etc.
 
+### Advanced engine-core extension points
+
+Platform plugins can also replace the classes used to construct and launch
+V1 engine cores. These are advanced hooks intended for platforms that need to
+substitute their own engine-core implementations without forking vLLM's engine
+startup flow.
+
+Set these fields in
+[`Platform.check_and_update_config`][vllm.platforms.interface.Platform.check_and_update_config]
+by assigning fully qualified class names to `vllm_config.parallel_config`:
+
+- `engine_core_cls`: in-process engine core used by `InprocClient`
+- `engine_core_proc_cls`: subprocess engine core used by
+  `CoreEngineProcManager`
+- `dp_engine_core_proc_cls`: data-parallel subprocess engine core used by
+  `run_engine_core`
+- `engine_core_actor_cls`: Ray actor engine core used by
+  `CoreEngineActorManager`
+- `dp_engine_core_actor_cls`: data-parallel Ray actor engine core used by
+  `CoreEngineActorManager`
+
+All of these fields default to the current built-in classes, so plugins only
+need to set the fields they want to override.
+
+For example, a platform plugin can redirect the in-process and subprocess
+engine-core construction like this:
+
+??? code
+
+    ```python
+    class MyPlatform(Platform):
+
+        @classmethod
+        def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+            parallel_config = vllm_config.parallel_config
+            parallel_config.engine_core_cls = (
+                "my_plugin.engine.MyInprocEngineCore"
+            )
+            parallel_config.engine_core_proc_cls = (
+                "my_plugin.engine.MyEngineCoreProc"
+            )
+    ```
+
+These hooks only change which classes are instantiated. The selected classes
+must remain compatible with the constructor and runtime expectations of the
+call sites above.
+
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets.
