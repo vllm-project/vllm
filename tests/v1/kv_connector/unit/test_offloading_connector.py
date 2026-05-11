@@ -14,11 +14,14 @@ from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 from vllm.platforms import current_platform
 
+CPU_BLOCK_SIZES: int = 64 if current_platform.is_xpu() else 48
 _ATTN_BACKENDS: list[str] = []
 if current_platform.is_cuda():
     _ATTN_BACKENDS = ["FLASH_ATTN", "FLASHINFER", "TRITON_ATTN"]
 elif current_platform.is_rocm():
     _ATTN_BACKENDS = ["TRITON_ATTN"]
+elif current_platform.is_xpu():
+    _ATTN_BACKENDS = ["FLASH_ATTN", "TRITON_ATTN"]
 
 # (model, attn_backend | None, block_size | None, uses_hma)
 #
@@ -30,14 +33,14 @@ elif current_platform.is_rocm():
 #   After page-size unification the mamba and attention groups have
 #   different block sizes.
 MODEL_PARAMS: list[tuple[str, str | None, int | None, bool]] = [
-    ("meta-llama/Llama-3.2-1B-Instruct", backend, 48, False)
+    ("meta-llama/Llama-3.2-1B-Instruct", backend, CPU_BLOCK_SIZES, False)
     for backend in _ATTN_BACKENDS
 ]
 # HMA / Mamba models are only tested on CUDA (not ROCm).
 if current_platform.is_cuda():
     MODEL_PARAMS += [
-        ("google/gemma-3-1b-it", None, 48, True),
-        ("state-spaces/mamba-130m-hf", None, 48, True),
+        ("google/gemma-3-1b-it", None, CPU_BLOCK_SIZES, True),
+        ("state-spaces/mamba-130m-hf", None, CPU_BLOCK_SIZES, True),
         # Falcon-H1: parallel hybrid (every layer has both attention and SSM).
         # The mamba and attention groups end up with different GPU block sizes
         # after page-size unification, so we leave cpu_block_size=None
