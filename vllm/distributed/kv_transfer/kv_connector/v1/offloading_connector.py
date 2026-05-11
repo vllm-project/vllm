@@ -163,6 +163,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        return "HND"
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
             return None  # We only emit stats from the worker-side
