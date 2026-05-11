@@ -6,7 +6,7 @@ This is an alternative to :class:`CUDAGraphWrapper` that replaces vLLM's
 torch.compile-based FX graph splitting with runtime stream-capture
 breaks.
 
-The idea (mirroring sgl-project/sglang#19102): instead of pre-splitting
+The idea (inspired by sgl-project/sglang#19102): instead of pre-splitting
 the model into many pieces at attention boundaries, a
 single capture context drives the whole forward and intercepts
 attention / kv-cache custom ops at the dispatcher to end the current
@@ -316,9 +316,25 @@ class BreakableCUDAGraphWrapper:
 
         if entry.capture is None:
             return self._capture(entry, args, kwargs)
-        return self._replay(entry, args)
+        return self._replay(entry, args, kwargs)
 
     # --- capture / replay paths -----------------------------------------
+
+    @staticmethod
+    def _collect_tensor_addresses(
+        args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> list[int]:
+        """Flatten tensor data_ptrs from positional and keyword args in a
+        stable order (positionals first, then kwargs in insertion order).
+
+        Used for the DEBUG-mode address-stability check; covers both call
+        styles since vLLM models are typically invoked with kwargs.
+        """
+        addrs = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+        addrs.extend(
+            v.data_ptr() for v in kwargs.values() if isinstance(v, torch.Tensor)
+        )
+        return addrs
 
     def _capture(
         self,
@@ -330,9 +346,7 @@ class BreakableCUDAGraphWrapper:
         # TODO: debug, will remove later
         print(f"Starting breakable cudagraph capture for {entry.batch_descriptor}")
 
-        entry.input_addresses = [
-            x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-        ]
+        entry.input_addresses = self._collect_tensor_addresses(args, kwargs)
 
         if self.graph_pool is not None:
             set_graph_pool_id(self.graph_pool)
@@ -377,9 +391,14 @@ class BreakableCUDAGraphWrapper:
         # caller of model(...) gets a tensor pointing at the cudagraph pool's memory
         return output
 
-    def _replay(self, entry: _BreakableEntry, args: tuple[Any, ...]) -> Any:
+    def _replay(
+        self,
+        entry: _BreakableEntry,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
         if self.is_debugging_mode and entry.input_addresses is not None:
-            new_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+            new_addresses = self._collect_tensor_addresses(args, kwargs)
             assert new_addresses == entry.input_addresses, (
                 "Input tensor addresses changed between capture and replay "
                 f"for {entry.batch_descriptor}. Expected "
