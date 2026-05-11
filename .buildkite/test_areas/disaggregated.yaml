@@ -118,3 +118,25 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
+# P TP 4 - D DPEP 4 test case for DSv4-Flash
+- label: DSv4-Flash Disaggregated DP EP
+  key: dsv4-flash-disaggregated
+  timeout_in_minutes: 30
+  device: h200
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 8
+  env:
+    ENABLE_HMA_FLAG: "1"
+    DP_EP: "1"
+    GPU_MEMORY_UTILIZATION: "0.85"
+    PREFILLER_TP_SIZE: "4"
+    DECODER_TP_SIZE: "4"
+    PREFILL_BLOCK_SIZE: "256"
+    DECODE_BLOCK_SIZE: "256"
+    MODEL_NAMES: "deepseek-ai/DeepSeek-V4-Flash"
+    VLLM_SERVE_EXTRA_ARGS: "--trust-remote-code,--kv-cache-dtype,fp8"
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
