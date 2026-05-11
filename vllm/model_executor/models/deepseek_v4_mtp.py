@@ -142,12 +142,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            hidden_states,
-            positions,
-            None,
-            None,
-            None,
-            None,
+            positions=positions, x=hidden_states, input_ids=None
         )
         hidden_states = self.mtp_block.hc_post(
             hidden_states, residual, post_mix, res_mix
