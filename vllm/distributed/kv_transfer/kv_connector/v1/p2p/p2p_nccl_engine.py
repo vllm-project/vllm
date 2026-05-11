@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from collections import deque
@@ -41,14 +42,26 @@ DEFAULT_MEM_POOL_SIZE_GB = 32
 
 
 def _split_zmq_address(address: str) -> tuple[str, int]:
+    if not address:
+        raise ValueError("P2P ZMQ address cannot be empty")
+
     if address.startswith("["):
-        return split_host_port(address)
+        try:
+            return split_host_port(address)
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"Invalid P2P ZMQ address: {address}") from exc
 
     # Keep accepting legacy unbracketed IPv6 addresses from existing request ids.
-    host, port = address.rsplit(":", 1)
+    parts = address.rsplit(":", 1)
+    if len(parts) != 2:
+        raise ValueError(f"Invalid P2P ZMQ address: {address}")
+    host, port = parts
     if not host or not port:
         raise ValueError(f"Invalid P2P ZMQ address: {address}")
-    return host, int(port)
+    try:
+        return host, int(port)
+    except ValueError as exc:
+        raise ValueError(f"Invalid P2P ZMQ address: {address}") from exc
 
 
 def _normalize_zmq_address(address: str) -> str:
@@ -63,8 +76,20 @@ def _make_zmq_tcp_path(address: str) -> str:
 
 def _enable_ipv6_if_needed(sock: zmq.Socket, address: str) -> None:
     host, _ = _split_zmq_address(address)
-    if is_valid_ipv6_address(host):
+    if is_valid_ipv6_address(host) or _resolves_to_ipv6(host):
         sock.setsockopt(zmq.IPV6, 1)
+
+
+def _resolves_to_ipv6(host: str) -> bool:
+    try:
+        return any(
+            family == socket.AF_INET6
+            for family, *_ in socket.getaddrinfo(
+                host, None, type=socket.SOCK_STREAM
+            )
+        )
+    except socket.gaierror:
+        return False
 
 
 @contextmanager
