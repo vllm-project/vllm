@@ -135,7 +135,9 @@ class SimpleCPUOffloadScheduler:
         # consumption in update_state_after_alloc() (Phase B). Found blocks are
         # temporarily pinned via touch() while pending, preventing LRU eviction
         # in the window between the two scheduler phases (#39702).
-        self._pending_cpu_hits: dict[str, tuple[list[list[KVCacheBlock]], int]] = {}
+        self._pending_cpu_hits: dict[
+            str, tuple[tuple[list[KVCacheBlock], ...], int]
+        ] = {}
 
         # Store metadata
         self._lazy_mode = lazy_offload
