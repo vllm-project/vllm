@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:21:00
+#SBATCH --time=00:45:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -229,16 +229,6 @@ if [ ! -x "${RAY_BIN}" ]; then
   exit 1
 fi
 echo "Using RAY_BIN=${RAY_BIN}"
-
-export HF_HOME="${HF_HOME:-/data/engs-glass/catz0932/hf_cache}"
-export HF_HUB_CACHE="${HF_HOME}/hub"
-export HUGGINGFACE_HUB_CACHE="${HF_HOME}/hub"
-export TRANSFORMERS_CACHE="${HF_HOME}/transformers"
-
-echo "HF_HOME=${HF_HOME}"
-echo "HF_HUB_CACHE=${HF_HUB_CACHE}"
-echo "TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
-
 
 export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
