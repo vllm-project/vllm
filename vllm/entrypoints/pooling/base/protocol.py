@@ -80,6 +80,10 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         max_output_tokens_param: str | None = None,
     ) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
+        kwargs = {}
+        if max_output_tokens_param is not None:
+            kwargs["max_output_tokens_param"] = max_output_tokens_param
+
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
@@ -88,7 +92,7 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=add_special_tokens,
             max_total_tokens_param=max_total_tokens_param,
-            max_output_tokens_param=max_output_tokens_param,
+            **kwargs,
         )
 
 
@@ -107,7 +111,8 @@ class FixedMaxLenTokenizeParamsMixin:
 
 class EmbeddingTokenizeParamsMixin:
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        max_total_tokens = model_config.max_model_len
+        default_max_total_tokens = model_config.max_model_len
+        max_total_tokens: int | None = default_max_total_tokens
         max_output_tokens = 0
 
         pooler_config = model_config.pooler_config
@@ -115,8 +120,8 @@ class EmbeddingTokenizeParamsMixin:
             if pooler_config.enable_chunked_processing:
                 max_total_tokens = None
             else:
-                max_embed_len = pooler_config.max_embed_len or max_total_tokens
-                max_output_tokens = max_total_tokens - max_embed_len
+                max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
+                max_output_tokens = default_max_total_tokens - max_embed_len
 
         build_tok_params = self._build_pooling_tok_params  # type: ignore[attr-defined]
         add_special_tokens = self.add_special_tokens  # type: ignore[attr-defined]
