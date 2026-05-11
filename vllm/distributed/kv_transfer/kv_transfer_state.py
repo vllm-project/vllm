@@ -49,7 +49,7 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
 
 
 def ensure_kv_transfer_initialized(
-    vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig | None" = None
+    vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"
 ) -> None:
     """
     Initialize KV cache transfer parallel group.
