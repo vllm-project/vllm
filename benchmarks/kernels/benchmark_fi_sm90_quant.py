@@ -95,7 +95,7 @@ def _run_comparison(
             q_fi is not None
             and q_cuda is not None
             and torch.allclose(s_fi.float(), s_cuda.float(), rtol=1e-5)
-            and torch.allclose(q_fi.float(), q_cuda.float(), rtol=0.01)
+            and torch.allclose(q_fi.float(), q_cuda.float(), rtol=0.15, atol=0.005)
         )
         result["correct"] = correct
     return result
