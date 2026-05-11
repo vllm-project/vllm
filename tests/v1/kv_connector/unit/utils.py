@@ -223,6 +223,7 @@ def create_request(
             remote_block_ids=list(range(num_remote_blocks)),
             remote_host="my-host",
             remote_port=1234,
+            tp_size=1,
         )
 
     max_tokens = 1 if do_remote_decode else max_tokens
@@ -293,9 +294,14 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-    def __init__(self, config: VllmConfig, role, kv_cache_config):
+    def __init__(
+        self,
+        config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = ExampleConnector(config, role)
+        self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -368,7 +374,7 @@ class MockKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         extra_config = self._kv_transfer_config.kv_connector_extra_config
@@ -477,10 +483,16 @@ def make_kv_cache_config(
     )
 
 
-def make_nixl_scheduler(has_mamba: bool = False, is_hma_required: bool = False):
+def make_nixl_scheduler(
+    has_mamba: bool = False,
+    is_hma_required: bool = False,
+    heartbeat: bool = False,
+    kv_lease_duration: int = 30,
+):
     """Create a NixlConnectorScheduler via __new__ (skipping __init__).
 
-    Only sets the two flags needed by the N-1 prefill logic.
+    Only sets the flags needed by the tests.  When *heartbeat=True* the
+    scheduler-side heartbeat bookkeeping fields are also initialised.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
@@ -489,4 +501,23 @@ def make_nixl_scheduler(has_mamba: bool = False, is_hma_required: bool = False):
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+
+    if heartbeat:
+        sched._heartbeat_by_engine = {}
+        sched._heartbeat_req_engine = {}
+        sched._last_heartbeat_time = 0.0
+        sched._kv_lease_duration = kv_lease_duration
+        sched._heartbeat_interval = kv_lease_duration // 6
+        # Fields touched by build_connector_meta / request_finished:
+        sched._reqs_need_recv = {}
+        sched._reqs_need_send = {}
+        sched._reqs_in_batch = set()
+        sched._reqs_not_processed = set()
+        sched._reqs_need_save = {}
+        sched.use_host_buffer = False
+        sched.engine_id = "test-engine"
+        sched.side_channel_host = "localhost"
+        sched.side_channel_port = 5555
+        sched.blocks_per_sw = []
+        sched.is_bidirectional_kv_xfer_enabled = False
     return sched
