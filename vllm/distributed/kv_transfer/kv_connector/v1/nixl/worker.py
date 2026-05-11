@@ -18,7 +18,6 @@ import numpy as np
 import torch
 import zmq
 
-from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
@@ -217,6 +216,12 @@ class NixlConnectorWorker:
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
         )
+        kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config(
+            "kv_lease_duration", 30
+        )
+        # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
+        self._lease_extension = kv_lease_duration * 2 // 3
+
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
@@ -688,23 +693,38 @@ class NixlConnectorWorker:
             stacklevel=2,
         )
 
-    def _background_nixl_handshake(
-        self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta
-    ):
-        # Do NIXL handshake in background and add to _ready_requests when done.
-        fut = self._handshake_futures.get(remote_engine_id)
-        if fut is None:
-            assert meta.remote is not None
+    def _ensure_handshake(
+        self,
+        engine_id: EngineId,
+        host: str,
+        port: int,
+        tp_size: int,
+    ) -> Future[dict[int, str]] | None:
+        """
+        Ensure a handshake is in-flight (or already done) for *engine_id*.
+
+        Returns the ``Future`` if a handshake is pending (or was just
+        started), or ``None`` if the handshake already completed
+        successfully.  Callers can attach per-request callbacks to the
+        returned future.
+        Failures to handshake are logged and the request is marked as failed.
+        """
+        with self._handshake_lock:
+            if engine_id in self._remote_agents:
+                return None
+            fut = self._handshake_futures.get(engine_id)
+            if fut is not None:
+                return fut
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake,
-                meta.remote.host,
-                meta.remote.port,
-                meta.tp_size,
-                remote_engine_id,
+                host,
+                port,
+                tp_size,
+                engine_id,
             )
-            self._handshake_futures[remote_engine_id] = fut
+            self._handshake_futures[engine_id] = fut
 
-            def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
+            def done_callback(f: Future[dict[int, str]], eid=engine_id):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
@@ -718,15 +738,30 @@ class NixlConnectorWorker:
                         )
 
             fut.add_done_callback(done_callback)
+            return fut
 
-        # check handshake success before proceeding with request
+    def _background_nixl_handshake(
+        self, req_id: str, remote_engine_id: EngineId, meta: ReqMeta
+    ):
+        # Do NIXL handshake in background and add to _ready_requests when done.
+        assert meta.remote is not None
+        fut = self._ensure_handshake(
+            remote_engine_id,
+            meta.remote.host,
+            meta.remote.port,
+            meta.tp_size,
+        )
+        if fut is None:
+            # Already handshaked — only happens if caller does not pre-check.
+            self._ready_requests.put((req_id, meta))
+            return
+
+        # Check handshake success before proceeding with request.
         def request_ready(f: Future[Any], entry=(req_id, meta)):
             try:
-                # check if handshake succeeded
                 f.result()
                 self._ready_requests.put(entry)
             except Exception as e:
-                # handshake failed - mark blocks as invalid
                 self._log_failure(
                     failure_type="handshake_failed",
                     req_id=req_id,
@@ -1721,10 +1756,9 @@ class NixlConnectorWorker:
             self.xfer_stats.record_kv_expired_req()
             logger.warning(
                 "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d decode worker(s) within %d seconds.",
+                "retrieved by %d remote worker(s) before lease expired.",
                 req_id,
                 count,
-                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
             )
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
@@ -1737,12 +1771,22 @@ class NixlConnectorWorker:
         Get req_ids which got a remote xfer message. When multiple consumers
         are reading from the same producer (heterogeneous TP scenario), wait
         for all consumers to be done pulling.
+
+        Also handles heartbeat notifications ("HB:req1,req2,...") by
+        extending the lease on the referenced requests.
         """
         assert self.transfer_topo is not None
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
-                req_id, tp_size = notif.decode("utf-8").rsplit(":", 1)
+                msg = notif.decode("utf-8")
+
+                # Handle heartbeat messages from D-side.
+                if msg.startswith("HB:"):
+                    self._handle_heartbeat(msg[3:])
+                    continue
+
+                req_id, tp_size = msg.rsplit(":", 1)
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -1776,6 +1820,27 @@ class NixlConnectorWorker:
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
+
+    def _handle_heartbeat(self, payload: str) -> None:
+        """Extend leases for requests referenced in a heartbeat.
+
+        Args:
+            payload: comma-separated P-side request IDs, e.g.
+                     "req_abc,req_def".
+        """
+        new_expiry = time.perf_counter() + self._lease_extension
+        for req_id in payload.split(","):
+            if req_id in self._reqs_to_send:
+                old = self._reqs_to_send[req_id]
+                self._reqs_to_send[req_id] = max(old, new_expiry)
+                logger.debug(
+                    "Heartbeat extended lease for request %s "
+                    "by %ds (old_expiry=%.1f, new_expiry=%.1f)",
+                    req_id,
+                    self._lease_extension,
+                    old,
+                    new_expiry,
+                )
 
     def _pop_done_transfers(self, transfers: dict[str, list[int]]) -> set[str]:
         """
@@ -1896,6 +1961,37 @@ class NixlConnectorWorker:
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
+
+        # Send heartbeats to P-side engines to keep KV blocks alive while
+        # requests sit in the D scheduler WAITING queue.
+        self._send_heartbeats(metadata)
+
+    def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
+        """
+        Send heartbeat notifications to remote engines, extending lease on KV blocks.
+        """
+        for engine_id, hb_info in metadata.heartbeat_by_engine.items():
+            # Proactive handshake (this request may still be in waiting queue) so
+            # the **next** heartbeat for this remote can go through.
+            if (
+                self._ensure_handshake(
+                    engine_id, hb_info.host, hb_info.port, hb_info.tp_size
+                )
+                is not None
+            ):
+                continue  # handshake is still pending
+
+            # Build the heartbeat message: "HB:req1,req2,..."
+            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
+            for agent_name in self._remote_agents[engine_id].values():
+                try:
+                    self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
+                except Exception:
+                    logger.debug(
+                        "Failed to send heartbeat to engine %s",
+                        engine_id,
+                        exc_info=True,
+                    )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.transfer_topo is not None
