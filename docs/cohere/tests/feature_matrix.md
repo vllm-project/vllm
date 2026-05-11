@@ -156,6 +156,37 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- |
 | | T.4.1.1 | | | | T.4.1.1 |
 
+### Cohere Auto-Config
+
+Pure CPU unit suite -- input/quantization/hardware/vLLM-feature axes are
+not exercised; entries are intentionally blank. The suite gates the
+`VLLM_ENABLE_COHERE_AUTO_CONFIG` opt-in path, profile resolution, and
+`EngineArgs.__post_init__` integration.
+
+| Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
+| Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody |
+| --- | --- | --- | --- | --- |
+| | | | | |
+
+| Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward |
+| --- | --- | --- | --- | --- |
+| | T.6.1.1 | T.6.1.1 | T.6.1.1 | |
+
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
+| Hardware | A100 | H100 | B200 | GB200 | MI300x |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
+| vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
 ### MM + GG + TB
 
 | Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
@@ -194,4 +225,4 @@ Where to check compatibility for each category when backfilling
 | Model Architecture | Test case code | |
 | Quantization | Test case code | |
 | Hardware | [`tests/cohere/configs/runner_map.json`](../../tests/cohere/configs/runner_map.json) -- which GPUs have CI runners for the test group | Test case skip markers |
-| vLLM Feature | [`tests/cohere/configs/hardware_profiles.yaml`](../../tests/cohere/configs/hardware_profiles.yaml) -- which vLLM features are enabled per GPU profile | Test case code |
+| vLLM Feature | [`vllm/cohere/hardware_profiles.yaml`](../../vllm/cohere/hardware_profiles.yaml) -- which vLLM features are enabled per GPU profile | Test case code |

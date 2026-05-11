@@ -34,9 +34,8 @@ export PATH="$HOME/.local/bin:$PATH"
 command nvidia-smi || rocm-smi || true
 export VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=${VLLM_ALLOW_DEPRECATED_BEAM_SEARCH:-1}
-
-# hardware specific env vars
-source <(python3 tests/cohere/scripts/apply_hardware_profiles.py --gpu-type $GPU_TYPE)
+# automatically apply hardware configs
+export VLLM_ENABLE_COHERE_AUTO_CONFIG=${VLLM_ENABLE_COHERE_AUTO_CONFIG:-1}
 
 # install dependencies
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh

@@ -14,7 +14,6 @@ from test_utils import (
     make_speculative_config,
     validate_output,
 )
-from test_utils_engine_args import get_async_engine_args_with_overrides
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams, TokensPrompt
@@ -23,6 +22,7 @@ from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # no
     convert_schema_to_structural_tags,
 )
 from vllm.cohere.utils import get_text_model_name
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -197,20 +197,16 @@ async def validate_thinking_token_budget(
 ):
     tasks = []
     all_prompt: dict[int, str] = {}
-    # Get effective engine args with hardware profile args + test-specific overrides
-    engine_args = get_async_engine_args_with_overrides(
-        test_kwargs={
-            "model": model,
-            "dtype": "auto",
-            "max_model_len": 32000,
-            "tensor_parallel_size": tensor_parallel_size,
-            "structured_outputs_config": {"backend": "xgrammar"},
-            "speculative_config": make_speculative_config(args),
-            "max_logprobs": 5,  # Enable logprobs collection
-            "reasoning_config": _create_reasoning_config(),
-            "async_scheduling": True,
-        },
-        engine_args_override=getattr(args, "engine_args", None),
+    engine_args = AsyncEngineArgs(
+        model=model,
+        dtype="auto",
+        max_model_len=32000,
+        tensor_parallel_size=tensor_parallel_size,
+        structured_outputs_config={"backend": "xgrammar"},
+        speculative_config=make_speculative_config(args),
+        max_logprobs=5,  # Enable logprobs collection
+        reasoning_config=_create_reasoning_config(),
+        async_scheduling=True,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
     # Debug: Check speculative config
@@ -328,17 +324,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_spec_tokens", type=int, default=4)
     parser.add_argument("--draft_tp", type=int, default=1)
     parser.add_argument("--max_model_len", type=int, default=32000)
-    parser.add_argument(
-        "--engine-args",
-        type=str,
-        default=None,
-        help=(
-            "CLI-style engine args to pass to AsyncLLM (e.g., '--max-model-len 32768 "
-            "--enable-chunked-prefill'). "
-            "If not provided, uses VLLM_HARDWARE_PROFILE_ARGS "
-            "environment variable."
-        ),
-    )
     args = parser.parse_args()
 
     reasoning_mode_enum = TestMode[args.reasoning_mode.upper()]

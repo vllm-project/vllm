@@ -75,15 +75,14 @@ Features from [Feature Matrix](../feature_matrix.md)
 5. **Hardware**: H100, B200, GB200 (compatible); A100, MI300x (not compatible)
    - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `model_arch_c5_lora` runners for H100/B200/GB200; none for A100/MI300x
 6. **vLLM Feature**: Chunked Prefill (compatible), CUDA Graphs (compatible)
-   - [`tests/cohere/configs/hardware_profiles.yaml`](../../../../tests/cohere/configs/hardware_profiles.yaml) -- `vllm-default` profile sets `enable-chunked-prefill` and `max-cudagraph-capture-size: 128`
+   - [`vllm/cohere/hardware_profiles.yaml`](../../../../vllm/cohere/hardware_profiles.yaml) -- `vllm-default` profile sets `enable-chunked-prefill` and `max-cudagraph-capture-size: 128`
 
 ## Implementation
 
 Primary test:
 [`tests/cohere/test_c5_lora.py`](../../../../tests/cohere/test_c5_lora.py)
 Shared helpers:
-[`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py),
-[`tests/cohere/test_utils_engine_args.py`](../../../../tests/cohere/test_utils_engine_args.py)
+[`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py)
 Dummy LoRA generator:
 [`tests/cohere/scripts/create_dummy_lora.py`](../../../../tests/cohere/scripts/create_dummy_lora.py)
 CI entry:
@@ -100,11 +99,14 @@ Runtime paths:
    `create_dummy_lora.py` to write a zero-weight bf16 adapter targeting
    `q_proj`, `k_proj`, `v_proj`, `o_proj` for every layer (rank 8) so the
    LoRA loading path is always exercised.
-2. **Engine flags**: `enable_lora=True`, `max_loras=1`, `max_lora_rank=64`
-   merged with hardware-profile defaults via `build_c5_llm` /
-   `get_engine_kwargs_with_overrides`. `max_model_len=32768`,
-   `tensor_parallel_size=1`. Hardware profile args are picked up from
-   `VLLM_HARDWARE_PROFILE_ARGS`; see
+2. **Engine flags**: `enable_lora=True`, `max_loras=1`, `max_lora_rank=64`,
+   `max_model_len=32768`, `tensor_parallel_size=1` are passed explicitly to
+   `LLM(...)` in `_build_lora_llm`. Profile-derived defaults (memory
+   utilization, attention backend, cudagraph capture sizes, etc.) are filled
+   in by `apply_cohere_auto_config` from `EngineArgs.__post_init__` because
+   `run_tests.sh` exports `VLLM_ENABLE_COHERE_AUTO_CONFIG=1`; the pytest
+   entry also calls `os.environ.setdefault(...)` so standalone runs
+   self-configure. See
    [Hardware Profiles](../../code_notes/ci-and-automation.md#hardware-profiles).
 3. **Sampling**: `SamplingParams(temperature=0.0, max_tokens=32)` over the
    four fixed prompts in `C5_SANITY_PROMPTS` (English capitals Q&A, NBA,

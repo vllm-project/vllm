@@ -11,27 +11,23 @@ from test_utils import (
     make_speculative_config,
     validate_output,
 )
-from test_utils_engine_args import get_async_engine_args_with_overrides
 from transformers import AutoTokenizer
 
 from vllm.cohere.utils import get_text_model_name
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.v1.engine.async_llm import AsyncLLM
 
 
 async def run_json_validation_tests(args):
-    # Get effective engine args with hardware profile args + test-specific overrides
-    engine_args = get_async_engine_args_with_overrides(
-        test_kwargs={
-            "model": args.model,
-            "dtype": "auto",
-            "max_model_len": args.max_model_len,
-            "tensor_parallel_size": args.tensor_parallel_size,
-            "structured_outputs_config": {"backend": "xgrammar"},
-            "speculative_config": make_speculative_config(args),
-            "reasoning_config": _create_reasoning_config(),
-            "async_scheduling": True,
-        },
-        engine_args_override=getattr(args, "engine_args", None),
+    engine_args = AsyncEngineArgs(
+        model=args.model,
+        dtype="auto",
+        max_model_len=args.max_model_len,
+        tensor_parallel_size=args.tensor_parallel_size,
+        structured_outputs_config={"backend": "xgrammar"},
+        speculative_config=make_speculative_config(args),
+        reasoning_config=_create_reasoning_config(),
+        async_scheduling=True,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)

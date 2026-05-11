@@ -1,4 +1,3 @@
-# NOTE: keep in sync with https://github.com/cohere-ai/blobheart/blob/main/go/poseidon/config/hardware_profiles.yaml
 # Applied in order, later profiles override earlier ones.
 # Hardware profiles define runtime args/env for vLLM serving and benchmarks.
 profiles:
@@ -14,8 +13,8 @@ profiles:
     env:
       VLLM_USE_V1: "1"
       VLLM_WORKER_MULTIPROC_METHOD: spawn
-  
-  # We use a triton moe backend since we end up with a 
+
+  # We use a triton moe backend since we end up with a
   # illegal memory access error which originates from
   # moe fp8 kernel
   - name: vllm-h100
@@ -24,7 +23,8 @@ profiles:
       moe-backend: "triton"
 
   - name: vllm-b200
-    when: server.type == "vllm" && matches(gpu.name, "b200")
+    # exclude GB200 explicitly since matches uses substring match
+    when: server.type == "vllm" && matches(gpu.name, "b200") && !matches(gpu.name, "gb200")
     args:
       attention-backend: "FLASHINFER"
       mm-encoder-attn-backend: "TORCH_SDPA"
@@ -42,9 +42,8 @@ profiles:
     when: server.type == "vllm" && matches(gpu.name, "mi300x")
     args:
       attention-backend: "TRITON_ATTN"
-      block-size: "64"
     env:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_USE_AITER_MHA: "1"
-      VLLM_ROCM_USE_AITER_PAGED_ATTN: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
       VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: "1"

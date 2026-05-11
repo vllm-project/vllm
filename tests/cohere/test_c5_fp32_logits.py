@@ -8,11 +8,10 @@ import os
 from typing import TypedDict, cast
 
 import vllm.envs as envs
-from vllm import SamplingParams
+from vllm import LLM, SamplingParams
 
 from .test_utils_c5 import (
     C5_SANITY_PROMPTS,
-    build_c5_llm,
     shutdown_llm,
     validate_model_path,
 )
@@ -47,10 +46,6 @@ def _tensor_parallel_size() -> int:
     if raw_value is None:
         return 1
     return int(raw_value)
-
-
-def _engine_args() -> str | None:
-    return os.environ.get("C5_ENGINE_ARGS")
 
 
 def _max_logprob_abs_diff() -> float:
@@ -167,12 +162,14 @@ def _get_fp32_logits_debug_info(model) -> dict[str, object]:
 def _capture_generation_snapshot(
     model_path: str,
     tensor_parallel_size: int,
-    engine_args: str | None,
 ) -> GenerationSnapshot:
     sampling_params = SamplingParams(
         temperature=0.0, max_tokens=32, logprobs=1, prompt_logprobs=1
     )
-    llm = build_c5_llm(model_path, tensor_parallel_size, engine_args)
+    llm = LLM(
+        model=model_path,
+        tensor_parallel_size=tensor_parallel_size,
+    )
     try:
         llm.apply_model(_install_logits_dtype_hook)
         outputs = llm.generate(C5_SANITY_PROMPTS, sampling_params=sampling_params)
@@ -215,7 +212,6 @@ def _capture_generation_snapshot(
 def run_fp32_logits_consistency_test(
     model_path: str,
     tensor_parallel_size: int = 1,
-    engine_args: str | None = None,
     max_logprob_abs_diff: float = 0.5,
     max_prompt_logprob_abs_diff: float = 5.0,
     min_shared_prefix: int = 8,
@@ -243,7 +239,6 @@ def run_fp32_logits_consistency_test(
         baseline_data = _capture_generation_snapshot(
             model_path=model_path,
             tensor_parallel_size=tensor_parallel_size,
-            engine_args=engine_args,
         )
 
         os.environ[env_key] = "1"
@@ -251,7 +246,6 @@ def run_fp32_logits_consistency_test(
         fp32_data = _capture_generation_snapshot(
             model_path=model_path,
             tensor_parallel_size=tensor_parallel_size,
-            engine_args=engine_args,
         )
     finally:
         for key, original_value in original_env_values.items():
@@ -411,7 +405,6 @@ def test_c5_fp32_logits_consistency() -> None:
     assert not run_fp32_logits_consistency_test(
         model_path=_required_model_path(),
         tensor_parallel_size=_tensor_parallel_size(),
-        engine_args=_engine_args(),
         max_logprob_abs_diff=_max_logprob_abs_diff(),
         max_prompt_logprob_abs_diff=_max_prompt_logprob_abs_diff(),
         min_shared_prefix=_min_shared_prefix(),

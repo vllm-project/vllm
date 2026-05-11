@@ -11,6 +11,9 @@ set -o pipefail
 
 source tests/cohere/scripts/run-helper.sh
 
+# Apply Cohere hardware_profiles.yaml inside spawned vllm processes.
+export VLLM_ENABLE_COHERE_AUTO_CONFIG=1
+
 run_latency_tests() {
   # run latency tests using `vllm bench latency` command
   # $1: a json file specifying latency test cases
@@ -56,7 +59,6 @@ run_latency_tests() {
     fi
 
     latency_command=" $latency_envs vllm bench latency \
-      ${VLLM_HARDWARE_PROFILE_ARGS:-} \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $latency_args"
 
@@ -126,7 +128,6 @@ run_throughput_tests() {
     fi
 
     throughput_command=" $throughput_envs vllm bench throughput \
-      ${VLLM_HARDWARE_PROFILE_ARGS:-} \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -224,7 +225,6 @@ run_serving_tests() {
     fi
 
     server_command="$server_envs vllm serve \
-      ${VLLM_HARDWARE_PROFILE_ARGS:-} \
       $server_args"
 
     echo "Running test case $test_name"

@@ -74,7 +74,11 @@ Runner map: [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/co
    `--enable-prefix-caching false`.
 2. Speculative decoding via EAGLE draft model (`c4-25a218t_fp8_eagle_l5/eagle`)
    with `--num-spec-tokens 3`, `--draft-tp 4`.
-3. Hardware profile args applied via `VLLM_HARDWARE_PROFILE_ARGS`.
+3. Hardware profile args applied automatically when the test sets
+   `VLLM_ENABLE_COHERE_AUTO_CONFIG=1` in `main()`; `apply_cohere_auto_config`
+   fills profile defaults from `EngineArgs.__post_init__` while preserving
+   the explicit kwargs passed to `AsyncEngineArgs(...)`. See
+   [Hardware Profiles](../../code_notes/ci-and-automation.md#hardware-profiles).
 4. Fixture images loaded from `tests/cohere/fixtures/` (duck.jpg, lion.jpg).
 5. Prompt constructed via `AutoProcessor.apply_chat_template` with image
    placeholders.

@@ -52,7 +52,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 5. **Hardware**: H100, B200, GB200, MI300x (compatible); A100 (not compatible)
    - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `model_arch_c5_3a30t` runners for H100/B200/GB200/MI300x; none for A100
 6. **vLLM Feature**: Chunked Prefill (compatible), CUDA Graphs (compatible)
-   - [`tests/cohere/configs/hardware_profiles.yaml`](../../../../tests/cohere/configs/hardware_profiles.yaml) -- default profile enables both
+   - [`vllm/cohere/hardware_profiles.yaml`](../../../../vllm/cohere/hardware_profiles.yaml) -- default profile enables both
 
 ## Implementation
 
@@ -66,7 +66,10 @@ CI entry: [`tests/cohere/scripts/run_tests.sh` L276](../../../../tests/cohere/sc
    (thinking start/end tokens), `--disable-log-stats`,
    `--mm-processor-cache-type shm` and parsers
    (`--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4`)
-2. Hardware profile args applied via `VLLM_HARDWARE_PROFILE_ARGS`.
+2. Hardware profile args applied automatically inside the spawned `vllm serve`
+   process via `apply_cohere_auto_config` (`run_tests.sh` exports
+   `VLLM_ENABLE_COHERE_AUTO_CONFIG=1`). See
+   [Hardware Profiles](../../code_notes/ci-and-automation.md#hardware-profiles).
 3. Thinking budget disabled (`ENABLE_THINKING_BUDGET=0`); no
    `thinking_token_budget` sent to the server.
 4. Invoked via `pytest` with env vars (`BEE_MODEL`, `BEE_DATA_DIR`,
@@ -121,7 +124,7 @@ Features from [Feature Matrix](../feature_matrix.md)
 5. **Hardware**: H100, B200, GB200, MI300x (compatible); A100 (not compatible)
    - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `bee_sample_tb_check` runners for H100/B200/GB200/MI300x; none for A100
 6. **vLLM Feature**: Chunked Prefill (compatible), CUDA Graphs (compatible)
-   - [`tests/cohere/configs/hardware_profiles.yaml`](../../../../tests/cohere/configs/hardware_profiles.yaml) -- default profile enables both
+   - [`vllm/cohere/hardware_profiles.yaml`](../../../../vllm/cohere/hardware_profiles.yaml) -- default profile enables both
 
 ## Implementation
 
@@ -138,7 +141,10 @@ Runner map: [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/co
    (thinking start/end tokens), `--disable-log-stats`,
    `--mm-processor-cache-type shm` and parsers
    (`--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4`)
-2. Hardware profile args applied via `VLLM_HARDWARE_PROFILE_ARGS`.
+2. Hardware profile args applied automatically inside the spawned `vllm serve`
+   process via `apply_cohere_auto_config` (`run_tests.sh` exports
+   `VLLM_ENABLE_COHERE_AUTO_CONFIG=1`). See
+   [Hardware Profiles](../../code_notes/ci-and-automation.md#hardware-profiles).
 3. `ENABLE_THINKING_BUDGET=1` env var passed to pytest, activating per-task
    `thinking_token_budget` from `TASK_CONFIG` (default 2048, aime 16384,
    mbpp_plus 4096).

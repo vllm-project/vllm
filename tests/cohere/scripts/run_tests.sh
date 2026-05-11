@@ -11,6 +11,8 @@ export VLLM_WORKSPACE="${VLLM_WORKSPACE:-/vllm-workspace}"
 export BEE_DIR="${BEE_DIR:-/app/cohere/apiary/bee}"
 export OUTPUT_DIR="${OUTPUT_DIR:-/root/output}"
 export UNIT_SUMMARY_FILE_NAME="${UNIT_SUMMARY_FILE_NAME:-unit_results_summary.json}"
+# automatically hardware_profiles
+export VLLM_ENABLE_COHERE_AUTO_CONFIG=1
 echo "Using ENGINES_DIR: $ENGINES_DIR"
 echo "Using VLLM_WORKSPACE: $VLLM_WORKSPACE"
 echo "Using BEE_DIR: $BEE_DIR"
@@ -302,7 +304,7 @@ run_bee_samples() {
         think_end=$(python3 -c "from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN; print(END_THINKING_TOKEN)")
         local reasoning_json="{\"reasoning_start_str\":\"${think_start}\",\"reasoning_end_str\":\"${think_end}\"}"
         local parsers="--reasoning-parser cohere_command4 --enable-auto-tool-choice --tool-call-parser cohere_command4"
-        local server_cmd="vllm serve ${MODEL_PATH} ${VLLM_HARDWARE_PROFILE_ARGS:-} --tensor-parallel-size ${TP_SIZE} --served-model-name ${MODEL_NAME} --disable-log-stats --mm-processor-cache-type shm ${parsers} --reasoning-config '${reasoning_json}'"
+        local server_cmd="vllm serve ${MODEL_PATH} --tensor-parallel-size ${TP_SIZE} --served-model-name ${MODEL_NAME} --disable-log-stats --mm-processor-cache-type shm ${parsers} --reasoning-config '${reasoning_json}'"
 
         if [[ "${MODEL_NAME}" == *"eagle"* ]]; then
             local eagle_path="${MODEL_PATH}/eagle"

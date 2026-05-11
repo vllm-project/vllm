@@ -70,17 +70,6 @@ def parse_args():
         help="Tensor parallel size for speculative model",
     )
     parser.add_argument("--max_model_len", type=int, default=32_000)
-    parser.add_argument(
-        "--engine-args",
-        type=str,
-        default=None,
-        help=(
-            "CLI-style engine args to pass to AsyncLLM (e.g., '--max-model-len 32768 "
-            "--enable-chunked-prefill'). "
-            "If not provided, uses VLLM_HARDWARE_PROFILE_ARGS "
-            "environment variable."
-        ),
-    )
 
     return parser.parse_args()
 

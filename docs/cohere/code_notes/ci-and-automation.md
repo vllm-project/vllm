@@ -205,33 +205,66 @@ Rules for new or modified tests:
 
 ### Hardware Profiles
 
-[`/tests/cohere/configs/hardware_profiles.yaml`](../../../tests/cohere/configs/hardware_profiles.yaml)
+[`/vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml)
 defines per-GPU runtime args and env vars for vLLM serving and benchmarks.
+The YAML lives inside the package and is bundled into the wheel via
+`setup.py` `package_data`, so the profiles travel with whatever vLLM is
+installed in the container.
 
 How profiles are applied:
 
-1. [`/tests/cohere/scripts/setup_tests.sh`](../../../tests/cohere/scripts/setup_tests.sh)
-   sources
-   [`/tests/cohere/scripts/apply_hardware_profiles.py`](../../../tests/cohere/scripts/apply_hardware_profiles.py)
-   at container startup. The script matches profiles by `GPU_TYPE` and exports
-   env vars directly and CLI args via `VLLM_HARDWARE_PROFILE_ARGS`.
-2. Benchmark and serving scripts (`run-performance-benchmarks.sh`,
-   `run-bee-eval.sh`) append `${VLLM_HARDWARE_PROFILE_ARGS:-}` to `vllm serve`
-   / `vllm bench` commands.
-3. Profiles are applied in order; later profiles override earlier ones. The
-   `vllm-default` profile is always applied as a baseline.
+1. The runtime hook lives at the end of `EngineArgs.__post_init__` in
+   [`/vllm/engine/arg_utils.py`](../../../vllm/engine/arg_utils.py): when
+   `VLLM_ENABLE_COHERE_AUTO_CONFIG` is truthy (`1` / `true`), it calls
+   `apply_cohere_auto_config(self)` from
+   [`/vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py),
+   which (a) probes the HF config for a Cohere architecture, (b) resolves
+   matching profiles via CEL `when:` clauses bound to `{server.type, gpu.name}`,
+   (c) merges `vllm-default` with the GPU-specific overlay, then (d) mutates
+   the live `EngineArgs` instance in place. User-supplied fields (live value
+   != dataclass default) are preserved.
+2. CI shells opt in once at the top of each script with
+   `export VLLM_ENABLE_COHERE_AUTO_CONFIG=1`:
+   [`run_tests.sh`](../../../tests/cohere/scripts/run_tests.sh),
+   [`run-bee-eval.sh`](../../../tests/cohere/scripts/run-bee-eval.sh),
+   [`run-performance-benchmarks.sh`](../../../tests/cohere/scripts/run-performance-benchmarks.sh).
+   Every spawned `vllm serve` / `vllm bench latency` / `vllm bench throughput`
+   / pytest subprocess inherits the env var and self-configures.
+3. Python entry points that build `LLM(...)` / `AsyncEngineArgs(...)`
+   directly call
+   `os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")` in their
+   `main()` / `__main__` / pytest entry function so standalone invocations
+   self-configure without depending on the shell wrapper.
+4. Profiles are applied in YAML order; later profiles override earlier ones.
+   The `vllm-default` profile is always applied as a baseline. Profile `env:`
+   entries only land when the env var is currently unset (pre-existing
+   `os.environ` values win and log at INFO).
+
+For the runtime-side contract (gate semantics, env-cache rationale, error
+swallowing) see
+[Cohere Auto-Config](runtime-and-scheduling.md#8-cohere-auto-config-hardware-profile-application).
+For CPU unit-test coverage see
+[`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py)
+([feature doc](../tests/features/auto_config.md)).
 
 Rules for new or modified tests:
 
-- **Respect hardware profiles by default.** Tests that use the vLLM engine for
-  serving or benchmarking should rely on the env vars and args exported by the
-  profile, not hard-code GPU-specific settings.
+- **Respect hardware profiles by default.** Tests that use the vLLM engine
+  for serving or benchmarking should opt in to auto-config (env var) rather
+  than hard-coding GPU-specific settings; profile values fill in
+  dataclass-default fields automatically.
 - Prefer enabling `torch.compile` and CUDA graphs when compatible with the
-  test. Call out any intentional deviation in the test doc's `## Setup` section.
+  test. Call out any intentional deviation in the test doc's `## Setup`
+  section.
 - If a test needs to override a profile value (e.g. a specific attention
-  backend), document the override and the reason in the test doc.
-- When adding a new GPU profile, update `hardware_profiles.yaml` and verify
-  that `apply_hardware_profiles.py` emits the expected exports.
+  backend), pass it explicitly to `LLM(...)` / `AsyncEngineArgs(...)` --
+  user-set fields are preserved by `apply_cohere_auto_config`. Document the
+  override and reason in the test doc.
+- When adding a new GPU profile, update
+  [`/vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml)
+  and add coverage in
+  [`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py)
+  for any non-trivial CEL `when:` clause or new keys.
 
 ### Nightly Metric Emission
 

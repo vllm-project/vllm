@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import logging
-import os
-import shlex
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, TypedDict
 
@@ -1181,17 +1179,10 @@ if __name__ == "__main__":
     # Import the server utility
     from tests.utils import RemoteOpenAIServer
 
-    # Get hardware profile args from environment (set by setup_tests.sh)
-    hardware_profile_args_str = os.environ.get("VLLM_HARDWARE_PROFILE_ARGS", "")
-    hardware_profile_args = (
-        shlex.split(hardware_profile_args_str) if hardware_profile_args_str else []
-    )
-
-    print(f"Hardware profile args: {hardware_profile_args}")
-
-    # Build server arguments based on command line inputs
-    # Start with hardware profile args, then add test-specific overrides
-    server_args = hardware_profile_args + [
+    # Build server arguments based on command line inputs.
+    # Profile defaults are applied inside the server process via
+    # VLLM_ENABLE_COHERE_AUTO_CONFIG (passed through env_dict below).
+    server_args = [
         "--max-model-len",
         str(parsed_args.max_model_len),
         "--tensor-parallel-size",
@@ -1230,7 +1221,11 @@ if __name__ == "__main__":
     print(f"Server args: {server_args}")
 
     try:
-        with RemoteOpenAIServer(model_name, server_args) as server:
+        with RemoteOpenAIServer(
+            model_name,
+            server_args,
+            env_dict={"VLLM_ENABLE_COHERE_AUTO_CONFIG": "1"},
+        ) as server:
             print(f"Server started at http://{server.host}:{server.port}")
 
             # Run the sync streaming test

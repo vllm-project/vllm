@@ -18,7 +18,6 @@ from test_utils import (
     make_speculative_config,
     validate_output,
 )
-from test_utils_engine_args import get_async_engine_args_with_overrides
 from transformers import AutoProcessor
 
 from vllm import SamplingParams
@@ -26,6 +25,7 @@ from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # no
     convert_schema_to_structural_tags,
 )
 from vllm.cohere.utils import get_text_model_name
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -91,19 +91,16 @@ async def run_vision_test(
     print("Loading images from local files...")
     images = [Image.open(path) for path in IMAGE_PATHS]
     # Set up engine args similar to load_command_a_vision
-    engine_args = get_async_engine_args_with_overrides(
-        test_kwargs={
-            "model": model_path,
-            "max_model_len": 32768,
-            "tensor_parallel_size": tensor_parallel_size,
-            "limit_mm_per_prompt": {"image": len(images)},
-            "structured_outputs_config": {"backend": "xgrammar"},
-            "enable_prefix_caching": False,
-            "speculative_config": make_speculative_config(args),
-            "reasoning_config": _create_reasoning_config(),
-            "async_scheduling": True,
-        },
-        engine_args_override=getattr(args, "engine_args", None),
+    engine_args = AsyncEngineArgs(
+        model=model_path,
+        max_model_len=32768,
+        tensor_parallel_size=tensor_parallel_size,
+        limit_mm_per_prompt={"image": len(images)},
+        structured_outputs_config={"backend": "xgrammar"},
+        enable_prefix_caching=False,
+        speculative_config=make_speculative_config(args),
+        reasoning_config=_create_reasoning_config(),
+        async_scheduling=True,
     )
     engine = AsyncLLM.from_engine_args(engine_args)
     model_arch = get_text_model_name(engine.model_config)
@@ -174,17 +171,6 @@ def main():
         nargs="+",
         default=[30000],
         help="Thinking token budgets to test (default: [30000])",
-    )
-    parser.add_argument(
-        "--engine-args",
-        type=str,
-        default=None,
-        help=(
-            "CLI-style engine args to pass to AsyncLLM (e.g., '--max-model-len 32768 "
-            "--enable-chunked-prefill'). "
-            "If not provided, uses VLLM_HARDWARE_PROFILE_ARGS "
-            "environment variable."
-        ),
     )
     args = parser.parse_args()
     asyncio.run(run_vision_test(args.model, args.tensor_parallel_size, args))

@@ -76,12 +76,14 @@ Runtime path: [`vllm/model_executor/layers/logits_processor.py`](../../../../vll
    [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py)
 3. Uses the C5 model path, `tensor_parallel_size`, and
    `SamplingParams(temperature=0.0, max_tokens=32, logprobs=1, prompt_logprobs=1)`
-   over the fixed multilingual/code prompt set in `C5_SANITY_PROMPTS`. Engine
-   kwargs are merged with hardware profile defaults via
-   `get_engine_kwargs_with_overrides` (`VLLM_HARDWARE_PROFILE_ARGS` env var):
+   over the fixed multilingual/code prompt set in `C5_SANITY_PROMPTS`. The
+   pytest entry calls `os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")`
+   so `apply_cohere_auto_config` fills profile defaults from
+   `EngineArgs.__post_init__` while the explicit kwargs (`model`,
+   `max_model_len=32768`, `tensor_parallel_size`) are preserved. See
+   [Hardware Profiles](../../code_notes/ci-and-automation.md#hardware-profiles):
    [`tests/cohere/test_c5_fp32_logits.py`](../../../../tests/cohere/test_c5_fp32_logits.py),
-   [`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py),
-   [`tests/cohere/test_utils_engine_args.py`](../../../../tests/cohere/test_utils_engine_args.py)
+   [`tests/cohere/test_utils_c5.py`](../../../../tests/cohere/test_utils_c5.py)
 4. Tuning env vars: `C5_FP32_LOGITS_MAX_ABS_DIFF` (sampled logprob tolerance,
    default 0.5), `C5_FP32_LOGITS_MAX_PROMPT_ABS_DIFF` (prompt logprob
    tolerance, default 5.0), `C5_FP32_LOGITS_MIN_SHARED_PREFIX` (minimum

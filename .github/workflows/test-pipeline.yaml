@@ -127,7 +127,7 @@ jobs:
     - name: Override Hardware Profiles
       if: ${{ inputs.hardware_profiles_override != '' && inputs.test_group != 'cpu_check' }}
       run: |
-        cat > tests/cohere/configs/hardware_profiles.yaml << 'EOF'
+        cat > vllm/cohere/hardware_profiles.yaml << 'EOF'
         ${{ inputs.hardware_profiles_override }}
         EOF
 

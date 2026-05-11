@@ -56,6 +56,12 @@ This matrix is part of a three-layer documentation structure:
 
 ### 6. vLLM
 
+#### 6.1 [Cohere Auto-Config](./features/auto_config.md)
+
+- 6.1.1 `test_post_init_applies_for_cohere`
+- 6.1.2 `test_post_init_disabled_by_default`
+- 6.1.3 `test_post_init_no_op_for_non_cohere`
+
 ## Benchmarks
 
 ### 1. Model Architecture
@@ -136,28 +142,50 @@ below.
 
 How profiles are applied:
 
-1. [`/tests/cohere/scripts/setup_tests.sh`](../../../tests/cohere/scripts/setup_tests.sh)
-   sources
-   [`/tests/cohere/scripts/apply_hardware_profiles.py`](../../../tests/cohere/scripts/apply_hardware_profiles.py)
-   at container startup. The script matches profiles by `GPU_TYPE` and exports
-   env vars directly and CLI args via `VLLM_HARDWARE_PROFILE_ARGS`.
-2. Benchmark and serving scripts (`run-performance-benchmarks.sh`,
-   `run-bee-eval.sh`) append `${VLLM_HARDWARE_PROFILE_ARGS:-}` to `vllm serve`
-   / `vllm bench` commands.
-3. Profiles are applied in order; later profiles override earlier ones. The
-   `vllm-default` profile is always applied as a baseline.
+1. The canonical YAML lives at
+   [`/vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml)
+   (bundled into the wheel via `setup.py` `package_data`). Profile selection
+   uses CEL `when:` clauses evaluated against `{server.type, gpu.name}` --
+   `gpu.name` is bound lowercased so YAML patterns like `b200` and `mi300x`
+   match real device names. The `vllm-default` profile is always applied
+   as a baseline; later profiles override earlier ones on conflicting keys.
+2. [`/vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py)
+   implements `apply_cohere_auto_config(engine_args)`, which is invoked from
+   [`/vllm/engine/arg_utils.py`](../../../vllm/engine/arg_utils.py) at the
+   end of `EngineArgs.__post_init__` whenever
+   `VLLM_ENABLE_COHERE_AUTO_CONFIG` is truthy (`1` / `true`). User-supplied
+   field values are detected by comparing each live field to its dataclass
+   default and never overwritten; profile env vars only land when the var
+   is unset.
+3. CI shells (`run_tests.sh`, `run-bee-eval.sh`,
+   `run-performance-benchmarks.sh`) `export VLLM_ENABLE_COHERE_AUTO_CONFIG=1`
+   so every spawned `vllm serve` / `vllm bench` / pytest process picks the
+   profiles up automatically. Python entry points that build `LLM(...)` /
+   `AsyncEngineArgs(...)` directly call
+   `os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")` in their
+   `main()` / `__main__` block (or the pytest entry function). See
+   [Cohere Auto-Config](../code_notes/runtime-and-scheduling.md#8-cohere-auto-config-hardware-profile-application)
+   for the runtime-side contract and
+   [Hardware Profiles](../code_notes/ci-and-automation.md#hardware-profiles)
+   for the CI-side contract.
 
 Rules for new or modified tests:
 
 - **Respect hardware profiles by default.** Tests that use the vLLM engine for
-  serving or benchmarking should rely on the env vars and args exported by the
-  profile, not hard-code GPU-specific settings.
+  serving or benchmarking should opt in to auto-config (env var) rather than
+  hard-coding GPU-specific settings; profile values fill in dataclass-default
+  fields automatically.
 - Prefer enabling `torch.compile` and CUDA graphs when compatible with the
   test. Call out any intentional deviation in the test doc's `## Setup` section.
 - If a test needs to override a profile value (e.g. a specific attention
-  backend), document the override and the reason in the test doc.
-- When adding a new GPU profile, update `hardware_profiles.yaml` and verify
-  that `apply_hardware_profiles.py` emits the expected exports.
+  backend), pass it explicitly to `LLM(...)` / `AsyncEngineArgs(...)` --
+  user-set fields are preserved by `apply_cohere_auto_config`. Document the
+  override and reason in the test doc.
+- When adding a new GPU profile, update
+  [`/vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml)
+  and add coverage in
+  [`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py)
+  for any non-trivial CEL `when:` clause or new keys.
 
 ### Nightly Metric Emission
 

@@ -21,8 +21,6 @@ BENCHMARK_CONFIG_PATH = SCRIPT_DIR.parent / "configs" / "benchmark-config.yaml"
 # TODO(czhu): if we want to benchmark multiple models/configs, we can
 # define different templates in json files and use environment variables
 # to control which ones to load.
-# NOTE: max_num_batched_tokens, max_num_seqs, and max_model_len are now
-# defined in hardware_profiles.yaml and applied via VLLM_HARDWARE_PROFILE_ARGS.
 SERVER_DEFAULTS: dict[str, Any] = {
     "disable_log_stats": "",
 }

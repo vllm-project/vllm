@@ -50,8 +50,8 @@ NOTE: if you specify a branch in `--ref`, the workflow may fail if you make chan
    - Auto-detect your GPU platform (NVIDIA/AMD)
    - Install test dependencies
    - Reinstall vLLM in editable mode using precompiled wheels for C++/CUDA extensions
-   - Apply hardware profiles from `tests/cohere/configs/hardware_profiles.yaml` via `apply_hardware_profiles.py`, exporting `VLLM_HARDWARE_PROFILE_ARGS` with the resolved CLI flags
    - This allows testing local source code changes while using optimized compiled extensions
+   - Hardware profiles are applied automatically at engine boot via [`vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py) when `VLLM_ENABLE_COHERE_AUTO_CONFIG=1` is set; CI shells export it once at the top of [`run_tests.sh`](../../../tests/cohere/scripts/run_tests.sh) (and friends), and standalone Python entry points set it via `os.environ.setdefault`. See [Hardware Profiles](#hardware-profiles) below.
 
 2. **Download model checkpoints** (optional, only needed for eval/performance/guided_generation/speculative_decoding/vision tests):
 
@@ -85,9 +85,9 @@ Configure these environment variables to customize paths:
 - `MODELS` - Comma-separated list of models for eval/performance tests (default: `command-r7b_fp8`)
 - `TEST_DATA_FILE` - Path to eval config YAML file (required for lm_eval tests)
 
-**Hardware profile args** (set automatically by `setup_tests.sh`):
+**Hardware profile opt-in** (exported once by each CI shell):
 
-- `VLLM_HARDWARE_PROFILE_ARGS` - CLI-style engine args resolved from `tests/cohere/configs/hardware_profiles.yaml` (e.g. `--gpu-memory-utilization 0.95 --enable-chunked-prefill --cudagraph-capture-sizes 64`). Tests consume this via `test_utils_engine_args.py` helpers that merge profile defaults with test-specific overrides. See [Hardware Profiles](#hardware-profiles) below.
+- `VLLM_ENABLE_COHERE_AUTO_CONFIG` - When `1` / `true`, `EngineArgs.__post_init__` invokes `apply_cohere_auto_config` from [`vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py), which loads [`vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml) and fills in `EngineArgs` fields that still match their dataclass defaults. Fields a test explicitly passes to `LLM(...)` / `AsyncEngineArgs(...)` are preserved. See [Hardware Profiles](#hardware-profiles) below.
 
 ### Running Test Groups
 
@@ -181,29 +181,32 @@ compatibility.
 
 ## Hardware Profiles
 
-Engine args for vLLM tests (memory utilization, chunked prefill, cudagraph capture sizes, etc.) are centralized in `tests/cohere/configs/hardware_profiles.yaml` rather than hardcoded in each test file.
+Engine args for vLLM tests (memory utilization, chunked prefill, cudagraph capture sizes, etc.) are centralized in [`vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml) — bundled into the wheel via `setup.py` `package_data` — rather than hardcoded in each test file.
 
 **How it works:**
 
-1. `setup_tests.sh` runs `apply_hardware_profiles.py --gpu-type $GPU_TYPE`, which reads `hardware_profiles.yaml`, merges the `vllm-default` profile with any GPU-specific profile (e.g. `vllm-b200`), and exports the result as `VLLM_HARDWARE_PROFILE_ARGS`.
-2. Tests import helpers from `tests/cohere/test_utils_engine_args.py`:
-   - `get_engine_kwargs_with_overrides(test_kwargs, ...)` — for `LLM(...)` constructor tests. Returns a merged `dict`.
-   - `get_async_engine_args_with_overrides(test_kwargs, ...)` — for `AsyncLLM.from_engine_args(...)` tests. Returns an `AsyncEngineArgs` instance.
-3. Profile args provide defaults; test-specific kwargs always win on overlap. Both helpers log the merge result for debuggability.
+1. The runtime hook lives at the end of `EngineArgs.__post_init__` in [`vllm/engine/arg_utils.py`](../../../vllm/engine/arg_utils.py): when `VLLM_ENABLE_COHERE_AUTO_CONFIG` is truthy (`1` / `true`), it calls `apply_cohere_auto_config(self)` from [`vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py).
+2. `apply_cohere_auto_config` (a) probes the HF config for a Cohere architecture, (b) resolves matching profiles via CEL `when:` clauses bound to `{server.type, gpu.name}` (lowercased so YAML patterns like `b200` and `mi300x` match), (c) merges `vllm-default` with the GPU-specific overlay, then (d) mutates the live `EngineArgs` instance in place. Fields whose live value still equals the dataclass default are filled from the profile; user-supplied overrides are preserved unchanged.
+3. CI shells export the env var once: [`run_tests.sh`](../../../tests/cohere/scripts/run_tests.sh), [`run-bee-eval.sh`](../../../tests/cohere/scripts/run-bee-eval.sh), [`run-performance-benchmarks.sh`](../../../tests/cohere/scripts/run-performance-benchmarks.sh) — every spawned `vllm serve` / `vllm bench` / pytest subprocess inherits and self-configures. Standalone Python entry points set it via `os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")` in their `main()` / `__main__` / pytest entry function.
+4. Profile env vars (`env:` block) only land when the var is currently unset; pre-existing `os.environ` values win and log at INFO. Failures inside `apply_cohere_auto_config` are caught and logged but never raised.
+
+For the runtime contract see [Cohere Auto-Config](../code_notes/runtime-and-scheduling.md#8-cohere-auto-config-hardware-profile-application). For CI integration see [Hardware Profiles](../code_notes/ci-and-automation.md#hardware-profiles). For CPU unit-test coverage see [`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py) ([feature doc](./features/auto_config.md)).
 
 **Key files:**
 
 | File | Purpose |
 | ------ | --------- |
-| `tests/cohere/configs/hardware_profiles.yaml` | Declares per-GPU engine args and env vars |
-| `tests/cohere/scripts/apply_hardware_profiles.py` | Reads YAML profiles, emits shell `export` statements |
-| `tests/cohere/test_utils_engine_args.py` | Parses `VLLM_HARDWARE_PROFILE_ARGS` and merges with test kwargs |
+| [`vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml) | Canonical per-GPU engine args and env vars |
+| [`vllm/cohere/auto_config.py`](../../../vllm/cohere/auto_config.py) | `apply_cohere_auto_config` -- profile resolution, type coercion, user-override detection |
+| [`vllm/engine/arg_utils.py`](../../../vllm/engine/arg_utils.py) | `EngineArgs.__post_init__` opt-in gate (reads `VLLM_ENABLE_COHERE_AUTO_CONFIG` directly) |
+| [`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py) | CPU unit suite covering arch detection, CEL `when:` clauses, type coercion, profile resolution, `__post_init__` integration |
 
 **Adding or changing engine args:**
 
-- To change a default for all tests, edit the `vllm-default` profile in `hardware_profiles.yaml`.
-- To add a GPU-specific override, add/edit the matching `vllm-<gpu>` profile.
-- List values (e.g. `cudagraph-capture-sizes: [1, 4, 16, 64]`) are emitted as space-separated CLI args and parsed via `nargs='+'`.
+- To change a default for all tests, edit the `vllm-default` profile in [`vllm/cohere/hardware_profiles.yaml`](../../../vllm/cohere/hardware_profiles.yaml).
+- To add a GPU-specific override, add/edit a profile with a CEL `when:` clause (e.g. `matches(gpu.name, "b200")`).
+- List values (e.g. `cudagraph-capture-sizes: [1, 4, 16, 64]`) are coerced to the declared `EngineArgs` field type via `_coerce`.
+- Add coverage for any non-trivial new CEL clause or coercion shape in [`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py).
 
 ## Test Output
 

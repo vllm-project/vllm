@@ -1013,6 +1013,7 @@ package_data = {
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
+        "cohere/hardware_profiles.yaml",  # cohere
     ]
 }
 

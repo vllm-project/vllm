@@ -23,7 +23,6 @@ from vllm.lora.request import LoRARequest
 from .test_utils_c5 import (
     C5_SANITY_EXPECTED,
     C5_SANITY_PROMPTS,
-    build_c5_llm,
     shutdown_llm,
     validate_model_path,
 )
@@ -32,16 +31,13 @@ C5_MODEL_DIR_ENV_KEY = "C5_MODEL_DIR"
 C5_LORA_DIR_ENV_KEY = "C5_LORA_DIR"
 
 
-def _build_lora_llm(
-    model_path: str,
-    tensor_parallel_size: int,
-    engine_args: str | None,
-) -> LLM:
-    return build_c5_llm(
-        model_path,
-        tensor_parallel_size,
-        engine_args,
-        extra_kwargs={"enable_lora": True, "max_loras": 1, "max_lora_rank": 64},
+def _build_lora_llm(model_path: str, tensor_parallel_size: int) -> LLM:
+    return LLM(
+        model=model_path,
+        tensor_parallel_size=tensor_parallel_size,
+        enable_lora=True,
+        max_loras=1,
+        max_lora_rank=64,
     )
 
 
@@ -87,7 +83,6 @@ def run_c5_lora_sanity_check_test(
     model_path: str,
     lora_path: str,
     tensor_parallel_size: int = 1,
-    engine_args: str | None = None,
 ) -> bool:
     """
     Run c5 LoRA serving sanity check test.
@@ -96,7 +91,6 @@ def run_c5_lora_sanity_check_test(
         model_path: Path to the c5 3a30t model checkpoint directory
         lora_path: Path to the LoRA adapter checkpoint directory
         tensor_parallel_size: Number of GPUs for tensor parallelism
-        engine_args: CLI-style engine args (overrides VLLM_HARDWARE_PROFILE_ARGS)
 
     Returns:
         True if there were any failures, False if all checks passed.
@@ -112,7 +106,7 @@ def run_c5_lora_sanity_check_test(
         lora_path=lora_path,
     )
 
-    llm = _build_lora_llm(model_path, tensor_parallel_size, engine_args)
+    llm = _build_lora_llm(model_path, tensor_parallel_size)
     errors = 0
     try:
         # Run without LoRA
@@ -173,23 +167,12 @@ def main():
         default=1,
         help="Number of GPUs for tensor parallelism (default: 1)",
     )
-    parser.add_argument(
-        "--engine-args",
-        type=str,
-        default=None,
-        help=(
-            "CLI-style engine args to pass to LLM (e.g., '--max-model-len 32768 "
-            "--enable-chunked-prefill'). "
-            "If not provided, uses VLLM_HARDWARE_PROFILE_ARGS "
-            "environment variable."
-        ),
-    )
     args = parser.parse_args()
     model_path = validate_model_path(args.model)
     lora_path = validate_model_path(args.lora)
 
     return run_c5_lora_sanity_check_test(
-        model_path, lora_path, args.tensor_parallel_size, args.engine_args
+        model_path, lora_path, args.tensor_parallel_size
     )
 
 

@@ -20,7 +20,6 @@ from test_utils import (
     get_tool_schema,
     make_speculative_config,
 )
-from test_utils_engine_args import get_async_engine_args_with_overrides
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams, TokensPrompt
@@ -28,6 +27,7 @@ from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # no
     convert_schema_to_structural_tags,
 )
 from vllm.cohere.utils import get_text_model_name
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -110,19 +110,15 @@ async def check_tools_are_valid(args, speculative: bool = False):
     """Check all prompts + tool schemas for given model."""
     spec_config = make_speculative_config(args) if speculative else None
 
-    # Get effective engine args with hardware profile args + test-specific overrides
-    engine_args = get_async_engine_args_with_overrides(
-        test_kwargs={
-            "model": args.model,
-            "dtype": "auto",
-            "max_model_len": args.max_model_len,
-            "tensor_parallel_size": args.tensor_parallel_size,
-            "structured_outputs_config": {"backend": "xgrammar"},
-            "speculative_config": spec_config,
-            "reasoning_config": _create_reasoning_config(),
-            "async_scheduling": True,
-        },
-        engine_args_override=getattr(args, "engine_args", None),
+    engine_args = AsyncEngineArgs(
+        model=args.model,
+        dtype="auto",
+        max_model_len=args.max_model_len,
+        tensor_parallel_size=args.tensor_parallel_size,
+        structured_outputs_config={"backend": "xgrammar"},
+        speculative_config=spec_config,
+        reasoning_config=_create_reasoning_config(),
+        async_scheduling=True,
     )
 
     engine = AsyncLLM.from_engine_args(engine_args)

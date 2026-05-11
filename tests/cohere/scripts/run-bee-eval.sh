@@ -20,6 +20,9 @@ fi
 
 source tests/cohere/scripts/run-helper.sh
 
+# Apply Cohere hardware_profiles.yaml inside spawned vllm processes.
+export VLLM_ENABLE_COHERE_AUTO_CONFIG=1
+
 run_bee_eval() {
   # run bee eval tests using `vllm serve` and `uv run bee` command
   # $1: a json file specifying serving test cases
@@ -74,7 +77,6 @@ run_bee_eval() {
     fi
 
     server_command="$server_envs vllm serve \
-      ${VLLM_HARDWARE_PROFILE_ARGS:-} \
       $server_args"
 
     # run the server

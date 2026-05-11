@@ -99,3 +99,60 @@ Validation checklist:
 3. Confirm no logprob shape mismatch/assertion under async scheduling.
 4. Force a grammar-advance failure and verify request aborts cleanly.
 5. Run repeated multimodal startup/shutdown and verify no SHM name collision.
+
+## 8) Cohere Auto-Config (Hardware Profile Application)
+
+Hardware profiles are applied at engine boot via an opt-in hook inside
+`EngineArgs.__post_init__`:
+
+- `vllm/cohere/auto_config.py`: `apply_cohere_auto_config(engine_args)` --
+  detects Cohere model architecture from the HF config, resolves matching
+  profiles from `vllm/cohere/hardware_profiles.yaml` via CEL `when:`
+  clauses bound to `{server.type, gpu.name}`, then mutates the live
+  `EngineArgs` instance in place.
+- `vllm/cohere/hardware_profiles.yaml`: bundled into the wheel via
+  `setup.py` `package_data`. The `vllm-default` profile is always applied
+  as a baseline; per-GPU profiles overlay it (later wins on conflicting
+  keys).
+- `vllm/engine/arg_utils.py`: at the end of `EngineArgs.__post_init__`
+  the gate reads `os.environ.get("VLLM_ENABLE_COHERE_AUTO_CONFIG", "0").strip().lower() in ("true", "1")`.
+  When truthy it does a lazy import and calls `apply_cohere_auto_config(self)`.
+  Default is **off** -- non-Cohere launches do not import the module.
+
+Subtle but important:
+
+- The gate uses raw `os.environ.get` rather than
+  `envs.VLLM_ENABLE_COHERE_AUTO_CONFIG` on purpose. `apply_cohere_auto_config`
+  sets profile env vars (e.g. `VLLM_USE_V1`, `VLLM_ROCM_USE_AITER`) right
+  after the gate; reading any `envs.*` attribute first would prime the
+  `vllm.envs` cache with pre-profile values and shadow the writes.
+- "User-set" detection compares each `EngineArgs` field's live value to
+  its dataclass default (`f.default` / `f.default_factory()`). Fields
+  matching the default are filled from the profile; fields with any
+  user-supplied value are preserved unchanged. This means
+  `LLM(model=..., max_model_len=8192)` keeps `max_model_len=8192` even
+  when the profile sets a different value.
+- Profile `env:` entries only land when the env var is currently unset;
+  pre-existing `os.environ` values win and are logged at INFO so user
+  overrides are visible.
+- Failures inside `apply_cohere_auto_config` are caught and logged but
+  never raised -- a malformed YAML or buggy CEL clause cannot break
+  engine startup.
+
+How callers opt in:
+
+- CI shells (`run_tests.sh`, `run-bee-eval.sh`,
+  `run-performance-benchmarks.sh`) `export VLLM_ENABLE_COHERE_AUTO_CONFIG=1`
+  so every spawned `vllm serve` / `vllm bench` / pytest process picks
+  profiles up automatically.
+- Python entry points that build `LLM(...)` / `AsyncEngineArgs(...)`
+  directly call
+  `os.environ.setdefault("VLLM_ENABLE_COHERE_AUTO_CONFIG", "1")` in their
+  `main()` / `__main__` / pytest entry function so standalone invocations
+  self-configure without depending on the shell wrapper.
+
+Validation: see
+[`tests/cohere/cpu/test_auto_config.py`](../../../tests/cohere/cpu/test_auto_config.py)
+([feature doc](../tests/features/auto_config.md)) for the full CPU unit
+suite covering arch detection, CEL evaluation, type coercion, profile
+resolution, and `__post_init__` opt-in semantics.

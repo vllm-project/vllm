@@ -21,13 +21,21 @@ Core configs:
 - `runner_map.json`: maps `(gpu, test_group)` -> runner labels.
 - `tp_model_map.json`: per `(gpu, model)` minimum/recommended TP constraints.
 - `model_eval_map.json` and related benchmark config files.
-- `hardware_profiles.yaml`: declares per-GPU engine args (memory utilization, chunked prefill, cudagraph capture sizes, etc.) and env vars. Applied by `apply_hardware_profiles.py` during `setup_tests.sh`, exported as `VLLM_HARDWARE_PROFILE_ARGS`.
+- `vllm/cohere/hardware_profiles.yaml`: declares per-GPU engine args (memory utilization, chunked prefill, cudagraph capture sizes, etc.) and env vars. Bundled into the wheel via `setup.py` `package_data`. Applied at engine boot via `apply_cohere_auto_config` from `EngineArgs.__post_init__` when `VLLM_ENABLE_COHERE_AUTO_CONFIG=1` is set in the process env.
 
 Why this is central:
 
 - CI matrix logic depends on these files for both validity checks and workload partitioning.
 - incorrect updates here can invalidate CI behavior even if workflow YAML is unchanged.
-- hardware profile changes affect every test that uses `test_utils_engine_args.py` helpers (`get_engine_kwargs_with_overrides`, `get_async_engine_args_with_overrides`), which parse `VLLM_HARDWARE_PROFILE_ARGS` and merge profile defaults with test-specific kwargs. Changing a profile value effectively changes the engine config for all tests unless a test explicitly overrides that key.
+- hardware profile changes affect every test that runs under
+  `VLLM_ENABLE_COHERE_AUTO_CONFIG=1` (CI shells export it; standalone Python
+  entry points set it via `os.environ.setdefault`). `apply_cohere_auto_config`
+  fills in `EngineArgs` fields that match their dataclass defaults; fields
+  the test explicitly passes to `LLM(...)` / `AsyncEngineArgs(...)` are
+  preserved. Changing a profile value effectively changes the engine config
+  for every test that doesn't override the same key. See
+  [Hardware Profiles](ci-and-automation.md#hardware-profiles) and
+  [Cohere Auto-Config](runtime-and-scheduling.md#8-cohere-auto-config-hardware-profile-application).
 
 ## 2b) Model-Conditional Eval Config Generation
 

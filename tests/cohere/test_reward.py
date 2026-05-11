@@ -10,7 +10,6 @@ import argparse
 import sys
 
 import torch
-from test_utils_engine_args import get_engine_kwargs_with_overrides
 
 from vllm import LLM, PoolingParams
 
@@ -31,7 +30,6 @@ PROMPTS = [
 def run_reward_test(
     model_path: str,
     tensor_parallel_size: int = 1,
-    engine_args: str | None = None,
 ):
     """
     Run reward test
@@ -39,26 +37,17 @@ def run_reward_test(
     Args:
         model_path: Path to the model checkpoint
         tensor_parallel_size: Number of GPUs for tensor parallelism
-        engine_args: CLI-style engine args (overrides
-            VLLM_HARDWARE_PROFILE_ARGS env var)
     """
     print(f"Loading model from: {model_path}")
     print(f"Using tensor_parallel_size: {tensor_parallel_size}")
 
-    # Get effective engine kwargs with hardware profile args + test-specific overrides
-    effective_kwargs = get_engine_kwargs_with_overrides(
-        test_kwargs={
-            "runner": "pooling",
-            "model": model_path,
-            "max_num_batched_tokens": 32768,
-            "tensor_parallel_size": tensor_parallel_size,
-            "seed": 0,
-        },
-        engine_args_override=engine_args,
+    llm = LLM(
+        runner="pooling",
+        model=model_path,
+        max_num_batched_tokens=32768,
+        tensor_parallel_size=tensor_parallel_size,
+        seed=0,
     )
-
-    # Create LLM instance with merged kwargs
-    llm = LLM(**effective_kwargs)
     pooling_params = [
         PoolingParams(use_activation=False),
         PoolingParams(use_activation=False),
@@ -96,20 +85,9 @@ def main():
         default=4,
         help="Number of GPUs for tensor parallelism (default: 4)",
     )
-    parser.add_argument(
-        "--engine-args",
-        type=str,
-        default=None,
-        help=(
-            "CLI-style engine args to pass to LLM (e.g., '--max-model-len 32768 "
-            "--enable-chunked-prefill'). "
-            "If not provided, uses VLLM_HARDWARE_PROFILE_ARGS "
-            "environment variable."
-        ),
-    )
     args = parser.parse_args()
 
-    return run_reward_test(args.model, args.tensor_parallel_size, args.engine_args)
+    return run_reward_test(args.model, args.tensor_parallel_size)
 
 
 if __name__ == "__main__":

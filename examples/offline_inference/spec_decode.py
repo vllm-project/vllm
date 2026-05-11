@@ -167,29 +167,14 @@ def main(args):
     else:
         raise ValueError(f"unknown method: {args.method}")
 
-    # COHERE STARTS
-    # Pick up hardware-specific overrides (e.g. mm_encoder_attn_backend for B200)
-    # from VLLM_HARDWARE_PROFILE_ARGS set by setup_tests.sh.
-    # Only extract keys that are hardware-specific; serving-oriented defaults
-    # (max_num_batched_tokens, max_num_seqs, etc.) are left to the LLM() call.
-    import os
-
-    from tests.cohere.test_utils_engine_args import parse_engine_args_to_dict
-
-    _HARDWARE_PROFILE_KEYS = {"mm_encoder_attn_backend"}
-    _hw_args = os.environ.get("VLLM_HARDWARE_PROFILE_ARGS", "")
-    _parsed = parse_engine_args_to_dict(_hw_args) if _hw_args else {}
-    cohere_overrides = {k: _parsed[k] for k in _HARDWARE_PROFILE_KEYS if k in _parsed}
-    # COHERE ENDS
-
     llm = LLM(
         model=model_dir,
         trust_remote_code=True,
         tensor_parallel_size=args.tp,
-        enable_chunked_prefill=args.enable_chunked_prefill,
+        # enable_chunked_prefill=args.enable_chunked_prefill,  # cohere
         enable_prefix_caching=True,  # cohere
         enforce_eager=args.enforce_eager,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        # gpu_memory_utilization=args.gpu_memory_utilization, # cohere
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=16384,  # cohere
@@ -197,7 +182,6 @@ def main(args):
         disable_chunked_mm_input=True,
         max_num_seqs=args.max_num_seqs if args.max_num_seqs is not None else 16,
         allowed_local_media_path=args.allowed_local_media_path,
-        **cohere_overrides,  # cohere
     )
 
     sampling_params = SamplingParams(
