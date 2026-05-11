@@ -108,7 +108,7 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
             w13_bias = getattr(layer, "w13_bias", None)
             w2_bias = getattr(layer, "w2_bias", None)
             if w13_bias is not None:
-                quant_config.set_w1_bias(w2_bias)
+                quant_config.set_w1_bias(w13_bias)
             if w2_bias is not None:
                 quant_config.set_w2_bias(w2_bias)
 

@@ -16,6 +16,9 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP4_DTYPE,
+    FP8_DTYPE,
+    MXFP_SCALE_DTYPE,
     GroupShape,
     QuantKey,
 )
@@ -191,8 +194,74 @@ class FusedMoEQuantDesc:
     shape: GroupShape | None = None
 
     @staticmethod
-    def make(quant_key: QuantKey) -> "FusedMoEQuantDesc":
-        raise NotImplementedError
+    def make(
+        quant_key: QuantKey | None, shape: GroupShape | None
+    ) -> "FusedMoEQuantDesc":
+        """
+        Construct a FusedMoEQuantDesc from an optional QuantKey.
+
+        Maps the QuantKey dtype and scale descriptor to the appropriate
+        FusedMoEQuantDesc dtype (which can be a torch.dtype or a string
+        for special types like "nvfp4", "mxfp4", "int4") and group shape.
+
+        Unquantized dtypes (fp16, bf16, fp32) or quant_key is None are mapped to None.
+        """
+        from vllm.scalar_type import scalar_types
+
+        if quant_key is None:
+            return FusedMoEQuantDesc(None, shape=shape)
+
+        assert shape is None
+
+        # Extract group shape from scale descriptor
+        group_shape = quant_key.scale.group_shape
+
+        # Determine the dtype mapping
+        quant_dtype = quant_key.dtype
+        scale_dtype = quant_key.scale.dtype
+        has_scale2 = quant_key.scale2 is not None
+
+        # Map special cases to string dtypes
+        dtype_result: torch.dtype | str | None
+
+        # Unquantized types (fp16, bf16, fp32) -> None
+        if quant_dtype in (torch.float16, torch.bfloat16, torch.float32):
+            dtype_result = None
+        # NVFP4: FP4_DTYPE with scale2 present and FP8 scale
+        elif quant_dtype == FP4_DTYPE and has_scale2:
+            dtype_result = "nvfp4"
+        # MXFP4/MXFP6/MXFP8: scale dtype is MXFP_SCALE_DTYPE (uint8)
+        elif scale_dtype == MXFP_SCALE_DTYPE:
+            if quant_dtype == FP4_DTYPE:
+                dtype_result = "mxfp4"
+            elif quant_dtype == FP8_DTYPE:
+                # MX FP8 formats - check group shape to distinguish
+                # Standard MXFP8 uses 32-element groups
+                dtype_result = "mxfp8"
+            else:
+                raise ValueError(
+                    f"Unsupported MXFP dtype: {quant_dtype} with scale dtype "
+                    f"{scale_dtype}"
+                )
+        # INT4: INT4_DTYPE scalar type
+        elif quant_dtype == scalar_types.uint4b8:
+            dtype_result = "int4"
+        # INT8: INT8_DTYPE scalar type
+        elif quant_dtype == scalar_types.uint8b128:
+            # Map to torch.int8 for standard int8 quantization
+            dtype_result = torch.int8
+        # FP8 quantization
+        elif quant_dtype == FP8_DTYPE:
+            dtype_result = quant_dtype
+        # torch.int8 (for non-scalar-type int8)
+        elif quant_dtype == torch.int8:
+            dtype_result = torch.int8
+        else:
+            raise ValueError(
+                f"Unable to map QuantKey dtype {quant_dtype} to FusedMoEQuantDesc dtype"
+            )
+
+        return FusedMoEQuantDesc(dtype=dtype_result, shape=group_shape)
 
 
 @dataclass
@@ -334,8 +403,13 @@ class FusedMoERuntimeQuantConfig:
 class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
     """
     The FusedMoEQuantConfig contains all the quantization parameters for
-    a single FusedMoEMethodBase operation.  It consists of four
-    FusedMoEQuantDescs, one for each activation and set of weights.
+    a single FusedMoEMethodBase operation.  It currently inherits from
+    FusedMoERuntimeQuantConfig (this inheritance is temporary and will be
+    removed in the future when the classes are fully separated) and adds
+    four FusedMoEQuantDescs (_a1, _a2, _w1, _w2) that describe the
+    quantization dtype and group shape for each activation and weight.
+    The inherited FusedMoEWeightDescs (_a1_w, _a2_w, _w1_w, _w2_w) contain
+    the runtime quantization parameters (scales, zero points, biases, etc.).
 
     Each FusedMoEMethodBase must implement a get_fused_moe_quant_config
     method to construct a FusedMoEQuantConfig for use with that class.
