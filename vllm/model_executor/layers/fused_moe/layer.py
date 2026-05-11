@@ -28,6 +28,8 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     ExpertMapManager,
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+    init_aiter_topK_meta_data,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -100,6 +102,9 @@ class FusedMoE(PluggableLayer):
                                       not supported by the router (or the experts).
     """
 
+    # Auto-incrementing layer ID for routing replay buffer binding.
+    _next_moe_layer_id: int = 0
+
     # --8<-- [end:fused_moe]
 
     def __init__(
@@ -136,6 +141,7 @@ class FusedMoE(PluggableLayer):
         router_logits_dtype: torch.dtype | None = None,
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
+        shared_expert_gate: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         apply_routed_scale_to_output: bool = False,
@@ -143,6 +149,10 @@ class FusedMoE(PluggableLayer):
         hash_indices_table: torch.Tensor | None = None,
     ):
         super().__init__()
+
+        # Assign unique layer ID for routing replay buffer binding.
+        self.moe_layer_id = FusedMoE._next_moe_layer_id
+        FusedMoE._next_moe_layer_id += 1
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -217,6 +227,8 @@ class FusedMoE(PluggableLayer):
             if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
             else 0
         )
+        self.shared_expert_gate = shared_expert_gate
+
         if (
             not self.aiter_fmoe_shared_expert_enabled
             and self.num_fused_shared_experts != 0
@@ -425,6 +437,7 @@ class FusedMoE(PluggableLayer):
             router=self.router,
             gate=gate,
             shared_experts=shared_experts,
+            shared_expert_gate=self.shared_expert_gate,
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
             routed_input_transform=routed_input_transform,
