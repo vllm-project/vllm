@@ -1009,7 +1009,7 @@ def launch_core_engines(
     launcher_cls = resolve_obj_by_qualname(
         vllm_config.parallel_config.engine_core_launcher_cls
     )
-    launcher: CoreEngineLauncher = launcher_cls()
+    launcher = launcher_cls()
     with launcher.launch_core_engines(
         vllm_config,
         executor_class,
