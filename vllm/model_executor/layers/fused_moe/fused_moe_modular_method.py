@@ -101,8 +101,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             topk_ids=topk_ids,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
-            expert_map=None if self.disable_expert_map else layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            expert_map=None if self.disable_expert_map else layer.expert_map,
             shared_experts_input=shared_experts_input,
-            layer_name=layer.layer_name,
         )

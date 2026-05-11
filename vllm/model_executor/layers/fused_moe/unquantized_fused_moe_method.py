@@ -286,7 +286,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
-            layer_name=layer.layer_name,
         )
 
     def forward_cuda(
