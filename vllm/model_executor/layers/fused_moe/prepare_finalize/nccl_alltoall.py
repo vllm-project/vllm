@@ -242,15 +242,14 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 flat_route_topk_ids, num_experts
             )
             order = torch.argsort(dest_ranks)
-            flat_hidden_states = a1q.index_select(0, flat_token_indices)
-            send_hidden_states = flat_hidden_states.index_select(0, order)
+            ordered_token_indices = flat_token_indices.index_select(0, order)
+            send_hidden_states = a1q.index_select(0, ordered_token_indices)
             send_topk_ids = flat_topk_ids.index_select(0, order)
-            sent_token_indices = flat_token_indices.index_select(0, order)
+            sent_token_indices = ordered_token_indices
             sent_topk_weights = flat_topk_weights.index_select(0, order)
             send_a1q_scale = None
             if a1q_scale is not None and a1q_scale.ndim != 0:
-                send_a1q_scale = a1q_scale.index_select(0, flat_token_indices)
-                send_a1q_scale = send_a1q_scale.index_select(0, order)
+                send_a1q_scale = a1q_scale.index_select(0, ordered_token_indices)
 
         send_counts_tensor = torch.bincount(
             dest_ranks, minlength=self.num_dispatchers_
@@ -312,7 +311,7 @@ class NcclAllToAllPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_tokens_meta,
             recv_topk_ids,
             (
-                torch.empty_like(recv_topk_ids, dtype=topk_weights.dtype)
+                torch.ones_like(recv_topk_ids, dtype=topk_weights.dtype)
                 if apply_router_weight_on_input
                 else torch.ones_like(recv_topk_ids, dtype=topk_weights.dtype)
             ),
