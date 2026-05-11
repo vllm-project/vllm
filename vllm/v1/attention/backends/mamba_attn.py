@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -270,15 +271,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_prefills = common.num_prefills
         num_decode_tokens = common.num_decode_tokens
 
-        num_computed_tokens_cpu = (
-            common_attn_metadata.compute_num_computed_tokens().cpu()
-        )
-        num_computed_tokens_p_cpu = num_computed_tokens_cpu[
-            num_reqs - num_prefills : num_reqs
-        ]
+        # Derive prefill context lengths from CPU data only.
+        # `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
+        # (including async spec decode), so this avoids the D2H sync that
+        # `compute_num_computed_tokens().cpu()` would force.
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        assert seq_lens_cpu is not None
         query_start_loc_p_cpu = (
             common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
             - num_decode_tokens
+        )
+        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
+        num_computed_tokens_p_cpu = (
+            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
@@ -289,20 +294,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
 
         device = common_attn_metadata.query_start_loc.device
-        cu_chunk_seqlen_p = torch.as_tensor(
-            cu_chunk_seqlen,
-            device=device,
-            dtype=torch.int32,
+        # Build on pinned CPU and upload non-blocking to avoid the synchronous
+        # H2D copy that `torch.as_tensor(list, device=cuda)` would force.
+        cu_chunk_seqlen_p = async_tensor_h2d(
+            cu_chunk_seqlen, dtype=torch.int32, device=device
         )
-        seq_idx_p = torch.as_tensor(
-            seq_idx,
-            device=device,
-            dtype=torch.int32,
-        )
-        last_chunk_indices_p = torch.as_tensor(
-            last_chunk_indices,
-            device=device,
-            dtype=torch.int32,
+        seq_idx_p = async_tensor_h2d(seq_idx, dtype=torch.int32, device=device)
+        last_chunk_indices_p = async_tensor_h2d(
+            last_chunk_indices, dtype=torch.int32, device=device
         )
         return cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p
 

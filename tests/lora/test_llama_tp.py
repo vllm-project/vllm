@@ -10,6 +10,7 @@ import vllm.config
 from vllm import LLM
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.platforms import current_platform
 
 from ..utils import VLLM_PATH, create_new_process_for_each_test, multi_gpu_test
 
@@ -139,6 +140,9 @@ def test_llama_lora(llama32_lora_files, cudagraph_specialize_lora: bool):
     generate_and_test(llm, llama32_lora_files)
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @multi_gpu_test(num_gpus=4)
 def test_llama_lora_tp4(llama32_lora_files):
     llm = vllm.LLM(
@@ -184,7 +188,7 @@ def test_tp2_serialize_and_deserialize_lora(
         result = subprocess.run(
             [
                 sys.executable,
-                f"{VLLM_PATH}/examples/others/tensorize_vllm_model.py",
+                f"{VLLM_PATH}/examples/features/tensorize_vllm_model.py",
                 "--model",
                 MODEL_PATH,
                 "--lora-path",
