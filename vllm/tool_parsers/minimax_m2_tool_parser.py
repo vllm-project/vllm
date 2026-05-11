@@ -9,6 +9,7 @@ from typing import Any
 import regex as re
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
@@ -19,6 +20,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -72,6 +74,18 @@ class MinimaxM2ToolParser(ToolParser):
         logger.debug(
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        if request.tools and request.tool_choice != "none":
+            request.skip_special_tokens = False
+            tc = request.tool_choice
+            if tc == "required" or isinstance(
+                tc, (ChatCompletionNamedToolChoiceParam, dict)
+            ):
+                return request
+        return super().adjust_request(request)
 
     def _generate_tool_call_id(self) -> str:
         """Generate a unique tool call ID."""
