@@ -151,6 +151,7 @@ class RequestState:
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
+        return_completion_routed_experts_only: bool = False,
         stream_input: bool = False,
     ):
         self.request_id = request_id
@@ -172,6 +173,9 @@ class RequestState:
         self.top_p = top_p
         self.n = n
         self.temperature = temperature
+        self.return_completion_routed_experts_only = (
+            return_completion_routed_experts_only
+        )
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
@@ -246,6 +250,18 @@ class RequestState:
             output_kind = request.pooling_params.output_kind
 
         assert request.external_req_id is not None
+        return_completion_routed_experts_only = False
+        if (
+            request.sampling_params is not None
+            and request.sampling_params.extra_args is not None
+        ):
+            kv_transfer_params = request.sampling_params.extra_args.get(
+                "kv_transfer_params"
+            )
+            return_completion_routed_experts_only = bool(
+                kv_transfer_params and kv_transfer_params.get("do_remote_prefill")
+            )
+
         return cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,
@@ -262,6 +278,9 @@ class RequestState:
             top_p=top_p,
             n=n,
             temperature=temperature,
+            return_completion_routed_experts_only=(
+                return_completion_routed_experts_only
+            ),
             arrival_time=request.arrival_time,
             queue=queue,
             log_stats=log_stats,
@@ -332,6 +351,8 @@ class RequestState:
             prompt_routed_experts, gen_routed_experts = split_routed_experts(
                 routed_experts, prompt_len, num_gen
             )
+            if self.return_completion_routed_experts_only:
+                prompt_routed_experts = None
 
         output = self._new_completion_output(
             new_token_ids, finish_reason, stop_reason, gen_routed_experts

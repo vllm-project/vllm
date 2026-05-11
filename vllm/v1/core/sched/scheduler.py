@@ -361,6 +361,11 @@ class Scheduler(SchedulerInterface):
                 return block_idx * block_size
         return num_blocks * block_size
 
+    @staticmethod
+    def _is_remote_prefill_decode_request(request: Request) -> bool:
+        params = request.kv_transfer_params
+        return bool(params and params.get("do_remote_prefill"))
+
     def _clip_prefix_cache_hit_for_routing_replay(
         self,
         request: Request,
@@ -376,6 +381,14 @@ class Scheduler(SchedulerInterface):
             not self.vllm_config.model_config.enable_return_routed_experts
             or initial_num_computed_tokens <= 0
         ):
+            return (
+                new_computed_blocks,
+                num_new_local_computed_tokens,
+                num_external_computed_tokens,
+                load_kv_async,
+            )
+
+        if self._is_remote_prefill_decode_request(request):
             return (
                 new_computed_blocks,
                 num_new_local_computed_tokens,
