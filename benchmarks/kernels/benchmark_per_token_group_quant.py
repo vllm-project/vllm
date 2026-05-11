@@ -25,6 +25,7 @@ def _time_cuda(
     warmup_iters: int,
     bench_iters: int,
 ) -> float:
+    # warmup
     for _ in range(warmup_iters):
         fn()
     torch.accelerator.synchronize()
@@ -41,22 +42,15 @@ def _time_cuda(
     return start.elapsed_time(end) / bench_iters  # ms/iter
 
 
-def _fi_precondition(col_major: bool, gs: int) -> bool:
-    """FI SM90 quantize requires column-major scales and group_size=128."""
-    return col_major and gs == 128
-
-
-# Column widths for consistent output
-_FMT_CUDA = 10
-_FMT_FI = 10
-_FMT_SPEEDUP = 9
-_FMT_TRITON = 10
-_FMT_VS_TRITON = 9
+def _can_run_fi(column_major: bool, group_size: int, scale_ue8m0: bool) -> bool:
+    """FI SM90 path only works with column-major, TMA-aligned, group_size=128, no ue8m0."""
+    return column_major and group_size == 128 and not scale_ue8m0
 
 
 def _run_single(
     shape: tuple[int, int],
     group_size: int,
+    dtype: str,
     *,
     column_major: bool = False,
     scale_ue8m0: bool = False,
@@ -69,17 +63,9 @@ def _run_single(
     torch.manual_seed(42)
     x = torch.randn(num_tokens, hidden_dim, device=device, dtype=torch.bfloat16) * 8
 
-    def impl():
-        return fp8_utils.per_token_group_quant_fp8(
-            x,
-            group_size,
-            column_major_scales=column_major,
-            tma_aligned_scales=column_major,
-            use_ue8m0=scale_ue8m0,
-        )
+    if dtype == "fp8":
 
-    def triton_impl():
-        with _triton_mode():
+        def cuda_impl():
             return fp8_utils.per_token_group_quant_fp8(
                 x,
                 group_size,
@@ -88,47 +74,67 @@ def _run_single(
                 use_ue8m0=scale_ue8m0,
             )
 
+        def triton_impl():
+            with _triton_mode():
+                return fp8_utils.per_token_group_quant_fp8(
+                    x,
+                    group_size,
+                    column_major_scales=column_major,
+                    tma_aligned_scales=column_major,
+                    use_ue8m0=scale_ue8m0,
+                )
+
+        def fi_impl():
+            """FI SM90 + CUDA fallback (same as cuda_impl but measured separately)."""
+            return fp8_utils.per_token_group_quant_fp8(
+                x,
+                group_size,
+                column_major_scales=column_major,
+                tma_aligned_scales=column_major,
+                use_ue8m0=scale_ue8m0,
+            )
+
+    elif dtype == "int8":
+
+        def cuda_impl():
+            return int8_utils.per_token_group_quant_int8(x, group_size)
+
+        def triton_impl():
+            with _triton_mode():
+                return int8_utils.per_token_group_quant_int8(x, group_size)
+    else:
+        raise ValueError("dtype must be 'fp8' or 'int8'")
+
+    cuda_ms = _time_cuda(cuda_impl, warmup_iters, bench_iters)
     triton_ms = _time_cuda(triton_impl, warmup_iters, bench_iters)
+    speedup = triton_ms / cuda_ms if cuda_ms else math.inf
 
-    use_fi = _fi_precondition(column_major, group_size)
+    cfg_desc = (
+        f"shape={shape}  gs={group_size:<3}  col_major={column_major:<5}  "
+        f"ue8m0={scale_ue8m0:<5}  dtype={dtype}"
+    )
 
-    if use_fi:
-        # CUDA-only: mock FI to force fallback to CUDA kernel
+    if dtype == "fp8" and _can_run_fi(column_major, group_size, scale_ue8m0):
+        # FI path: mock out _flashinfer_sm90_per_token_group_quant_fp8 to get
+        # CUDA-only baseline, then compare against FI-enabled path.
         with patch.object(
             fp8_utils,
             "_flashinfer_sm90_per_token_group_quant_fp8",
             return_value=None,
         ):
-            cuda_ms = _time_cuda(impl, warmup_iters, bench_iters)
-        fi_ms = _time_cuda(impl, warmup_iters, bench_iters)
-        fi_speedup = cuda_ms / fi_ms if fi_ms else math.inf
+            cuda_only_ms = _time_cuda(fi_impl, warmup_iters, bench_iters)
+        fi_ms = _time_cuda(fi_impl, warmup_iters, bench_iters)
+        fi_speedup = cuda_only_ms / fi_ms if fi_ms else math.inf
+        print(
+            f"{cfg_desc:55} | CUDA {cuda_only_ms:7.3f} ms  | FI    {fi_ms:7.3f} ms  | "
+            f"FI speed-up ×{fi_speedup:5.2f}  | Triton {triton_ms:7.3f} ms  | "
+            f"vs Triton ×{speedup:5.2f}"
+        )
     else:
-        cuda_ms = _time_cuda(impl, warmup_iters, bench_iters)
-        fi_ms = None
-        fi_speedup = None
-
-    vs_triton = triton_ms / cuda_ms if cuda_ms else math.inf
-
-    shape_s = f"({num_tokens}, {hidden_dim})"
-    cfg_s = (
-        f"{shape_s:>14}  gs={group_size:<3}  "
-        f"col_major={int(column_major)}  ue8m0={int(scale_ue8m0)}"
-    )
-
-    cu_s = f"{cuda_ms:7.3f} ms"
-    if fi_ms is not None:
-        fi_s = f"{fi_ms:7.3f} ms"
-        fi_sp = f"x{fi_speedup:5.2f}"
-    else:
-        fi_s = "      n/a"
-        fi_sp = "    n/a"
-    tr_s = f"{triton_ms:7.3f} ms"
-    vt_s = f"x{vs_triton:5.2f}"
-
-    print(
-        f"{cfg_s:52} | {cu_s:>{_FMT_CUDA}} | {fi_s:>{_FMT_FI}} | "
-        f"{fi_sp:>{_FMT_SPEEDUP}} | {tr_s:>{_FMT_TRITON}} | {vt_s:>{_FMT_VS_TRITON}}"
-    )
+        print(
+            f"{cfg_desc:55} | CUDA {cuda_ms:7.3f} ms  | Triton {triton_ms:7.3f} ms  | "
+            f"speed-up ×{speedup:5.2f}"
+        )
 
 
 def parse_args():
@@ -157,25 +163,47 @@ if __name__ == "__main__":
     num_tokens_list = [int(n) for n in args.num_tokens.split(",")]
     hidden_dims = [int(d) for d in args.hidden_dim.split(",")]
 
+    dtypes = ["fp8", "int8"] if args.dtype == "both" else [args.dtype]
+
     header = (
-        f"{'Configuration':52} | {'CUDA':>{_FMT_CUDA}} | {'FI/SM90':>{_FMT_FI}} | "
-        f"{'FI spup':>{_FMT_SPEEDUP}} | {'Triton':>{_FMT_TRITON}} | {'vs Triton':>{_FMT_VS_TRITON}}"
+        "Configuration".ljust(55)
+        + " | "
+        + "CUDA (ms)".center(12)
+        + " | "
+        + "FI (ms)".center(12)
+        + " | "
+        + "FI Speed-up".center(13)
+        + " | "
+        + "Triton (ms)".center(13)
+        + " | "
+        + "vs Triton"
     )
     print(header)
     print("-" * len(header))
 
-    group_sizes = [128]
-    for hidden_dim in hidden_dims:
-        for num_tokens in num_tokens_list:
-            shape = (num_tokens, hidden_dim)
-            for gs in group_sizes:
-                for col_major in (False, True):
-                    for ue8m0 in (False, True):
+    group_sizes = [128]  # FI only supports gs=128
+    for dtype in dtypes:
+        for hidden_dim in hidden_dims:
+            for num_tokens in num_tokens_list:
+                shape = (num_tokens, hidden_dim)
+                for gs in group_sizes:
+                    if dtype == "fp8":
+                        for col_major in (False, True):
+                            for ue8m0 in (False, True):
+                                _run_single(
+                                    shape,
+                                    gs,
+                                    dtype,
+                                    column_major=col_major,
+                                    scale_ue8m0=ue8m0,
+                                    warmup_iters=warmup_iters,
+                                    bench_iters=bench_iters,
+                                )
+                    else:
                         _run_single(
                             shape,
                             gs,
-                            column_major=col_major,
-                            scale_ue8m0=ue8m0,
+                            dtype,
                             warmup_iters=warmup_iters,
                             bench_iters=bench_iters,
                         )
