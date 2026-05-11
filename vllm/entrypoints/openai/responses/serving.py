@@ -167,6 +167,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -178,6 +179,7 @@ class OpenAIServingResponses(OpenAIServing):
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
+        self.chat_template_kwargs = default_chat_template_kwargs or {}
         self.enable_log_outputs = enable_log_outputs
 
         # Set up the unified parser - either a unified parser or fall back to
@@ -254,10 +256,14 @@ class OpenAIServingResponses(OpenAIServing):
     def _effective_chat_template_kwargs(
         self, request: ResponsesRequest
     ) -> dict[str, Any]:
-        return request.build_chat_params(
-            self.chat_template,
-            self.chat_template_content_format,
-        ).chat_template_kwargs
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.chat_template_kwargs)
+            .chat_template_kwargs
+        )
 
     def _validate_generator_input(
         self,
