@@ -99,7 +99,10 @@ def test_audio_attention_forwards_varlen_metadata_to_mm_encoder_attention(
     assert call["max_seqlen"] is max_seqlen
 
 
-def test_audio_encoder_keeps_huggingface_checkpoint_key_names(monkeypatch):
+def test_audio_encoder_keeps_huggingface_checkpoint_key_names(
+    monkeypatch,
+    default_vllm_config,
+):
     monkeypatch.setattr(
         qwen2_5_omni,
         "MMEncoderAttention",
@@ -119,7 +122,10 @@ def test_audio_encoder_keeps_huggingface_checkpoint_key_names(monkeypatch):
     assert not any("qkv" in key for key in keys)
 
 
-def test_audio_encoder_forward_uses_mm_encoder_attention(monkeypatch):
+def test_audio_encoder_forward_uses_mm_encoder_attention(
+    monkeypatch,
+    default_vllm_config,
+):
     monkeypatch.setattr(
         qwen2_5_omni,
         "MMEncoderAttention",
