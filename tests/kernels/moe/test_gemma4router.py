@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
-from torch import nn
-from torch.func import functional_call
 
 from vllm.model_executor.models.gemma4 import (
     gemma4_fused_routing_kernel_triton,
