@@ -35,6 +35,10 @@ logger = init_logger(__name__)
 
 
 class Qwen3CoderToolParser(ToolParser):
+    from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
+
+    supports_required_and_named: bool = not VLLM_ENFORCE_STRICT_TOOL_CALLING
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
