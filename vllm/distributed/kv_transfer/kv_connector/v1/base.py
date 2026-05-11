@@ -510,6 +510,14 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def on_new_request(self, request: "Request") -> None:
+        """Called by the scheduler when a new request is added.
+
+        Connectors can override this to inspect the request and perform
+        bookkeeping. The default implementation is a no-op.
+        """
+        return
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.
