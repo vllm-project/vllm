@@ -130,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_tool_parser",
         "MinimaxToolParser",
     ),
+    "nemotron_json": (
+        "nemotron_json_tool_parser",
+        "NemotronJSONToolParser",
+    ),
     "mistral": (
         "mistral_tool_parser",
         "MistralToolParser",
