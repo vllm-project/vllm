@@ -46,7 +46,7 @@ def backend_to_kernel_cls(
     backend: Int8MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
     if backend == Int8MoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
             TritonExperts,
         )
 
@@ -78,9 +78,6 @@ def select_int8_moe_backend(
     Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
-    if config.is_lora_enabled:
-        return Int8MoeBackend.TRITON, backend_to_kernel_cls(Int8MoeBackend.TRITON)[0]
 
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
