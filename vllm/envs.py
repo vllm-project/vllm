@@ -202,7 +202,6 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -1464,13 +1463,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS": lambda: bool(
         int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))
-    ),
-    # Time (in seconds) after which the KV cache on the producer side is
-    # automatically cleared if no READ notification is received from the
-    # consumer. This is only applicable when using NixlConnector in a
-    # disaggregated decode-prefill setup.
-    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
-        os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
     ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
