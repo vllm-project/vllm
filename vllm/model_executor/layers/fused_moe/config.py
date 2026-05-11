@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Union
 
@@ -302,10 +302,10 @@ class _FusedMoEWeightDesc:
 
 @dataclass
 class FusedMoERuntimeQuantConfig:
-    _a1_w: _FusedMoEWeightDesc = _FusedMoEWeightDesc()
-    _a2_w: _FusedMoEWeightDesc = _FusedMoEWeightDesc()
-    _w1_w: _FusedMoEWeightDesc = _FusedMoEWeightDesc()
-    _w2_w: _FusedMoEWeightDesc = _FusedMoEWeightDesc()
+    _a1_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
+    _a2_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
+    _w1_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
+    _w2_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
 
     @property
     def a1_scale(self) -> torch.Tensor | None:
@@ -443,10 +443,10 @@ class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
       so that only the required quantization parameters are used/stored.
     """
 
-    _a1: _FusedMoEQuantDesc = _FusedMoEQuantDesc()
-    _a2: _FusedMoEQuantDesc = _FusedMoEQuantDesc()
-    _w1: _FusedMoEQuantDesc = _FusedMoEQuantDesc()
-    _w2: _FusedMoEQuantDesc = _FusedMoEQuantDesc()
+    _a1: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
+    _a2: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
+    _w1: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
+    _w2: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
 
     mx_alignment: int = 0
     ocp_mx_scheme: str | None = None
