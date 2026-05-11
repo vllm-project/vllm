@@ -59,6 +59,8 @@ For further details on pooling models, please refer to [this page](../../models/
 
 ## Speech to Text APIs
 
+For further details on speech to text, please refer to [this page](speech_to_text.md).
+
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#transcription).
 - [Translation API](./speech_to_text.md#translations-api) (`/v1/audio/translations`)
