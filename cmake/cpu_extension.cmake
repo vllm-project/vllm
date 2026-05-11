@@ -86,7 +86,7 @@ function(check_sysctl TARGET OUT)
     endif()
 endfunction()
 
-if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+if (MACOSX_FOUND AND (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64"))
     message(STATUS "Apple Silicon Detected")
     set(APPLE_SILICON_FOUND TRUE)
     set(ENABLE_NUMA OFF)
