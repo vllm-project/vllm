@@ -154,6 +154,22 @@ class Fp8Config(QuantizationConfig):
             self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
 
     @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant, hf_config=None
+    ):
+        if cls.get_name() != "fp8":
+            return None
+
+        quant_method = str(hf_quant_cfg.get("quant_method", "")).lower()
+        packing_format = str(hf_quant_cfg.get("packing_format", "")).lower()
+
+        if quant_method in ("auto_round:fp8", "auto-round:fp8"):
+            return "fp8"
+        if packing_format in ("auto_round:fp8", "auto-round:fp8") and "fp8" in quant_method:
+            return "fp8"
+        return None
+
+    @classmethod
     def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = "fp8" in quant_method
