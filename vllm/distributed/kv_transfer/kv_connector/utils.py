@@ -593,7 +593,7 @@ class TransferTopology:
         return (
             f"TransferTopology("
             f"tp_ratio={self.tp_ratio(info.remote_tp_size)}, "
-            f"K={self.total_num_kv_heads}, "
+            f"num_kv_heads={self.total_num_kv_heads if not self.is_mla else 1}, "
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
             f"local_rank={self.tp_rank}, "
