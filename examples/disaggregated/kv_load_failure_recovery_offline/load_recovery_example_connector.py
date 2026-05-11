@@ -20,6 +20,7 @@ from vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = logging.getLogger()
 logging.basicConfig(level=logging.INFO)
@@ -35,8 +36,17 @@ class LoadRecoveryExampleConnectorMetadata(ExampleConnectorMetadata):
 
 
 class LoadRecoveryExampleConnector(ExampleConnector):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            role=role,
+            kv_cache_config=kv_cache_config,
+        )
         self._async_load = vllm_config.kv_transfer_config.get_from_extra_config(
             "async_load", False
         )
