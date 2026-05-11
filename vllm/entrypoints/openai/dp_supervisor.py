@@ -194,8 +194,7 @@ def _build_dp_supervisor_app(
     @app.get("/ready", include_in_schema=False)
     @app.get("/readyz", include_in_schema=False)
     async def ready() -> Response:
-        # when child servers is healthy, it is ready already
-        return _status_response(app.state.supervisor.is_healthy())
+        return _status_response(app.state.supervisor.is_ready())
 
     return app
 
@@ -228,6 +227,9 @@ class DPSupervisor:
         self._shutdown_signal = signal.SIGTERM
 
     def is_healthy(self) -> bool:
+        return self.children_healthy
+
+    def is_ready(self) -> bool:
         return not self._shutdown_event.is_set() and self.children_healthy
 
     async def run(self) -> None:

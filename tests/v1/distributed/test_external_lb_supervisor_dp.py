@@ -69,14 +69,16 @@ def test_dp_supervisor_aggregates_health():
     supervisor.children_healthy = True
 
     assert supervisor.is_healthy() is True
+    assert supervisor.is_ready() is True
 
 
-def test_dp_supervisor_is_unhealthy_after_shutdown_requested():
+def test_dp_supervisor_is_not_ready_after_shutdown_requested():
     supervisor = DPSupervisor(_make_args())
     supervisor.children_healthy = True
     supervisor._shutdown_event.set()
 
-    assert supervisor.is_healthy() is False
+    assert supervisor.is_healthy() is True
+    assert supervisor.is_ready() is False
 
 
 @pytest.mark.asyncio
