@@ -122,6 +122,9 @@ class CachedRequestData:
     # connector. Won't contain requests that were scheduled in the prior step.
     all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
+    # Request ids whose block table entries must replace the worker row rather
+    # than append. SWA eviction can rewrite earlier logical slots to null_block.
+    block_table_rewrite_req_ids: set[str]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
 
@@ -138,6 +141,7 @@ class CachedRequestData:
             f"new_token_ids_lens={new_token_ids_lens},"
             f"all_token_ids_lens={all_token_ids_lens},"
             f"new_block_ids={self.new_block_ids},"
+            f"block_table_rewrite_req_ids={self.block_table_rewrite_req_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"num_output_tokens={self.num_output_tokens}"
             f")"
@@ -172,6 +176,7 @@ class CachedRequestData:
             new_token_ids=[],
             all_token_ids={},
             new_block_ids=[],
+            block_table_rewrite_req_ids=set(),
             num_computed_tokens=[],
             num_output_tokens=[],
         )

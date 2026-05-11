@@ -325,6 +325,7 @@ class Scheduler(SchedulerInterface):
         preempted_reqs: list[Request] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+        block_table_rewrite_req_ids: set[str] = set()
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         if self._pause_state == PauseState.PAUSED_ALL:
@@ -445,6 +446,7 @@ class Scheduler(SchedulerInterface):
                             scheduled_running_reqs.remove(preempted_req)
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
                             req_to_new_blocks.pop(preempted_req_id)
+                            block_table_rewrite_req_ids.discard(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
                             preempted_encoder_inputs = scheduled_encoder_inputs.pop(
                                 preempted_req_id, None
@@ -474,7 +476,15 @@ class Scheduler(SchedulerInterface):
             # Schedule the request.
             scheduled_running_reqs.append(request)
             request_id = request.request_id
-            req_to_new_blocks[request_id] = new_blocks
+            if self.kv_cache_manager.block_table_updated(request_id):
+                # SWA eviction rewrites older logical slots to null blocks.
+                req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
+                    request_id
+                )
+                block_table_rewrite_req_ids.add(request_id)
+                self.kv_cache_manager.clear_block_table_updated(request_id)
+            else:
+                req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -853,6 +863,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
                 scheduled_spec_decode_tokens,
                 req_to_new_blocks,
+                block_table_rewrite_req_ids,
             )
 
         # Record the request ids that were scheduled in this step.
@@ -1005,6 +1016,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
         req_to_new_blocks: dict[str, KVCacheBlocks],
+        block_table_rewrite_req_ids: set[str],
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
@@ -1054,6 +1066,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             all_token_ids=all_token_ids,
             new_block_ids=new_block_ids,
+            block_table_rewrite_req_ids=block_table_rewrite_req_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
         )

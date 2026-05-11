@@ -232,7 +232,7 @@ def test_chunked_local_attention_remove_skipped_blocks():
     block_table = id_to_block_table(original_block_ids)
     manager.req_to_blocks["test"] = block_table
 
-    manager.remove_skipped_blocks("test", 0)
+    assert manager.remove_skipped_blocks("test", 0) is False
     assert_block_id(block_table, original_block_ids)
 
     # For 4th token (0-indexed), token 0-3 is out of the local attention window.
@@ -299,29 +299,29 @@ def test_sliding_window_remove_skipped_blocks():
     # 4 tokens are computed. Only token 0 is out of the sliding window. As
     # block 1000 also contains token 1 that is in the sliding window, block 1000
     # cannot be removed.
-    manager.remove_skipped_blocks("test", 4)
+    assert manager.remove_skipped_blocks("test", 4) is False
     assert_block_id(block_table, original_block_ids)
 
     # 5 tokens are computed. Token 0 & 1 are out of the sliding window.
     # Block 1000 can be removed.
-    manager.remove_skipped_blocks("test", 5)
+    assert manager.remove_skipped_blocks("test", 5) is True
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 6 tokens are computed. Token 0-2 are out of the sliding window.
     # Cannot remove new block as the block 1001 is still used by token 3.
-    manager.remove_skipped_blocks("test", 6)
+    assert manager.remove_skipped_blocks("test", 6) is False
     assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 7 tokens are computed. Token 0-3 are out of the sliding window.
     # Block 1001 can be removed and block 1000 is already removed.
-    manager.remove_skipped_blocks("test", 7)
+    assert manager.remove_skipped_blocks("test", 7) is True
     assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
 
     # 11 tokens are computed. Token 0-7 are out of the sliding window.
     # Block 1002 & 1003 can be removed now. Block 1003 represents a longer
     # sequence, and is expected to be evicted earlier than 1002, so the order
     # of removed blocks should be [1003, 1002].
-    manager.remove_skipped_blocks("test", 11)
+    assert manager.remove_skipped_blocks("test", 11) is True
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
 
 

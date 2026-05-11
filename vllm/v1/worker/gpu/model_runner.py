@@ -718,7 +718,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if req_new_block_ids is not None:
                 req_index = self.req_states.req_id_to_index[req_id]
                 self.block_tables.append_block_ids(
-                    req_index, req_new_block_ids, overwrite=False
+                    req_index,
+                    req_new_block_ids,
+                    overwrite=req_id in reqs.block_table_rewrite_req_ids,
                 )
 
     def prepare_inputs(

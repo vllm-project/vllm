@@ -158,6 +158,8 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        # Requests whose CPU block table was rewritten and must be resent.
+        self._block_table_update_req_ids: set[str] = set()
 
     @property
     def usage(self) -> float:
@@ -359,9 +361,11 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(
+        block_table_updated = self.coordinator.remove_skipped_blocks(
             request.request_id, total_computed_tokens
         )
+        if block_table_updated:
+            self._block_table_update_req_ids.add(request.request_id)
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
@@ -423,11 +427,12 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        self._block_table_update_req_ids.discard(request.request_id)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
-    ) -> None:
+    ) -> bool:
         """Remove the blocks that are no longer needed from `blocks` and replace
         the removed blocks with null_block.
 
@@ -436,7 +441,18 @@ class KVCacheManager:
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
         """
-        self.coordinator.remove_skipped_blocks(request_id, total_computed_tokens)
+        block_table_updated = self.coordinator.remove_skipped_blocks(
+            request_id, total_computed_tokens
+        )
+        if block_table_updated:
+            self._block_table_update_req_ids.add(request_id)
+        return block_table_updated
+
+    def block_table_updated(self, request_id: str) -> bool:
+        return request_id in self._block_table_update_req_ids
+
+    def clear_block_table_updated(self, request_id: str) -> None:
+        self._block_table_update_req_ids.discard(request_id)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

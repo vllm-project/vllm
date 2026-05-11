@@ -41,6 +41,20 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
+def _empty_model_runner_output(
+    scheduler_output: SchedulerOutput,
+) -> ModelRunnerOutput:
+    req_ids = list(scheduler_output.num_scheduled_tokens)
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[] for _ in req_ids],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+
 def test_add_requests():
     scheduler = create_scheduler()
     requests = create_requests(num_requests=10)
@@ -104,6 +118,42 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+def test_swa_eviction_sends_block_table_rewrite_for_cached_request():
+    scheduler = create_scheduler(
+        max_num_seqs=1,
+        max_num_batched_tokens=4,
+        max_model_len=12,
+        block_size=2,
+        sliding_window=4,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=10,
+        max_tokens=1,
+        block_size=2,
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, _empty_model_runner_output(output))
+
+    output = scheduler.schedule()
+    assert output.scheduled_cached_reqs.block_table_rewrite_req_ids == set()
+    scheduler.update_from_output(output, _empty_model_runner_output(output))
+
+    output = scheduler.schedule()
+    cached_reqs = output.scheduled_cached_reqs
+
+    assert cached_reqs.req_ids == [request.request_id]
+    assert cached_reqs.block_table_rewrite_req_ids == {request.request_id}
+    # The scheduler must send the whole block table so workers can replace
+    # stale logical slots with null blocks before appending new entries.
+    assert cached_reqs.new_block_ids[0] == scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    assert cached_reqs.new_block_ids[0][0][0] == 0
 
 
 def test_schedule_multimodal_requests():
