@@ -6,7 +6,15 @@ steps:
   key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
-    - vllm/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/inputs/
+    - vllm/model_executor/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
     - tests/v1/spec_decode
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -18,7 +26,17 @@ steps:
   timeout_in_minutes: 30
   device: h200_18gb
   source_file_dependencies:
-    - vllm/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/inputs/
+    - vllm/logger.py
+    - vllm/model_executor/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
     - tests/v1/sample
     - tests/v1/logits_processors
     - tests/v1/test_oracle.py
@@ -41,7 +59,23 @@ steps:
   key: v1-core-kv-metrics
   timeout_in_minutes: 30
   source_file_dependencies:
-    - vllm/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/entrypoints/pooling/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/model_executor/
+    - vllm/multimodal/
+    - vllm/outputs.py
+    - vllm/platforms/
+    - vllm/pooling_params.py
+    - vllm/profiler/
+    - vllm/sampling_params.py
+    - vllm/tokenizers/
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
     - tests/v1/core
     - tests/v1/executor
     - tests/v1/kv_offload
@@ -68,7 +102,21 @@ steps:
   depends_on:
     - image-build-cpu
   source_file_dependencies:
-    - vllm/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/inputs/
+    - vllm/lora/
+    - vllm/multimodal/
+    - vllm/outputs.py
+    - vllm/platforms/
+    - vllm/pooling_params.py
+    - vllm/profiler/
+    - vllm/sampling_params.py
+    - vllm/tokenizers/
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
     - tests/v1
   device: cpu-small
   commands:
@@ -84,7 +132,17 @@ steps:
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
-  - vllm/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/test_regression
   commands:
   - pip install modelscope
@@ -117,8 +175,8 @@ steps:
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # for features demo
     - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-    - python3 offline_inference/llm_engine_example.py
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 deployment/llm_engine_example.py
+    - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
@@ -128,7 +186,18 @@ steps:
   timeout_in_minutes: 20
   num_devices: 2
   source_file_dependencies:
-  - vllm/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tracing/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/v1/tracing
   commands:
   - "pip install \
@@ -141,6 +210,7 @@ steps:
 - label: Python-only Installation
   key: python-only-installation
   depends_on: ~
+  optional: true
   timeout_in_minutes: 20
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -152,7 +222,19 @@ steps:
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tokenizers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/detokenizer
   - tests/multimodal
   - tests/utils_
@@ -167,7 +249,30 @@ steps:
   - image-build-cpu
   timeout_in_minutes: 30
   source_file_dependencies:
-  - vllm/
+  - vllm/assets/
+  - vllm/config/
+  - vllm/engine/arg_utils.py
+  - vllm/entrypoints/chat_utils.py
+  - vllm/entrypoints/mcp/
+  - vllm/entrypoints/openai/chat_completion/protocol.py
+  - vllm/entrypoints/openai/engine/protocol.py
+  - vllm/envs.py
+  - vllm/exceptions.py
+  - vllm/inputs/
+  - vllm/model_executor/layers/quantization/quark/
+  - vllm/multimodal/
+  - vllm/outputs.py
+  - vllm/platforms/
+  - vllm/pooling_params.py
+  - vllm/ray/
+  - vllm/reasoning/
+  - vllm/renderers/
+  - vllm/sampling_params.py
+  - vllm/tokenizers/
+  - vllm/tool_parsers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
@@ -178,6 +283,7 @@ steps:
   - tests/tokenizers_
   - tests/reasoning
   - tests/tool_parsers
+  - tests/parser
   - tests/transformers_utils
   - tests/config
   device: cpu-small
@@ -192,6 +298,7 @@ steps:
   - pytest -v -s tokenizers_
   - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
   - pytest -v -s tool_parsers
+  - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
 

@@ -995,16 +995,23 @@ class GPUModelRunner(
         if len(token_type_id_requests) == 0:
             return model_kwargs
 
-        seq_lens = self.seq_lens[:num_reqs]
+        # Build ids on CPU using the CPU-resident upper bound for seq_lens;
+        # `torch.arange(seq_lens[i])` with a GPU scalar would force a sync.
+        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].tolist()
         token_type_ids = []
 
         for i in range(num_reqs):
-            pos = token_type_id_requests.get(i, seq_lens[i])
-            ids = (torch.arange(seq_lens[i]) >= pos).int()
+            seq_len_i = seq_lens_cpu[i]
+            pos = token_type_id_requests.get(i, seq_len_i)
+            ids = (torch.arange(seq_len_i) >= pos).int()
             token_type_ids.append(ids)
 
-        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
-            device=self.device
+        token_type_ids_cpu = torch.empty(
+            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=self.pin_memory
+        )
+        torch.cat(token_type_ids, out=token_type_ids_cpu)
+        model_kwargs["token_type_ids"] = token_type_ids_cpu.to(
+            device=self.device, non_blocking=True
         )
         return model_kwargs
 
@@ -2715,10 +2722,9 @@ class GPUModelRunner(
         # There might have leftover indices in logits_indices[num_logits:]
         # from previous iterations, whose values may be greater than the
         # batch size in the current iteration. To ensure indices are always
-        # valid, we fill the padded indices with the last index.
-        self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
-            logits_indices[-1].item()
-        )
+        # valid, fill the padded indices with the last index. Broadcast the
+        # scalar GPU-side to avoid a D2H sync on `.item()`.
+        self.kv_sharing_fast_prefill_logits_indices[num_logits:] = logits_indices[-1]
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_logits, invalid_modes={CUDAGraphMode.FULL}
@@ -3129,7 +3135,7 @@ class GPUModelRunner(
 
         return tuple(tasks)
 
-    def sync_and_slice_intermediate_tensors(
+    def sync_and_gather_intermediate_tensors(
         self,
         num_tokens: int,
         intermediate_tensors: IntermediateTensors | None,
@@ -3140,24 +3146,23 @@ class GPUModelRunner(
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
 
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
+        # When sequence parallelism is enabled, the "residual" tensor is
+        # sharded across TP ranks. All-gather it here because downstream
+        # QKV + Attention needs the full residual before the SP split point.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
                 is_scattered = k == "residual" and is_rs
-                copy_len = num_tokens // tp if is_scattered else num_tokens
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
+                if is_scattered:
+                    local_len = num_tokens // tp
+                    v = get_tp_group().all_gather(v[:local_len], dim=0)
+
+                self.intermediate_tensors[k][:num_tokens].copy_(
+                    v[:num_tokens], non_blocking=True
                 )
 
         return IntermediateTensors(
-            {
-                k: v[: num_tokens // tp]
-                if k == "residual" and is_rs
-                else v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            }
+            {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
         )
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
@@ -3373,7 +3378,7 @@ class GPUModelRunner(
             intermediate_tensors = None
         else:
             assert intermediate_tensors is not None
-            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+            intermediate_tensors = self.sync_and_gather_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True
             )
 
@@ -5589,7 +5594,7 @@ class GPUModelRunner(
                         )
                     )
 
-                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                intermediate_tensors = self.sync_and_gather_intermediate_tensors(
                     num_tokens_padded, None, False
                 )
 
@@ -6154,7 +6159,8 @@ class GPUModelRunner(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
                 "ensure `cudagraph_mode` was not manually set to `NONE`"
             )
-            self.init_routed_experts_capturer()
+            if self.model_config.enable_return_routed_experts:
+                self.init_routed_experts_capturer()
             return 0
 
         # Initialize encoder CUDA graph manager if enabled.
@@ -6193,7 +6199,8 @@ class GPUModelRunner(
         # address is baked into the graph.  Do NOT call this inside
         # _capture_cudagraphs() -- creating the capturer twice replaces
         # the device buffer, causing graphs to write to a dead buffer.
-        self.init_routed_experts_capturer()
+        if self.model_config.enable_return_routed_experts:
+            self.init_routed_experts_capturer()
 
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
@@ -6989,6 +6996,10 @@ class GPUModelRunner(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
         )
+        if not self.model_config.enable_return_routed_experts:
+            self.routed_experts_initialized = False
+            return
+
         from vllm.distributed import get_tp_group
 
         if hasattr(self.model_config.hf_text_config, "n_shared_experts"):
