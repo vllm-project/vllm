@@ -103,7 +103,7 @@ class DequantGatherKCacheKernel:
         # k_data_slice: [num_blocks, block_size, (16, data_dim/16)]
         # s_kdata_slice: [(4, data_dim/16), num_stages]
 
-        op = cpasync.CopyG2SOp(cute.nvgpu.LoadCacheMode.GLOBAL)
+        op = cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL)
         cp16_atom = cute.make_copy_atom(op, Uint32, num_bits_per_copy=128)
         cp8_atom = cute.make_copy_atom(cpasync.CopyG2SOp(), Uint8, num_bits_per_copy=64)
         page_id = block_table[req_id, pos // self.block_size]
