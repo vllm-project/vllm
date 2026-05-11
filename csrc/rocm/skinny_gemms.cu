@@ -1244,6 +1244,8 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
     bool fit_lds = (Kbp_in * N_in <= max_lds_len);        \
     if (_sYT <= 1)                                        \
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
+    else if (is_gfx11() && (K_in <= 2048))                \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
     else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
       WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
     else if (_sYT <= 4 * 3)                               \

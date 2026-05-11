@@ -40,6 +40,9 @@ SHAPES = [
     (37888, 3584, "Qwen2.5VL-7B gate_up"),
     (3584, 18944, "Qwen2.5VL-7B down"),
     (152064, 3584, "Qwen2.5VL-7B lm_head"),
+    # Qwen3.5-35B-A3B (vocab=248320, hidden=2048)
+    (248320, 2048, "Qwen3.5-35B-A3B lm_head"),
+    (1024, 2048, "Qwen3.5-35B-A3B 1024 proj"),
 ]
 
 
