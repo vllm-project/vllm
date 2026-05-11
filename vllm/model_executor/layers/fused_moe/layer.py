@@ -353,7 +353,6 @@ class FusedMoE(PluggableLayer):
             vllm_config.parallel_config.expert_placement_strategy
         )
 
-        # Create EPLB manager (always constructed for consistent API)
         self.eplb_state: EplbLayerState | None = None
         if enable_eplb:
             if self.global_num_experts % self.ep_size != 0:
@@ -364,7 +363,6 @@ class FusedMoE(PluggableLayer):
                 )
             self.eplb_state = EplbLayerState()
         else:
-            # EPLB validation is handled by EplbManager.__init__
             assert not self.use_ep or num_redundant_experts == 0, (
                 "Redundant experts are only supported with EPLB."
             )
@@ -1535,8 +1533,6 @@ class FusedMoE(PluggableLayer):
 
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
-
-        Delegates to EplbManager for state management.
 
         Args:
             moe_layer_idx: Index of this MoE layer
