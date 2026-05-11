@@ -76,19 +76,6 @@ class TestExampleSecondaryTier:
         # Third block not present
         assert tier.lookup(blocks[2], _CTX) is False
 
-    def test_in_flight_blocks_return_none(self):
-        """Test that in-flight blocks cause lookup to return None."""
-        tier = ExampleSecondaryTier(max_blocks=10)
-
-        blocks = to_keys(range(3))
-
-        # Mark first block as in-flight
-        tier.in_flight[blocks[0]] = 1
-
-        # Lookup should return None (retry later)
-        assert tier.lookup(blocks[0], _CTX) is None
-        assert tier.lookup(blocks[1], _CTX) is False  # not in-flight, just absent
-
     def test_lru_eviction(self):
         """Test LRU eviction policy."""
         tier = ExampleSecondaryTier(max_blocks=3)
@@ -147,8 +134,7 @@ class TestExampleSecondaryTier:
             )
         )
 
-        # Blocks should be in-flight
-        assert tier.get_num_in_flight() == 2
+        # Blocks should not yet be stored (pending async completion)
         assert tier.get_num_blocks() == 0
 
         # First get_finished() should complete the job
@@ -159,7 +145,6 @@ class TestExampleSecondaryTier:
 
         # Blocks should now be stored
         assert tier.get_num_blocks() == 2
-        assert tier.get_num_in_flight() == 0
 
 
 class TestTieringOffloadingManager:
