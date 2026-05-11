@@ -317,6 +317,7 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         group_shape: GroupShape,
         num_heads: int,
         head_dim: int,
+        match_aiter_quant: bool = True,
         symmetric: bool = True,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -324,12 +325,8 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
             fused_add=False,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
-        super().__init__(epsilon, key)
+        super().__init__(epsilon, key, match_aiter_quant)
         self.rmsnorm_gated_matcher = MatcherRMSNormGated(epsilon)
-        self.quant_matcher = MatcherQuantFP8(
-            quant_key=kFp8Dynamic128Sym,
-            match_rocm_aiter=True,
-        )
         self.num_heads = num_heads
         self.head_dim = head_dim
 
