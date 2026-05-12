@@ -40,7 +40,7 @@ steps:
 - label: LM Eval Small Models (B200)
   key: lm-eval-small-models-b200
   timeout_in_minutes: 120
-  device: b200-k8s
+  device: b200
   optional: true
   source_file_dependencies:
   - csrc/
