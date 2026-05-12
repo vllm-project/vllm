@@ -352,10 +352,33 @@ class Qwen3ForCausalLM(
             row_abssum = float(row.abs().sum().item())
             # logsumexp
             row_lse = float((row - row.max()).exp().sum().log().item() + row_max)
+            # PROBE: compute the rank directly from logits — exactly what
+            # _ranks_kernel does. If THIS differs across configs while
+            # tok2701 doesn't, the row itself has bit-level differences in
+            # tokens near the comparison boundary.
+            if tok2701 is not None:
+                # Count vocab tokens with logit >= logit[2701]
+                # (matches _ranks_kernel.tl.sum((logits >= x).to(int32)))
+                row_gpu = logits[1].detach()
+                rank_count = int((row_gpu >= row_gpu[2701]).sum().item())
+                # Count "boundary" tokens within tiny tolerance of tok2701
+                # tok_val unused (kept for clarity if extended)
+                # Find tokens within 1e-5 of tok2701 (near-tie candidates)
+                near = (
+                    ((row_gpu - row_gpu[2701]).abs() < 1e-5)
+                    .nonzero(as_tuple=False)
+                    .flatten()
+                    .tolist()
+                )
+                near_vals = [(int(i), float(row_gpu[i].item())) for i in near[:8]]
+            else:
+                rank_count = None
+                near_vals = []
             print(
                 f"[VLLM_LOGITS] shape={list(logits.shape)} pos=1 "
                 f"head8={head8} tok2701={tok2701} max={row_max} "
-                f"argmax={row_argmax} sum={row_sum} abssum={row_abssum} lse={row_lse}",
+                f"argmax={row_argmax} sum={row_sum} abssum={row_abssum} lse={row_lse} "
+                f"rank_count={rank_count} near={near_vals}",
                 file=sys.stderr,
                 flush=True,
             )
