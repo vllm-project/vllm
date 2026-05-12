@@ -16,7 +16,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm import MarlinFP8ScaledMMLinearKernel
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -437,8 +440,8 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
-        # we will use BF16 dequant when DeepGEMM is not supported.
+        # if batch invariant mode is enabled, prefer direct FP8 path
+        # we will use BF16 dequant when direct FP8 is not supported.
         if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
@@ -448,6 +451,9 @@ class Fp8LinearMethod(LinearMethodBase):
                     bias,
                 )
             else:
+                if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+                    return self.fp8_linear.apply_weights(layer, x, bias)
+
                 # per-tensor/channel: dequant to BF16 and run GEMM
                 weight_fp8 = layer.weight.to(torch.bfloat16)
                 weight_scale = layer.weight_scale.to(torch.bfloat16)
