@@ -258,7 +258,15 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
                 self.cursor = idx + len(THINK_END)
                 while self.cursor < len(self.buffer_string) and self.buffer_string[self.cursor] == "\n":
                     self.cursor += 1
-            self.reasoning_ended = True
+                self.reasoning_ended = True
+            elif _partial_prefix_len(self.buffer_string, THINK_END) > 0:
+                # ``</think>`` may straddle deltas; hold the buffer until the
+                # tag completes so we don't leak its tail as content.
+                return None
+            else:
+                # No </think> in the buffer and no partial match — production
+                # path (reasoning parser already stripped it) or thinking=false.
+                self.reasoning_ended = True
 
         # JSON list fallback for ``tool_choice="required"`` / named when the
         # structured-output schema forces the model into a JSON payload

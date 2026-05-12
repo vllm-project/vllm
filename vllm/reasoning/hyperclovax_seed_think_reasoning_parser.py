@@ -155,11 +155,20 @@ class HyperCLOVAXSeedThinkReasoningParser(ReasoningParser):
     # ------------------------------------------------------------------
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
-        if len(input_ids) > 1:
-            n = len(self.think_end_tokens)
-            return n > 0 and len(input_ids) >= n and input_ids[-n:] == self.think_end_tokens
-        return self.no_reasoning_content or (
+        # Structured decoding asks "has reasoning ended at any point so far?",
+        # so we must accept the end marker anywhere in the sequence, not only
+        # at the tail. Short-circuit on the no-reasoning case and on the
+        # explicit <|im_end|> stop token first.
+        if self.no_reasoning_content or (
             self.end_token_id is not None and self.end_token_id in input_ids
+        ):
+            return True
+        n = len(self.think_end_tokens)
+        if n == 0 or len(input_ids) < n:
+            return False
+        return any(
+            input_ids[i:i + n] == self.think_end_tokens
+            for i in range(len(input_ids) - n + 1)
         )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

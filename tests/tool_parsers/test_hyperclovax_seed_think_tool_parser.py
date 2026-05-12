@@ -390,3 +390,21 @@ class TestStreamingJSON:
         )
         # Buffer is not yet parseable → no tool_call emission.
         assert _collect_streaming_tool_calls(results) == []
+
+    def test_split_think_end_across_deltas_does_not_leak(
+        self, tool_parser, mock_request
+    ):
+        """Standalone usage: when `</think>` straddles deltas, the partial tail
+        must not be emitted as content (regression test for #42366 review)."""
+        deltas = [
+            "</thi",
+            "nk>",
+            '[{"name": "get_current_weather", "parameters": {"location": "Seoul"}}]',
+        ]
+        results = _simulate_streaming(tool_parser, deltas, mock_request)
+        content = _collect_streaming_content(results)
+        assert "</thi" not in content
+        assert "nk>" not in content
+        tc = _collect_streaming_tool_calls(results)
+        assert len(tc) == 1
+        assert tc[0]["name"] == "get_current_weather"

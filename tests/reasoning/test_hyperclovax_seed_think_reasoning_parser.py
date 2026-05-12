@@ -267,6 +267,15 @@ class TestTokenIdHelpers:
         # Suffix matches the encoded </think> sequence.
         assert parser.is_reasoning_end([1, 2, THINK_END_ID]) is True
 
+    def test_is_reasoning_end_when_think_end_in_middle(self, mock_tokenizer):
+        """Structured decoding requires detecting the marker anywhere in the
+        sequence, not only at the tail (regression test for #42366 review)."""
+        parser = HyperCLOVAXSeedThinkReasoningParser(
+            mock_tokenizer, chat_template_kwargs={"thinking": True}
+        )
+        # </think> followed by additional content tokens — still ended.
+        assert parser.is_reasoning_end([1, 2, THINK_END_ID, 3, 4, 5]) is True
+
     def test_is_reasoning_end_no_think_end_thinking_true(self, mock_tokenizer):
         parser = HyperCLOVAXSeedThinkReasoningParser(
             mock_tokenizer, chat_template_kwargs={"thinking": True}
