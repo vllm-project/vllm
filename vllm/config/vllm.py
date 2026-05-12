@@ -1383,14 +1383,13 @@ class VllmConfig:
                     logger.warning(
                         "Turning off hybrid kv cache manager because "
                         "`--kv-transfer-config` is set with a connector that "
-                        "does not implement SupportsHMA. This will reduce the "
-                        "performance of vLLM on LLMs with sliding window "
-                        "attention or Mamba attention. If you are a developer "
-                        "of kv connector, please consider supporting hybrid "
-                        "kv cache manager for your connector by making sure "
-                        "your connector is a subclass of `SupportsHMA` "
-                        "defined in kv_connector/v1/base.py. To force-disable "
-                        "HMA, pass --disable-hybrid-kv-cache-manager."
+                        "does not implement `SupportsHMA`. This will reduce the "
+                        "performance of vLLM on LLMs with sliding window attention "
+                        "or Mamba attention. If you are a developer of kv connector"
+                        ", please consider supporting hybrid kv cache manager for "
+                        "your connector by making sure your connector is a subclass"
+                        " of `SupportsHMA` defined in kv_connector/v1/base.py and"
+                        " use --no-disable-hybrid-kv-cache-manager to start vLLM."
                     )
             self.scheduler_config.disable_hybrid_kv_cache_manager = (
                 need_disable_hybrid_kv_cache_manager
