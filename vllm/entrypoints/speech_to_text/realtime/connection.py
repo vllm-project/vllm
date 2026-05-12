@@ -14,7 +14,10 @@ from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.realtime.protocol import (
+from vllm.exceptions import VLLMValidationError
+from vllm.logger import init_logger
+
+from .protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
     InputAudioBufferCommit,
@@ -22,9 +25,7 @@ from vllm.entrypoints.openai.realtime.protocol import (
     TranscriptionDelta,
     TranscriptionDone,
 )
-from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
-from vllm.exceptions import VLLMValidationError
-from vllm.logger import init_logger
+from .serving import OpenAIServingRealtime
 
 logger = init_logger(__name__)
 

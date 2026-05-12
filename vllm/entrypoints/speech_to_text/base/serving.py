@@ -24,18 +24,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionResponse,
-    TranscriptionResponseStreamChoice,
-    TranscriptionResponseVerbose,
-    TranscriptionSegment,
-    TranscriptionStreamResponse,
-    TranslationResponse,
-    TranslationResponseStreamChoice,
-    TranslationResponseVerbose,
-    TranslationSegment,
-    TranslationStreamResponse,
-)
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EncoderDecoderInput, EngineInput
@@ -50,6 +38,21 @@ from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_p
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
+
+from ..transcription.protocol import (
+    TranscriptionResponse,
+    TranscriptionResponseStreamChoice,
+    TranscriptionResponseVerbose,
+    TranscriptionSegment,
+    TranscriptionStreamResponse,
+)
+from ..translation.protocol import (
+    TranslationResponse,
+    TranslationResponseStreamChoice,
+    TranslationResponseVerbose,
+    TranslationSegment,
+    TranslationStreamResponse,
+)
 
 SpeechToTextResponse: TypeAlias = TranscriptionResponse | TranslationResponse
 SpeechToTextResponseVerbose: TypeAlias = (
