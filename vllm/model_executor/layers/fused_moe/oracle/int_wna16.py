@@ -154,7 +154,6 @@ def make_wna16_moe_kernel(
     w13_g_idx_sort_indices: torch.Tensor | None,
     w2_g_idx_sort_indices: torch.Tensor | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Currently, we only support MarlinExperts and BatchedMarlinExperts
     assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
@@ -202,7 +201,6 @@ def make_wna16_moe_kernel(
     return mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=shared_experts,
         inplace=not moe_config.disable_inplace,
     )
 
