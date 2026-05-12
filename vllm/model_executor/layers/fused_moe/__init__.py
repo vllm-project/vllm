@@ -85,8 +85,14 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         DeepGemmExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        BatchedTritonExperts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
         AiterExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
+        TritonOrDeepGemmExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
         TritonExperts,
@@ -97,9 +103,6 @@ if HAS_TRITON:
         XPUExpertsFp8,
         XPUExpertsMXFp4,
     )
-    from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-        BatchedTritonExperts,
-    )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
         fused_experts,
         get_config_file_name,
@@ -109,9 +112,6 @@ if HAS_TRITON:
     )
     from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
         GroupedTopk,
-    )
-    from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
-        TritonOrDeepGemmExperts,
     )
 
     __all__ += [
