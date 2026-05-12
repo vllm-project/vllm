@@ -2101,7 +2101,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         assert self.mxfp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
 
-        if layer.enable_eplb:
+        if layer.eplb_state is not None:
             raise NotImplementedError(
                 "EPLB is not supported for FlashInfer TRTLLM MXFP8 MoE backend."
             )

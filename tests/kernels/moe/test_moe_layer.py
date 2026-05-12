@@ -1004,7 +1004,6 @@ def make_fake_moe_layer(
     activation: str = "silu",
     indices_type: torch.dtype | None = None,
     expert_map: torch.Tensor | None = None,
-    enable_eplb: bool = False,
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
@@ -1022,7 +1021,6 @@ def make_fake_moe_layer(
     router = create_fused_moe_router(
         top_k=top_k,
         global_num_experts=global_num_experts,
-        # eplb_state=None, # TODO
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
@@ -1032,7 +1030,6 @@ def make_fake_moe_layer(
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=0,  # TODO
-        enable_eplb=enable_eplb,
         # TODO(bnell): once we can construct the MK at init time, we
         # can make this a value.
         indices_type_getter=lambda: indices_type,

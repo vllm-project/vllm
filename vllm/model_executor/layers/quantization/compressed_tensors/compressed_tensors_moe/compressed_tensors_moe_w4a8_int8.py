@@ -307,7 +307,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert not layer.enable_eplb, "EPLB not supported for W4A8-int MoE yet."
         assert layer.activation in (
             MoEActivation.SILU,
             MoEActivation.SWIGLUOAI,
