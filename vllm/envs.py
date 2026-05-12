@@ -63,8 +63,6 @@ def _env_set(name: str) -> bool:
     return any(k.lower() == needle for k in os.environ)
 
 
-_MCP_LABEL_CHOICES = {"container", "code_interpreter", "web_search_preview"}
-
 # Sentinel `validation_alias` used to keep VLLM_TPU_USING_PATHWAYS off the
 # pydantic-settings env-loading path. The field's value is computed by a
 # default_factory from JAX_PLATFORMS, not from VLLM_TPU_USING_PATHWAYS itself.
@@ -2033,7 +2031,10 @@ class UsageSettings(BaseSettings):
         default=False,
         description="If set, allow loading or unloading lora adapters in runtime.",
     )
-    gpt_oss_system_tool_mcp_labels: Annotated[set[str], NoDecode] = Field(
+    gpt_oss_system_tool_mcp_labels: Annotated[
+        set[Literal["container", "code_interpreter", "web_search_preview"]],
+        NoDecode,
+    ] = Field(
         default_factory=set,
         description=(
             "Valid values are container, code_interpreter, web_search_preview. "
@@ -2103,19 +2104,10 @@ class UsageSettings(BaseSettings):
         if v is None or v == "":
             return set()
         if isinstance(v, (set, list, tuple)):
-            items = {str(x).strip() for x in v if str(x).strip()}
-        elif isinstance(v, str):
-            items = {p.strip() for p in v.split(",") if p.strip()}
-        else:
-            return v
-        for label in items:
-            if label not in _MCP_LABEL_CHOICES:
-                raise ValueError(
-                    f"Invalid value '{label}' in "
-                    f"VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS. "
-                    f"Valid options: {sorted(_MCP_LABEL_CHOICES)}."
-                )
-        return items
+            return {str(x).strip() for x in v if str(x).strip()}
+        if isinstance(v, str):
+            return {p.strip() for p in v.split(",") if p.strip()}
+        return v
 
 
 # ----------------------------------------------------------------------------
