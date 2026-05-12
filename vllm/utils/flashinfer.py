@@ -12,7 +12,7 @@ import importlib.util
 import os
 import shutil
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import Any, NoReturn, get_args
 
 import requests
 import torch
@@ -23,15 +23,6 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
-FLASHINFER_BF16_GEMM_BACKENDS = (
-    "cudnn",
-    "cutlass",
-    "tgv",
-    "cublaslt",
-    "tinygemm",
-)
-FLASHINFER_BF16_GEMM_BACKENDS_WITHOUT_BIAS = ("cutlass", "cublaslt")
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
@@ -249,56 +240,6 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 
 @functools.cache
-def has_flashinfer_bf16_gemm() -> bool:
-    """Return `True` if FlashInfer BF16 dense GEMM is available."""
-    if not has_flashinfer():
-        return False
-
-    mod = _get_submodule("flashinfer")
-    return callable(getattr(mod, "mm_bf16", None)) if mod else False
-
-
-@functools.cache
-def get_flashinfer_bf16_supported_backends(
-    compute_capability: int | None = None,
-) -> tuple[str, ...]:
-    """Return FlashInfer BF16 GEMM backends supported by this device."""
-    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
-        return ()
-
-    mod = _get_submodule("flashinfer")
-    mm_bf16 = getattr(mod, "mm_bf16", None) if mod else None
-    if mm_bf16 is None or not hasattr(mm_bf16, "is_backend_supported"):
-        return ()
-
-    if compute_capability is None:
-        device_capability = current_platform.get_device_capability()
-        if device_capability is None:
-            return ()
-        compute_capability = device_capability.to_int()
-
-    supported_backends: list[str] = []
-    for backend in FLASHINFER_BF16_GEMM_BACKENDS:
-        try:
-            if mm_bf16.is_backend_supported(backend, compute_capability):
-                supported_backends.append(backend)
-        except Exception:
-            continue
-
-    return tuple(supported_backends)
-
-
-def is_flashinfer_bf16_backend_supported(
-    backend: str,
-    compute_capability: int | None = None,
-) -> bool:
-    """Return whether a FlashInfer BF16 GEMM backend is supported."""
-    if backend == "auto":
-        return bool(get_flashinfer_bf16_supported_backends(compute_capability))
-    return backend in get_flashinfer_bf16_supported_backends(compute_capability)
-
-
-@functools.cache
 def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_cutedsl():
@@ -354,7 +295,9 @@ def get_flashinfer_bf16_supported_backends(
         compute_capability = device_capability.to_int()
 
     supported_backends: list[str] = []
-    for backend in BF16LinearBackend:
+    for backend in get_args(BF16LinearBackend):
+        if backend in ("torch", "auto"):
+            continue
         try:
             if mm_bf16.is_backend_supported(backend, compute_capability):
                 supported_backends.append(backend)
@@ -564,47 +507,6 @@ if has_flashinfer():
     )
 
     @torch.library.custom_op(
-        "vllm::flashinfer_mm_bf16",
-        mutates_args=[],
-        device_types="cuda",
-    )
-    def flashinfer_mm_bf16(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        bias: torch.Tensor | None,
-        pdl: bool,
-        backend: str,
-    ) -> torch.Tensor:
-        from flashinfer import mm_bf16 as flashinfer_mm_bf16_
-
-        return flashinfer_mm_bf16_(
-            A,
-            B,
-            bias=bias,
-            pdl=pdl,
-            out=None,
-            out_dtype=torch.bfloat16,
-            backend=backend,
-        )
-
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_bf16",
-    )
-    def flashinfer_mm_bf16_fake(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        bias: torch.Tensor | None,
-        pdl: bool,
-        backend: str,
-    ) -> torch.Tensor:
-        return torch.empty(
-            A.shape[0],
-            B.shape[1],
-            dtype=torch.bfloat16,
-            device=A.device,
-        )
-
-    @torch.library.custom_op(
         "vllm::flashinfer_mm_fp4",
         mutates_args=[],
         device_types="cuda",
@@ -789,34 +691,6 @@ if has_flashinfer():
         op_func=_flashinfer_mm_bf16,
         fake_impl=_flashinfer_mm_bf16_fake,
     )
-
-
-def flashinfer_bf16_mm(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    bias: torch.Tensor | None = None,
-    backend: str = "auto",
-) -> torch.Tensor:
-    """Dense BF16 MM helper for FlashInfer kernels.
-
-    `a` is expected to be row-major [M, K] and `b` column-major [K, N].
-    PDL is enabled only when the selected backend can use it without reducing
-    FlashInfer's auto backend choices.
-    """
-    assert a.ndim == 2 and b.ndim == 2
-    assert a.shape[1] == b.shape[0]
-    assert backend in (*FLASHINFER_BF16_GEMM_BACKENDS, "auto")
-    assert a.dtype == torch.bfloat16 and b.dtype == torch.bfloat16
-    assert a.device.type == "cuda" and b.device.type == "cuda"
-    assert a.device == b.device
-    assert a.stride(-1) == 1 and b.stride(0) == 1
-    if bias is not None:
-        assert bias.shape == (b.shape[1],)
-        assert bias.dtype == torch.bfloat16
-        assert bias.device == a.device
-
-    pdl = backend in ("tgv", "tinygemm") or (backend == "auto" and bias is not None)
-    return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl, backend)
 
 
 def flashinfer_mm_mxfp8(
@@ -1087,9 +961,6 @@ __all__ = [
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
-    "has_flashinfer_bf16_gemm",
-    "get_flashinfer_bf16_supported_backends",
-    "is_flashinfer_bf16_backend_supported",
     "flashinfer_bf16_mm",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp8_mm",
