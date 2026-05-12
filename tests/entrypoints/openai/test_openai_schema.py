@@ -133,7 +133,9 @@ def test_openapi_stateless(case: Case):
     # (weight_transfer_config) and are meant to be stateful.
     if case.operation.path in (
         "/init_weight_transfer_engine",
+        "/start_weight_update",
         "/update_weights",
+        "/finish_weight_update",
     ):
         return
 
