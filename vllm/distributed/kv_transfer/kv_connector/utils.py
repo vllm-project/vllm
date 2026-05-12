@@ -272,7 +272,6 @@ def kv_postprocess_layout_on_receive(cache, indices):
     target_shape[0] = -1
     inv_order =  [0, 1, 3, 2, 4]  if cache.dim() == 5 else [0, 2, 1, 3] 
     src_shape = tuple(target_shape[i] for i in inv_order)
-    blocks_to_update = cache.index_select(0, indices)
     permuted_blocks = blocks_to_update.reshape(src_shape).permute(*inv_order)
     cache.index_copy_(0, indices, permuted_blocks)
 
