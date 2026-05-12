@@ -553,7 +553,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
   // Batch swap: submit all block copies in a single driver call.
   cache_ops.def(
       "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
-      "                  Tensor sizes) -> ()");
+      "                  Tensor sizes,"
+      "                  bool is_src_access_order_any=False) -> ()");
   cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
 
   // Reshape the key and value tensors and cache them.
