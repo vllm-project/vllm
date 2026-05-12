@@ -433,7 +433,7 @@ class INCConfig(QuantizationConfig):
             )
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            is_ark_available, ark_error, _, _ = _get_auto_round_ark_state()
+            is_ark_available, ark_error, _, _ = get_ark_state()
             if is_ark_available:
                 return INCARKLinearMethod(
                     weight_bits=weight_bits,
@@ -473,7 +473,7 @@ class INCConfig(QuantizationConfig):
                 "INC W4A16 on CPU only supports symmetric quantization for now."
             )
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            is_ark_available, ark_error, _, _ = _get_auto_round_ark_state()
+            is_ark_available, ark_error, _, _ = get_ark_state()
             if is_ark_available:
                 return INCARKLinearMethod(
                     weight_bits=weight_bits,
@@ -527,7 +527,7 @@ class INCConfig(QuantizationConfig):
         return None
 
 
-class _INCXPULinearBase(LinearMethodBase):
+class INCXPULinearBase(LinearMethodBase):
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
         self.weight_bits = weight_bits
         self.group_size = group_size
@@ -608,7 +608,6 @@ class _INCXPULinearBase(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        del input_size, output_size
         self._create_inc_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
@@ -621,14 +620,13 @@ class _INCXPULinearBase(LinearMethodBase):
 
 
 @lru_cache(maxsize=1)
-def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
-    """Return ARK availability, error details, and cached instance."""
+def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
+    """Return ARK availability, error details, cached instance, and QuantLinear."""
     try:
         import auto_round_kernel
         from auto_round_kernel.qlinear import QuantLinear
 
         logger.info("Successfully imported auto_round_kernel.")
-
     except ImportError as error:
         return False, str(error), None, None
 
@@ -637,21 +635,17 @@ def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None, Any | Non
         return False, "auto_round_kernel does not expose _ark_instance().", None, None
 
     try:
-        return True, None, ark_loader(), QuantLinear
+        ark_instance = ark_loader()
     except Exception as error:
         return False, str(error), None, None
 
+    if ark_instance is None:
+        return False, "auto_round_kernel._ark_instance() returned None.", None, None
 
-def _get_auto_round_ark_instance() -> Any:
-    is_available, error_str, ark_instance, ark_linear = _get_auto_round_ark_state()
-    if not is_available or ark_instance is None:
-        reason = error_str or "unknown error"
-        raise ImportError(f"Failed to import auto_round_kernel. {reason}")
-
-    return ark_linear
+    return True, None, ark_instance, QuantLinear
 
 
-class INCXPULinearMethod(_INCXPULinearBase):
+class INCXPULinearMethod(INCXPULinearBase):
     """XPU linear method for INC w4a16 GPTQ quantization (symmetric only).
 
     Repacks GPTQ weights from [in_packed, out] to oneDNN [out, in_packed]
@@ -709,8 +703,10 @@ class INCXPULinearMethod(_INCXPULinearBase):
         return out.reshape(out_shape)
 
 
-class INCARKLinearMethod(_INCXPULinearBase):
+class INCARKLinearMethod(INCXPULinearBase):
     """XPU & CPU w4a16 linear method for INC quantization utilizing the ARK backend.
+
+    See: https://github.com/intel/auto-round/blob/main/auto_round_extension/ark/README.md
 
     Repacks GPTQ/INC weights into ARK's layout.
     """
@@ -718,9 +714,12 @@ class INCARKLinearMethod(_INCXPULinearBase):
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
         super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
 
-        self.weight_type = f"int{weight_bits}"
+        is_available, error_str, _, quant_linear_cls = get_ark_state()
+        if not is_available or quant_linear_cls is None:
+            reason = error_str or "unknown error"
+            raise ImportError(f"Failed to import auto_round_kernel. {reason}")
 
-        self.QuantLinear = _get_auto_round_ark_instance()
+        self.QuantLinear = quant_linear_cls
 
     def create_weights(
         self,
@@ -762,7 +761,7 @@ class INCARKLinearMethod(_INCXPULinearBase):
         else:
             out_features = layer.scales.shape[-1]
 
-        ark_module = self.QuantLinear(
+        ark_linear = self.QuantLinear(
             bits=self.weight_bits,
             group_size=self.group_size,
             sym=self.sym,
@@ -772,21 +771,24 @@ class INCARKLinearMethod(_INCXPULinearBase):
             weight_dtype=layer.params_dtype,
         )
 
-        ark_module.qweight = layer.qweight.data
+        ark_linear.to(layer.qweight.device)
 
-        if hasattr(layer, "qzeros") and layer.qzeros is not None:
-            ark_module.qzeros = layer.qzeros.data
-        else:
-            ark_module.qzeros = None
+        with torch.no_grad():
+            ark_linear.qweight.copy_(layer.qweight.detach())
 
-        ark_module.scales = layer.scales.data
+            if hasattr(layer, "qzeros") and layer.qzeros is not None:
+                ark_linear.qzeros.copy_(layer.qzeros.detach())
+            else:
+                ark_linear.qzeros = None
 
-        if hasattr(layer, "bias") and layer.bias is not None:
-            ark_module.bias = layer.bias.data
+            ark_linear.scales.copy_(layer.scales.detach())
 
-        ark_module.post_init()
+            if hasattr(layer, "bias") and layer.bias is not None:
+                ark_linear.bias.copy_(layer.bias.detach())
 
-        layer.ark_linear = ark_module
+        ark_linear.post_init()
+
+        layer.ark_linear = ark_linear
 
         del layer.qweight
         if hasattr(layer, "qzeros"):
