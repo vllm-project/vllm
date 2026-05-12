@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=512G
-#SBATCH --time=00:21:00
+#SBATCH --time=00:30:00
 #SBATCH --output=results/%x-%j.out
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
@@ -195,6 +195,8 @@ export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
+export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-1}"
+export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-1}"
 
 # === NCCL logs ===
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
@@ -205,6 +207,8 @@ echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
 echo "NSYS_TRACE=${NSYS_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
+echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
+echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
@@ -322,12 +326,31 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${HEAD_NODE_IP}
 configure_socket_ifnames \"${HEAD_NODE_IP}\" 0
-\"${RAY_BIN}\" start --block \\
-  --head \\
-  --node-ip-address=${HEAD_NODE_IP} \\
-  --port=${RAY_PORT} \\
-  --num-gpus=${GPUS_PER_NODE} \\
-  --num-cpus=${CPUS_PER_TASK}"
+
+if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
+  echo \"Profiling Ray head with Nsight Systems\"
+  echo \"Nsight output: ${NSYS_DIR}/ray_head_${HEAD_NODE}.nsys-rep\"
+
+  nsys profile \\
+    --force-overwrite=true \\
+    --trace=\"${NSYS_TRACE}\" \\
+    --sample=none \\
+    --delay=\"${NSYS_DELAY}\" \\
+    --output=\"${NSYS_DIR}/ray_head_${HEAD_NODE}\" \\
+    \"${RAY_BIN}\" start --block \\
+      --head \\
+      --node-ip-address=${HEAD_NODE_IP} \\
+      --port=${RAY_PORT} \\
+      --num-gpus=${GPUS_PER_NODE} \\
+      --num-cpus=${CPUS_PER_TASK}
+else
+  \"${RAY_BIN}\" start --block \\
+    --head \\
+    --node-ip-address=${HEAD_NODE_IP} \\
+    --port=${RAY_PORT} \\
+    --num-gpus=${GPUS_PER_NODE} \\
+    --num-cpus=${CPUS_PER_TASK}
+fi"
 srun \
   --nodelist "${HEAD_NODE}" \
   --nodes=1 \
@@ -359,11 +382,29 @@ source \"${VENV_DIR}/bin/activate\"
 unset GLOO_SOCKET_IFNAME
 export VLLM_HOST_IP=${WORKER_IP}
 configure_socket_ifnames \"${WORKER_IP}\" 0
-\"${RAY_BIN}\" start --block \\
-  --address=${HEAD_NODE_IP}:${RAY_PORT} \\
-  --node-ip-address=${WORKER_IP} \\
-  --num-gpus=${GPUS_PER_NODE} \\
-  --num-cpus=${CPUS_PER_TASK}"
+
+if [ \"${NSYS_ENABLE}\" = \"1\" ] && [ \"${NSYS_PROFILE_RAY}\" = \"1\" ]; then
+  echo \"Profiling Ray worker ${WORKER} with Nsight Systems\"
+  echo \"Nsight output: ${NSYS_DIR}/ray_worker_${WORKER}.nsys-rep\"
+
+  nsys profile \\
+    --force-overwrite=true \\
+    --trace=\"${NSYS_TRACE}\" \\
+    --sample=none \\
+    --delay=\"${NSYS_DELAY}\" \\
+    --output=\"${NSYS_DIR}/ray_worker_${WORKER}\" \\
+    \"${RAY_BIN}\" start --block \\
+      --address=${HEAD_NODE_IP}:${RAY_PORT} \\
+      --node-ip-address=${WORKER_IP} \\
+      --num-gpus=${GPUS_PER_NODE} \\
+      --num-cpus=${CPUS_PER_TASK}
+else
+  \"${RAY_BIN}\" start --block \\
+    --address=${HEAD_NODE_IP}:${RAY_PORT} \\
+    --node-ip-address=${WORKER_IP} \\
+    --num-gpus=${GPUS_PER_NODE} \\
+    --num-cpus=${CPUS_PER_TASK}
+fi"
     srun \
       --nodelist "${WORKER}" \
       --nodes=1 \
@@ -398,7 +439,7 @@ PY
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
-if [ "${NSYS_ENABLE}" = "1" ]; then
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
   echo "Profiling vLLM server with Nsight Systems"
   echo "Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
 
