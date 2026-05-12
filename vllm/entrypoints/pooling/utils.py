@@ -62,6 +62,17 @@ def encode_pooling_output_float(output: PoolingRequestOutput) -> list[float]:
     return output.outputs.data.tolist()
 
 
+def encode_pooling_output_float_or_ndarray(output: PoolingRequestOutput) -> Any:
+    """Return an ndarray when the response renderer can serialize NumPy."""
+    try:
+        data = output.outputs.data
+        if not data.is_contiguous():
+            data = data.contiguous()
+        return data.numpy()
+    except (RuntimeError, TypeError):
+        return output.outputs.data.tolist()
+
+
 def encode_pooling_output_base64(
     output: PoolingRequestOutput,
     embed_dtype: EmbedDType,
