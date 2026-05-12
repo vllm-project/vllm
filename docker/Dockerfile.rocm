@@ -3,12 +3,13 @@ ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 # NIC backend for MoRI RDMA support.
-# By default (none), drivers and userspace libraries for all supported NIC types
+# By default (all), drivers and userspace libraries for all supported NIC types
 # (ainic and bnxt) are installed; MoRI selects the appropriate one at runtime.
 # To install drivers for a single NIC type only, set NIC_BACKEND explicitly:
 #   --build-arg NIC_BACKEND=ainic   # AMD AINIC (Pensando) only
 #   --build-arg NIC_BACKEND=bnxt    # Broadcom Thor-2 only
-ARG NIC_BACKEND=none
+#   --build-arg NIC_BACKEND=none    # Install nothing.
+ARG NIC_BACKEND=all
 # AMD AINIC apt repo settings
 ARG AINIC_VERSION=1.117.5
 ARG UBUNTU_CODENAME=jammy
@@ -276,10 +277,11 @@ RUN /bin/bash -lc 'set -euo pipefail; \
  # NIC backend deps — mori auto-detects NIC at runtime (MORI_DEVICE_NIC env var override). \
  # Only vendor packages are installed here for dlopen; no compile-time flags needed. \
  case "${NIC_BACKEND}" in \
-   none)  install_ainic; install_bnxt ;; \
+   none)  ;; \
+   all)   install_ainic; install_bnxt ;; \
    ainic) install_ainic ;; \
    bnxt)  install_bnxt ;; \
-   *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt"; exit 2 ;; \
+   *)     echo "ERROR: unknown NIC_BACKEND=${NIC_BACKEND}. Use one of: none, ainic, bnxt, all"; exit 2 ;; \
  esac'
 
 # -----------------------
