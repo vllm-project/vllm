@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer.moe import (
     align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 

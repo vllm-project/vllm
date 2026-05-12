@@ -21,13 +21,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer.moe import (
     FlashinferMoeBackend,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
     get_flashinfer_moe_backend,
     swap_w13_to_w31,
 )
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 

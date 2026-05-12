@@ -21,11 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
-    prepare_fp8_moe_layer_for_fi,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     prepare_fp8_moe_layer_for_deepgemm,
 )
@@ -38,6 +33,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer.moe import (
+    FlashinferMoeBackend,
+    get_flashinfer_moe_backend,
+    prepare_fp8_moe_layer_for_fi,
+)
 
 logger = init_logger(__name__)
 

@@ -8,16 +8,16 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    align_fp4_moe_weights_for_fi,
-    align_trtllm_fp4_moe_hidden_dim_for_fi,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_cutlass_fused_moe,
+)
+from vllm.utils.flashinfer.moe import (
+    align_fp4_moe_weights_for_fi,
+    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 
 if TYPE_CHECKING:

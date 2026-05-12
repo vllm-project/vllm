@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""MoE-specific helpers for FlashInfer backends."""
+
 from enum import Enum
 from typing import TYPE_CHECKING
 

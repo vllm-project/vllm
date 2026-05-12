@@ -16,9 +16,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -29,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer.moe import activation_to_flashinfer_int
 
 logger = init_logger(__name__)
 
