@@ -10,10 +10,10 @@ from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
