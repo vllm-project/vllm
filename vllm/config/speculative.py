@@ -69,7 +69,7 @@ RejectionSampleMethod = Literal["standard", "synthetic"]
 DraftSampleMethod = Literal["greedy", "gumbel"]
 
 
-@config
+@config(config=ConfigDict(populate_by_name=True))
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
