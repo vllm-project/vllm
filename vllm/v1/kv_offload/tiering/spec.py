@@ -94,10 +94,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
-            # Create scheduler-side SharedOffloadRegion (rank=None) first so
-            # CPUPrimaryTierOffloadingManager.create_kv_memoryview() has _base
-            # available when TieringOffloadingManager.__init__ wires secondary
-            # tier memoryviews.
+            # Create scheduler-side SharedOffloadRegion (rank=None) so the
+            # primary tier can eagerly create a memoryview over _base.
             world_size = self.vllm_config.parallel_config.world_size
             scheduler_mmap = SharedOffloadRegion(
                 instance_id=self.vllm_config.instance_id,
@@ -121,10 +119,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             )
 
             # Create secondary tiers
+            primary_kv_view = primary_tier.get_kv_memoryview()
             secondary_tiers = []
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
-                    tier = create_secondary_tier(tier_config)
+                    tier = create_secondary_tier(tier_config, primary_kv_view)
                     secondary_tiers.append(tier)
                     logger.info(
                         "Created secondary tier #%d (%s)",

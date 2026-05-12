@@ -43,6 +43,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
 
     def __init__(
         self,
+        primary_kv_view: memoryview,
         max_blocks: int = 1000,
         simulate_async: bool = False,
     ):
@@ -50,14 +51,14 @@ class ExampleSecondaryTier(SecondaryTierManager):
         Initialize the example secondary tier.
 
         Args:
+            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             max_blocks: Maximum number of blocks this tier can store
             simulate_async: If True, jobs complete on next get_finished() call.
                           If False, jobs complete immediately.
         """
+        super().__init__(primary_kv_view)
         self.max_blocks = max_blocks
         self.simulate_async = simulate_async
-
-        self._primary_view: memoryview | None = None
 
         # key -> True (only care about presence)
         self.blocks: OrderedDict[OffloadKey, bool] = OrderedDict()
@@ -67,9 +68,6 @@ class ExampleSecondaryTier(SecondaryTierManager):
 
         # Pending jobs (for simulated async mode)
         self.pending_jobs: list[_JobMetadata] = []
-
-    def set_primary_view(self, view: memoryview) -> None:
-        self._primary_view = view
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """

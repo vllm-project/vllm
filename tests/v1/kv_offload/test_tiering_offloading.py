@@ -59,7 +59,8 @@ class TestExampleSecondaryTier:
 
     def test_basic_store_and_lookup(self):
         """Test basic store and lookup operations."""
-        tier = ExampleSecondaryTier(max_blocks=10)
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTier(primary_kv_view=mock_view, max_blocks=10)
 
         # Initially empty
         blocks = to_keys(range(3))
@@ -78,7 +79,8 @@ class TestExampleSecondaryTier:
 
     def test_lru_eviction(self):
         """Test LRU eviction policy."""
-        tier = ExampleSecondaryTier(max_blocks=3)
+        mock_view = memoryview(torch.zeros((4, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTier(primary_kv_view=mock_view, max_blocks=3)
 
         # Fill tier to capacity
         blocks = to_keys(range(3))
@@ -92,9 +94,6 @@ class TestExampleSecondaryTier:
 
         # Store new block should evict blocks[1] (least recently used)
         new_block = to_keys([3])[0]
-
-        mock_tensor = torch.zeros((4, 16), dtype=torch.float32)
-        tier.set_primary_view(memoryview(mock_tensor.numpy()))
 
         tier.submit_store(
             JobMetadata(
@@ -117,12 +116,12 @@ class TestExampleSecondaryTier:
 
     def test_async_simulation(self):
         """Test simulated async behavior."""
-        tier = ExampleSecondaryTier(max_blocks=10, simulate_async=True)
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTier(
+            primary_kv_view=mock_view, max_blocks=10, simulate_async=True
+        )
 
         blocks = to_keys(range(2))
-
-        mock_tensor = torch.zeros((10, 16), dtype=torch.float32)
-        tier.set_primary_view(memoryview(mock_tensor.numpy()))
 
         # Submit store job
         tier.submit_store(
@@ -155,12 +154,15 @@ class TestTieringOffloadingManager:
         # Create primary tier (CPU-based)
         self.primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
 
-        mock_arr = torch.zeros((5, 16), dtype=torch.int8).numpy()
-        self.primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
+        mock_view = memoryview(torch.zeros((5, 16), dtype=torch.int8).numpy())
 
-        # Create secondary tiers
-        self.secondary_tier1 = ExampleSecondaryTier(max_blocks=10)
-        self.secondary_tier2 = ExampleSecondaryTier(max_blocks=10)
+        # Create secondary tiers with the primary view
+        self.secondary_tier1 = ExampleSecondaryTier(
+            primary_kv_view=mock_view, max_blocks=10
+        )
+        self.secondary_tier2 = ExampleSecondaryTier(
+            primary_kv_view=mock_view, max_blocks=10
+        )
 
         # Create tiered manager
         self.manager = TieringOffloadingManager(
@@ -375,15 +377,18 @@ class TestTieringOffloadingManager:
 
     def test_multiple_secondary_tiers_independent_eviction(self):
         """Test that secondary tiers manage their own evictions."""
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+
         # Create tier with small capacity
-        small_tier = ExampleSecondaryTier(max_blocks=5, simulate_async=False)
-        large_tier = ExampleSecondaryTier(max_blocks=10, simulate_async=False)
+        small_tier = ExampleSecondaryTier(
+            primary_kv_view=mock_view, max_blocks=5, simulate_async=False
+        )
+        large_tier = ExampleSecondaryTier(
+            primary_kv_view=mock_view, max_blocks=10, simulate_async=False
+        )
 
         # Create a fresh primary tier for this test
         primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=10)
-
-        mock_arr = torch.zeros((10, 16), dtype=torch.int8).numpy()
-        primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
 
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
@@ -508,9 +513,6 @@ class TestTieringOffloadingWithoutSecondaryTiers:
     def test_works_without_secondary_tiers(self):
         """Test that manager works with empty secondary_tiers list."""
         primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
-
-        mock_arr = torch.zeros((5, 16), dtype=torch.int8).numpy()
-        primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(

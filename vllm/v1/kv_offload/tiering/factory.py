@@ -14,7 +14,10 @@ _TIER_REGISTRY: dict[str, type[SecondaryTierManager]] = {
 }
 
 
-def create_secondary_tier(tier_config: dict) -> SecondaryTierManager:
+def create_secondary_tier(
+    tier_config: dict,
+    primary_kv_view: memoryview,
+) -> SecondaryTierManager:
     """
     Create a secondary tier from configuration.
 
@@ -23,6 +26,7 @@ def create_secondary_tier(tier_config: dict) -> SecondaryTierManager:
             - type (required): Type of secondary tier (e.g., "example")
             - Additional tier-specific parameters are passed directly
               to the tier constructor
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
 
     Returns:
         SecondaryTierManager instance
@@ -42,4 +46,4 @@ def create_secondary_tier(tier_config: dict) -> SecondaryTierManager:
             f"Unknown secondary tier type: {tier_type!r}. "
             f"Supported types: {list(_TIER_REGISTRY)}"
         )
-    return cls(**config)
+    return cls(primary_kv_view=primary_kv_view, **config)

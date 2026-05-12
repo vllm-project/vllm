@@ -49,6 +49,9 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished() polls for completion.
     """
 
+    def __init__(self, primary_kv_view: memoryview) -> None:
+        self._primary_kv_view: memoryview = primary_kv_view
+
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
@@ -131,19 +134,6 @@ class SecondaryTierManager(ABC):
             last call.
         """
         pass
-
-    def set_primary_view(self, view: memoryview) -> None:
-        """
-        Provide a long-lived memoryview of the primary-tier CPU tensor.
-
-        Called once during initialisation.
-        Override to store the view for use in `submit_store` and `submit_load`.
-        Use `view.strides[0]` to obtain the byte stride between block slots.
-
-        Args:
-            view: Memoryview of the primary tier's CPU KV cache tensor.
-        """
-        return
 
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """

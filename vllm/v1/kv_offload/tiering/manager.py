@@ -86,16 +86,24 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
 
-    def create_kv_memoryview(self) -> memoryview:
-        """Create a memoryview over the primary tier's KV cache buffer.
+        self._kv_memoryview: memoryview | None = None
+        if mmap_region is not None:
+            self._kv_memoryview = self._create_kv_memoryview()
 
-        Returns a 2-D memoryview of shape (num_blocks, row_stride_bytes)
-        backed by the SharedOffloadRegion mmap. Secondary tiers address
-        block b as view[b]. Caller must call release() when done.
+    def get_kv_memoryview(self) -> memoryview:
+        """Return the memoryview over the primary tier's KV cache buffer.
+
+        The view has shape (num_blocks, row_stride_bytes) and is backed by the
+        SharedOffloadRegion mmap.  Secondary tiers address block *b* as
+        ``view[b]``.
         """
-        assert self._mmap_region is not None, (
+        assert self._kv_memoryview is not None, (
             "mmap_region must be provided to CPUPrimaryTierOffloadingManager"
         )
+        return self._kv_memoryview
+
+    def _create_kv_memoryview(self) -> memoryview:
+        assert self._mmap_region is not None
         kv_tensor = self._mmap_region._base.view(
             self._mmap_region.num_blocks, self._mmap_region._row_stride
         )
@@ -105,6 +113,15 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             "secondary tiers require zero-copy access to primary KV data"
         )
         return memoryview(np_arr)
+
+    def shutdown(self) -> None:
+        super().shutdown()
+        if self._kv_memoryview is not None:
+            self._kv_memoryview.release()
+            self._kv_memoryview = None
+        if self._mmap_region is not None:
+            self._mmap_region.cleanup()
+            self._mmap_region = None
 
 
 class TieringOffloadingManager(OffloadingManager):
@@ -161,12 +178,6 @@ class TieringOffloadingManager(OffloadingManager):
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
         # Reset at the end of each step in take_events().
         self._processed_jobs_this_step: bool = False
-
-        # Wire each secondary tier with a long-lived memoryview of the primary
-        # CPU buffer. One view is shared across all tiers; released in shutdown().
-        self._primary_kv_view = primary_tier.create_kv_memoryview()
-        for tier in self.secondary_tiers:
-            tier.set_primary_view(self._primary_kv_view)
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -509,8 +520,5 @@ class TieringOffloadingManager(OffloadingManager):
         yield from self.primary_tier.take_events()
 
     def shutdown(self) -> None:
-        """Release memoryviews and scheduler-side mmap."""
-        self._primary_kv_view.release()
-        if self.primary_tier._mmap_region is not None:
-            self.primary_tier._mmap_region.cleanup()
-            self.primary_tier._mmap_region = None
+        """Shutdown all tiers and release resources."""
+        self.primary_tier.shutdown()
