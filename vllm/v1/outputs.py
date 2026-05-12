@@ -198,9 +198,6 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
-    # req_id -> routed experts ndarray of shape (seq_len, num_moe_layers, top_k)
-    routed_experts_dict: dict[str, np.ndarray] | None = None
-
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
