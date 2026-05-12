@@ -19,6 +19,45 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def flashinfer_sampler_supported(logprobs_mode: LogprobsMode) -> bool:
+    """Decide whether FlashInfer's top-p/top-k sampler can be used.
+
+    Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
+    is 0, when ``logprobs_mode`` requires the post-top-k/top-p logits/logprobs
+    (which FlashInfer doesn't expose), when the platform isn't CUDA, or when the
+    GPU's compute capability is unsupported. Raises ``RuntimeError`` if the
+    user explicitly opted in via the env var on unsupported hardware.
+    """
+    if logprobs_mode in ("processed_logits", "processed_logprobs"):
+        return False
+    if not current_platform.is_cuda():
+        return False
+    if not envs.VLLM_USE_FLASHINFER_SAMPLER:
+        logger.info_once(
+            "FlashInfer top-p/top-k sampling disabled via "
+            "VLLM_USE_FLASHINFER_SAMPLER=0."
+        )
+        return False
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    capability = current_platform.get_device_capability()
+    assert capability is not None
+    if FlashInferBackend.supports_compute_capability(capability):
+        logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
+        return True
+    if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
+        raise RuntimeError(
+            "FlashInfer does not support compute capability "
+            f"{capability.as_version_str()}, unset VLLM_USE_FLASHINFER_SAMPLER=1."
+        )
+    logger.warning_once(
+        "FlashInfer top-p/top-k sampling not supported on compute capability "
+        "%s; falling back. Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence.",
+        capability.as_version_str(),
+    )
+    return False
+
+
 class TopKTopPSampler(nn.Module):
     """
     Module that performs optional top-k and top-p filtering followed by
@@ -30,49 +69,12 @@ class TopKTopPSampler(nn.Module):
     def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs") -> None:
         super().__init__()
         self.logprobs_mode = logprobs_mode
-        # flashinfer optimization does not apply if intermediate
-        # logprobs/logits after top_k/top_p need to be returned
-        if (
-            logprobs_mode not in ("processed_logits", "processed_logprobs")
-            and current_platform.is_cuda()
-        ):
-            if envs.VLLM_USE_FLASHINFER_SAMPLER:
-                from vllm.v1.attention.backends.flashinfer import FlashInferBackend
-
-                capability = current_platform.get_device_capability()
-                assert capability is not None
-                if FlashInferBackend.supports_compute_capability(capability):
-                    logger.info_once(
-                        "Using FlashInfer for top-p & top-k sampling.",
-                        scope="global",
-                    )
-                    self.forward = self.forward_cuda
-                elif envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
-                    # User explicitly opted in but the GPU can't run FlashInfer.
-                    capability_str = capability.as_version_str()
-                    raise RuntimeError(
-                        "FlashInfer does not support compute capability "
-                        f"{capability_str}, unset VLLM_USE_FLASHINFER_SAMPLER=1."
-                    )
-                else:
-                    # Default-on path; hardware can't run FlashInfer →
-                    # quietly fall back to the PyTorch-native sampler
-                    # instead of failing server startup.
-                    logger.warning_once(
-                        "FlashInfer top-p/top-k sampling not supported on "
-                        "compute capability %s; falling back to PyTorch-native "
-                        "sampler. Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence.",
-                        capability.as_version_str(),
-                    )
-                    self.forward = self.forward_native
-            else:
-                # User explicitly set VLLM_USE_FLASHINFER_SAMPLER=0.
-                logger.info_once(
-                    "FlashInfer top-p/top-k sampling disabled via "
-                    "VLLM_USE_FLASHINFER_SAMPLER=0; using PyTorch-native sampler."
-                )
-                self.forward = self.forward_native
-
+        if current_platform.is_cuda():
+            self.forward = (
+                self.forward_cuda
+                if flashinfer_sampler_supported(logprobs_mode)
+                else self.forward_native
+            )
         elif current_platform.is_cpu():
             arch = current_platform.get_cpu_architecture()
             # Fall back to native implementation for POWERPC and RISCV.
@@ -415,7 +417,7 @@ def flashinfer_sample(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
-    generators: dict[int, torch.Generator],
+    generators: dict[int, torch.Generator] = {},  # noqa
 ) -> torch.Tensor:
     """Sample from the logits using FlashInfer.
 

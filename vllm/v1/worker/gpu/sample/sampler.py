@@ -7,6 +7,10 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    flashinfer_sample,
+    flashinfer_sampler_supported,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
@@ -43,6 +47,7 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
+        self.use_flashinfer = flashinfer_sampler_supported(logprobs_mode)
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -126,6 +131,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -161,6 +167,11 @@ class Sampler:
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)
 
+        # When FlashInfer will perform top-k/top-p sampling, leave the logits
+        # unmasked so it can use them directly.
+        if skip_top_k_top_p:
+            return logits
+
         # Apply top_k and/or top_p. This might or might not return a new tensor.
         return self.sampling_states.apply_top_k_top_p(
             logits, expanded_idx_mapping, idx_mapping_np
@@ -175,6 +186,22 @@ class Sampler:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # FlashInfer only handles the sample step, has no greedy mode, and
+        # can't honor per-request seeds -- fall back to gumbel otherwise.
+        top_k: torch.Tensor | None = None
+        top_p: torch.Tensor | None = None
+        use_flashinfer = self.use_flashinfer
+        if use_flashinfer:
+            top_k, top_p = self.sampling_states.get_top_k_top_p(
+                expanded_idx_mapping, idx_mapping_np
+            )
+            if (
+                (top_k is None and top_p is None)
+                or self.sampling_states.any_greedy(idx_mapping_np)
+                or self.sampling_states.any_explicit_seed(idx_mapping_np)
+            ):
+                use_flashinfer = False
+
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
@@ -182,15 +209,18 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            skip_top_k_top_p=use_flashinfer,
         )
 
-        # Sample the next token.
-        sampled = gumbel_sample(
-            processed_logits,
-            expanded_idx_mapping,
-            self.sampling_states.temperature.gpu,
-            self.sampling_states.seeds.gpu,
-            pos,
-            apply_temperature=False,
-        )
+        if use_flashinfer:
+            sampled = flashinfer_sample(processed_logits.contiguous(), top_k, top_p)
+        else:
+            sampled = gumbel_sample(
+                processed_logits,
+                expanded_idx_mapping,
+                self.sampling_states.temperature.gpu,
+                self.sampling_states.seeds.gpu,
+                pos,
+                apply_temperature=False,
+            )
         return sampled, processed_logits
