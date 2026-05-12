@@ -64,7 +64,7 @@ if(DEEPGEMM_ARCHS)
   # private CPython symbols — a single `_C.abi3.so` is not viable today
   # (see #41476 / #41512 for the failed attempt).
   #
-  # TODOs (tracked in vllm-project/vllm#TBD):
+  # TODOs (tracked in vllm-project/vllm#42431):
   #   - Replace DeepGEMM's pybind11 binding with a TORCH_LIBRARY + shim
   #     binding (cf. vllm-flash-attention/csrc/common/pytorch_shim.h) to
   #     collapse to one `_C.abi3.so`. Needs either an upstream change or
