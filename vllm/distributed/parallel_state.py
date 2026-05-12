@@ -46,6 +46,7 @@ import vllm.envs as envs
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
+from vllm.distributed.layer_parallel_config import init_layer_parallel_resolver
 from vllm.distributed.utils import (
     StatelessProcessGroup,
     get_cached_tcp_store_client,
@@ -1938,6 +1939,30 @@ def initialize_model_parallel(
                 )
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
+
+    # Per-layer parallel config resolver.
+    full_tp_size = tensor_model_parallel_size
+    full_tp_rank = _TP.rank_in_group
+    attn_tp_size = (
+        getattr(parallel_config, "tensor_parallel_size_attention", 0) or full_tp_size
+    )
+    if attn_tp_size > full_tp_size:
+        raise ValueError(
+            f"tensor_parallel_size_attention ({attn_tp_size}) cannot exceed "
+            f"tensor_model_parallel_size ({full_tp_size})"
+        )
+    if full_tp_size % attn_tp_size != 0:
+        raise ValueError(
+            f"tensor_model_parallel_size ({full_tp_size}) must be divisible "
+            f"by tensor_parallel_size_attention ({attn_tp_size})"
+        )
+    attn_tp_rank = full_tp_rank % attn_tp_size
+    init_layer_parallel_resolver(
+        full_tp_size=full_tp_size,
+        full_tp_rank=full_tp_rank,
+        attn_tp_size=attn_tp_size,
+        attn_tp_rank=attn_tp_rank,
+    )
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
