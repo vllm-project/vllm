@@ -15,6 +15,7 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    StructuredOutputOptions,
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
@@ -353,6 +354,17 @@ class StructuredOutputManager:
             # Reasoning just ended, so we shouldn't advance til
             # next pass
             structured_req.reasoning_ended = True
+
+            # Only treat reasoning_ended as allowing FSM advance for speculative
+            # decoding with structural-tag constraints; other paths keep prior
+            # streaming gating without this shortcut.
+            if (
+                structured_req.reasoning_ended
+                and self.vllm_config.speculative_config is not None
+                and structured_req.structured_output_key[0]
+                == StructuredOutputOptions.STRUCTURAL_TAG
+            ):
+                return True
 
         return False
 
