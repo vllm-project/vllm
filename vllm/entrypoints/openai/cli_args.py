@@ -156,6 +156,13 @@ class BaseFrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    warmup_config: str | None = None
+    """Path to a JSON file or JSON string containing warmup configuration.
+    The configuration specifies prompts to run through the engine before
+    the server starts accepting traffic, to warm up kernels and avoid
+    lazy compilation latency. Example format:
+    {"prompts": [{"prompt": "Hello", "max_tokens": 100}], "concurrency": [1, 4]}
+    """
     fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
     """Controls the ``system_fingerprint`` field on responses.
 
