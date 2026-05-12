@@ -304,7 +304,7 @@ class SimpleCPUOffloadScheduler:
         skipped = sum(blk.block_hash is not None for blk in blocks.blocks[self.fa_gidx])
         num_computed_tokens = skipped * self.block_size
 
-        # Build transfer pairs across all groups
+        # Build transfer pairs across all groups.
         total_computed_tokens = num_computed_tokens + num_external_tokens
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
 
