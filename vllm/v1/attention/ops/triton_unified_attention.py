@@ -140,11 +140,19 @@ def kernel_unified_attention(
     # over ``SLIDING_WINDOW`` inside the helpers.  ``-1`` disables.
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
+    USE_SWAPPED_GRID: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
 
-    q_block_global_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
+    # ROCm gfx1151: swap program_id mapping based on empirical performance
+    # Grid order: (kv_heads, q_blocks) on gfx1151, (q_blocks, kv_heads) elsewhere
+    # When True, swaps program_id(0) and program_id(1)
+    if USE_SWAPPED_GRID and not IS_3D:
+        kv_head_idx = tl.program_id(0)
+        q_block_global_idx = tl.program_id(1)
+    else:
+        q_block_global_idx = tl.program_id(0)
+        kv_head_idx = tl.program_id(1)
     segm_idx = tl.program_id(2) if IS_3D else 0
 
     (
@@ -724,8 +732,14 @@ def unified_attention(
 
     grid: tuple[Any, ...]
     config = {}
+
+    use_swapped_grid = not use_3d and current_platform.is_gfx1151()
+
     if not use_3d:
-        grid = (total_num_q_blocks, num_kv_heads)
+        if use_swapped_grid:
+            grid = (num_kv_heads, total_num_q_blocks)
+        else:
+            grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
         # Add ROCm-specific config for prefill path
         if waves_per_eu is not None:
@@ -803,6 +817,7 @@ def unified_attention(
         KV_QUANT_MODE=kv_quant_mode,
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
+        USE_SWAPPED_GRID=use_swapped_grid,
         **config,
     )
 
