@@ -388,8 +388,6 @@ class NixlConnectorWorker:
         # Set of requests that have been part of a batch, regardless of status.
         self._reqs_to_process: set[ReqId] = set()
 
-        # Invalid blocks from failed NIXL operations (thread-safe queue of block ids)
-        self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
         # Requests that skipped transfer (handshake or transfer failures).
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
@@ -1919,17 +1917,12 @@ class NixlConnectorWorker:
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
         """
-        Handle a failed transfer by marking all (logical) blocks as invalid and
-        recording the failure.
+        Handle a failed transfer by recording the request ID.
 
         Args:
             req_id: The request ID.
             handle: The transfer handle.
         """
-        # Use .get() here as the metadata cleanup is handled by get_finished()
-        # TODO (NickLucche) handle failed transfer for HMA.
-        if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
-            self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
@@ -2438,22 +2431,6 @@ class NixlConnectorWorker:
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()
         return None
-
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Return and clear the set of block IDs that failed to load.
-
-        This is called by the scheduler to identify blocks that need
-        to be retried after a NIXL transfer failure.
-        """
-        # Drain the queue (thread-safe, no lock needed).
-        result: set[int] = set()
-        while not self._invalid_block_ids.empty():
-            try:
-                result.update(self._invalid_block_ids.get_nowait())
-            except queue.Empty:
-                break
-        return result
 
     def get_request_ids_with_load_errors(self) -> set[str]:
         """
