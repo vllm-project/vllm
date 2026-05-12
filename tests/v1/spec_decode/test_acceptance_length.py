@@ -167,6 +167,7 @@ def get_mt_bench_prompts(
         disable_shuffle=False,
         skip_chat_template=False,
         trust_remote_code=False,
+        enable_multimodal_chat=False,
     )
     samples = get_samples(args, tokenizer)
     prompt_ids = [

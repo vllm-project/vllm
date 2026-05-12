@@ -84,6 +84,34 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
+- label: EAGLE3 Acceptance Length
+  key: eagle3-acceptance-length
+  timeout_in_minutes: 90
+  device: h100
+  optional: true
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/spec_decode/test_acceptance_length.py
+  commands:
+    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -k "llama3-8b-eagle3 or qwen3-8b-eagle3 or gpt-oss-20b-eagle3"
+
+- label: EAGLE3 Acceptance Length Nightly B200
+  key: eagle3-acceptance-length-nightly-b200
+  timeout_in_minutes: 90
+  device: b200
+  optional: true
+  num_devices: 1
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/spec_decode/test_acceptance_length.py
+  commands:
+    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -k "llama3-8b-eagle3 or qwen3-8b-eagle3 or gpt-oss-20b-eagle3"
+
 - label: DFlash Speculators Correctness
   key: dflash-speculators-correctness
   timeout_in_minutes: 30
