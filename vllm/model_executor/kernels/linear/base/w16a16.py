@@ -1,8 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# NOTE: do NOT add `from __future__ import annotations` to this file.
-# w16a16_dispatch_fn relies on PEP-3107 runtime annotations for infer_schema.
-
 from dataclasses import dataclass
 
 import torch
