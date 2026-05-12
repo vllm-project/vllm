@@ -227,47 +227,43 @@ class TieringOffloadingManager(OffloadingManager):
         Check whether a single block is offloaded and ready.
 
         Algorithm:
-        1. Process any completed async jobs first
-        2. Query all tiers (primary + secondaries) unconditionally
-        3. Decide based on combined results
+            1. Process any completed async jobs first.
+            2. Query primary tier — short-circuit on hit or in-flight.
+            3. On primary miss, query secondary tiers — stop on first
+               hit and initiate promotion.
 
         Args:
             key: Block hash to look up.
             req_context: Per-request context.
 
         Returns:
-            True if the block is ready (primary hit, or found in a secondary
-                tier with promotion initiated),
-            False if not found in any tier,
-            None if no tier has the block but at least one tier is busy
-                (retry later).
+            True  — block is ready in the primary tier.
+            None  — block found but not yet ready (primary in-flight,
+                    promotion started, or a secondary tier is busy).
+            False — block not found in any tier, or primary is full
+                    and cannot accept a promotion.
         """
         self._maybe_process_finished_jobs()
 
-        # Always query every tier to warm up caches / prefetch state
         primary_hit = self.primary_tier.lookup(key, req_context)
+        if primary_hit is True:
+            return True
+        if primary_hit is None:
+            return None
 
-        hit_tier = None
         any_none = False
         for tier in self.secondary_tiers:
             result = tier.lookup(key, req_context)
-            if result is True and hit_tier is None:
-                hit_tier = tier
-            elif result is None:
+            if result is True:
+                if not self._initiate_promotion(tier, key, req_context):
+                    return False  # primary full, block unavailable
+                return None  # promotion started, retry later
+            if result is None:
                 any_none = True
 
-        if primary_hit:
-            return True
-        elif primary_hit is None:
+        if any_none:
             return None
-        elif hit_tier is not None:
-            if self._initiate_promotion(hit_tier, key, req_context):
-                return None  # promotion started, retry later
-            return False  # primary full, block unavailable
-        elif any_none:
-            return None
-        else:
-            return False
+        return False
 
     def _initiate_promotion(
         self,
