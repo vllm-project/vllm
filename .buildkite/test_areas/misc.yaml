@@ -339,8 +339,9 @@ steps:
 - label: Acceptance Length Test (Large Models) # optional
   key: acceptance-length-test-large-models
   timeout_in_minutes: 25
-  device: h200_18gb
+  gpu: h100
   optional: true
+  num_gpus: 1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
