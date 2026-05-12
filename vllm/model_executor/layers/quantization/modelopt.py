@@ -59,9 +59,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    swap_w13_to_w31,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
@@ -97,6 +94,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
+from vllm.utils.flashinfer.moe import swap_w13_to_w31
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
