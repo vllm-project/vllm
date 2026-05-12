@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable, Mapping, Sequence
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -36,10 +37,27 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenVLAConfig
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
+
+from .module_mapping import MultiModelKeys
+from .utils import init_vllm_registered_model, maybe_prefix
 
 _OPENVLA_IMAGE_SIZE = 224
 _OPENVLA_PATCH_SIZE = 14
 _OPENVLA_NUM_IMAGE_TOKENS = (_OPENVLA_IMAGE_SIZE // _OPENVLA_PATCH_SIZE) ** 2
+
+
+class OpenVLAImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (6)
+        - h: Height
+        - w: Width
+    """
+
+    type: Literal["pixel_values"] = "pixel_values"
+    data: Annotated[torch.Tensor, TensorShape("bn", 6, "h", "w")]
 
 
 class OpenVLAProcessingInfo(BaseProcessingInfo):
@@ -168,11 +186,13 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         tokenizer = self.info.get_tokenizer()
         prompt_ids = tokenizer.encode(prompt, **tok_kwargs)
 
-        images = mm_data.get("images", [])
-        if not images:
+        images = mm_data.get("images")
+        if images is None:
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
         if not isinstance(images, Sequence) or isinstance(images, (str, bytes)):
             images = [images]
+        if len(images) == 0:
+            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
         pixel_values = torch.stack(
             [self._preprocess_image(image) for image in images],
@@ -238,13 +258,7 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
     dummy_inputs=OpenVLADummyInputsBuilder,
 )
 class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
-    """Registration and processor skeleton for OpenVLA.
-
-    The executable OpenVLA model is implemented in later phases.  Keeping this
-    class importable lets config, architecture registration, and multimodal
-    token accounting be verified independently before adding vision towers,
-    projector, language model, and action decoding.
-    """
+    """OpenVLA wrapper with vLLM language-model execution wired in."""
 
     embed_input_ids = SupportsMultiModal.embed_input_ids
 
@@ -256,35 +270,73 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        self.config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
+        self.config = config
+        self.multimodal_config = vllm_config.model_config.multimodal_config
+        self.image_token_id = config.image_token_index
+        self.num_patches = _OPENVLA_NUM_IMAGE_TOKENS
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     def get_language_model(self) -> nn.Module:
-        raise NotImplementedError("OpenVLA execution is implemented in a later phase")
+        return self.language_model
+
+    def _parse_and_validate_image_input(
+        self,
+        **kwargs: object,
+    ) -> OpenVLAImagePixelInputs | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        if pixel_values is None:
+            return None
+
+        return OpenVLAImagePixelInputs(
+            type="pixel_values",
+            data=pixel_values,
+            resolve_bindings={
+                "h": _OPENVLA_IMAGE_SIZE,
+                "w": _OPENVLA_IMAGE_SIZE,
+            },
+        )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        raise NotImplementedError("OpenVLA execution is implemented in a later phase")
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return []
+
+        raise NotImplementedError("OpenVLA vision tower is implemented in phase 4")
 
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        *,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        raise NotImplementedError("OpenVLA execution is implemented in a later phase")
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        return self.language_model.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-        raise NotImplementedError("OpenVLA execution is implemented in a later phase")
+        return self.language_model.compute_logits(hidden_states)
 
-    def make_empty_intermediate_tensors(
-        self,
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        raise NotImplementedError("OpenVLA execution is implemented in a later phase")
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(language_model="language_model")
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         return num_image_tokens
