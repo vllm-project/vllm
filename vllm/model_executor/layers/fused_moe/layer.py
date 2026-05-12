@@ -203,12 +203,23 @@ class FusedMoE(PluggableLayer):
         compilation_config.static_all_moe_layers.append(prefix)
         self.layer_name = prefix
 
-        self.enable_eplb = enable_eplb
-        # TODO(bnell): should this be owned by router?
-        self.eplb_state = EplbLayerState()
         self.expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
         )
+
+        self.eplb_state: EplbLayerState | None = None
+        if enable_eplb:
+            if self.use_ep and self.global_num_experts % self.ep_size != 0:
+                raise ValueError(
+                    f"EPLB currently only supports even distribution of "
+                    f"experts across ranks. Got {self.global_num_experts} experts "
+                    f"and {self.ep_size} EP ranks."
+                )
+            self.eplb_state = EplbLayerState()
+        else:
+            assert not self.use_ep or num_redundant_experts == 0, (
+                "Redundant experts are only supported with EPLB."
+            )
 
         # ROCm aiter shared experts fusion
         # AITER only supports gated activations (silu/gelu), so disable it
@@ -237,17 +248,6 @@ class FusedMoE(PluggableLayer):
             )
 
         # Determine expert maps
-        if self.use_ep:
-            if self.enable_eplb:
-                assert self.global_num_experts % self.ep_size == 0, (
-                    "EPLB currently only supports even distribution of "
-                    "experts across ranks."
-                )
-            else:
-                assert num_redundant_experts == 0, (
-                    "Redundant experts are only supported with EPLB."
-                )
-
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         # Create ExpertMapManager to handle expert mapping and placement for EP.
@@ -261,7 +261,7 @@ class FusedMoE(PluggableLayer):
             num_expert_group=num_expert_group,
             moe_parallel_config=self.moe_parallel_config,
             placement_strategy=self.expert_placement_strategy,
-            enable_eplb=self.enable_eplb,
+            enable_eplb=enable_eplb,
             num_fused_shared_experts=self.num_fused_shared_experts,
             rocm_aiter_enabled=self.rocm_aiter_fmoe_enabled,
         )
@@ -313,7 +313,6 @@ class FusedMoE(PluggableLayer):
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
@@ -381,7 +380,7 @@ class FusedMoE(PluggableLayer):
                 "is_act_and_mul=False is supported only for CUDA and XPU for now"
             )
 
-        if self.enable_eplb and not self.quant_method.supports_eplb:
+        if enable_eplb and not self.quant_method.supports_eplb:
             # TODO: Add support for additional quantization methods.
             # The implementation for other quantization methods does not
             # contain essential differences, but the current quant API
@@ -1282,10 +1281,20 @@ class FusedMoE(PluggableLayer):
 
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
+
+        Args:
+            moe_layer_idx: Index of this MoE layer
+            expert_load_view: View into global expert load tracking tensor
+            logical_to_physical_map: Mapping from logical to physical expert IDs
+            logical_replica_count: Number of replicas for each logical expert
         """
-        self.eplb_state.expert_load_view = expert_load_view[moe_layer_idx]
-        self.eplb_state.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
-        self.eplb_state.logical_replica_count = logical_replica_count[moe_layer_idx]
+        if self.eplb_state is not None:
+            self.eplb_state.set_layer_state(
+                moe_layer_idx,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
