@@ -40,7 +40,12 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
     }
 )
 _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
-_DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 1024
+# Cap warmup at the largest single-chunk prefill the scheduler will ever
+# issue (max_num_batched_tokens). 8192 covers the canonical SM12x serve
+# (max_num_batched_tokens=8192); larger scheduler caps clamp to this
+# value via _clamp_warmup_tokens at the call site, smaller caps clamp
+# down naturally.
+_DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 8192
 _DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2)
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
