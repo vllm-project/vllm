@@ -54,6 +54,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptFp8PbWoLinearMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
+    "ModelOptNvFp4W4A16LinearMethod",
     "HummingLinearMethod",
 ]
 
@@ -208,6 +209,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
         from vllm.model_executor.kernels.linear import choose_w16a16_kernel
+
+        if current_platform.is_cpu() and layer.weight.ndim != 2:
+            # this is not a linear layer
+            return
 
         config = w16a16.Config(
             weight_dtype=layer.weight.dtype,
