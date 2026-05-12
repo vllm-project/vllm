@@ -77,6 +77,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 * `encoder_eager_forward(...)` — fallback eager forward when no graph fits.
 * `get_input_modality(...)` - return the modality of the inputs.
 * `get_max_frames_per_video()` - return model-specific max frames per video.
+* `postprocess_encoder_output(...)` - post process encoder output, directly call scatter_output_slices by default
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
@@ -87,7 +88,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 | ------------ | ------ | ------------ | ------------ |
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ |
-| `Step3VLForConditionalGeneration` | `Step3-VL`   | ✅︎ | ❌︎ |
+| `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ |
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
