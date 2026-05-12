@@ -124,9 +124,13 @@ def compute_topk_logprobs(
         # tokens where applicable.
         assert logprob_token_ids_state is not None
         assert expanded_idx_mapping is not None
-        topk_indices = None
+
         if num_logprobs > 0:
-            topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = torch.topk(logits, num_logprobs, dim=-1).indices
+            topk_token_ids = topk_token_ids.to(torch.int32)
+        else:
+            # This tensor just used as an int32 pointer, data not accessed.
+            topk_token_ids = logprob_token_ids_state.token_ids.gpu
 
         num_cols = max(num_logprobs, max_per_req_token_ids)
         logprob_token_ids = sampled_token_ids.new_zeros((batch_size, 1 + num_cols))
@@ -137,8 +141,8 @@ def compute_topk_logprobs(
             valid_mask,
             valid_mask.stride(0),
             sampled_token_ids,
-            topk_indices if topk_indices is not None else logprob_token_ids,
-            topk_indices.stride(0) if topk_indices is not None else 0,
+            topk_token_ids,
+            topk_token_ids.stride(0),
             expanded_idx_mapping,
             logprob_token_ids_state.num_token_ids.gpu,
             logprob_token_ids_state.token_ids.gpu,
@@ -202,14 +206,12 @@ def _fill_logprob_token_ids_kernel(
         # Override topk with per-request custom tokens.
         src = per_req_token_ids_ptr + req_state_idx * per_req_token_ids_stride
         valid = col < num_custom
-        # per_req_token_ids is int32; output is int64.
-        tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
     else:
         # Fill with topk indices (no-op when NUM_TOPK == 0).
         src = topk_indices_ptr + batch_idx * topk_indices_stride
         valid = col < NUM_TOPK
-        tokens = tl.load(src + col, mask=valid, other=0)
 
+    tokens = tl.load(src + col, mask=valid, other=0).to(tl.int64)
     tl.store(tid_base + col, tokens, mask=valid)
     tl.store(mask_base + col, tl.full([PADDED_COLS], 1, tl.int1), mask=valid)
 
