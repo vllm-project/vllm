@@ -194,6 +194,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        empty_req_mask: torch.Tensor | None,
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
@@ -248,6 +249,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             scheduler_metadata=scheduler_metadata,
             max_num_splits=max_num_splits,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            empty_req_mask=empty_req_mask,
         )
         return metadata
 

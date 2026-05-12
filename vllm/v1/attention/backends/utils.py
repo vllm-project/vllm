@@ -894,28 +894,29 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens.squeeze(1)
 
 
-def expand_req_values_to_token(
-    req_values: torch.Tensor,
+def get_empty_req_mask(
+    seq_lens: torch.Tensor,
     query_start_loc: torch.Tensor,
     num_tokens: int | None = None,
 ) -> torch.Tensor:
-    """Expand request-level values to token-level values using query offsets."""
+    """Calculate empty request mask by expanding request-level seq lens
+    to token-level and checking for zero-length (empty) sequences."""
     if num_tokens is None:
         num_tokens = query_start_loc[-1].item()
 
-    if req_values.shape[0] == num_tokens:
-        return req_values
+    if seq_lens.shape[0] == num_tokens:
+        return seq_lens.eq(0)
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    assert query_lens.shape[0] == req_values.shape[0], (
-        "query_start_loc and req_values must have matching request dimension: "
-        f"{query_lens.shape[0]} vs {req_values.shape[0]}"
+    assert query_lens.shape[0] == seq_lens.shape[0], (
+        "query_start_loc and seq_lens must have matching request dimension: "
+        f"{query_lens.shape[0]} vs {seq_lens.shape[0]}"
     )
     return torch.repeat_interleave(
-        req_values,
+        seq_lens,
         query_lens.to(torch.long),
         output_size=num_tokens,
-    )
+    ).eq(0)
 
 
 def mamba_get_block_table_tensor(

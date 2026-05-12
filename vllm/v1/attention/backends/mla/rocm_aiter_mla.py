@@ -418,6 +418,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        empty_req_mask: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
         device = self.device
         num_reqs = seq_lens_device.size(0)
@@ -516,6 +517,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             paged_kv_last_page_len=paged_kv_last_page_len,
             qo_indptr=qo_indptr,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            empty_req_mask=empty_req_mask,
             max_qo_len=max_qo_len,
             attn_out_dtype=self.decode_attn_out_dtype,
             has_persistent_metadata=has_persistent_metadata,

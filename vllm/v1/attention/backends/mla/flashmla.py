@@ -158,6 +158,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        empty_req_mask: torch.Tensor | None,
     ) -> FlashMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # we use the max but all should be the same due to uniform length requirement
@@ -198,6 +199,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             seq_lens=seq_lens_device,
             scheduler_metadata=scheduler_metadata,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
+            empty_req_mask=empty_req_mask,
         )
 
 
