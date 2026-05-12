@@ -5,7 +5,6 @@ from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 
 import regex as re
-from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Module
 
@@ -35,16 +34,6 @@ STRATEGY_TO_WEIGHT_QUANT_KEY = {
     QuantizationStrategy.CHANNEL: kFp8StaticChannelSym,
     QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
 }
-
-
-def is_activation_quantization_format(format: str) -> bool:
-    _ACTIVATION_QUANTIZATION_FORMATS = [
-        CompressionFormat.naive_quantized.value,
-        CompressionFormat.int_quantized.value,
-        CompressionFormat.float_quantized.value,
-        CompressionFormat.nvfp4_pack_quantized.value,
-    ]
-    return format in _ACTIVATION_QUANTIZATION_FORMATS
 
 
 def should_ignore_layer(
