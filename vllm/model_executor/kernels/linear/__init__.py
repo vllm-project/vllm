@@ -675,14 +675,16 @@ _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
 }
 
 
-def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
+def init_nvfp4_linear_kernel(use_marlin: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
 
     # Env-var overrides.
     force_kernel: type[NvFp4LinearKernel] | None = None
-    if envs.VLLM_BATCH_INVARIANT:
+    if use_marlin:  # force marlin if running weight-only quantization
+        force_kernel = MarlinNvFp4LinearKernel
+    elif envs.VLLM_BATCH_INVARIANT:
         logger.info_once(
             "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
             "emulation backend for deterministic execution."
