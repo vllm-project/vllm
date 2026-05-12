@@ -103,7 +103,6 @@ async def test_client_sentinel_initialization(client_sentinel: ClientSentinel):
 async def test_ft_operation(
     client_sentinel: ClientSentinel, mock_call_utility_async, ft_operation: str
 ):
-    """Test pause method"""
     # Mock all engines to pause successfully
     mock_call_utility_async.return_value = {
         "request_id": "request_id",

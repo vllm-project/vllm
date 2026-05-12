@@ -102,32 +102,40 @@ class WorkerSentinel(BaseSentinel):
         return FaultToleranceResult(ft_request.request_id, True)
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        self.clear_worker_input_batch()
+        self.clean_worker_state()
         get_pause_event().clear()
-        comm = get_ep_group().device_communicator
-        assert comm and comm.all2all_manager
-        if self.worker.parallel_config.all2all_backend not in _FT_BACKEND_SET:
-            return FaultToleranceResult(
-                ft_request.request_id,
-                False,
-                "all2all_backend not supported, must in {}".format(_FT_BACKEND_SET),
+        if self.dp_size > 1:
+            get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
+                self.data_parallel_master_ip,
+                ft_request.params["new_stateless_dp_group_port"],
+                self.dp_rank,
+                self.dp_size,
+                backend="gloo",
+                gloo_timeout_seconds=self.worker.parallel_config.gloo_timeout_seconds,
             )
-        comm.all2all_manager.clean_mask()
-
-        get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
-            self.data_parallel_master_ip,
-            ft_request.params["new_stateless_dp_group_port"],
-            self.dp_rank,
-            self.dp_size,
-            backend="gloo",
-        )
+            if self.worker.vllm_config.model_config.is_moe:
+                comm = get_ep_group().device_communicator
+                assert comm and comm.all2all_manager
+                if self.worker.parallel_config.all2all_backend not in _FT_BACKEND_SET:
+                    return FaultToleranceResult(
+                        ft_request.request_id,
+                        False,
+                        "Only support {} backends".format(_FT_BACKEND_SET),
+                    )
+                comm.all2all_manager.clean_mask()
         return FaultToleranceResult(ft_request.request_id, True)
 
-    def clear_worker_input_batch(self):
+    def clean_worker_state(self):
+        self.worker.model_runner.execute_model_state = None
+        self.worker.model_runner.kv_connector_output = None
         input_batch = self.worker.model_runner.input_batch
         cached_req_ids = input_batch.req_id_to_index.keys()
         for req_id in list(cached_req_ids):
             input_batch.remove_request(req_id)
+        input_batch.condense()
+        input_batch.refresh_metadata()
+        # remove_request() does not drop prompt embeds for removed indices
+        input_batch.req_prompt_embeds.clear()
 
     def shutdown(self):
         close_sockets([self.engine_core_cmd_socket])

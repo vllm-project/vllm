@@ -3,7 +3,6 @@
 import threading
 import time
 import traceback
-import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
@@ -123,7 +122,7 @@ class EngineCoreSentinel(BaseSentinel):
         # if it's blocked on input_queue.get()
         self.engine.input_queue.put((EngineCoreRequestType.WAKEUP, None))
         self._execute_command_on_workers(
-            FaultToleranceRequest(str(uuid.uuid4()), "pause", ft_request.params),
+            FaultToleranceRequest(ft_request.request_id, "pause", ft_request.params),
             self.worker_identities,
             timeout=timeout,
         )
@@ -157,17 +156,17 @@ class EngineCoreSentinel(BaseSentinel):
 
         parallel_config = self.engine.vllm_config.parallel_config
         parallel_config._coord_store_port = ft_request.params["coord_store_port"]
-        self._execute_command_on_workers(
-            FaultToleranceRequest(str(uuid.uuid4()), "retry", ft_request.params),
+        worker_result = self._execute_command_on_workers(
+            FaultToleranceRequest(ft_request.request_id, "retry", ft_request.params),
             self.worker_identities,
             timeout=timeout,
         )
-        self.clean_engine_state()
-        self.run_busy_loop.set()
-        return FaultToleranceResult(
-            request_id=ft_request.request_id,
-            success=True,
-        )
+        if worker_result.success:
+            self.clean_engine_state()
+            self.run_busy_loop.set()
+            return FaultToleranceResult(request_id=ft_request.request_id, success=True)
+        else:
+            return worker_result
 
     def clean_engine_state(self):
         # Put running requests into waiting list.
@@ -188,7 +187,7 @@ class EngineCoreSentinel(BaseSentinel):
             dp_engine.dp_group = (
                 self.engine.vllm_config.parallel_config.stateless_init_dp_group()
             )
-            self.engine.step_counter = 0
+            dp_engine.step_counter = 0
 
         executor = self.engine.model_executor
         # Drain all stale futures and their pending responses
@@ -205,7 +204,7 @@ class EngineCoreSentinel(BaseSentinel):
             for mq in mqs:
                 for _ in range(num_stale):
                     try:
-                        mq.dequeue(timeout=30)
+                        mq.dequeue(timeout=0.1)
                     except Exception:
                         break
 
@@ -307,6 +306,6 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
                             "[BusyLoopWrapper] EngineCore did not recover in time."
                         )
 
-                raise e
+                raise
 
     return run_with_fault_tolerance

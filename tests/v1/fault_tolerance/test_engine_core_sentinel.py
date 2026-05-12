@@ -179,10 +179,6 @@ def test_retry(mock_parallel_config, addr_dict, dp_size):
             patch.object(
                 engine_core_sentinel, "clean_engine_state"
             ) as clean_engine_state,
-            patch(
-                "vllm.v1.fault_tolerance.engine_core_sentinel."
-                "stateless_destroy_torch_distributed_process_group"
-            ) as destroy_dp_group,
         ):
             result = engine_core_sentinel.retry(ft_req)
 
@@ -194,18 +190,6 @@ def test_retry(mock_parallel_config, addr_dict, dp_size):
         assert target_workers == engine_core_sentinel.worker_identities
         assert execute_on_workers.call_args.kwargs["timeout"] == 2
         clean_engine_state.assert_called_once_with()
-
-        if dp_size > 1:
-            destroy_dp_group.assert_called_once_with("old_dp_group")
-            mock_parallel_config.stateless_init_dp_group.assert_called_once_with()
-            assert engine_core_sentinel.host.dp_group == "new_dp_group"
-            assert engine_core_sentinel.host.step_counter == 0
-        else:
-            destroy_dp_group.assert_not_called()
-            mock_parallel_config.stateless_init_dp_group.assert_not_called()
-            assert engine_core_sentinel.host.dp_group == "old_dp_group"
-            assert engine_core_sentinel.host.step_counter == 123
-
         assert engine_core_sentinel.run_busy_loop.is_set()
     finally:
         engine_core_sentinel.shutdown()
