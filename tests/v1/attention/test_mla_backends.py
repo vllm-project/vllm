@@ -20,10 +20,10 @@ from tests.v1.attention.utils import (
 from vllm import _custom_ops as ops
 from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
+    MLAAttention,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
 )
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -410,14 +410,18 @@ class MockSparseMLAAttentionLayer:
         return output
 
 
-class MockMLAAttentionLayer(AttentionLayerBase):
+class MockMLAAttentionLayer(MLAAttention):
     """A mock MLA attention layer for testing.
 
     This replicates the forward_impl logic from MLAAttention to allow
     testing MLA backends without the full layer infrastructure.
 
-    The W_UK_T and W_UV weight matrices are created on the layer (like in
-    MLAAttention.process_weights_after_loading), not on the impl.
+    Subclasses MLAAttention so that backends that filter
+    `static_forward_context` by `isinstance(layer, MLAAttention)` (e.g.
+    FlashInfer prefill, which reads sm_scale through that filter) see the
+    mock as a real MLA layer. MLAAttention.__init__ is intentionally
+    skipped — it would create its own impl/prefill_backend and self-register
+    in static_forward_context, which fights what the test sets up below.
     """
 
     def __init__(
@@ -433,6 +437,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         q_scale: float,
         k_scale: float,
     ):
+        torch.nn.Module.__init__(self)
         self.impl = impl
         self.num_heads = num_heads
         self.qk_nope_head_dim = qk_nope_head_dim
@@ -603,7 +608,11 @@ def run_attention_backend(
             vllm_config.parallel_config
         )
         head_size = vllm_config.model_config.get_head_size()
-        scale = 1.0 / (head_size**0.5)
+        # Production MLA passes 1/sqrt(qk_head_dim) (the prefill scale) to the
+        # impl and forwards the same value to the prefill backend. FLASHINFER
+        # prefill reads sm_scale back from impl.scale via global_hyperparameters
+        # at plan() time, so impl.scale must agree with prefill_backend.scale.
+        scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -844,9 +853,13 @@ def test_backend_correctness(
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"
     )
-    decode_scale = 1.0 / (total_head_size**0.5)
     qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
     prefill_scale = qk_head_dim**-0.5
+    # MLA reuses prefill_scale for the decode path: production sets
+    # impl.scale = 1/sqrt(qk_head_dim) and the decode kernels apply it even
+    # though the latent attention runs at head_size dimensions. Keeping the
+    # reference here in sync with run_attention_backend's impl.scale.
+    decode_scale = prefill_scale
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
