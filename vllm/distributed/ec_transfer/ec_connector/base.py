@@ -250,3 +250,11 @@ class ECConnectorBase(ABC):
             get_finished().
         """
         return False, None
+
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the scheduler process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return None

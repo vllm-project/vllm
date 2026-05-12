@@ -1924,6 +1924,8 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
+        if self.ec_connector is not None:
+            self.ec_connector.shutdown()
 
     ########################################################################
     # KV Connector Related Methods
