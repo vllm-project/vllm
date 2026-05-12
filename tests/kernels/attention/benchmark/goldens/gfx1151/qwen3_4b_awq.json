@@ -23,11 +23,11 @@
       "num_kv_splits": null,
       "reorder_batch_threshold": null
     },
-    "mean_time": 0.004888743930392795,
-    "std_time": 5.222637706171433e-05,
-    "min_time": 0.004846426645914714,
-    "max_time": 0.00499368625217014,
-    "throughput_tokens_per_sec": 818206.0784841747,
+    "mean_time": 0.004273207283020019,
+    "std_time": 7.749815574763894e-05,
+    "min_time": 0.004208327823215061,
+    "max_time": 0.004440420362684462,
+    "throughput_tokens_per_sec": 936065.0525647016,
     "memory_allocated_mb": null,
     "memory_reserved_mb": null,
     "error": null

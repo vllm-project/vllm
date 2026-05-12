@@ -23,11 +23,11 @@
       "num_kv_splits": null,
       "reorder_batch_threshold": null
     },
-    "mean_time": 0.03569782592773438,
-    "std_time": 0.0005500578450746853,
-    "min_time": 0.03526264953613281,
-    "max_time": 0.037182159423828125,
-    "throughput_tokens_per_sec": 224103.28338187773,
+    "mean_time": 0.0309721728515625,
+    "std_time": 9.574017041477147e-05,
+    "min_time": 0.03092716979980469,
+    "max_time": 0.03125830688476562,
+    "throughput_tokens_per_sec": 258296.37585780205,
     "memory_allocated_mb": null,
     "memory_reserved_mb": null,
     "error": null
@@ -89,11 +89,11 @@
       "num_kv_splits": null,
       "reorder_batch_threshold": null
     },
-    "mean_time": 0.03705089477539063,
-    "std_time": 6.215718944708756e-05,
-    "min_time": 0.036940447998046876,
-    "max_time": 0.037137322998046875,
-    "throughput_tokens_per_sec": 221101.2729830526,
+    "mean_time": 0.031781553649902344,
+    "std_time": 0.0005288116608373992,
+    "min_time": 0.030973348999023438,
+    "max_time": 0.03223701477050781,
+    "throughput_tokens_per_sec": 257759.58249999434,
     "memory_allocated_mb": null,
     "memory_reserved_mb": null,
     "error": null
