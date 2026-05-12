@@ -728,7 +728,7 @@ def test_eagle_correctness_heavy(
             0.0,
             marks=pytest.mark.skipif(
                 current_platform.is_device_capability_family(100),
-                reason="DeepSeek MTP CUDA graph compilation hangs on Blackwell",
+                reason="DeepSeek MTP: TRTLLM MoE top_k check fails on Blackwell",
             ),
         ),  # dummy model
         (
