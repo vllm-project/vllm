@@ -8,6 +8,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Import kernels to trigger IR impl registration
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -205,27 +208,17 @@ class MulAndSilu(CustomOp):
 
     # --8<-- [end:mul_and_silu]
 
-    def __init__(self):
-        super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_xpu():
-            self.op = torch.ops._C.mul_and_silu
-        elif current_platform.is_cpu():
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
+        if current_platform.is_cpu():
             self._forward_method = self.forward_native
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward()."""
-        d = x.shape[-1] // 2
-        return x[..., :d] * F.silu(x[..., d:])
+    @staticmethod
+    def forward_native(x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.mul_and_silu(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x)
-        return out
-
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        return ir.ops.mul_and_silu(x)
 
 
 # --8<-- [start:gelu_and_mul_sparse]
