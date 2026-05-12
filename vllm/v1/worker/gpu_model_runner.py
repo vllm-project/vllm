@@ -888,6 +888,12 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
+        self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
+        if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
+            self.mamba_prev_last_scheduled_idx = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
+        self._mamba_block_size: int | None = None
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1310,6 +1316,9 @@ class GPUModelRunner(
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
+            if resumed_from_preemption:
+                req_state.mamba_last_scheduled_idx = -1
+
             if not is_last_rank:
                 if not req_data.new_token_ids:
                     # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
@@ -1514,6 +1523,25 @@ class GPUModelRunner(
             )
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
+
+        if self.mamba_prev_last_scheduled_idx is not None:
+            if self._mamba_block_size is None:
+                self._mamba_block_size = next(
+                    g.kv_cache_spec.block_size
+                    for g in self.kv_cache_config.kv_cache_groups
+                    if isinstance(g.kv_cache_spec, MambaSpec)
+                )
+            block_size = self._mamba_block_size
+            full_decode_len = 1 + self.num_spec_tokens
+            scheduled = scheduler_output.num_scheduled_tokens
+            for req_id in self.input_batch.req_ids[:num_reqs]:
+                req = self.requests[req_id]
+                num_query = scheduled.get(req_id, 0)
+                if num_query == full_decode_len:
+                    seq_len = req.num_computed_tokens + num_query
+                    req.mamba_last_scheduled_idx = max(0, (seq_len - 1) // block_size)
+                else:
+                    req.mamba_last_scheduled_idx = -1
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -2012,6 +2040,13 @@ class GPUModelRunner(
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
 
+        if self.mamba_prev_last_scheduled_idx is not None:
+            np_view = self.mamba_prev_last_scheduled_idx.np
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                np_view[i] = self.requests[req_id].mamba_last_scheduled_idx
+            np_view[num_reqs:].fill(-1)
+            self.mamba_prev_last_scheduled_idx.copy_to_gpu()
+
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
@@ -2319,6 +2354,13 @@ class GPUModelRunner(
                         :num_reqs_padded
                     ],
                 )
+                if (
+                    isinstance(builder, Mamba2AttentionMetadataBuilder)
+                    and self.mamba_prev_last_scheduled_idx is not None
+                ):
+                    extra_attn_metadata_args["prev_last_scheduled_idx"] = (
+                        self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
+                    )
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(

@@ -20,6 +20,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
+    _compute_block_idx_last_scheduled_prev_step,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -114,6 +115,7 @@ def test_update_block_table_copies_block_idx_to_persistent_buffers():
         block_idx_last_computed_token=(
             builder_a.block_idx_last_computed_token[:num_reqs]
         ),
+        block_idx_last_scheduled_token_prev_step=None,
         seq_lens=seq_lens,
     )
 
@@ -256,6 +258,7 @@ def test_block_idx_cudagraph_capture_padded_by_num_reqs():
         block_idx_last_scheduled_token=block_idx_vals,
         block_idx_first_scheduled_token_p=None,
         block_idx_last_computed_token=block_idx_vals,
+        block_idx_last_scheduled_token_prev_step=None,
         seq_lens=seq_lens,
     )
 
@@ -271,3 +274,207 @@ def test_block_idx_cudagraph_capture_padded_by_num_reqs():
     )
     assert torch.all(out.block_idx_last_scheduled_token[num_decodes:] == 0)
     assert torch.all(out.block_idx_last_computed_token[num_decodes:] == 0)
+
+
+def test_block_idx_prev_step_persistent_buffer_allocated():
+    """With mamba_cache_mode='all' + spec decode, the builder must allocate
+    block_idx_last_scheduled_token_prev_step as a persistent buffer with the
+    same shape as the existing block_idx_last_{scheduled,computed}_token
+    buffers, so cudagraph capture records a stable pointer for the prev-step
+    input anchor consumed by mamba_mixer2's input gather."""
+    block_size = 16
+    max_model_len = 256
+    max_num_seqs = 8
+    num_speculative_tokens = 1
+    device = torch.device("cpu")
+
+    vllm_config = _make_vllm_config(
+        max_model_len,
+        max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="all",
+        num_speculative_blocks=2,
+    )
+    builder = _ConcreteMambaBuilder(spec, ["layer0"], vllm_config, device)
+
+    assert hasattr(builder, "block_idx_last_scheduled_token_prev_step")
+    assert builder.block_idx_last_scheduled_token_prev_step.shape == (max_num_seqs,)
+    assert builder.block_idx_last_scheduled_token_prev_step.dtype == torch.int32
+
+
+def test_block_idx_prev_step_persistent_buffer_skipped_without_spec_decode():
+    """Without spec decode, the prev-step buffer is unused and must not be
+    allocated — the input anchor reduces to last_computed_token."""
+    block_size = 16
+    max_model_len = 256
+    max_num_seqs = 8
+    device = torch.device("cpu")
+
+    vllm_config = _make_vllm_config(
+        max_model_len, max_num_seqs, num_speculative_tokens=0
+    )
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="all",
+    )
+    builder = _ConcreteMambaBuilder(spec, ["layer0"], vllm_config, device)
+
+    assert not hasattr(builder, "block_idx_last_scheduled_token_prev_step")
+
+
+def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
+    """_update_metadata_for_cudagraph_capture must copy the prev-step anchor
+    into the builder's persistent buffer (so cudagraph replay reads from the
+    same underlying memory), pad past num_decodes with zero, and return a
+    slice of the persistent buffer in the metadata."""
+    block_size = 16
+    max_model_len = 256
+    max_num_seqs = 8
+    num_speculative_tokens = 1
+    device = torch.device("cpu")
+
+    vllm_config = _make_vllm_config(
+        max_model_len,
+        max_num_seqs,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="all",
+        num_speculative_blocks=2,
+    )
+    builder = _ConcreteMambaBuilder(spec, ["layer0"], vllm_config, device)
+    builder.block_idx_last_scheduled_token.fill_(-1)
+    builder.block_idx_last_computed_token.fill_(-1)
+    builder.block_idx_last_scheduled_token_prev_step.fill_(-1)
+
+    num_decodes = 2
+    num_reqs = 3
+    num_decode_tokens = num_decodes * (1 + num_speculative_tokens)
+    seq_lens = torch.full((num_reqs,), 64, dtype=torch.int32, device=device)
+    block_idx_vals = torch.tensor([3, 5], dtype=torch.int32, device=device)
+    prev_step_vals = torch.tensor([2, 4], dtype=torch.int32, device=device)
+    state_indices_d = torch.zeros(
+        (num_decodes, builder.state_indices_tensor_d.shape[1]),
+        dtype=torch.int32,
+        device=device,
+    )
+    query_start_loc_d = torch.arange(
+        num_decodes + 1, dtype=torch.int32, device=device
+    ) * (1 + num_speculative_tokens)
+    num_accepted_tokens = torch.ones(num_decodes, dtype=torch.int32, device=device)
+
+    metadata = BaseMambaAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decode_tokens,
+        num_reqs=num_reqs,
+        has_initial_states_p=None,
+        query_start_loc_p=None,
+        num_computed_tokens_p=None,
+        state_indices_tensor_p=None,
+        state_indices_tensor_d=state_indices_d,
+        query_start_loc_d=query_start_loc_d,
+        num_accepted_tokens=num_accepted_tokens,
+        block_idx_last_scheduled_token=block_idx_vals,
+        block_idx_first_scheduled_token_p=None,
+        block_idx_last_computed_token=block_idx_vals,
+        block_idx_last_scheduled_token_prev_step=prev_step_vals,
+        seq_lens=seq_lens,
+    )
+
+    out = builder._update_metadata_for_cudagraph_capture(metadata)
+
+    # Output field exists and is identity-shared with the persistent buffer.
+    assert out.block_idx_last_scheduled_token_prev_step is not None
+    assert (
+        out.block_idx_last_scheduled_token_prev_step.untyped_storage().data_ptr()
+        == builder.block_idx_last_scheduled_token_prev_step.untyped_storage().data_ptr()
+    ), (
+        "prev-step buffer must live in the builder's persistent buffer, not "
+        "in the caller-provided tensor"
+    )
+
+    # Padded by num_reqs (not num_decode_tokens) — same fix as bug 2 for the
+    # other block_idx_* fields.
+    assert out.block_idx_last_scheduled_token_prev_step.shape == (num_reqs,)
+
+    # First num_decodes values: input values copied through.
+    torch.testing.assert_close(
+        out.block_idx_last_scheduled_token_prev_step[:num_decodes],
+        prev_step_vals,
+    )
+
+    # Tail values past num_decodes: zero-filled padding for cudagraph capture.
+    assert torch.all(out.block_idx_last_scheduled_token_prev_step[num_decodes:] == 0)
+
+
+def test_prev_step_anchor_first_decode_after_prefill():
+    """First decode step after prefill: the previous step (prefill) stored
+    its terminal mamba state at block (num_computed - 1) // block_size.
+    The worker-side tracker has no entry for these requests, so we pass
+    -1 to indicate the fallback path."""
+    block_size = 16
+    num_computed = torch.tensor([100, 16, 64, 1], dtype=torch.int64)
+    prev_last_scheduled = torch.full((4,), -1, dtype=torch.int64)
+
+    result = _compute_block_idx_last_scheduled_prev_step(
+        num_computed, prev_last_scheduled, block_size
+    )
+
+    expected = torch.tensor([6, 0, 3, 0], dtype=torch.int64)
+    torch.testing.assert_close(result, expected)
+
+
+def test_prev_step_anchor_subsequent_decode_uses_tracker():
+    """For decode steps with a prior decode step, the worker-side tracker
+    holds the previous step's last_scheduled block index. The function must
+    use that value verbatim — even when last_computed (= (num_computed - 1)
+    // block_size) would give a different answer, which is exactly what
+    happens after partial draft acceptance straddles a block boundary."""
+    block_size = 16
+    # num_computed[N] = 16 means the last committed token is at position 15
+    # (block 0). Naive last_computed would be 0. But the tracker says the
+    # previous step ended with last_scheduled = 1 (because step N-1 had
+    # scheduled tokens up to position 17, in block 1; some drafts were
+    # rejected so only 2 tokens committed, leaving the committed tail in
+    # block 0). The tracker's value (1) is what we need.
+    num_computed = torch.tensor([16], dtype=torch.int64)
+    prev_last_scheduled = torch.tensor([1], dtype=torch.int64)
+
+    result = _compute_block_idx_last_scheduled_prev_step(
+        num_computed, prev_last_scheduled, block_size
+    )
+
+    expected = torch.tensor([1], dtype=torch.int64)
+    torch.testing.assert_close(result, expected)
+
+
+def test_prev_step_anchor_mixed_batch():
+    """Mixed batch: some requests are first-decode (tracker -1), others are
+    subsequent decode (tracker has a value). Each path resolves
+    independently."""
+    block_size = 16
+    num_computed = torch.tensor([16, 100, 16, 64], dtype=torch.int64)
+    # req 0: subsequent decode, tracker says block 1 (boundary-crossing case)
+    # req 1: first decode after prefill, fallback to last_computed = 6
+    # req 2: subsequent decode, tracker says block 0 (no boundary involvement)
+    # req 3: first decode, fallback to last_computed = 3
+    prev_last_scheduled = torch.tensor([1, -1, 0, -1], dtype=torch.int64)
+
+    result = _compute_block_idx_last_scheduled_prev_step(
+        num_computed, prev_last_scheduled, block_size
+    )
+
+    expected = torch.tensor([1, 6, 0, 3], dtype=torch.int64)
+    torch.testing.assert_close(result, expected)
