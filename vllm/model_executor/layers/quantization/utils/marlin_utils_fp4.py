@@ -31,9 +31,12 @@ def _nvfp4_compute_scale_factor(
     marlin_scales: torch.Tensor,
     a_dtype: torch.dtype | None = None,
 ) -> float:
-    """Compute the power-of-2 scale_factor needed so that all non-zero
-    values in marlin_scales * 2^7 are >= 2 after rescaling.
-    Returns a Python float (power of 2, >= 1.0)."""
+    """Compute a bounded power-of-2 scale_factor for NVFP4 Marlin scales.
+
+    The factor must be large enough for tiny non-zero scales to survive the
+    S0E5M3 transform, but small enough that the largest scales still fit the
+    FP8 scale range after rescaling.
+    """
 
     # Since half has a smaller dynamic range compared to bfloat16,
     # no rescaling is applied here if active dtype is half.
@@ -216,7 +219,12 @@ def prepare_fp4_layer_for_marlin(
 
     part_size_n = layer.output_size_per_partition
     part_size_k = layer.input_size_per_partition
-    param_dtype = layer.params_dtype
+    # VocabParallelEmbedding / ParallelLMHead does not store params_dtype as an
+    # attribute. Fall back to the current default to keep the scale dtype
+    # consistent with the surrounding model parameters.
+    param_dtype = getattr(layer, "params_dtype", None)
+    if param_dtype is None:
+        param_dtype = torch.get_default_dtype()
 
     assert layer.weight.shape == (part_size_n, part_size_k // 2)
 

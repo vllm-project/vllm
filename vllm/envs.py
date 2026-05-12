@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
+    VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
@@ -182,6 +183,8 @@ if TYPE_CHECKING:
     )
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD: int = 0
+    VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION: Literal["fp4", "bf16"] = "fp4"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1115,6 +1118,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
+    # Wrap the unquantized BF16 F.linear call in torch.compile with
+    # mode="max-autotune-no-cudagraphs" so inductor autotunes across
+    # triton/aten/cutlass per shape without compiling the whole model.
+    # Opt-in. When tinygemm_bf16 is also available, tinygemm handles
+    # M<=8 shapes and this torch.compile path handles the rest. Enabling
+    # this also calls
+    # ``vllm.model_executor.layers.utils.force_inductor_max_autotune_gemm_on_small_gpus``
+    # once, which patches inductor's ``is_big_gpu`` / Blackwell-arch gates
+    # and bumps Dynamo cache limits so the full GEMM autotune template
+    # pool is reachable on sub-data-center devices (GB10 / SM120-121).
+    "VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "0"))
+    ),
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.
     "VLLM_USE_LAYERNAME": lambda: bool(int(os.getenv("VLLM_USE_LAYERNAME", "1"))),
@@ -1395,6 +1411,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
     ),
+    # When >0 and num_tokens >= threshold, the B12x SM12x MoE wrapper routes
+    # to cutlass_fused_moe (prefill) instead of the b12x kernels (decode).
+    # 0 (default) keeps pure b12x dispatch. The flashinfer-side env var
+    # FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD overrides this if also set.
+    "VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD": lambda: int(
+        os.getenv("VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD", "0")
+    ),
+    # Intermediate activation precision for the B12x SM12x MoE wrapper:
+    # "fp4" (W4A4, default) re-quantizes the post-SwiGLU/ReLU2 activations
+    # to FP4 before the FC2 GEMM; "bf16" (W4A16) keeps them in BF16 and
+    # dequantizes weights instead. Same NVFP4 weight bytes for both —
+    # the kernel chooses internally.
+    "VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION": env_with_choices(
+        "VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION",
+        "fp4",
+        ["fp4", "bf16"],
+    ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
@@ -1501,6 +1534,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
         [
+            "flashinfer-b12x",
             "flashinfer-cudnn",
             "flashinfer-trtllm",
             "flashinfer-cutlass",

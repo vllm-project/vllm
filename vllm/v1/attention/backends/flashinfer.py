@@ -72,7 +72,6 @@ from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
 
@@ -450,6 +449,18 @@ class FIDecode:
 
 
 @dataclass
+class FISpecDecode:
+    """Metadata for native FlashInfer spec-decode verification (non-TRTLLM).
+
+    Used when the decode bucket has uniform query_len > 1 (1 + num_spec_tokens)
+    and TRTLLM decode attention is unavailable. Routes through the prefill
+    wrapper in cudagraph mode with zero_rows padding for padded request slots.
+    """
+
+    wrapper: BatchPrefillWithPagedKVCacheWrapper
+
+
+@dataclass
 class TRTLLMPrefill:
     """Metadata for the TRTLLM prefill pathway."""
 
@@ -518,7 +529,7 @@ class FlashInferMetadata:
     Will be `None` if `num_prefill_tokens == 0`.
     """
 
-    decode: FIDecode | TRTLLMDecode | None
+    decode: FIDecode | FISpecDecode | TRTLLMDecode | None
     """
     Holds the metadata for the decode portion of the batch.
     Will be `None` if `num_decode_tokens == 0`.
@@ -554,6 +565,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
+        # Separate prefill-shaped wrapper reserved for spec-decode verification
+        # so real-prefill and spec-decode plan() calls cannot stomp each other
+        # inside a mixed batch.
+        self._spec_decode_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
 
         if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
@@ -584,6 +599,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # size is needed for FlashInfer.
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
+            ] = {}
+            # Parallel dict for the spec-decode prefill wrapper, keyed by
+            # request batch size (not token count) because the prefill
+            # CUDAGraph wrapper fixes batch_size == len(qo_indptr) - 1.
+            self._spec_decode_wrappers_cudagraph: dict[
+                int, BatchPrefillWithPagedKVCacheWrapper
             ] = {}
             self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
             if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -657,7 +678,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Prefer TRTLLM attention for decoding in all cases.
         # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
         self.use_trtllm_decode_attention = can_use_trtllm
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
+        # Non-DCP native FlashInfer can also route spec-decode through the
+        # decode bucket by using the prefill wrapper in cudagraph mode with
+        # zero_rows padding. DCP keeps threshold=1 regardless (enforced inside
+        # _init_reorder_batch_threshold when supports_dcp_with_varlen is False).
+        native_spec_as_decode = self.dcp_world_size <= 1
+        self._init_reorder_batch_threshold(
+            1,
+            supports_spec_as_decode=can_use_trtllm or native_spec_as_decode,
+        )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -689,6 +718,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        # Persistent qo_indptr buffer for the spec-decode prefill wrapper.
+        # Sized for the padded request count (one extra slot for the
+        # inclusive end). Populated by plan() each step; the CUDAGraph-mode
+        # wrapper holds a fixed-address view into this buffer.
+        self.spec_decode_qo_indptr = self._make_buffer(max_num_reqs + 1)
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
@@ -710,38 +744,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention.
 
-        This depends on whether we can use TRTLLM attention for decodes, since we can
-        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
-        To check this, we must call can_use_trtllm_attention with the number of KV
-        heads from the kv_cache_spec. We check all available KV cache specs and
-        only return UNIFORM_BATCH if all of them support TRTLLM attention.
-        """
-        # For UniformTypeKVCacheSpecs, check all contained specs
-        kv_specs = (
-            kv_cache_spec.kv_cache_specs.values()
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
-            else [kv_cache_spec]
-        )
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
-        has_trtllm_support: bool = len(kv_specs) > 0
-        for spec in kv_specs:
-            if not isinstance(spec, AttentionSpec):
-                # FlashInfer only applies to attention, so we don't consider other types
-                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
-                continue
-            if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=spec.num_kv_heads,
-            ):
-                has_trtllm_support = False
-                break
+        Native FlashInfer can capture UNIFORM_BATCH full cudagraphs for
+        spec-decode by routing uniform query_len > 1 batches through the
+        prefill wrapper in cudagraph mode (verified zero_rows padding yields
+        bit-identical real-row numerics). TRTLLM decode attention is not
+        required for this path.
 
-        if has_trtllm_support:
-            return AttentionCGSupport.UNIFORM_BATCH
-        else:
+        DCP uses BatchDCPPrefillWrapper which is not wired for cudagraph
+        spec-decode; downgrade to UNIFORM_SINGLE_TOKEN_DECODE there.
+        """
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        return AttentionCGSupport.UNIFORM_BATCH
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -816,6 +830,47 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self._decode_wrapper = decode_wrapper
 
         return decode_wrapper
+
+    def _get_spec_decode_prefill_wrapper(
+        self, batch_size: int, use_cudagraph: bool = False
+    ) -> BatchPrefillWithPagedKVCacheWrapper:
+        """Return a BatchPrefillWithPagedKVCacheWrapper for spec-decode.
+
+        In cudagraph mode, a separate wrapper is cached per padded request
+        batch size; the wrapper holds fixed-address views into
+        `spec_decode_qo_indptr`, `paged_kv_indptr`, `paged_kv_indices`, and
+        `paged_kv_last_page_len` so that per-step plan() calls only update
+        buffer contents, not pointers.
+
+        `batch_size` is the padded request count, not the token count.
+        """
+        if use_cudagraph:
+            wrapper = self._spec_decode_wrappers_cudagraph.get(batch_size, None)
+        else:
+            wrapper = self._spec_decode_wrapper
+
+        if wrapper is None:
+            if use_cudagraph:
+                wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                    use_cuda_graph=True,
+                    qo_indptr_buf=self.spec_decode_qo_indptr.gpu[: batch_size + 1],
+                    paged_kv_indptr_buf=self.paged_kv_indptr.gpu[: batch_size + 1],
+                    paged_kv_indices_buf=self.paged_kv_indices.gpu,
+                    paged_kv_last_page_len_buf=(
+                        self.paged_kv_last_page_len.gpu[:batch_size]
+                    ),
+                )
+                self._spec_decode_wrappers_cudagraph[batch_size] = wrapper
+            else:
+                wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                )
+                self._spec_decode_wrapper = wrapper
+
+        return wrapper
 
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
@@ -1206,43 +1261,100 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     and pure_decode
                     and num_decode_tokens <= self._decode_cudagraph_max_bs
                 )
-                num_input_tokens = num_decode_tokens
+                # FULL CG may add zero rows; derive query_len from nonzero
+                # qo_indptr deltas, not num_decode_tokens / num_decodes.
+                decode_query_lens = (
+                    qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
+                )
+                nonzero_query_lens = decode_query_lens[decode_query_lens > 0]
+                if nonzero_query_lens.numel() == 0:
+                    query_len = 1
+                else:
+                    query_len = int(nonzero_query_lens[0].item())
+                    is_uniform_or_padding = (decode_query_lens == query_len) | (
+                        decode_query_lens == 0
+                    )
+                    assert bool(is_uniform_or_padding.all().item()), (
+                        f"non-uniform decode bucket: {decode_query_lens.tolist()}"
+                    )
 
-                decode_wrapper = self._get_decode_wrapper(
-                    num_input_tokens, use_cudagraph
-                )
-                # Use the persistent buffer with padding length,
-                # instead of the same address but chunked version
-                # in atten_metadata when using cudagraph.
-                # NVFP4 trtllm kernel only supports FP8 output;
-                # use FP8 o_data_type so the wrapper matches the
-                # FP8 output buffer allocated in forward().
-                o_dtype = (
-                    FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
-                )
-                fast_plan_decode(
-                    decode_wrapper,
-                    indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
-                    indices=paged_kv_indices,
-                    last_page_len_cpu=self.paged_kv_last_page_len.cpu[
-                        :num_input_tokens
-                    ],
-                    num_qo_heads=self.num_qo_heads * self.dcp_world_size,
-                    num_kv_heads=self.num_kv_heads,
-                    head_dim=self.head_dim,
-                    page_size=self.page_size,
-                    # Disable flashinfer's pos encoding and use vllm's rope.
-                    pos_encoding_mode="NONE",
-                    sm_scale=self.sm_scale,
-                    window_left=self.window_left,
-                    logits_soft_cap=self.logits_soft_cap,
-                    q_data_type=self.q_data_type,
-                    kv_data_type=self.kv_cache_dtype,
-                    o_data_type=o_dtype,
-                    fixed_split_size=self.decode_fixed_split_size,
-                    disable_split_kv=self.disable_split_kv,
-                )
-                attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+                if query_len <= 1:
+                    num_input_tokens = num_decode_tokens
+
+                    decode_wrapper = self._get_decode_wrapper(
+                        num_input_tokens, use_cudagraph
+                    )
+                    # Use the persistent buffer with padding length,
+                    # instead of the same address but chunked version
+                    # in atten_metadata when using cudagraph.
+                    # NVFP4 trtllm kernel only supports FP8 output;
+                    # use FP8 o_data_type so the wrapper matches the
+                    # FP8 output buffer allocated in forward().
+                    o_dtype = (
+                        FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
+                    )
+                    fast_plan_decode(
+                        decode_wrapper,
+                        indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
+                        indices=paged_kv_indices,
+                        last_page_len_cpu=self.paged_kv_last_page_len.cpu[
+                            :num_input_tokens
+                        ],
+                        num_qo_heads=self.num_qo_heads * self.dcp_world_size,
+                        num_kv_heads=self.num_kv_heads,
+                        head_dim=self.head_dim,
+                        page_size=self.page_size,
+                        # Disable flashinfer's pos encoding and use vllm's rope.
+                        pos_encoding_mode="NONE",
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
+                        q_data_type=self.q_data_type,
+                        kv_data_type=self.kv_cache_dtype,
+                        o_data_type=self.model_config.dtype,
+                        fixed_split_size=self.decode_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
+                    )
+                    attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+                else:
+                    real_decode_tokens = int(qo_indptr_cpu[num_decodes].item())
+                    full_cg_decode = (
+                        use_cudagraph and pure_decode and num_prefill_tokens == 0
+                    )
+                    if real_decode_tokens != num_decode_tokens and not full_cg_decode:
+                        raise RuntimeError(
+                            f"num_decode_tokens ({num_decode_tokens}) != "
+                            f"qo_indptr[-1] ({real_decode_tokens}) outside "
+                            "FULL-CG decode."
+                        )
+                    # FlashInfer prefill uses qo_indptr[-1] as query length;
+                    # full-CG token padding must not leak into forward slice.
+                    attn_metadata.num_decode_tokens = real_decode_tokens
+                    spec_wrapper = self._get_spec_decode_prefill_wrapper(
+                        num_decodes, use_cudagraph
+                    )
+                    spec_wrapper.plan(
+                        qo_indptr=qo_indptr_cpu[: num_decodes + 1],
+                        paged_kv_indptr=self.paged_kv_indptr.cpu[: num_decodes + 1],
+                        paged_kv_indices=paged_kv_indices,
+                        paged_kv_last_page_len=self.paged_kv_last_page_len.cpu[
+                            :num_decodes
+                        ],
+                        num_qo_heads=self.num_qo_heads * self.dcp_world_size,
+                        num_kv_heads=self.num_kv_heads,
+                        head_dim_qk=self.head_dim,
+                        page_size=self.page_size,
+                        causal=True,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
+                        q_data_type=self.q_data_type,
+                        kv_data_type=self.kv_cache_dtype,
+                        o_data_type=self.model_config.dtype,
+                        fixed_split_size=self.prefill_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
+                    )
+                    attn_metadata.decode = FISpecDecode(wrapper=spec_wrapper)
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -1688,27 +1800,44 @@ class FlashInferImpl(AttentionImpl):
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
 
+            if self.is_kvcache_nvfp4:
+                kv_cache_permute = nvfp4_kv_data
+            kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+
+            # NVFP4 kernel only supports FP8 output.
+            # Use a pre-allocated FP8 buffer and dequantize afterwards.
+            needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+            if needs_fp8_out:
+                out_decode = self._nvfp4_fp8_out[:num_decode_tokens]
+            else:
+                out_decode = output[:num_decode_tokens]
+                
             if not decode_use_trtllm:
-                assert isinstance(attn_metadata.decode, FIDecode)
+                assert isinstance(attn_metadata.decode, (FIDecode, FISpecDecode))
                 decode_wrapper = attn_metadata.decode.wrapper
                 assert decode_wrapper is not None
                 assert decode_wrapper._window_left == self.window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
 
-                if self.is_kvcache_nvfp4:
-                    kv_cache_permute = nvfp4_kv_data
-                kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
-
-                # NVFP4 kernel only supports FP8 output.
-                # Use a pre-allocated FP8 buffer and dequantize afterwards.
-                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
-                if needs_fp8_out:
-                    out_decode = self._nvfp4_fp8_out[:num_decode_tokens]
-                else:
-                    out_decode = output[:num_decode_tokens]
-
-                if use_dcp:
+                if isinstance(attn_metadata.decode, FISpecDecode):
+                    # Spec-decode verification through the prefill wrapper.
+                    # Non-DCP only: get_cudagraph_support returns
+                    # UNIFORM_SINGLE_TOKEN_DECODE under DCP, which forces the
+                    # decode bucket to query_len==1.
+                    assert not use_dcp, (
+                        "FISpecDecode is not supported under DCP; "
+                        "get_cudagraph_support should have downgraded."
+                    )
+                    assert decode_wrapper._causal
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[:num_decode_tokens],
+                    )
+                elif use_dcp:
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
                     )

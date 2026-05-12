@@ -25,6 +25,9 @@ from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
 if TYPE_CHECKING:
     from vllm.config.speculative import SpeculativeConfig
 
+if TYPE_CHECKING:
+    from vllm.config.speculative import SpeculativeConfig
+
 logger = init_logger(__name__)
 
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1

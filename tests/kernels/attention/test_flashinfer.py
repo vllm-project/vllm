@@ -2,10 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import unittest.mock
+
 import pytest
 
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_standard_kv_cache_spec,
+    create_vllm_config,
+)
+from vllm.config import CUDAGraphMode, SpeculativeConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.utils import PerLayerParameters
 
 try:
     import flashinfer
@@ -24,6 +35,10 @@ DTYPES = [torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
+SPEC_DECODE_BLOCK_SIZE = 16
+SPEC_DECODE_MODEL = "Qwen/Qwen2.5-0.5B"
+NUM_SPEC_TOKENS = 4
+DEVICE = torch.device("cuda:0")
 
 
 def ref_paged_attn(
@@ -144,6 +159,101 @@ def _make_cg_decode_wrapper(
         ),
         use_tensor_cores=use_tensor_cores,
     )
+
+
+def _mock_flashinfer_layer_params(vllm_config, layer_names, impl_cls):
+    head_size = vllm_config.model_config.get_head_size()
+    return {
+        name: PerLayerParameters(
+            window_left=-1,
+            logits_soft_cap=0.0,
+            sm_scale=1.0 / (head_size**0.5),
+        )
+        for name in layer_names
+    }
+
+
+class _RecordingPrefillWrapper:
+    def __init__(self):
+        self.plan_kwargs: dict | None = None
+        self.requested_batch_size: int | None = None
+        self.requested_use_cudagraph: bool | None = None
+        self._window_left = -1
+        self._logits_soft_cap = 0.0
+        self._sm_scale = 0.0
+        self._causal = False
+
+    def plan(self, **kwargs):
+        self.plan_kwargs = {
+            k: v.detach().cpu().clone() if isinstance(v, torch.Tensor) else v
+            for k, v in kwargs.items()
+        }
+        self._window_left = kwargs.get("window_left", self._window_left)
+        self._logits_soft_cap = kwargs.get("logits_soft_cap", self._logits_soft_cap)
+        self._sm_scale = kwargs.get("sm_scale", self._sm_scale)
+        self._causal = kwargs.get("causal", self._causal)
+
+
+def _make_flashinfer_spec_decode_builder():
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    vllm_config = create_vllm_config(
+        model_name=SPEC_DECODE_MODEL,
+        max_model_len=512,
+        block_size=SPEC_DECODE_BLOCK_SIZE,
+        num_gpu_blocks=512,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=NUM_SPEC_TOKENS,
+        prompt_lookup_max=4,
+        prompt_lookup_min=2,
+    )
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.can_use_trtllm_attention",
+            return_value=False,
+        ),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            _mock_flashinfer_layer_params,
+        ),
+    ):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, ["layer.0"], vllm_config, DEVICE
+        )
+
+    assert builder.reorder_batch_threshold == 1 + NUM_SPEC_TOKENS
+    return builder
+
+
+def _build_flashinfer_spec_decode_metadata(
+    builder,
+    batch_spec: BatchSpec,
+    num_actual_tokens_override: int | None = None,
+):
+    common = create_common_attn_metadata(batch_spec, SPEC_DECODE_BLOCK_SIZE, DEVICE)
+    if num_actual_tokens_override is not None:
+        common.num_actual_tokens = num_actual_tokens_override
+    fake_wrapper = _RecordingPrefillWrapper()
+
+    def _fake_get_spec_decode_prefill_wrapper(batch_size, use_cudagraph):
+        fake_wrapper.requested_batch_size = batch_size
+        fake_wrapper.requested_use_cudagraph = use_cudagraph
+        return fake_wrapper
+
+    with unittest.mock.patch.object(
+        builder,
+        "_get_spec_decode_prefill_wrapper",
+        side_effect=_fake_get_spec_decode_prefill_wrapper,
+    ):
+        attn_metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    return attn_metadata, fake_wrapper
 
 
 def test_fast_decode_plan_importable() -> None:
@@ -699,3 +809,62 @@ def test_flashinfer_decode_with_paged_fp8_kv(
         torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=1e-2),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+def test_spec_decode_full_cudagraph_padding_routes_to_fispecdecode():
+    from vllm.v1.attention.backends.flashinfer import FISpecDecode
+
+    builder = _make_flashinfer_spec_decode_builder()
+    attn_metadata, fake_wrapper = _build_flashinfer_spec_decode_metadata(
+        builder,
+        BatchSpec(seq_lens=[64, 72, 0], query_lens=[5, 5, 0]),
+        num_actual_tokens_override=40,
+    )
+
+    assert isinstance(attn_metadata.decode, FISpecDecode), (
+        "expected FISpecDecode for padded multi-token decode, "
+        f"got {type(attn_metadata.decode).__name__}"
+    )
+    assert attn_metadata.decode.wrapper is fake_wrapper
+
+    assert fake_wrapper.requested_batch_size == 3
+    assert fake_wrapper.requested_use_cudagraph is True
+    assert fake_wrapper.plan_kwargs is not None
+    assert fake_wrapper.plan_kwargs["causal"] is True
+
+    qo = fake_wrapper.plan_kwargs["qo_indptr"]
+    assert qo.tolist() == [0, 5, 10, 10]
+
+    last_page_len = fake_wrapper.plan_kwargs["paged_kv_last_page_len"]
+    assert last_page_len.tolist() == [16, 8, 0]
+
+    paged_kv_indptr = fake_wrapper.plan_kwargs["paged_kv_indptr"]
+    assert paged_kv_indptr[-1].item() == paged_kv_indptr[-2].item()
+
+    # Prevent query[:40] with qo_indptr[-1] == 10.
+    assert attn_metadata.num_decode_tokens == 10
+
+
+@pytest.mark.parametrize(
+    "dcp_size, expected",
+    [
+        (1, AttentionCGSupport.UNIFORM_BATCH),
+        (2, AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE),
+    ],
+)
+def test_get_cudagraph_support_dcp_downgrade(dcp_size, expected):
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    vllm_config = create_vllm_config(
+        model_name=SPEC_DECODE_MODEL,
+        tensor_parallel_size=dcp_size,
+        max_model_len=512,
+        block_size=SPEC_DECODE_BLOCK_SIZE,
+    )
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    support = FlashInferMetadataBuilder.get_cudagraph_support(
+        vllm_config, kv_cache_spec
+    )
+    assert support is expected

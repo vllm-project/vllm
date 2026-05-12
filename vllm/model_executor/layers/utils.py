@@ -89,6 +89,449 @@ def apply_penalties(
     return logits
 
 
+def _tinygemm_bf16_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    """Real implementation: calls FlashInfer tinygemm via lazy wrapper."""
+    from vllm.utils.flashinfer import flashinfer_tinygemm_bf16
+
+    out = torch.empty(
+        input.shape[0],
+        weight.shape[0],
+        dtype=torch.bfloat16,
+        device=input.device,
+    )
+    flashinfer_tinygemm_bf16(input, weight, out, bias=bias)
+    return out
+
+
+def _tinygemm_bf16_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    """Fake implementation for torch.compile graph tracing."""
+    return torch.empty(
+        input.shape[0],
+        weight.shape[0],
+        dtype=torch.bfloat16,
+        device=input.device,
+    )
+
+
+_TINYGEMM_AVAILABLE = False
+
+
+def _init_tinygemm():
+    """Register tinygemm custom op if FlashInfer is available on SM90+."""
+    global _TINYGEMM_AVAILABLE
+    try:
+        from vllm.utils.flashinfer import has_flashinfer
+
+        if not has_flashinfer():
+            return
+        capability = current_platform.get_device_capability()
+        if capability is None or capability[0] < 9:
+            return
+        direct_register_custom_op(
+            "tinygemm_bf16",
+            _tinygemm_bf16_impl,
+            fake_impl=_tinygemm_bf16_fake,
+        )
+        _TINYGEMM_AVAILABLE = True
+    except Exception:
+        pass
+
+
+_init_tinygemm()
+
+
+_inductor_autotune_applied = False
+
+
+def force_inductor_max_autotune_gemm() -> None:
+    """Enable inductor max-autotune-gemm for BF16 linear torch.compile path.
+
+    Called lazily when the first compiled BF16 linear is created. NOT called
+    at import time — baseline configs get zero inductor changes.
+
+    Patches:
+    - is_big_gpu -> True (enables Triton templates on < 68 SM GPUs)
+    - is_datacenter_blackwell_arch -> True for SM120/121
+    - max_autotune_gemm with ATEN+TRITON backends (no inductor CUTLASS)
+    - Persistent TMA matmul for Blackwell
+    - TF32 precision for FP32 GEMMs
+    - Dynamo cache limits (large values to avoid eviction/crashes)
+    """
+    global _inductor_autotune_applied
+    if _inductor_autotune_applied:
+        return
+    _inductor_autotune_applied = True
+
+    try:
+        import torch._dynamo.config as dynamo_config
+        import torch._inductor.config as inductor_config
+        import torch._inductor.utils as inductor_utils
+    except Exception:
+        logger.warning(
+            "torch._inductor/_dynamo could not be imported; "
+            "leaving inductor config untouched.",
+            exc_info=True,
+        )
+        return
+
+    # -- Patch is_big_gpu to always return True --
+    big_gpu_ok = False
+    original_big_gpu = getattr(inductor_utils, "is_big_gpu", None)
+    if original_big_gpu is not None:
+        if not getattr(original_big_gpu, "__vllm_patched__", False):
+            def _forced_big_gpu(*args, **kwargs) -> bool:
+                return True
+            _forced_big_gpu.__vllm_patched__ = True
+            inductor_utils.is_big_gpu = _forced_big_gpu
+            cache_clear = getattr(original_big_gpu, "cache_clear", None)
+            if callable(cache_clear):
+                try:
+                    cache_clear()
+                except Exception:
+                    pass
+        big_gpu_ok = True
+
+    # -- Patch is_datacenter_blackwell_arch for SM120/121 --
+    blackwell_ok = False
+    try:
+        from torch._inductor.codegen.cuda import cuda_env
+        original_blackwell = getattr(
+            cuda_env, "is_datacenter_blackwell_arch", None
+        )
+        if original_blackwell is not None and not getattr(
+            original_blackwell, "__vllm_patched__", False
+        ):
+            def _forced_blackwell_family_arch() -> bool:
+                if original_blackwell():
+                    return True
+                if torch.cuda.is_available():
+                    major, _ = torch.cuda.get_device_capability()
+                    if major >= 10:
+                        return True
+                return False
+            _forced_blackwell_family_arch.__vllm_patched__ = True
+            cuda_env.is_datacenter_blackwell_arch = (
+                _forced_blackwell_family_arch
+            )
+            cache_clear = getattr(original_blackwell, "cache_clear", None)
+            if callable(cache_clear):
+                try:
+                    cache_clear()
+                except Exception:
+                    pass
+        blackwell_ok = True
+    except Exception:
+        pass
+
+    # -- Inductor autotune (ATEN + TRITON only, no CUTLASS) --
+    inductor_config.max_autotune = True
+    inductor_config.max_autotune_gemm = True
+    inductor_config.max_autotune_gemm_backends = "ATEN,TRITON"
+    if hasattr(inductor_config, "triton") and hasattr(
+        inductor_config.triton, "enable_persistent_tma_matmul"
+    ):
+        inductor_config.triton.enable_persistent_tma_matmul = True
+
+    # -- TF32 for FP32 GEMMs (e.g. router layers) --
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+
+    # -- Dynamo cache limits --
+    _CACHE_LIMIT = 65536
+    _ACCUMULATED_LIMIT = 1048576
+
+    dynamo_config.accumulated_cache_size_limit = max(
+        getattr(dynamo_config, "accumulated_cache_size_limit", 0),
+        _ACCUMULATED_LIMIT,
+    )
+    if hasattr(dynamo_config, "cache_size_limit"):
+        dynamo_config.cache_size_limit = max(
+            dynamo_config.cache_size_limit, _CACHE_LIMIT
+        )
+    if hasattr(dynamo_config, "recompile_limit"):
+        dynamo_config.recompile_limit = max(
+            dynamo_config.recompile_limit, _CACHE_LIMIT
+        )
+    if hasattr(dynamo_config, "accumulated_recompile_limit"):
+        dynamo_config.accumulated_recompile_limit = max(
+            dynamo_config.accumulated_recompile_limit, _ACCUMULATED_LIMIT
+        )
+    if hasattr(dynamo_config, "fail_on_recompile_limit_hit"):
+        dynamo_config.fail_on_recompile_limit_hit = False
+    if hasattr(dynamo_config, "fail_on_cache_limit_hit"):
+        dynamo_config.fail_on_cache_limit_hit = False
+
+    logger.info(
+        "force_inductor_max_autotune_gemm: is_big_gpu=%s, "
+        "blackwell_arch=%s, backends=ATEN,TRITON, TF32=high, "
+        "dynamo cache_size=%d, accumulated=%d",
+        big_gpu_ok,
+        blackwell_ok,
+        _CACHE_LIMIT,
+        _ACCUMULATED_LIMIT,
+    )
+
+
+# State for the torch.compile-wrapped BF16 linear fast path.
+# Each unique (shape, stride, dtype, device) combination gets its own
+# statically-compiled function with fullgraph=True, dynamic=False.
+# This lets inductor pick the best GEMM kernel per exact shape.
+import itertools as _itertools
+_COMPILED_LINEAR_CACHE: dict[tuple, Callable] = {}
+_COMPILED_LINEAR_ID_GEN = _itertools.count()
+_unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
+_unquant_bf16_linear_torch_compile_configured = False
+_unquant_bf16_linear_torch_compile_disabled = False
+
+
+def _configure_unquant_bf16_linear_torch_compile_once() -> None:
+    global _unquant_bf16_linear_torch_compile_configured
+    if _unquant_bf16_linear_torch_compile_configured:
+        return
+
+    # Apply all inductor patches (is_big_gpu, blackwell, autotune, TF32, etc.)
+    force_inductor_max_autotune_gemm()
+
+    import torch._inductor.config
+    torch._inductor.config.coordinate_descent_tuning = True
+    torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.fx_graph_cache = True
+
+    _unquant_bf16_linear_torch_compile_configured = True
+
+
+def _compiled_linear_key(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> tuple:
+    return (
+        tuple(x.shape),
+        tuple(x.stride()),
+        x.dtype,
+        tuple(weight.shape),
+        tuple(weight.stride()),
+        weight.dtype,
+        None if bias is None else tuple(bias.shape),
+        None if bias is None else tuple(bias.stride()),
+        None if bias is None else bias.dtype,
+        x.device.type,
+        x.device.index,
+    )
+
+
+def _compile_linear_for_args(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> Callable:
+    _configure_unquant_bf16_linear_torch_compile_once()
+    compile_id = next(_COMPILED_LINEAR_ID_GEN)
+    import torch.nn.functional as F
+
+    if bias is None:
+        namespace = {"F": F, "torch": torch}
+        fn_name = f"_linear_no_bias_{compile_id}"
+        exec(
+            f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor)"
+            " -> torch.Tensor:\n"
+            "    return F.linear(x, weight, None)\n",
+            namespace,
+        )
+        compiled = torch.compile(
+            namespace[fn_name],
+            fullgraph=True,
+            dynamic=False,
+            mode="max-autotune-no-cudagraphs",
+        )
+        compiled(x, weight)  # warmup — triggers compilation for this shape
+        return compiled
+
+    namespace = {"F": F, "torch": torch}
+    fn_name = f"_linear_with_bias_{compile_id}"
+    exec(
+        f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor,"
+        " bias: torch.Tensor) -> torch.Tensor:\n"
+        "    return F.linear(x, weight, bias)\n",
+        namespace,
+    )
+    compiled = torch.compile(
+        namespace[fn_name],
+        fullgraph=True,
+        dynamic=False,
+        mode="max-autotune-no-cudagraphs",
+    )
+    compiled(x, weight, bias)  # warmup
+    return compiled
+
+
+def _get_or_create_compiled_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    allow_new_compile: bool,
+) -> Callable | None:
+    key = _compiled_linear_key(x, weight, bias)
+    compiled = _COMPILED_LINEAR_CACHE.get(key)
+    if compiled is not None:
+        return compiled
+
+    if not allow_new_compile:
+        return None
+
+    compiled = _compile_linear_for_args(x, weight, bias)
+    _COMPILED_LINEAR_CACHE[key] = compiled
+    return compiled
+
+
+def _should_use_unquant_bf16_linear_torch_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if _unquant_bf16_linear_torch_compile_disabled:
+        return False
+    # Avoid nested compile: if dynamo is already tracing (e.g. vLLM's
+    # piecewise model-level torch.compile), let it see the plain F.linear.
+    if torch._dynamo.is_compiling():
+        return False
+    if not x.is_cuda or x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        return False
+    if bias is not None and bias.dtype != torch.bfloat16:
+        return False
+    if not x.is_contiguous():
+        return False
+    return True
+
+
+def _apply_unquant_bf16_linear_torch_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor | None:
+    global _unquant_bf16_linear_torch_compile_disabled
+
+    key = _compiled_linear_key(x, weight, bias)
+    is_capturing = torch.cuda.is_current_stream_capturing()
+
+    if is_capturing and key not in _unquant_bf16_linear_capture_safe_keys:
+        return None
+
+    compiled = _get_or_create_compiled_linear(
+        x, weight, bias, allow_new_compile=not is_capturing
+    )
+    if compiled is None:
+        return None
+
+    try:
+        if bias is None:
+            output = compiled(x, weight)
+        else:
+            output = compiled(x, weight, bias)
+    except Exception:
+        if is_capturing:
+            return None
+        logger.warning(
+            "Disabling compiled BF16 linear fast path after "
+            "torch.compile failure.",
+            exc_info=True,
+        )
+        _unquant_bf16_linear_torch_compile_disabled = True
+        return None
+
+    if not is_capturing:
+        _unquant_bf16_linear_capture_safe_keys.add(key)
+
+    return output
+
+
+def _torch_compile_bf16_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _should_use_unquant_bf16_linear_torch_compile(x, weight, bias):
+        output = _apply_unquant_bf16_linear_torch_compile(x, weight, bias)
+        if output is not None:
+            return output
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def _tinygemm_eligible(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    num_tokens = x.numel() // x.shape[-1]
+    return (
+        num_tokens <= 8
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and weight.shape[0] % 16 == 0
+        and x.is_contiguous()
+        and weight.is_contiguous()
+        and (bias is None or bias.dtype == torch.bfloat16)
+    )
+
+
+def _apply_tinygemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    num_tokens = x.numel() // x.shape[-1]
+    if bias is None:
+        bias = torch.zeros(
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=x.device,
+        )
+    out_shape = (*x.shape[:-1], weight.shape[0])
+    result = torch.ops.vllm.tinygemm_bf16(
+        x.view(num_tokens, -1),
+        weight,
+        bias,
+    )
+    return result.view(out_shape)
+
+
+def _tinygemm_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _tinygemm_eligible(x, weight, bias):
+        return _apply_tinygemm(x, weight, bias)
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def _tinygemm_then_compile_bf16_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _tinygemm_eligible(x, weight, bias):
+        return _apply_tinygemm(x, weight, bias)
+    if _should_use_unquant_bf16_linear_torch_compile(x, weight, bias):
+        output = _apply_unquant_bf16_linear_torch_compile(x, weight, bias)
+        if output is not None:
+            return output
+    return torch.nn.functional.linear(x, weight, bias)
+
+
 def default_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
@@ -309,5 +752,15 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
+    compile_enabled = (
+        envs.VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE
+        and current_platform.is_cuda()
+    )
+    if _TINYGEMM_AVAILABLE and compile_enabled:
+        return _tinygemm_then_compile_bf16_unquantized_gemm
+    elif _TINYGEMM_AVAILABLE:
+        return _tinygemm_unquantized_gemm
+    elif compile_enabled:
+        return _torch_compile_bf16_unquantized_gemm
     else:
         return default_unquantized_gemm
