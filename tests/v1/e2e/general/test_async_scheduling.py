@@ -1,30 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from itertools import repeat
-from typing import Any
 
-import pytest
-import torch._dynamo.config as dynamo_config
+# PROBE: log which Triton autotune configs are picked, per kernel+shape, to
+# help see if different configs trigger different config selections.
+os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "1")
 
-from tests.utils import (
+from itertools import repeat  # noqa: E402
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
+import torch._dynamo.config as dynamo_config  # noqa: E402
+
+from tests.utils import (  # noqa: E402
     large_gpu_mark,
     single_gpu_only,
 )
-from vllm import SamplingParams
-from vllm.logprobs import Logprob
-from vllm.platforms import current_platform
-from vllm.sampling_params import StructuredOutputsParams
-from vllm.v1.metrics.reader import Metric
+from vllm import SamplingParams  # noqa: E402
+from vllm.logprobs import Logprob  # noqa: E402
+from vllm.platforms import current_platform  # noqa: E402
+from vllm.sampling_params import StructuredOutputsParams  # noqa: E402
+from vllm.v1.metrics.reader import Metric  # noqa: E402
 
-from ....conftest import VllmRunner
-from ....models.utils import check_outputs_equal
+from ....conftest import VllmRunner  # noqa: E402
+from ....models.utils import check_outputs_equal  # noqa: E402
 
 MODEL = "Qwen/Qwen3-0.6B"
 MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
-# Need to enforce eager for MRV2 while we sort out cudagraph issues.
-ENFORCE_EAGER = os.getenv("ENFORCE_EAGER", "0") == "1"
+ENFORCE_EAGER = False
 
 first_prompt = (
     "The following numbers of the sequence "
@@ -204,8 +208,9 @@ def run_tests(
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
-    # Flex attention supports float32.
-    attention_config = {"backend": "FLEX_ATTENTION"}
+    # PROBE: switch from FLEX_ATTENTION to TORCH_SDPA (also fp32-capable,
+    # routes through cuDNN/oneDNN — bypasses flex_attention's Triton kernel).
+    attention_config = {"backend": "TORCH_SDPA"}
 
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
@@ -360,7 +365,7 @@ def run_test(
         speculative_config=spec_config,
         disable_log_stats=False,
         attention_config=attention_config,
-        enable_prefix_caching=False if current_platform.is_rocm() else None,
+        enable_prefix_caching=False,  # PROBE: disable prefix caching
         **cache_arg,
     ) as vllm_model:
         results = []
