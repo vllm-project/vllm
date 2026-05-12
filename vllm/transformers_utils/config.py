@@ -640,7 +640,7 @@ def maybe_override_with_speculators(
     )
 
     # Apply user --speculative-config overrides (e.g. attention_backend).
-    if vllm_speculative_config:
+    if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
     # Set the draft model to the speculators model
