@@ -1618,6 +1618,14 @@ class Scheduler(SchedulerInterface):
                 kv_connector_output.invalid_block_ids,
                 num_scheduled_tokens,
             )
+        if kv_connector_output and kv_connector_output.failed_recv_request_ids:
+            req_level_failed = self._handle_failed_recv_requests(
+                kv_connector_output.failed_recv_request_ids,
+            )
+            if failed_kv_load_req_ids is None:
+                failed_kv_load_req_ids = req_level_failed
+            else:
+                failed_kv_load_req_ids |= req_level_failed
 
         # Persist per-step routed experts into the scheduler-side slot
         # buffer (CPU->CPU fancy-index assign; ~few MB per step).
@@ -2809,3 +2817,80 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def _handle_failed_recv_requests(self, failed_request_ids: set[str]) -> set[str]:
+        """
+        Handle KV load failures reported at request level.
+
+        This is the request-level counterpart of _handle_invalid_blocks().
+        Instead of mapping block IDs to requests, it directly processes
+        the failed request IDs reported by the connector.
+
+        Async-loading requests (WAITING_FOR_REMOTE_KVS) use
+        delay_cache_blocks=True, so external blocks are never hashed
+        before the transfer completes — no eviction needed on failure.
+
+        Sync-loading requests (RUNNING) use delay_cache_blocks=False,
+        so blocks may already be in the prefix cache.  We evict *all*
+        blocks of such requests to prevent cache pollution.  This is
+        aggressive (valid local-prefix blocks are evicted too) but safe.
+
+        Returns:
+            Set of affected request IDs to skip in update_from_output
+            main loop.
+        """
+        should_fail = not self.recompute_kv_load_failures
+        async_failed_req_ids: set[str] = set()
+        sync_failed_req_ids: set[str] = set()
+        blocks_to_evict: set[int] = set()
+
+        for req_id in failed_request_ids:
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+
+            request.num_computed_tokens = 0
+
+            if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                async_failed_req_ids.add(req_id)
+                if not should_fail:
+                    self.failed_recving_kv_req_ids.add(req_id)
+            else:
+                sync_failed_req_ids.add(req_id)
+                # TODO(ZhanqiuHu): Evicting all blocks is aggressive —
+                # it removes valid local-prefix blocks too.  Ideally we
+                # would only evict externally-loaded blocks if possible.
+                try:
+                    for group_ids in self.kv_cache_manager.get_block_ids(req_id):
+                        blocks_to_evict.update(group_ids)
+                except KeyError:
+                    pass
+                logger.warning(
+                    "Sync-loaded request %s reported KV load failure. "
+                    "Evicting all blocks (aggressive). "
+                    "See: https://github.com/ZhanqiuHu/vllm-wip/issues/17",
+                    req_id,
+                )
+
+        all_failed = async_failed_req_ids | sync_failed_req_ids
+        if not all_failed:
+            return set()
+
+        if blocks_to_evict and should_fail:
+            self.kv_cache_manager.evict_blocks(blocks_to_evict)
+
+        if should_fail:
+            logger.error(
+                "Failing %d request(s) due to KV load failure "
+                "(failure_policy=fail). Request IDs: %s",
+                len(all_failed),
+                all_failed,
+            )
+        else:
+            logger.warning(
+                "Recovered from KV load failure: "
+                "%d request(s) rescheduled for recomputation.",
+                len(all_failed),
+            )
+
+        return all_failed
