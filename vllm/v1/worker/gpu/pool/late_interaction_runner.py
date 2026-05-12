@@ -38,13 +38,13 @@ class LateInteractionRunner:
         except ImportError:
             self._has_flash_maxsim_rerank = False
 
-        # Warm up Triton kernels to avoid compilation on first request
-        self._warmup_kernels()
-
-    def _warmup_kernels(self) -> None:
+    def warmup_kernels(self) -> None:
         """Pre-compile flash_maxsim_rerank_direct for realistic autotune
-        buckets so the first request never triggers Triton autotune."""
-        if not torch.cuda.is_available():
+        buckets so the first request never triggers Triton autotune.
+
+        Caller is responsible for invoking this only when the loaded model
+        has a late-interaction pooler (see gpu_model_runner.load_model)."""
+        if not self._has_flash_maxsim_rerank or not torch.cuda.is_available():
             return
         try:
             from vllm.v1.pool.flash_maxsim import flash_maxsim_rerank_direct

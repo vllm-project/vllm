@@ -4930,6 +4930,14 @@ class GPUModelRunner(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
+        # Warm up flash-maxsim Triton kernels only when the loaded model
+        # supports late-interaction zero-copy scoring (same capability check
+        # the runtime path uses). Plain LLMs skip the autotune cost.
+        pooler = getattr(self.model, "pooler", None)
+        pooler_head = getattr(pooler, "head", None) if pooler is not None else None
+        if pooler_head is not None and hasattr(pooler_head, "project_batch"):
+            self.late_interaction_runner.warmup_kernels()
+
         if (
             is_mixture_of_experts(self.model)
             and self.parallel_config.enable_eplb
