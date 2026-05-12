@@ -301,10 +301,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         python3 use_existing_torch.py --prefix; \
     fi
 
-# Provision a bare interpreter for each CPython covered by `requires-python`
-# so DeepGEMM `_C` is built once per Python and bundled side-by-side in the
-# wheel; cmake reads DEEPGEMM_PYTHON_INTERPRETERS in deepgemm.cmake's
-# foreach loop. The matrix is derived from pyproject.toml.
+# Provision one bare Python per `requires-python` entry; cmake reads
+# DEEPGEMM_PYTHON_INTERPRETERS to build DeepGEMM `_C` for each. See
+# cmake/external_projects/deepgemm.cmake for the full picture.
 COPY tools/setup_deepgemm_pythons.sh tools/build_deepgemm_C.py tools/
 ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
 RUN --mount=type=cache,target=/root/.cache/uv \
