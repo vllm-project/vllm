@@ -1,31 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import queue
 import threading
 import time
 import traceback
 import uuid
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
+from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import close_sockets, make_zmq_socket
 from vllm.v1.engine import EngineCoreRequestType, EngineStatusType
 from vllm.v1.engine.exceptions import EngineLoopPausedError
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
 from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
     FaultToleranceRequest,
     FaultToleranceResult,
 )
-from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
-    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 logger = init_logger(__name__)
 
@@ -54,11 +54,13 @@ class EngineCoreSentinel(BaseSentinel):
         )
 
         self.data_parallel_size = parallel_config.data_parallel_size
-        self.cmd_q: queue.Queue[FaultToleranceRequest | None] = queue.Queue(maxsize=1)
         self.engine_recovery_timeout_sec = (
             parallel_config.fault_tolerance_config.engine_recovery_timeout_sec
         )
-        self.stop_busy_loop = threading.Event()
+        # flag to indicate if busy_loop should run.
+        self.run_busy_loop = threading.Event()
+        self.run_busy_loop.set()
+        # flag to indicate the status of busy loop.
         self.busy_loop_paused = threading.Event()
         self.worker_responsive = threading.Event()
         self.worker_responsive.set()
@@ -90,6 +92,7 @@ class EngineCoreSentinel(BaseSentinel):
         return self.host
 
     def report_fault_events(self, engine_exception, engine_status: EngineStatusType):
+        self.run_busy_loop.clear()
         msg = FaultInfo.from_exception(
             engine_exception, self.engine_index, engine_status
         )
@@ -115,7 +118,7 @@ class EngineCoreSentinel(BaseSentinel):
         timeout = ft_request.params["timeout"]
         deadline = time.monotonic() + timeout
         # set the flag to signal busy loop should pause
-        self.stop_busy_loop.set()
+        self.run_busy_loop.clear()
         # Put a wakeup request to unblock the busy loop
         # if it's blocked on input_queue.get()
         self.engine.input_queue.put((EngineCoreRequestType.WAKEUP, None))
@@ -142,33 +145,69 @@ class EngineCoreSentinel(BaseSentinel):
         This instruction tells the EngineCore to continue its busy loop
         after being suspended due to an exception.
         """
+        timeout = ft_request.params["timeout"]
+        if not self.worker_responsive.wait(timeout=timeout):
+            return FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason="Worker is not responsive yet.",
+            )
         if not self.busy_loop_paused.is_set():
             return FaultToleranceResult(ft_request.request_id, True)
-        timeout = ft_request.params["timeout"]
-        self.parallel_config._coord_store_port = ft_request.params["coord_store_port"]
+
+        parallel_config = self.engine.vllm_config.parallel_config
+        parallel_config._coord_store_port = ft_request.params["coord_store_port"]
         self._execute_command_on_workers(
             FaultToleranceRequest(str(uuid.uuid4()), "retry", ft_request.params),
             self.worker_identities,
             timeout=timeout,
         )
-        if self.data_parallel_size > 1:
-            # If the Gloo communication times out,
-            # the data parallel group (dp_group) needs to be reinitialized
-            reinit_request = FaultToleranceRequest(
-                instruction="reinit_dp_group_on_fault_tolerance",
-                request_id=str(uuid.uuid4()),
-                params={},
-            )
-            self.cmd_q.put(reinit_request)
-        else:
-            self.cmd_q.put(None)
-
-        self.stop_busy_loop.clear()
+        self.clean_engine_state()
+        self.run_busy_loop.set()
         return FaultToleranceResult(
             request_id=ft_request.request_id,
             success=True,
-            reason=None if True else "Worker don't recovered within timeout.",
         )
+
+    def clean_engine_state(self):
+        # Put running requests into waiting list.
+        scheduler = self.engine.scheduler
+        timestamp = time.monotonic()
+        while scheduler.running:  # type: ignore[attr-defined]
+            request = scheduler.running.pop()  # type: ignore[attr-defined]
+            scheduler.preempt_request(request, timestamp)  # type: ignore[attr-defined]
+        scheduler.prev_step_scheduled_req_ids.clear()  # type: ignore[attr-defined]
+        if self.engine.batch_queue is not None:
+            self.engine.batch_queue.clear()
+
+        if self.data_parallel_size > 1:
+            # If the Gloo communication times out,
+            # the data parallel group (dp_group) needs to be reinitialized
+            dp_engine = cast("DPEngineCoreProc", self.engine)
+            stateless_destroy_torch_distributed_process_group(dp_engine.dp_group)
+            dp_engine.dp_group = (
+                self.engine.vllm_config.parallel_config.stateless_init_dp_group()
+            )
+            self.engine.step_counter = 0
+
+        executor = self.engine.model_executor
+        # Drain all stale futures and their pending responses
+        if isinstance(executor, MultiprocExecutor):
+            num_stale = len(executor.futures_queue)
+            executor.futures_queue.clear()
+            if num_stale == 0:
+                return
+            logger.info("Draining %d stale response(s) from response queue", num_stale)
+            if executor.kv_output_aggregator is not None:
+                mqs = executor.response_mqs
+            else:
+                mqs = [executor.response_mqs[executor.output_rank]]
+            for mq in mqs:
+                for _ in range(num_stale):
+                    try:
+                        mq.dequeue(timeout=30)
+                    except Exception:
+                        break
 
     def _execute_command_on_workers(
         self,
@@ -258,47 +297,16 @@ def fault_tolerant_wrapper(busy_loop_func: Callable):
                         "[BusyLoopWrapper] Busy loop Suspended and "
                         "waiting for fault tolerance instructions.",
                     )
-                    # Put running requests into waiting list.
-                    timestamp = time.monotonic()
-                    while self.scheduler.running:  # type: ignore[attr-defined]
-                        request = self.scheduler.running.pop()  # type: ignore[attr-defined]
-                        self.scheduler.preempt_request(request, timestamp)  # type: ignore[attr-defined]
-                    self.scheduler.prev_step_scheduled_req_ids.clear()  # type: ignore[attr-defined]
-                    if self.batch_queue is not None:
-                        self.batch_queue.clear()
-
-                    try:
-                        # Block until recovery command received
-                        ft_request = self.engine_core_sentinel.cmd_q.get(
-                            timeout=self.engine_recovery_timeout_sec
-                        )
-
-                        if ft_request is not None:
-                            logger.debug(
-                                "[BusyLoopWrapper] Received fault tolerance "
-                                "command: %s",
-                                ft_request.instruction,
-                            )
-                            method, params = (ft_request.instruction, ft_request.params)
-                            run_method(self, method, args=(), kwargs=params)
-                        # recovery succeeded; restart the busy loop
+                    recovered = self.sentinel.run_busy_loop.wait(
+                        timeout=self.engine_recovery_timeout_sec
+                    )
+                    if recovered:
                         continue
-                    except queue.Empty:
-                        # No handling instruction received within predefined
-                        # timeout period.
+                    else:
                         logger.error(
-                            "[BusyLoopWrapper] Fault tolerance instruction not received"
-                            " within timeout. Proceeding with default exception "
-                            "handling."
+                            "[BusyLoopWrapper] EngineCore did not recover in time."
                         )
-                    except Exception as cmd_exc:
-                        raise RuntimeError(
-                            "Fault tolerance execution failed."
-                        ) from cmd_exc
 
-                    # Fault tolerance not enabled OR no instruction received
-                    # before timeout. Re-raise the original exception
-                    # for upper level handling.
                 raise e
 
     return run_with_fault_tolerance

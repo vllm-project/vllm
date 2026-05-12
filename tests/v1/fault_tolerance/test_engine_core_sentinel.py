@@ -11,6 +11,7 @@ from msgspec import msgpack
 
 from vllm.config import FaultToleranceConfig, ParallelConfig
 from vllm.v1.engine import EngineStatusType
+from vllm.v1.engine.exceptions import EngineLoopPausedError
 from vllm.v1.fault_tolerance import EngineCoreSentinel
 from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
@@ -61,6 +62,10 @@ def create_engine_core_sentinel(
     engine = Mock()
     engine.engine_index = 0
     engine.input_queue = queue.Queue()
+    engine.vllm_config = Mock()
+    engine.vllm_config.parallel_config = parallel_config
+    engine.dp_group = "old_dp_group"
+    engine.step_counter = 123
     worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
     sentinel = EngineCoreSentinel(
         parallel_config,
@@ -72,16 +77,31 @@ def create_engine_core_sentinel(
     return sentinel
 
 
-def test_engine_core_sentinel_initialization(addr_dict, mock_parallel_config):
-    sentinel = create_engine_core_sentinel(mock_parallel_config, addr_dict)
-
-    assert sentinel.engine_index == 0
-    assert sentinel.engine_fault_socket.type == zmq.DEALER
-
-    sentinel.shutdown()
-
-
-def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config):
+@pytest.mark.parametrize(
+    "engine_exception, expected_type, expected_status, expected_message",
+    [
+        (
+            RuntimeError("test exception"),
+            "RuntimeError",
+            EngineStatusType.UNHEALTHY,
+            "test exception",
+        ),
+        (
+            EngineLoopPausedError("paused"),
+            "EngineLoopPausedError",
+            EngineStatusType.PAUSED,
+            "[EnginePaused] paused",
+        ),
+    ],
+)
+def test_busy_loop_exception_forwarded_to_client(
+    addr_dict,
+    mock_parallel_config,
+    engine_exception,
+    expected_type,
+    expected_status,
+    expected_message,
+):
     """
     Verify that an engine exception reported to EngineCoreSentinel
     is forwarded as a FaultInfo message to the client-facing
@@ -99,9 +119,7 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config
 
     try:
         time.sleep(0.1)
-        sentinel.report_fault_events(
-            RuntimeError("test exception"), EngineStatusType.UNHEALTHY
-        )
+        sentinel.report_fault_events(engine_exception, expected_status)
         # Wait for the sentinel to forward the fault to the engine_fault socket.
         if not engine_fault_receiver.poll(timeout=5000):
             pytest.fail("Timeout waiting for engine fault message from sentinel")
@@ -109,9 +127,10 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict, mock_parallel_config
         parts = engine_fault_receiver.recv_multipart()
         assert len(parts) >= 2
         fault_info = msgpack.decode(parts[-1], type=FaultInfo)
-        assert fault_info.type == "RuntimeError"
+        assert fault_info.type == expected_type
         assert fault_info.engine_id == 0
-        assert fault_info.message == "test exception"
+        assert fault_info.engine_status == expected_status
+        assert fault_info.message == expected_message
     finally:
         engine_fault_receiver.close(linger=0)
         sentinel.shutdown()
@@ -137,26 +156,56 @@ def test_engine_status_wire_format_is_pinned():
         assert int(member) == expected_int
         assert member.name.lower() == expected_str
 
+
 @pytest.mark.parametrize("dp_size", [1, 2])
 def test_retry(mock_parallel_config, addr_dict, dp_size):
     mock_parallel_config.data_parallel_size = dp_size
+    mock_parallel_config.stateless_init_dp_group.return_value = "new_dp_group"
     sentinel_identity = b"engine_sentinel_0"
     engine_core_sentinel = create_engine_core_sentinel(
         mock_parallel_config, addr_dict, sentinel_identity=sentinel_identity
     )
     engine_core_sentinel.busy_loop_paused.set()
-    patch.object(engine_core_sentinel, "_execute_command_on_workers")
     ft_req = FaultToleranceRequest(
         "1", "retry", {"timeout": 2, "coord_store_port": 54321}
     )
 
-    engine_core_sentinel.retry(ft_req)
+    try:
+        with (
+            patch.object(
+                engine_core_sentinel,
+                "_execute_command_on_workers",
+            ) as execute_on_workers,
+            patch.object(
+                engine_core_sentinel, "clean_engine_state"
+            ) as clean_engine_state,
+            patch(
+                "vllm.v1.fault_tolerance.engine_core_sentinel."
+                "stateless_destroy_torch_distributed_process_group"
+            ) as destroy_dp_group,
+        ):
+            result = engine_core_sentinel.retry(ft_req)
 
-    assert mock_parallel_config._coord_store_port == 54321
-    if dp_size > 1:
-        assert not engine_core_sentinel.cmd_q.empty()
-        cmd = engine_core_sentinel.cmd_q.get()
-        assert cmd.instruction == "reinit_dp_group_on_fault_tolerance"
-        assert not engine_core_sentinel.stop_busy_loop.is_set()
-    else:
-        assert engine_core_sentinel.cmd_q.get() is None
+        assert result.success
+        assert mock_parallel_config._coord_store_port == 54321
+        execute_on_workers.assert_called_once()
+        worker_req, target_workers = execute_on_workers.call_args.args
+        assert worker_req.instruction == "retry"
+        assert target_workers == engine_core_sentinel.worker_identities
+        assert execute_on_workers.call_args.kwargs["timeout"] == 2
+        clean_engine_state.assert_called_once_with()
+
+        if dp_size > 1:
+            destroy_dp_group.assert_called_once_with("old_dp_group")
+            mock_parallel_config.stateless_init_dp_group.assert_called_once_with()
+            assert engine_core_sentinel.host.dp_group == "new_dp_group"
+            assert engine_core_sentinel.host.step_counter == 0
+        else:
+            destroy_dp_group.assert_not_called()
+            mock_parallel_config.stateless_init_dp_group.assert_not_called()
+            assert engine_core_sentinel.host.dp_group == "old_dp_group"
+            assert engine_core_sentinel.host.step_counter == 123
+
+        assert engine_core_sentinel.run_busy_loop.is_set()
+    finally:
+        engine_core_sentinel.shutdown()

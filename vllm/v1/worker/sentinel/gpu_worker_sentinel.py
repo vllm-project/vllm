@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import msgspec
@@ -42,7 +41,6 @@ class WorkerSentinel(BaseSentinel):
         worker: "Worker",
         device: torch.device,
         worker_cmd_addr: str,
-        clear_input_batch_callback: Callable,
     ):
         self.dp_rank = worker.parallel_config.data_parallel_rank
         tp_rank = get_tp_group().rank_in_group
@@ -55,7 +53,6 @@ class WorkerSentinel(BaseSentinel):
         self.device = device
         self.data_parallel_master_ip = parallel_config.data_parallel_master_ip
         self.dp_size = parallel_config.data_parallel_size
-        torch.accelerator.set_device_index(self.device)
 
         self.engine_core_cmd_socket = make_zmq_socket(
             self.ctx,
@@ -74,8 +71,6 @@ class WorkerSentinel(BaseSentinel):
             self.mask = torch.zeros((world_size,), device=self.device, dtype=torch.int)
             # todo: last_mask is prepared and should be updated in scaling down.
             self.last_mask = torch.zeros_like(self.mask)
-
-        self.clear_input_batch_callback = clear_input_batch_callback
 
         threading.Thread(
             target=self.run, daemon=True, name="WorkerSentinelThread"
@@ -107,11 +102,11 @@ class WorkerSentinel(BaseSentinel):
         return FaultToleranceResult(ft_request.request_id, True)
 
     def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        self.clear_input_batch_callback()
+        self.clear_worker_input_batch()
         get_pause_event().clear()
         comm = get_ep_group().device_communicator
         assert comm and comm.all2all_manager
-        if self.parallel_config.all2all_backend not in _FT_BACKEND_SET:
+        if self.worker.parallel_config.all2all_backend not in _FT_BACKEND_SET:
             return FaultToleranceResult(
                 ft_request.request_id,
                 False,
@@ -127,6 +122,12 @@ class WorkerSentinel(BaseSentinel):
             backend="gloo",
         )
         return FaultToleranceResult(ft_request.request_id, True)
+
+    def clear_worker_input_batch(self):
+        input_batch = self.worker.model_runner.input_batch
+        cached_req_ids = input_batch.req_id_to_index.keys()
+        for req_id in list(cached_req_ids):
+            input_batch.remove_request(req_id)
 
     def shutdown(self):
         close_sockets([self.engine_core_cmd_socket])

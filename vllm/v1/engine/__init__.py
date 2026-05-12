@@ -269,7 +269,7 @@ class EngineStatusType(enum.IntEnum):
     DEAD = 1
     # Cases where EngineCoreProc throws exceptions but does not exit
     UNHEALTHY = 2
-    # Cases where EngineCoreProc is paused.
+    # Cases where EngineCoreProc is actively paused to handle faults of other engines
     PAUSED = 3
-    # Cases where the workers of EngineCore are not responsive.
+    # Cases where the workers of EngineCore are not responsive
     HUNG = 4

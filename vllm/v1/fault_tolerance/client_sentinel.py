@@ -177,9 +177,10 @@ class ClientSentinel(BaseSentinel):
                 logger.error("Engine core is dead; retry won't work.")
                 return FaultToleranceResult(ft_request.request_id, False, "Engine dead")
 
-        ip, store = init_distributed_coordination(self.parallel_config)
+        parallel_config = self.client.vllm_config.parallel_config
+        ip, store = init_distributed_coordination(parallel_config)
         self._coord_store = store
-        ft_request.params["coord_store_port"] = self.parallel_config._coord_store_port
+        ft_request.params["coord_store_port"] = parallel_config._coord_store_port
         if "new_stateless_dp_group_port" not in ft_request.params:
             ft_request.params["new_stateless_dp_group_port"] = get_open_port()
 
