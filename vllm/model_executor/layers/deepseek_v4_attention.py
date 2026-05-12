@@ -831,7 +831,16 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        if current_platform.is_rocm():
+        if (
+            current_platform.is_rocm()
+            and not envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+        ):
+            # Opt-in (env=0) routes ROCm through the new AITER sparse
+            # MLA backend. Default (env=1) falls through to the unified
+            # FlashMLASparse backend; the actual kernels are then
+            # supplied by ``vllm.v1.attention.ops.flashmla`` which on
+            # ROCm hands off to our Triton fallbacks
+            # (``flash_mla_with_kvcache_rocm`` / ``flash_mla_sparse_fwd_rocm``).
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterMLASparseBackend,
             )
@@ -869,7 +878,14 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
         )
 
-        if current_platform.is_rocm():
+        if (
+            current_platform.is_rocm()
+            and not envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+        ):
+            # See the matching gate in ``get_attn_backend``: env=0 opts
+            # into the AITER sparse MLA impl. Default (env=1) falls
+            # through to the unified path below, which routes ROCm to our
+            # Triton kernels via ``flashmla.py``.
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterMLASparseImpl,
             )

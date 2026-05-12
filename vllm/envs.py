@@ -1077,9 +1077,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
     ),
-    # Master switch for the pre-rebase ROCm-native code paths used by
+    # Master switch for the ROCm-native code paths used by
     # DeepSeek-V4 (DSv4-Flash-FP8). When True (default on ROCm) the model
-    # selects the validated pre-rebase implementations at two call sites:
+    # selects the triton/torch fallbacks at three call sites:
     #
     #   1. SWA K-cache writer: torch reference
     #      (``_deepseek_v4_qnorm_rope_kv_insert_reference``) instead of
@@ -1087,19 +1087,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #      C++ kernel, whose FP8 dtype is selected at compile time
     #      (``HIP_FP8_TYPE_OCP``) and silently corrupts every K byte on
     #      MI300X (FNUZ-only). This is the regression fix.
-    #   2. Sparse indexer: recovered ``rocm_sparse_attn_indexer_no_insert``
+    #   2. Sparse indexer: ``rocm_sparse_attn_indexer_no_insert``
     #      orchestration instead of upstream's
     #      ``rocm_aiter_sparse_attn_indexer_native``.
+    #   3. MLA sparse backend dispatch: route through the unified
+    #      ``DeepseekV4FlashMLASparseBackend`` (whose ROCm kernels are
+    #      supplied by ``flash_mla_with_kvcache_rocm`` /
+    #      ``flash_mla_sparse_fwd_rocm`` via ``flashmla.py``) instead of
+    #      ``DeepseekV4ROCMAiterMLASparseBackend`` /
+    #      ``Impl`` (whose ``_sparse_attn_decode_ragged_kernel`` Triton
+    #      kernel currently hard-codes the SM89 ``tl.float8e4b15`` dtype
+    #      in the ``IS_FNUZ`` branch and crashes JIT-compile on
+    #      gfx942 — see logs/0512/server_log2.txt).
     #
-    # NOTE: the MLA decode/sparse-prefill paths are not gated by this env
-    # var any more — upstream unified the call sites, and our ROCm
-    # ``flash_mla_with_kvcache_rocm`` / ``flash_mla_sparse_fwd_rocm``
-    # Triton kernels are always dispatched on ROCm via
-    # ``vllm.v1.attention.ops.flashmla``.
-    #
-    # Set to "0" to opt back into the upstream paths for bisection (note:
-    # the SWA-writer C++ kernel still produces deterministic garbage on
-    # MI300X, so site 1 is only useful for kernel debugging at present).
+    # Set to "0" to opt back into the upstream AITER + native paths for
+    # bisection (note: the SWA-writer C++ kernel still produces
+    # deterministic garbage on MI300X, and the AITER Triton kernel has the
+    # ``fp8e4b15`` bug above, so env=0 is only useful for kernel debugging
+    # at present).
     "VLLM_ROCM_USE_V4_TRITON_FALLBACK": lambda: (
         os.getenv("VLLM_ROCM_USE_V4_TRITON_FALLBACK", "True").lower() in ("true", "1")
     ),
