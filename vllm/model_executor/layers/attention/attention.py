@@ -249,6 +249,8 @@ class Attention(nn.Module, AttentionLayerBase):
         )
 
         # Skip quantization for specified layers
+        kv_cache_dtype_before_skip = kv_cache_dtype
+        skipped_kv_cache_dtype = False
         if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
             from vllm.model_executor.models.utils import extract_layer_index
 
@@ -266,6 +268,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if skip:
                 kv_cache_dtype = "auto"
                 calculate_kv_scales = False
+                skipped_kv_cache_dtype = True
             logger.debug(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
                 prefix,
@@ -301,6 +304,16 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
+            backend_override = None
+            if (
+                skipped_kv_cache_dtype
+                and isinstance(kv_cache_dtype_before_skip, str)
+                and kv_cache_dtype_before_skip.startswith("turboquant_")
+            ):
+                # The model may use a global TURBOQUANT backend because some
+                # layers still store compressed KV. Layers explicitly skipped
+                # back to native KV must use a native backend as well.
+                backend_override = AttentionBackendEnum.TRITON_ATTN
             self.attn_backend = get_attn_backend(
                 head_size,
                 dtype,
@@ -310,6 +323,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 use_mm_prefix=self.use_mm_prefix,
                 use_per_head_quant_scales=use_per_head_quant_scales,
                 attn_type=attn_type,
+                backend_override=backend_override,
             )
         else:
             self.attn_backend = attn_backend
@@ -573,11 +587,24 @@ class Attention(nn.Module, AttentionLayerBase):
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
-            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+            from vllm.v1.kv_cache_interface import (
+                TQFullAttentionSpec,
+                TQSlidingWindowSpec,
+            )
 
             tq_config = TurboQuantConfig.from_cache_dtype(
                 self.kv_cache_dtype, self.head_size
             )
+            if self.sliding_window is not None:
+                return TQSlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    tq_slot_size=tq_config.slot_size_aligned,
+                    sliding_window=self.sliding_window,
+                )
             return TQFullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,

@@ -14,6 +14,19 @@ from vllm.utils.torch_utils import direct_register_custom_op
 logger = init_logger(__name__)
 
 
+def _maybe_import_vllm_flash_attn_apply_rotary_emb():
+    module_name = "vllm.vllm_flash_attn.layers.rotary"
+    try:
+        if find_spec(module_name) is None:
+            return None
+    except ModuleNotFoundError:
+        return None
+
+    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+    return apply_rotary_emb
+
+
 # common functions
 def rotate_neox(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., : x.shape[-1] // 2]
@@ -230,7 +243,10 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+        apply_rotary_emb = _maybe_import_vllm_flash_attn_apply_rotary_emb()
+        apply_rotary = self.apply_rotary_emb_flash_attn
+        if apply_rotary_emb is None and apply_rotary is None:
+            return self.forward_native(x, cos, sin)
 
         x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
@@ -242,7 +258,11 @@ class ApplyRotaryEmb(CustomOp):
             ...
         """
         interleaved = not self.is_neox_style
-        output = apply_rotary_emb(x, cos, sin, interleaved)
+        if apply_rotary_emb is not None:
+            output = apply_rotary_emb(x, cos, sin, interleaved)
+        else:
+            assert apply_rotary is not None
+            output = apply_rotary(x, cos, sin, interleaved=interleaved).type_as(x)
 
         output = self._post_process(output, origin_shape, origin_dtype)
         return output
