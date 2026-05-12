@@ -106,7 +106,6 @@ def _moe_forward(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._forward_impl(
@@ -123,14 +122,7 @@ def _moe_forward_fake(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
 ) -> torch.Tensor:
-    # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
-    # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
-    # as an op arg (not peeked from the layer registry) to keep the fake
-    # a pure shape function of its inputs and preserve subgraph dedup.
-    if hidden_dim_unpadded > 0:
-        return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
     return torch.empty_like(hidden_states)
 
 
@@ -140,7 +132,6 @@ def _moe_forward_shared(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._forward_impl(
@@ -157,17 +148,13 @@ def _moe_forward_shared_fake(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
-    hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
-    # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
-    # else `hidden_states`.
-    if hidden_dim_unpadded > 0:
-        fused_out = hidden_states.new_empty(
-            (*hidden_states.shape[:-1], hidden_dim_unpadded)
-        )
-    else:
-        fused_out = torch.empty_like(hidden_states)
+    # Output shapes:
+    # - fused_out: same as hidden_states (routed experts use transformed size)
+    # - shared_out: same as shared_experts_input if provided, else same as
+    #               hidden_states
+    # (For latent MoE: shared experts use original hidden_size, not latent size)
+    fused_out = torch.empty_like(hidden_states)
     if shared_experts_input is not None:
         shared_out = torch.empty_like(shared_experts_input)
     else:
@@ -263,6 +250,7 @@ class MoERunner(MoERunnerInterface):
                 shared_experts,
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
+                # TODO: use lambda?
                 mk_can_overlap_shared_experts=routed_experts.quant_method.mk_can_overlap_shared_experts,
             )
 
