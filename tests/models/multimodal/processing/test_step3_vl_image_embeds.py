@@ -18,17 +18,17 @@ class _FakeStep3VL:
 
 
 def test_image_embedding_inputs_construction():
-    """Step3VLImageEmbeddingInputs should accept image_embeds kwarg."""
+    """Step3VLImageEmbeddingInputs should store embeddings in the data field."""
     image_embeds = torch.randn(2, 16, 64)
 
     inputs = Step3VLImageEmbeddingInputs(
         type="image_embeds",
-        image_embeds=image_embeds,
+        data=image_embeds,
     )
 
     assert inputs["type"] == "image_embeds"
-    assert torch.equal(inputs["image_embeds"], image_embeds)
-    assert torch.equal(inputs.image_embeds, image_embeds)
+    assert torch.equal(inputs["data"], image_embeds)
+    assert torch.equal(inputs.data, image_embeds)
 
 
 def test_image_embedding_inputs_validation_rejects_wrong_rank():
@@ -36,7 +36,7 @@ def test_image_embedding_inputs_validation_rejects_wrong_rank():
     with pytest.raises(ValueError, match="rank"):
         Step3VLImageEmbeddingInputs(
             type="image_embeds",
-            image_embeds=torch.randn(16, 64),
+            data=torch.randn(16, 64),
         )
 
 
@@ -45,7 +45,7 @@ def test_process_image_embeds_does_not_require_pixel_input_fields():
     image_embeds = torch.randn(2, 4, 8)
     image_input = Step3VLImageEmbeddingInputs(
         type="image_embeds",
-        image_embeds=image_embeds,
+        data=image_embeds,
     )
 
     outputs = Step3VLForConditionalGeneration._process_image_input(
