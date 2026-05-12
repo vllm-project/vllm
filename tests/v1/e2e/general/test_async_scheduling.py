@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
-# PROBE: log which Triton autotune configs are picked, per kernel+shape, to
-# help see if different configs trigger different config selections.
-os.environ.setdefault("TRITON_PRINT_AUTOTUNING", "1")
+# PROBE: enable per-layer hidden state dump in qwen2.forward at position of
+# token 2701 (' following').
+os.environ.setdefault("VLLM_DEBUG_DUMP_HS", "1")
 
 from itertools import repeat  # noqa: E402
 from typing import Any  # noqa: E402
@@ -28,7 +28,7 @@ from ....models.utils import check_outputs_equal  # noqa: E402
 MODEL = "Qwen/Qwen3-0.6B"
 MTP_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
-ENFORCE_EAGER = False
+ENFORCE_EAGER = True  # PROBE: eager so dumps work without cudagraph capture
 
 first_prompt = (
     "The following numbers of the sequence "

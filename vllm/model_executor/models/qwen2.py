@@ -393,6 +393,38 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # PROBE: per-layer hidden state dump for token id 2701 (' following') at
+        # position 1 of the first prompt. Activated by VLLM_DEBUG_DUMP_HS=1.
+        # Used to find which transformer layer first produces a divergent value
+        # across async-scheduling configs.
+        import os as _os
+
+        _DUMP = _os.environ.get("VLLM_DEBUG_DUMP_HS", "") == "1"
+
+        def _dump(name, t, input_ids_local):
+            if not _DUMP or input_ids_local is None or t is None:
+                return
+            if input_ids_local.ndim != 1 or input_ids_local.shape[0] < 2:
+                return
+            # Find positions where token id == 2701 (' following')
+            try:
+                positions_2701 = (
+                    (input_ids_local == 2701).nonzero(as_tuple=False).flatten().tolist()
+                )
+            except Exception:
+                return
+            if not positions_2701:
+                return
+            import sys
+
+            for pos in positions_2701[:2]:  # at most first 2 occurrences
+                vals = t[pos, :16].detach().cpu().float().tolist()
+                print(
+                    f"[VLLM_DUMP] {name} pos={pos} tok=2701: {vals}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -404,11 +436,14 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        _dump("embed", hidden_states, input_ids)
+
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            _dump(f"layer{idx:02d}", hidden_states, input_ids)
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
@@ -419,6 +454,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        _dump("norm", hidden_states, input_ids)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
