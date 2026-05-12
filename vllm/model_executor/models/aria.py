@@ -84,10 +84,10 @@ class AriaVisionTransformer(Idefics3VisionTransformer, SupportsQuant):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, quant_config=quant_config, prefix=prefix)
+        super().__init__(config, vllm_config=vllm_config, prefix=prefix)
         # Unlike Idefics3VisionTransformer which uses LayerNorm after the
         # final layer, Aria omits this normalization, so we replace it with an
         # Identity layer

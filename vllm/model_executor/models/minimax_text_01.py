@@ -491,9 +491,6 @@ class MiniMaxText01Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: MiniMaxConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
         scheduler_config = vllm_config.scheduler_config
         self.config = config
         self.CONCAT_FFN = True
@@ -536,10 +533,8 @@ class MiniMaxText01Model(nn.Module):
             layer_config.layer_idx = layer_idx
 
             decoder_kwargs = {
-                "quant_config": quant_config,
+                "vllm_config": vllm_config,
                 "layer_id": layer_idx,
-                "model_config": model_config,
-                "cache_config": cache_config,
             }
 
             if layer_config.attention_type == 0:

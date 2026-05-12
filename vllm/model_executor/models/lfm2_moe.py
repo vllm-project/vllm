@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -339,13 +339,14 @@ class Lfm2MoeShortConvDecoderLayer(nn.Module):
         self,
         config: Lfm2MoeConfig,
         layer_idx: int,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        model_config: ModelConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
     ) -> None:
         super().__init__()
+        model_config = vllm_config.model_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         self.layer_idx = layer_idx
         self.short_conv = ShortConv(
             config=config,

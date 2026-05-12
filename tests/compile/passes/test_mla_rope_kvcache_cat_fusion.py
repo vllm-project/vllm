@@ -131,8 +131,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
             kv_b_proj=self.kv_b_proj,
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
+            vllm_config=vllm_config,
             prefix=prefix,
             attn_backend=attn_backend.get_class(),
         )

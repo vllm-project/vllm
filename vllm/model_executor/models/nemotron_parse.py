@@ -28,7 +28,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -473,14 +472,15 @@ class RadioWithNeck(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
         self.config = config.encoder
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
 
         self.model_encoder = self.get_vit_model_from_radio_config(
-            config, quant_config=quant_config
+            config, vllm_config=vllm_config
         )
 
         # Neck components
@@ -513,7 +513,7 @@ class RadioWithNeck(nn.Module):
     def get_vit_model_from_radio_config(
         self,
         hf_config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig | None = None,
     ) -> RadioModel:
         hf_config_vision = hf_config.encoder
         model_name = hf_config_vision.args.get("model")
@@ -526,7 +526,7 @@ class RadioWithNeck(nn.Module):
             **hf_config_vision.args,
         )
 
-        return RadioModel(config=radio_config, quant_config=quant_config)
+        return RadioModel(config=radio_config, vllm_config=vllm_config)
 
     def forward(self, pixel_values: torch.Tensor, **kwargs) -> torch.Tensor:
         summary, feature = self.model_encoder(pixel_values)
@@ -584,7 +584,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         with self._mark_tower_model(vllm_config, "image"):
             self.encoder = RadioWithNeck(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.encoder"
+                config=config, vllm_config=vllm_config, prefix=f"{prefix}.encoder"
             )
 
         with self._mark_language_model(vllm_config):
