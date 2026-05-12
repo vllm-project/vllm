@@ -305,10 +305,10 @@ def supports_trtllm_attention() -> bool:
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # TRTLLM attention is currently only validated on SM100 (CC 10.0).
-    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
-    # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
-    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
+    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
+    return (
+        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
+    )
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -685,6 +685,47 @@ def flashinfer_scaled_fp4_mm(
     )
 
 
+def flashinfer_scaled_fp4_mm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    alpha: torch.Tensor,
+    out: torch.Tensor,
+    out_dtype: torch.dtype | None,
+    use_8x4_sf_layout: bool,
+    backend: str,
+) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
+    assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
+    assert a.stride(-1) == 1
+    assert a.shape[1] == b.shape[0]
+    assert out.shape == (a.shape[0], b.shape[1])
+    assert out.device.type == "cuda"
+
+    if backend in ("cutlass", "cudnn"):
+        if block_scale_a.dtype != torch.uint8:
+            block_scale_a = block_scale_a.view(torch.uint8)
+        if block_scale_b.dtype != torch.uint8:
+            block_scale_b = block_scale_b.view(torch.uint8)
+
+    from flashinfer import mm_fp4 as flashinfer_mm_fp4_
+
+    flashinfer_mm_fp4_(
+        a,
+        b,
+        block_scale_a,
+        block_scale_b,
+        alpha,
+        out_dtype or out.dtype,
+        out=out,
+        block_size=16,
+        use_8x4_sf_layout=use_8x4_sf_layout,
+        backend=backend,
+    )
+    return out
+
+
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -713,6 +754,38 @@ def flashinfer_scaled_fp8_mm(
     if bias is not None:
         output = output + bias
     return output
+
+
+def flashinfer_scaled_fp8_mm_out(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out: torch.Tensor,
+    out_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2 and out.ndim == 2
+    assert a.shape[1] == b.shape[0]
+    assert out.shape == (a.shape[0], b.shape[1])
+    assert scale_a.numel() == 1 and scale_b.numel() == 1
+    assert a.dtype == torch.float8_e4m3fn and b.dtype == torch.float8_e4m3fn
+    assert out.device.type == "cuda"
+    assert a.is_contiguous()
+
+    from flashinfer import bmm_fp8 as bmm_fp8_
+
+    bmm_fp8_(
+        a.unsqueeze(0),
+        # FlashInfer expects the weight in the same column-major view layout
+        # consumed by flashinfer_scaled_fp8_mm, so keep the transposed view.
+        b.unsqueeze(0),
+        scale_a,
+        scale_b,
+        out_dtype or out.dtype,
+        out.unsqueeze(0),
+        "auto",
+    )
+    return out
 
 
 def flashinfer_quant_nvfp4_8x4_sf_layout(
@@ -748,8 +821,9 @@ def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
 def should_use_flashinfer_for_blockscale_fp8_gemm(
     is_flashinfer_supported: bool,
     output_dtype: torch.dtype,
-    input: torch.Tensor,
-    weight: torch.Tensor,
+    input_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    weight_shape: tuple[int, int],
 ):
     if not is_flashinfer_supported:
         return False
@@ -760,18 +834,49 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
-    weight_dtype = weight.dtype
-    input_dtype = input.dtype
-
     should_use_flashinfer = (
         output_dtype == torch.bfloat16
         and input_dtype == torch.bfloat16
         and weight_dtype == torch.float8_e4m3fn
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_shape[0] % N_MULTIPLE == 0
+        and weight_shape[1] % K_MULTIPLE == 0
     )
 
     return should_use_flashinfer
+
+
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+
+
+@functools.cache
+def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
+    """Check if FP8 ViT attention is supported on this platform.
+
+    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    and cuDNN >= 9.17.1.
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
+    if not current_platform.has_device_capability(90):
+        return False
+
+    try:
+        supported = current_platform.get_supported_vit_attn_backends()
+        if AttentionBackendEnum.FLASHINFER not in supported:
+            return False
+    except (ImportError, AttributeError):
+        return False
+
+    try:
+        import torch.backends.cudnn as cudnn
+
+        if cudnn.is_available() and cudnn.version() < _MIN_CUDNN_FP8:
+            return False
+    except (ImportError, AttributeError):
+        pass
+
+    return True
 
 
 __all__ = [
@@ -800,9 +905,12 @@ __all__ = [
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
+    "flashinfer_scaled_fp4_mm_out",
     "flashinfer_scaled_fp8_mm",
+    "flashinfer_scaled_fp8_mm_out",
     "flashinfer_quant_nvfp4_8x4_sf_layout",
     "flashinfer_fp8_blockscale_gemm",
     "should_use_flashinfer_for_blockscale_fp8_gemm",
     "is_flashinfer_fp8_blockscale_gemm_supported",
+    "is_flashinfer_cudnn_fp8_prefill_attn_supported",
 ]

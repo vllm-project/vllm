@@ -105,7 +105,7 @@ class GateLinear(ReplicatedLinear):
 
         # Tier 2: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
-            output = ops.router_gemm_bf16_fp32(x, self.weight)
+            output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
             return output, None
 
         # Tier 3: F.linear (ReplicatedLinear)
