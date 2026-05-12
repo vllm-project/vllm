@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-import vllm.model_executor.layers.mhc as mhc_ops  # noqa: F401
+import vllm.model_executor.kernels.mhc  # noqa: F401
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -138,7 +138,7 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
 
     residual_ref, post_mix_ref, res_mix_ref, layer_input_ref = run_ref()
 
-    residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
+    residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre_tilelang(
         x,
         residual,
         post_layer_mix,
@@ -166,7 +166,7 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
 @pytest.mark.parametrize("hc_mult", [4])
-def test_hc_head_fused_kernel(num_tokens, hidden_size, hc_mult):
+def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
     torch.set_default_device(DEVICE)
     set_random_seed(0)
 
@@ -179,7 +179,7 @@ def test_hc_head_fused_kernel(num_tokens, hidden_size, hc_mult):
     out = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16)
     out.fill_(float("nan"))
 
-    result = torch.ops.vllm.hc_head_fused_kernel(
+    result = torch.ops.vllm.hc_head_triton(
         residual,
         fn,
         hc_scale,
