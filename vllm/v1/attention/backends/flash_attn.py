@@ -502,11 +502,20 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             else:
                 qkv_dtype = self.kv_cache_dtype
             if aot_schedule:
+                # TPA-GQA skips the pre-attention DCP Q all-gather, so Q
+                # already has H/attn_tp heads with no DCP expansion.
+                from vllm.distributed.parallel_state import is_tpa_gqa_mode
+
+                scheduler_num_heads_q = (
+                    self.num_heads_q
+                    if is_tpa_gqa_mode()
+                    else self.num_heads_q * self.dcp_world_size
+                )
                 return get_scheduler_metadata(
                     batch_size=batch_size,
                     max_seqlen_q=max_query_len,
                     max_seqlen_k=max_seq_len,
-                    num_heads_q=self.num_heads_q * self.dcp_world_size,
+                    num_heads_q=scheduler_num_heads_q,
                     num_heads_kv=self.num_heads_kv,
                     headdim=self.headdim,
                     cache_seqlens=seqlens,
@@ -1116,13 +1125,31 @@ class FlashAttentionImpl(AttentionImpl):
         max_seqlen_q = attn_metadata.max_query_len
         block_table = attn_metadata.block_table
 
+        # TPA-GQA: Q already has per-attn-rank heads, so skip the
+        # cross-DCP all-gather; dcp_combine reduces H/attn_tp → H/full_tp.
+        from vllm.distributed.parallel_state import is_tpa_gqa_mode
+
+        tpa_gqa_mode = is_tpa_gqa_mode()
+
         query = query.contiguous()
         if attn_metadata.max_dcp_context_kv_len == 0:
+            # No cross-DCP context: purely local self-attention. Under TPA-GQA
+            # the query carries H/attn_tp heads and must be sliced to this DCP
+            # rank's H/full_tp window (mirrors the full path's query-branch
+            # slice); a scratch is needed since `output` is only H/full_tp.
+            fast_out = output
+            if tpa_gqa_mode:
+                (fast_out,) = current_workspace_manager().get_simultaneous(
+                    (
+                        (query.shape[0], query.shape[1], self.head_size),
+                        self._dcp_dtype,
+                    ),
+                )
             flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
-                out=output,
+                out=fast_out,
                 cu_seqlens_q=cu_seqlens_q,
                 max_seqlen_q=max_seqlen_q,
                 cu_seqlens_k=cu_seqlens_q,
@@ -1141,19 +1168,29 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale,
                 num_splits=attn_metadata.max_num_splits,
             )
+            if tpa_gqa_mode:
+                dcp_group = get_dcp_group()
+                hpf = query.shape[1] // dcp_group.world_size
+                head_start = dcp_group.rank_in_group * hpf
+                output.copy_(fast_out[:, head_start : head_start + hpf, :])
             return output
 
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        # TPA-GQA: Q already carries this attn-rank's heads, so skip the
+        # cross-DCP query all-gather (dcp_combine reduces H/attn_tp -> H/full_tp).
+        context_q = query if tpa_gqa_mode else get_dcp_group().all_gather(query, dim=1)
+        context_num_heads = context_q.shape[1]
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        n = query_across_dcp.shape[0]
+        n = context_q.shape[0]
         num_reqs = cu_seqlens_q.shape[0] - 1
         num_decodes = attn_metadata.num_decode_reqs
         num_context_prefills = attn_metadata.num_prefill_reqs
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_context_prefill_tokens = attn_metadata.num_prefill_tokens
-        split_dcp_context = should_split_fa2_dcp_context_attention(
+        # The split-FA2 context workaround assumes the all-gathered query
+        # layout; under TPA-GQA the query stays local, so use the non-split path.
+        split_dcp_context = not tpa_gqa_mode and should_split_fa2_dcp_context_attention(
             self.vllm_flash_attn_version,
             max_seqlen_q,
             num_reqs,
@@ -1161,10 +1198,15 @@ class FlashAttentionImpl(AttentionImpl):
             num_context_prefills,
         )
         dcp_context_out_tokens = max(n, self._dcp_max_num_tokens)
+        # Head dim = the actual context-branch query head count. By the TPA
+        # invariant (attn_tp*dcp == tp) this equals (num_heads_q // tp) * dcp in
+        # BOTH modes = the pre-grow's max_context_heads, so the workspace stays
+        # CUDA-graph-fixed. NOTE: self.num_heads * dcp is WRONG under TPA, where
+        # self.num_heads is the attn-tp-local count, not num_heads_q // tp.
         dcp_context_out_spec = (
             (
                 dcp_context_out_tokens,
-                self.num_heads * self.dcp_world_size,
+                context_num_heads,
                 self.head_size,
             ),
             self._dcp_dtype,
@@ -1182,7 +1224,7 @@ class FlashAttentionImpl(AttentionImpl):
             assert self.vllm_flash_attn_version is not None
             context_attn_out, context_lse = run_split_fa2_dcp_context_attention(
                 flash_attn_varlen_func,
-                query_across_dcp,
+                context_q,
                 key_cache,
                 value_cache,
                 dcp_context_out,
@@ -1209,7 +1251,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
         else:
             context_attn_out, context_lse = flash_attn_varlen_func(
-                q=query_across_dcp,
+                q=context_q,
                 k=key_cache,
                 v=value_cache,
                 out=dcp_context_out,
@@ -1231,6 +1273,12 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale,
                 num_splits=attn_metadata.max_num_splits,
             )
+        # FA3 with out= may return the underlying base buffer rather than
+        # the sliced view; slice back to the actual head count used here.
+        if context_attn_out.shape[1] != context_num_heads:
+            context_attn_out = context_attn_out[:, :context_num_heads]
+        if context_lse.shape[0] != context_num_heads:
+            context_lse = context_lse[:context_num_heads]
         # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
@@ -1240,11 +1288,18 @@ class FlashAttentionImpl(AttentionImpl):
         )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
+        # Query branch must write to a scratch sized to the query's OWN head
+        # count (H/attn_tp under TPA, != output's H/full_tp), then merge_attn_states
+        # writes the final combined result into `output`. Writing q-attn directly
+        # to `output` mismatches heads under TPA and aliases the merge destination.
+        (dcp_query_out,) = current_workspace_manager().get_simultaneous(
+            ((query.shape[0], query.shape[1], self.head_size), self._dcp_dtype),
+        )
         query_attn_out, query_lse = flash_attn_varlen_func(
             q=query,
             k=key,
             v=value,
-            out=output,
+            out=dcp_query_out,
             cu_seqlens_q=cu_seqlens_q,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_k=cu_seqlens_q,
@@ -1261,6 +1316,23 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
+        # Under TPA-GQA the query branch holds H/attn_tp heads while the
+        # context branch has been reduce-scattered to H/full_tp; slice the
+        # query branch to this DCP rank's head window for merge_attn_states.
+        if tpa_gqa_mode:
+            dcp_group = get_dcp_group()
+            dcp_size = dcp_group.world_size
+            dcp_rank = dcp_group.rank_in_group
+            total_heads = query_attn_out.shape[1]
+            assert total_heads % dcp_size == 0, (
+                f"TPA-GQA: query_attn_out heads ({total_heads}) must be "
+                f"divisible by dcp_size ({dcp_size})"
+            )
+            heads_per_full_rank = total_heads // dcp_size
+            head_start = dcp_rank * heads_per_full_rank
+            head_end = head_start + heads_per_full_rank
+            query_attn_out = query_attn_out[:, head_start:head_end, :].contiguous()
+            query_lse = query_lse[head_start:head_end, :].contiguous()
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(
