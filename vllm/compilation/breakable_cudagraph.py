@@ -12,8 +12,9 @@ single capture context drives the whole forward and intercepts
 attention / kv-cache custom ops at the dispatcher to end the current
 stream capture, run the op eagerly, and resume capture.
 
-The captured artifact is a list of ``("graph", CUDAGraph)`` /
-``("eager", callable)`` segments, replayed in order at inference time.
+The captured artifact is a list of zero-arg callables -- the bound
+``CUDAGraph.replay`` for graph segments, or the user fn for eager
+segments -- replayed in order at inference time.
 
 Eager segments must operate on the same static buffers used during
 capture so subsequent graph segments read the same memory addresses.
@@ -145,8 +146,9 @@ class BreakableCUDAGraphCapture:
 
     def __init__(self, pool: Any | None = None) -> None:
         self.pool = pool
-        # Each segment: ("graph", torch.cuda.CUDAGraph) | ("eager", callable).
-        self.segments: list[tuple[str, Any]] = []
+        self.segments: list[Callable[[], Any]] = []
+        self._num_graphs: int = 0
+        self._num_eager_breaks: int = 0
         self._current_graph: torch.cuda.CUDAGraph | None = None
         self._capturing: bool = False
 
@@ -189,7 +191,8 @@ class BreakableCUDAGraphCapture:
         # informational and we let it through -- if it ever fires from a
         # segment that should have had work, it points at a real bug.
         self._current_graph.capture_end()
-        self.segments.append(("graph", self._current_graph))
+        self.segments.append(self._current_graph.replay)
+        self._num_graphs += 1
         self._current_graph = None
         self._capturing = False
 
@@ -203,28 +206,26 @@ class BreakableCUDAGraphCapture:
         """
         self._end_segment()
         result = fn()
-        self.segments.append(("eager", fn))
+        self.segments.append(fn)
+        self._num_eager_breaks += 1
         self._begin_segment()
         return result
 
     # --- replay ----------------------------------------------------------
 
     def replay(self) -> None:
-        for kind, item in self.segments:
-            if kind == "graph":
-                item.replay()  # type: ignore[union-attr]
-            else:
-                item()
+        for r in self.segments:
+            r()
 
     # --- introspection ---------------------------------------------------
 
     @property
     def num_graphs(self) -> int:
-        return sum(1 for kind, _ in self.segments if kind == "graph")
+        return self._num_graphs
 
     @property
     def num_eager_breaks(self) -> int:
-        return sum(1 for kind, _ in self.segments if kind == "eager")
+        return self._num_eager_breaks
 
     def __repr__(self) -> str:
         return (
