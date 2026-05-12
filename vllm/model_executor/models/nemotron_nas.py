@@ -87,6 +87,7 @@ class DeciLMAttention(LlamaAttention):
         bias_o_proj: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -99,6 +100,7 @@ class DeciLMAttention(LlamaAttention):
             bias_o_proj=bias_o_proj,
             prefix=prefix,
             attn_type=attn_type,
+            quant_config=quant_config,
         )
 
     def _init_rotary_emb(
