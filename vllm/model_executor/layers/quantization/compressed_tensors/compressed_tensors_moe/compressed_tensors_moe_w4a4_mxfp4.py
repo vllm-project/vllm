@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsMxfp4,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -41,6 +41,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         super().__init__(moe)
         self.group_size = 32
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
+        # use cutlass if supported, otherwise fallback to marlin for weight-only FP4
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.experts_cls: type[mk.FusedMoEExperts]
         if self.use_cutlass_mxfp4:
@@ -194,7 +195,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 experts_cls=self.experts_cls,
                 mxfp4_backend=self.mxfp4_backend,
                 shared_experts=layer.shared_experts,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def apply(

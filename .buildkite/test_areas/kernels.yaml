@@ -105,7 +105,11 @@ steps:
   device: h100
   num_devices: 1
   source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
   - tools/install_deepgemm.sh
+  - tools/build_deepgemm_C.py
+  - tools/setup_deepgemm_pythons.sh
+  - tools/check_wheel_deepgemm.py
   - vllm/utils/deep_gemm.py
   - vllm/model_executor/layers/fused_moe
   - vllm/model_executor/layers/quantization
@@ -115,6 +119,7 @@ steps:
   - tests/kernels/attention/test_deepgemm_attention.py
   - tests/quantization/test_cutlass_w4a16.py
   commands:
+    - python3 ../tools/check_wheel_deepgemm.py
     - pytest -v -s kernels/quantization/test_block_fp8.py
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
@@ -242,7 +247,7 @@ steps:
 - label: Kernels FusedMoE Layer Test (2 B200s)
   key: kernels-fusedmoe-layer-test-2-b200s
   timeout_in_minutes: 90
-  device: b200
+  device: b200-k8s
   num_devices: 2
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/

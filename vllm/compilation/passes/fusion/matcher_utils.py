@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+    DeepseekScalingRotaryEmbedding,
+)
 from vllm.platforms import current_platform
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -158,6 +161,87 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         return result
 
 
+class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
+    def __init__(
+        self,
+        is_neox: bool,
+        head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        use_flashinfer: bool = False,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = DeepseekScalingRotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.is_neox = is_neox
+        self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.rotary_dim = head_size
+        self.use_flashinfer = use_flashinfer
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(5)
+        query = self.empty(5, self.num_heads, self.head_size)
+        key = self.empty(5, self.num_kv_heads, self.head_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, query, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_flashinfer:
+            torch.ops.vllm.flashinfer_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox,
+            )
+            return query, key
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
+            DeepseekScalingRotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
+        )
+        return result
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
+            DeepseekScalingRotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
+        )
+        return result
+
+
 class MatcherQuantFP8(MatcherCustomOp):
     def __init__(
         self,
@@ -189,12 +273,7 @@ class MatcherQuantFP8(MatcherCustomOp):
                     "ROCm aiter fusion pass currently supports "
                     "quantization operation with group_size 128"
                 )
-                if current_platform.is_fp8_fnuz():
-                    self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
-                else:
-                    self.QUANT_OP = (
-                        torch.ops.vllm.triton_per_token_group_quant_fp8.default
-                    )
+                self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
 
         else:
             assert quant_key in QUANT_OPS, (
