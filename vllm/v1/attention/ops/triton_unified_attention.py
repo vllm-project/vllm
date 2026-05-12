@@ -514,7 +514,10 @@ def _get_tile_size(
     # Note: this may disable the fast path (TILE_SIZE == BLOCK_SIZE)
     # for non-power-of-2 block sizes
     if current_platform.is_navi():
-        tile_size = triton.next_power_of_2(block_size)
+        if current_platform.is_gfx1151() and is_prefill and head_size >= 80:
+            tile_size = 32
+        else:
+            tile_size = triton.next_power_of_2(block_size)
         # Cap TILE_SIZE to 128 when head_size > 128 to fit in 64KB LDS
         # and avoid 30+ min LLVM compilation times
         if head_size > 128:
@@ -682,12 +685,18 @@ def unified_attention(
 
         # Long context prefill optimization
         if max_seqlen_q >= 256:
-            # Strix Halo (gfx1151) tuning: BLOCK_M=64, waves_per_eu=4 for long contexts
-            if current_platform.is_gfx1151() and head_size >= 80:
-                BLOCK_M = 64
-                waves_per_eu = 4
+            # Strix Halo (gfx1151) tuning from systematic experiments
+            if current_platform.is_gfx1151():
+                num_stages_2d = 3
+                if head_size >= 80:
+                    BLOCK_M = 64
+                    waves_per_eu = 6
+                else:
+                    BLOCK_M = 128
+                    waves_per_eu = 4
             else:
                 BLOCK_M = 128
+                num_stages_2d = 1
 
             # Navi memory optimization: Cap BLOCK_M to fit Q tile in 64KB LDS
             q_tile_bytes = BLOCK_M * head_size * element_size
@@ -696,9 +705,8 @@ def unified_attention(
                 # Reserve headroom for K/V tiles
                 BLOCK_M = min(BLOCK_M, max_block_m - max_block_m % 16)
 
-            # Long context uses more warps and fewer stages
+            # Long context uses more warps
             num_warps_2d = 4
-            num_stages_2d = 1
 
             # Recalculate derived values
             BLOCK_Q = BLOCK_M // num_queries_per_kv
