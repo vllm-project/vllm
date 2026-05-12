@@ -1340,7 +1340,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 moe_config=self.moe,
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
                 shared_experts=layer.shared_experts,
             )
 

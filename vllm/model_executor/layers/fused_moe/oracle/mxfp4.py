@@ -147,7 +147,7 @@ def backend_to_kernel_cls(
         return [UnfusedOAITritonExperts]
 
     elif backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
             BatchedHummingGroupedExperts,
             HummingGroupedExperts,
             HummingIndexedExperts,
