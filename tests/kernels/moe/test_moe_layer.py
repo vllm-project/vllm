@@ -130,8 +130,8 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
 BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "allgather_reducescatter":     (True,  True,  True,  True),
     "mori":                        (True, False, False,  True),
-    "flashinfer_nvlink_two_sided": (True,  True, False, False),
-    "flashinfer_nvlink_one_sided": (True,  True, False, False),
+    "flashinfer_nvlink_two_sided": (False, True, False, False),
+    "flashinfer_nvlink_one_sided": (False, True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
     "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
