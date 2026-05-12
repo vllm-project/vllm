@@ -17,7 +17,7 @@ cutlass_torch = pytest.importorskip("cutlass.torch")
 from_dlpack = pytest.importorskip("cutlass.cute.runtime").from_dlpack
 
 from vllm.model_executor.specialized_models.kimi_k2_5_nvfp4.model import (  # noqa: E402
-    kimik25_rmsnorm_special_qkv_split,
+    kimi_fused_rmsnorm,
 )
 
 Q_LORA_RANK = 1536
@@ -87,7 +87,7 @@ def test_kimik25_cutlass_fused_rmsnorm_matches_two_pytorch_rmsnorms(
     assert actual_input.stride() == (TOTAL_LORA_RANK + QK_ROPE_HEAD_DIM, 1)
     assert not actual_input.is_contiguous()
 
-    kimik25_rmsnorm_special_qkv_split(
+    kimi_fused_rmsnorm(
         data=from_dlpack(actual_input).mark_layout_dynamic(),
         weights_q=from_dlpack(q_weight),
         weights_kv=from_dlpack(kv_weight),
