@@ -2266,10 +2266,22 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 "'quantized_layers' mapping in the quantization config."
             )
 
+        nvfp4_quant_methods = {
+            layer_info.get("quant_algo", "").upper()
+            for layer_info in quantized_layers.values()
+            if "NVFP4" in layer_info.get("quant_algo", "").upper()
+        }
+        if len(nvfp4_quant_methods) > 1:
+            raise ValueError(
+                "Mixed NVFP4 quant_algo variants within one checkpoint are "
+                f"not supported: {nvfp4_quant_methods}"
+            )
+        nvfp4_quant_method = next(iter(nvfp4_quant_methods), "NVFP4")
+
         # Determine group_size from the first NVFP4 entry if not provided.
         if group_size is None:
             for layer_info in quantized_layers.values():
-                if layer_info.get("quant_algo", "").upper() == "NVFP4":
+                if "NVFP4" in layer_info.get("quant_algo", "").upper():
                     group_size = layer_info.get("group_size", 16)
                     break
         if group_size is None:
@@ -2282,6 +2294,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             exclude_modules=[],
         )
         nvfp4_config = ModelOptNvFp4Config(
+            quant_method=nvfp4_quant_method,
             is_checkpoint_nvfp4_serialized=True,
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=[],
@@ -2358,8 +2371,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if quant_algo == "FP8":
                 return ModelOptFp8LinearMethod(self.fp8_config)
-            if quant_algo == "NVFP4":
-                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            if quant_algo and "NVFP4" in quant_algo:
+                return self.nvfp4_config.LinearMethodCls(self.nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
@@ -2369,7 +2382,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     quant_config=self.fp8_config,
                     moe_config=layer.moe_config,
                 )
-            if quant_algo == "NVFP4":
+            if quant_algo and "NVFP4" in quant_algo:
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
