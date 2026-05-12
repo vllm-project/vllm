@@ -434,6 +434,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         )
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
+        self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -942,7 +943,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         which has fixed kernel parameters (no autotuning), so only the
         prefill (chunked) path needs warming up.
         """
-        if hasattr(self, "_prefill_kernels_warmed_up"):
+        if self._prefill_kernels_warmed_up:
             return
         self._prefill_kernels_warmed_up = True
 
