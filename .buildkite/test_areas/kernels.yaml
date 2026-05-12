@@ -242,7 +242,7 @@ steps:
 - label: Kernels FusedMoE Layer Test (2 B200s)
   key: kernels-fusedmoe-layer-test-2-b200s
   timeout_in_minutes: 90
-  device: b200
+  device: b200-k8s
   num_devices: 2
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
