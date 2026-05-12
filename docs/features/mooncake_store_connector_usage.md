@@ -29,7 +29,6 @@ mooncake_master --port 50051
 Default ports:
 
 - RPC: 50051
-- HTTP metadata: 8080
 
 Multiple vLLM instances can share the same master server.
 
@@ -39,7 +38,7 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
 
 ```json
 {
-  "metadata_server": "http://127.0.0.1:8080/metadata",
+  "metadata_server": "P2PHANDSHAKE",
   "master_server_address": "127.0.0.1:50051",
   "global_segment_size": "80GB",
   "local_buffer_size": "4GB",
