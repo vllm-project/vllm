@@ -40,6 +40,7 @@ except ImportError as e:
 
 try:
     import vllm._C  # noqa: F401
+    import vllm._C_stable_libtorch  # noqa
 except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 

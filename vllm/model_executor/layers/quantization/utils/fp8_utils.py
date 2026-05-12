@@ -560,7 +560,7 @@ def per_token_group_quant_fp8(
 
     # prefer CUDA kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
-    if current_platform.is_cuda() and x.is_contiguous():
+    if current_platform.is_cuda_alike() and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,

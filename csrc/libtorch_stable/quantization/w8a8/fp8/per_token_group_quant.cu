@@ -2,12 +2,27 @@
 #include <torch/csrc/stable/ops.h>
 #include <torch/headeronly/util/Exception.h>
 #include <torch/headeronly/core/ScalarType.h>
-
+#include "../../../../cuda_compat.h"
 #include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
 
 #include <cmath>
 
-#include <cuda_fp8.h>
+#ifndef USE_ROCM
+  #include <cuda_fp8.h>
+#else
+  #if defined(NDEBUG)
+    #undef NDEBUG
+    #include <assert.h>
+    #define UNREACHABLE_CODE assert(false);
+    #define NDEBUG
+  #else
+    #define UNREACHABLE_CODE assert(false);
+  #endif
+  #include <hip/hip_fp8.h>
+
+typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
+typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3_fnuz;
+#endif
 
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
@@ -15,8 +30,23 @@
 #include "libtorch_stable/torch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
-  unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
-
+  constexpr int warp_size = WARP_SIZE;
+#ifdef USE_ROCM
+  const int lane = threadIdx.x % warp_size;
+  uint64_t mask;
+  if constexpr (warp_size == 64) {
+    const int group_base = lane & ~15;
+    // 0xffff'0000'0000'0000
+    // 0x0000'ffff'0000'0000
+    // 0x0000'0000'ffff'0000
+    // 0x0000'0000'0000'ffff
+    mask = uint64_t(0xffffull) << group_base;
+  } else {
+    mask = lane >= warp_size / 2 ? 0xffff0000ull : 0x0000ffffull;
+  }
+#else
+  const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
+#endif
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
@@ -59,10 +89,15 @@ __device__ __forceinline__ float ComputeGroupScale(
 }
 
 template <typename T, typename DST_DTYPE>
-__device__ __forceinline__ void QuantizeGroup(
-    const T* __restrict__ smem_group, DST_DTYPE* __restrict__ group_output,
-    const int group_size, const int lane_id, const int threads_per_group,
-    const float y_s, const float min_8bit, const float max_8bit) {
+__device__ __forceinline__
+#ifdef USE_ROCM
+    std::enable_if_t<!std::is_same_v<DST_DTYPE, __nv_fp8_e4m3> &&
+                     !std::is_same_v<DST_DTYPE, __nv_fp8_e4m3_fnuz>>
+#endif
+    QuantizeGroup(const T* __restrict__ smem_group,
+                  DST_DTYPE* __restrict__ group_output, const int group_size,
+                  const int lane_id, const int threads_per_group,
+                  const float y_s, const float min_8bit, const float max_8bit) {
   constexpr int vec_size = 16 / sizeof(T);
 
   // quantize shared -> global 8-bit
@@ -79,6 +114,51 @@ __device__ __forceinline__ void QuantizeGroup(
       threads_per_group,  // stride
       scalar_op_quant);   // scalar handler
 }
+
+// On ROCm both fn and fnuz implementations would need to be compiled into
+// the fat binary, because the host is compiled once and needs to dispatch
+// in runtime.
+// The default constructor and conversion operators exist on the __device__
+// only for the current supported type, the other is only available on
+// __host__. So we're using the explicit conversion and avoiding the
+// future use of vec_n_t<__nv_fp8_e4m3[_funz]> as one of them will always
+// be unavailable
+#ifdef USE_ROCM
+template <typename T, typename DST_DTYPE>
+__device__ __forceinline__
+    std::enable_if_t<std::is_same_v<DST_DTYPE, __nv_fp8_e4m3> ||
+                     std::is_same_v<DST_DTYPE, __nv_fp8_e4m3_fnuz>>
+    QuantizeGroup(const T* __restrict__ smem_group,
+                  DST_DTYPE* __restrict__ group_output, const int group_size,
+                  const int lane_id, const int threads_per_group,
+                  const float y_s, const float min_8bit, const float max_8bit) {
+  constexpr int vec_size = 16 / sizeof(T);
+  if constexpr (std::is_same_v<DST_DTYPE, __nv_fp8_e4m3>) {
+  #if !(HIP_FP8_TYPE_OCP)
+    UNREACHABLE_CODE
+  #endif
+  } else {
+  #if HIP_FP8_TYPE_OCP
+    UNREACHABLE_CODE
+  #endif
+  }
+
+  auto* out_bytes = reinterpret_cast<uint8_t*>(group_output);
+  auto scalar_op_quant = [&] __device__(uint8_t& dst, const T& src) {
+    float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
+    dst = __hip_cvt_float_to_fp8(q, DST_DTYPE::__default_saturation,
+                                 DST_DTYPE::__default_interpret);
+  };
+
+  vllm::vectorize_with_alignment<vec_size>(
+      smem_group,         // in (shared)
+      out_bytes,          // out (global quant tensor)
+      group_size,         // elements
+      lane_id,            // tid
+      threads_per_group,  // stride
+      scalar_op_quant);   // scalar handler
+}
+#endif
 
 template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
           bool SCALE_UE8M0 = false, typename scale_packed_t = float>
@@ -228,6 +308,10 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
         if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
+#ifdef USE_ROCM
+        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
+#endif
         } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
         }
@@ -308,7 +392,11 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   // 8-lane subgroup shuffle reduce (octet of the warp). The mask selects the
   // 8 lanes within the warp that share a group.
+#ifndef USE_ROCM
   unsigned mask = 0xffu << (threadIdx.x & 24u);
+#else
+  auto mask = static_cast<unsigned long long>(0xffu << (threadIdx.x & 24u));
+#endif
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
@@ -477,6 +565,10 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
       input.scalar_type(), "per_token_group_quant_8bit_packed_register", ([&] {
         if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_REG_KERNEL(scalar_t, __nv_fp8_e4m3);
+#ifdef USE_ROCM
+        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_REG_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
+#endif
         } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_REG_KERNEL(scalar_t, int8_t);
         } else {
