@@ -325,7 +325,10 @@ class MooncakeStoreScheduler:
 
         # Handle requests with pending load specs not yet scheduled
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
-        for request_id, (unfinished_req, block_ids) in self._unfinished_requests.items():
+        for request_id, (
+            unfinished_req,
+            block_ids,
+        ) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
                 if not load_spec:
