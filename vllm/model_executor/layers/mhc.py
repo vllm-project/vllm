@@ -8,8 +8,17 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 
 
+# --8<-- [start:mhc_pre]
 @CustomOp.register("mhc_pre")
 class MHCPreOp(CustomOp):
+    """MHC pre block.
+
+    Computes mix logits from RMS-normalized HC residual streams, then
+    returns post_mix, comb_mix, and
+    layer_input = sum_i pre_mix_i * residual_i.
+    """
+
+    # --8<-- [end:mhc_pre]
     @classmethod
     def enabled(cls) -> bool:
         return True
@@ -83,8 +92,17 @@ class MHCPreOp(CustomOp):
         raise NotImplementedError("Native implementation of mhc_pre is not available")
 
 
+# --8<-- [start:mhc_post]
 @CustomOp.register("mhc_post")
 class MHCPostOp(CustomOp):
+    """MHC post block.
+
+    Combines the layer output with the HC residual streams:
+    out_j = post_layer_mix_j * x + sum_i comb_res_mix_ij * residual_i.
+    """
+
+    # --8<-- [end:mhc_post]
+
     @classmethod
     def enabled(cls) -> bool:
         return True
@@ -127,8 +145,17 @@ class MHCPostOp(CustomOp):
         raise NotImplementedError("Native implementation of mhc_post is not available")
 
 
+# --8<-- [start:hc_head]
 @CustomOp.register("hc_head")
 class HCHeadOp(CustomOp):
+    """HC head reduction for DeepSeek V4.
+
+    Computes gates from the RMS-normalized flattened HC residual and
+    returns out = sum_i gate_i * residual_i, collapsing hc_mult streams
+    to one.
+    """
+
+    # --8<-- [end:hc_head]
     @classmethod
     def enabled(cls) -> bool:
         return True
@@ -199,8 +226,17 @@ class HCHeadOp(CustomOp):
         raise NotImplementedError("Native implementation of hc_head is not available")
 
 
+# --8<-- [start:mhc_fused_post_pre]
 @CustomOp.register("mhc_fused_post_pre")
 class MHCFusedPostPreOp(CustomOp):
+    """Fused MHC post block followed by the next MHC pre block.
+
+    Equivalent to applying MHCPostOp and then MHCPreOp to the updated
+    residual streams, returning residual_cur, post_mix_cur, comb_mix_cur,
+    and layer_input_cur.
+    """
+
+    # --8<-- [end:mhc_fused_post_pre]
     @classmethod
     def enabled(cls) -> bool:
         return True
