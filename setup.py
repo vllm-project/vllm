@@ -970,6 +970,9 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "nvidia-cutlass-dsl" in req and cuda_major == "13":
+                # Add [cu13] extra to get CUDA 13 specific libs.
+                req = req.replace("nvidia-cutlass-dsl", "nvidia-cutlass-dsl[cu13]")
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
