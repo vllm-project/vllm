@@ -1391,13 +1391,13 @@ class DeepseekV2Model(nn.Module):
         forward_ctx = get_forward_context()
         afd_metadata = forward_ctx.afd_metadata if forward_ctx is not None else None
 
+        aux_hidden_states = []
         if afd_metadata != None:
             # TODO(jcz):aux_hidden_states
             hidden_states, residual = self.forward_with_afd(
                 hidden_states, residual, positions, afd_metadata, llama_4_scaling
             )
         else:
-            aux_hidden_states = []
             for idx, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer),
                 start=self.start_layer,

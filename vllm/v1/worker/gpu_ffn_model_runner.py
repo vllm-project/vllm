@@ -184,20 +184,23 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                                 attn_num_tokens[start_a_idx:end_a_idx].sum().item()
                             )
 
-                        ffn_dp_rank = self.vllm_config.parallel_config.data_parallel_rank
-                        ffn_num_tokens = ffn_num_tokens_list[ffn_dp_rank]
-                        ffn_num_tokens_across_dp_cpu = torch.tensor(
-                            ffn_num_tokens_list,
-                            dtype=attn_num_tokens.dtype,
-                            device=attn_num_tokens.device,
-                        )
+                        if self.vllm_config.parallel_config.data_parallel_size > 1:
+                            ffn_dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+                            ffn_num_tokens = ffn_num_tokens_list[ffn_dp_rank]
+                            ffn_num_tokens_across_dp_cpu = torch.tensor(
+                                ffn_num_tokens_list,
+                                dtype=attn_num_tokens.dtype,
+                                device=attn_num_tokens.device,
+                            )
 
-                        scaled_dp_metadata = DPMetadata.make(
-                            parallel_config=self.vllm_config.parallel_config,
-                            num_tokens=ffn_num_tokens,
-                            num_tokens_across_dp_cpu=ffn_num_tokens_across_dp_cpu,
-                        )
-                        get_forward_context().dp_metadata = scaled_dp_metadata
+                            scaled_dp_metadata = DPMetadata.make(
+                                parallel_config=self.vllm_config.parallel_config,
+                                num_tokens=ffn_num_tokens,
+                                num_tokens_across_dp_cpu=ffn_num_tokens_across_dp_cpu,
+                            )
+                            get_forward_context().dp_metadata = scaled_dp_metadata
+                        else:
+                            get_forward_context().dp_metadata = None
                     else:
                         get_forward_context().dp_metadata = dp_metadata
                     rank_ffn_output = self._execute_eager_mode(

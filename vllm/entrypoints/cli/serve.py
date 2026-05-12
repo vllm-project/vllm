@@ -256,6 +256,7 @@ def run_multi_api_server(args: argparse.Namespace):
     engine_args._api_process_rank = -1
 
     usage_context = UsageContext.OPENAI_API_SERVER
+    print("Starting API server... args:", args)
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
