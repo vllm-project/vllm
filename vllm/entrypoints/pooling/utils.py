@@ -148,7 +148,8 @@ def get_pooling_usage(
     pooling_outputs: Sequence[PoolingRequestOutput],
 ) -> UsageInfo:
     num_prompt_tokens = sum(
-        len(output.prompt_token_ids) if output.prompt_token_ids is not None else 0 for output in pooling_outputs
+        len(output.prompt_token_ids) if output.prompt_token_ids is not None else 0
+        for output in pooling_outputs
     )
     return UsageInfo(
         prompt_tokens=num_prompt_tokens,

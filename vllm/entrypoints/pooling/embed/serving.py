@@ -13,13 +13,13 @@ from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext
 from ..utils import (
     BytesEncodingFormat,
-    encode_pooling_output_float,
-    encode_pooling_output_float_or_ndarray,
     JsonEncodingFormat,
     build_pooling_bytes_streaming_response,
+    encode_pooling_output_float,
+    encode_pooling_output_float_or_ndarray,
+    get_json_response_cls,
     get_pooling_output_encoder,
     get_pooling_usage,
-    get_json_response_cls,
 )
 from .io_processor import EmbedIOProcessor
 from .protocol import (
@@ -182,7 +182,10 @@ class ServingEmbedding(PoolingServing):
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
 
-        all_floats = [encode_pooling_output_float(out) for out in ctx.final_res_batch]
+        all_floats = [
+            cast(list[float], encode_pooling_output_float(out))
+            for out in ctx.final_res_batch
+        ]
         total_tokens = get_pooling_usage(ctx.final_res_batch).prompt_tokens
 
         image_tokens = total_tokens if request.images is not None else 0
