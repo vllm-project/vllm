@@ -15,4 +15,4 @@ torch==2.11.0+xpu
 torchaudio
 torchvision
 
-vllm_xpu_kernels @ https://github.com/vllm-project/vllm-xpu-kernels/releases/download/v0.1.7/vllm_xpu_kernels-0.1.7-cp38-abi3-manylinux_2_28_x86_64.whl
+vllm_xpu_kernels @ https://github.com/vllm-project/vllm-xpu-kernels/releases/download/v0.1.8/vllm_xpu_kernels-0.1.8-cp38-abi3-manylinux_2_28_x86_64.whl
