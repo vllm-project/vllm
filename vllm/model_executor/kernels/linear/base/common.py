@@ -11,38 +11,21 @@ from typing import ClassVar, Generic, TypeVar
 import torch
 from torch.library import Library
 
-# Library for composed-kernel ops. Each Composite subclass registers its
-# per-layer dispatch op under torch.ops.composed_kernel.<op_name>.
+# Each Composite registers a dispatch op under torch.ops.composed_kernel.
 composed_kernel_lib = Library("composed_kernel", "FRAGMENT")  # noqa
 
 
 @dataclass
 class Config:
-    """Base class for kernel layer configurations.
-
-    Scheme-specific bases (e.g. ``base/w16a16.py``) subclass this to define
-    the concrete fields required by their kernels. Passing a typed
-    ``Config`` subclass through ``Kernel.__init__`` and ``can_implement``
-    ensures that configuration validation is scheme-aware at the call site.
-    """
+    """Base config; subclasses (e.g. ``base/w16a16.py``) add scheme-specific fields."""
 
 
 ConfigT = TypeVar("ConfigT", bound=Config)
 
 
 class Kernel(ABC, Generic[ConfigT]):
-    """Abstract base class defining the interface contract for all linear GEMM kernels.
-
-    A ``Kernel`` encapsulates a single hardware- or algorithm-specific
-    implementation of a linear projection. Concrete subclasses are selected
-    at layer-initialisation time based on platform support and weight
-    configuration, and are expected to remain fixed for the lifetime of the
-    layer.
-
-    The class is structured around two complementary entry points,
-    ``apply`` and ``apply_weights``, whose separation is load-bearing for
-    compile-time correctness.
-    """
+    """A linear GEMM implementation. Subclasses pick one hardware/algorithm
+    path and stay fixed for the life of the layer."""
 
     config: ConfigT
 
@@ -69,45 +52,22 @@ class Kernel(ABC, Generic[ConfigT]):
 
     @abstractmethod
     def apply_weights(self, *args, **kwargs) -> torch.Tensor:
-        """Execute the kernel for the given layer and inputs.
-
-        This is the primary runtime entry point. Implementations read
-        layer state directly (e.g. ``layer.processed_weight``) and delegate
-        to ``type(self).apply``. Routing through ``type(self)`` rather than
-        a direct call to ``apply`` is essential: it ensures that a subclass
-        override of ``apply`` is honoured without requiring any corresponding
-        override of ``apply_weights`` in the predicated subclass.
-
-        Scheme-specific bases narrow the signature to the concrete arguments
-        required by their calling convention.
-        """
+        """Run the kernel for the layer. Delegate to ``type(self).apply`` so
+        ``PredicateKernel`` subclasses can override ``apply`` without
+        overriding this method."""
         ...
 
     @staticmethod
     @abstractmethod
     def apply(*args, **kwargs) -> torch.Tensor:
-        """Define the pure tensor semantics of this kernel.
-
-        ``apply`` is a *static* method so that its signature is fully
-        inspectable at class-definition time, independent of any instance
-        state. ``make_predicated`` overrides ``apply`` on the generated
-        ``_PredicatedKernel`` subclass to redirect calls through the registered
-        op, thereby avoiding Python-level conditionals that would otherwise
-        cause graph breaks under ``torch.compile`` and CUDA graph capture.
-
-        Scheme-specific bases narrow the signature and provide a safe default
-        implementation (e.g. ``torch.nn.functional.linear`` for w16a16) that
-        serves as the terminal fallback in the dispatch chain.
-        """
+        """Pure-function GEMM. Static so the signature is inspectable at
+        class-definition time (used for op registration / tracing)."""
         ...
 
 
 class PredicateKernel(Kernel[ConfigT]):
-    """A Kernel that participates in a predicated chain.
-
-    Subclasses must override ``predicate`` with  check
-    whose signature mirrors ``apply`` for the scheme.
-    """
+    """Kernel with a predicate. Override ``predicate`` with a check matching
+    ``apply``'s args."""
 
     @staticmethod
     @abstractmethod
@@ -115,26 +75,18 @@ class PredicateKernel(Kernel[ConfigT]):
 
 
 def _hash_chain_name(kernel_names: list[str]) -> str:
-    """Hash an ordered list of kernel identity strings to a short 8-hex
-    digest."""
+    """Hash an ordered list of kernel identity strings to a short 8-hex digest."""
     return hashlib.sha1(".".join(kernel_names).encode()).hexdigest()[:8]
 
 
 class Composite(Kernel[ConfigT]):
-    """Generic dispatching Kernel built from a list of inner kernels.
+    """Dispatching Kernel built from a chain of inner kernels.
 
-    Subclasses declare:
-        _scheme_tag    : str — short tag baked into the registered op name
-        _chain         : list[type[Kernel]] — PredicateKernels followed by an
-                         optional plain-Kernel terminal candidate
-        _dispatcher_fn : Callable — scheme-specific dispatch factory; takes
-                         (predicate, primary, fallback_fn) and returns a
-                         typed closure suitable for direct_register_custom_op
-        _native_impl   : Callable — scheme-specific safe-default impl. Used as
-                         (a) the runtime safety net when no PredicateKernel
-                         matches and the plain terminal candidate (if any)
-                         isn't viable for this config, and (b) the fake_impl
-                         passed to direct_register_custom_op for tracing.
+    Subclasses set:
+        _scheme_tag: op-name prefix
+        _chain: PredicateKernels, optionally ending in a plain Kernel terminal
+        _dispatcher_fn: wraps (predicate, primary, fallback) into a closure
+        _native_impl: safe-default impl; runtime fallback and fake_impl for tracing
     """
 
     _scheme_tag: ClassVar[str]
@@ -174,8 +126,6 @@ class Composite(Kernel[ConfigT]):
             k for k in predicated if k.is_supported()[0] and k.can_implement(config)[0]
         ]
 
-        # native_impl is always a safe runtime fallback, so dispatch_fn is
-        # guaranteed non-None even if no PredicateKernel matches at apply time.
         dispatch_fn = terminal_apply
         for primary in reversed(viable):
             if not issubclass(primary, PredicateKernel):
@@ -207,8 +157,7 @@ class Composite(Kernel[ConfigT]):
                 target_lib=composed_kernel_lib,
             )
 
-        # Cache the op handle so apply_weights doesn't re-resolve via getattr
-        # on every forward.
+        # Cache to avoid getattr on every forward.
         self._op = getattr(torch.ops.composed_kernel, self._op_name)
 
     def apply_weights(
