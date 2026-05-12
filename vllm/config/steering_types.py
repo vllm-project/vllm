@@ -641,6 +641,39 @@ def _build_named_payload_from_resolved(
     return payload
 
 
+AUTO_PROMOTE_NAME_PREFIX = "_auto_"
+
+
+def auto_promote_hashes_from_module_ref(
+    module_ref: tuple[str, float] | None,
+) -> tuple[int, int] | None:
+    """Recover ``(prefill_hash, decode_hash)`` from an auto-promoted name.
+
+    Returns ``None`` when *module_ref* is ``None`` or names a user-defined
+    module.  Auto-promoted names follow the format
+    ``_auto_<prefill_hex16>_<decode_hex16>`` and embed the original
+    pre-promotion inline-content hashes (see
+    :func:`_auto_promote_prep`), so the request hash can be recovered
+    by parsing the name alone — no access to the original inline
+    vectors required.  This is the linchpin of auto-promote being a
+    transport-only optimization: the request identity stays equal to
+    the inline-content hash on both sides of the promotion.
+    """
+    if module_ref is None:
+        return None
+    name, _ = module_ref
+    if not name.startswith(AUTO_PROMOTE_NAME_PREFIX):
+        return None
+    body = name[len(AUTO_PROMOTE_NAME_PREFIX):]
+    parts = body.split("_")
+    if len(parts) != 2 or len(parts[0]) != 16 or len(parts[1]) != 16:
+        return None
+    try:
+        return int(parts[0], 16), int(parts[1], 16)
+    except ValueError:
+        return None
+
+
 def _auto_promote_prep(
     sp: SamplingParams,
     registry_lru: SteeringAutoPromoteLRU,
@@ -710,7 +743,7 @@ def _auto_promote_prep(
         assert name is not None
         return name, None, None
     # status == "second": this is the moment to register.
-    name = f"_auto_{h_prefill:016x}_{h_decode:016x}"
+    name = AUTO_PROMOTE_NAME_PREFIX + f"{h_prefill:016x}_{h_decode:016x}"
     payload = _build_named_payload_from_resolved(sp)
     if not payload:
         return None
@@ -723,10 +756,18 @@ def _auto_promote_apply(sp: SamplingParams, name: str) -> None:
 
     Both inline and packed fields are cleared because *sp* may have been
     pre-packed by an earlier request in the same shared-``[sp]*N`` batch.
-    The cached_property values for ``effective_*_steering`` and
-    ``effective_*_steering_hash`` are left intact: ``hash_steering_config``
-    folds the new ``module_ref`` into the digest on first read, and the
-    worker-side resolver pulls vectors from the registered module name.
+    The request hash is intentionally preserved at its pre-promotion
+    (inline-content) value: auto-promotion is purely a worker-side
+    transport optimization (the worker resolves vectors from the named
+    module instead of unpacking inline blobs), and folding the auto-
+    generated ``_auto_<hex>`` name into the hash would change the
+    request identity in flight.  Within a shared-``[sp]*N`` batch the
+    first request reaches ``_add_request`` before promotion and ships
+    with the inline hash, while siblings register after promotion;
+    re-deriving the hash from ``module_ref`` here would produce a
+    different value for siblings, doubling the ``(hash, phase)`` row
+    slots the worker's strict-capacity table needs to service the same
+    logical config across that batch.
     """
     sp.steering_module_ref = (name, 1.0)
     sp.steering_vectors = None
@@ -734,13 +775,11 @@ def _auto_promote_apply(sp: SamplingParams, name: str) -> None:
     sp.decode_steering_vectors = None
     sp._effective_prefill_steering_packed = None
     sp._effective_decode_steering_packed = None
-    # Drop any cached resolved/hash values — they were keyed on the inline
-    # spec; the worker now resolves via the module name + new module_ref
-    # contribution to the hash.
+    # Drop the cached resolved-vector dicts only.  The hash cached_props
+    # are deliberately left intact so the pre-promotion inline-content
+    # hash continues to identify this request end-to-end.
     sp.__dict__.pop("effective_prefill_steering", None)
     sp.__dict__.pop("effective_decode_steering", None)
-    sp.__dict__.pop("prefill_steering_config_hash", None)
-    sp.__dict__.pop("decode_steering_config_hash", None)
 
 
 def maybe_auto_promote_steering_modules(

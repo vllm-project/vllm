@@ -34,6 +34,7 @@ import pytest
 
 from vllm.config.steering_types import (
     SteeringAutoPromoteLRU,
+    auto_promote_hashes_from_module_ref,
     maybe_auto_promote_steering_modules,
     maybe_auto_promote_steering_modules_async,
 )
@@ -431,3 +432,92 @@ class TestAsyncAutoPromote:
             "register_steering_modules",
             "unregister_steering_modules",
         ]
+
+
+class TestHashStabilityAcrossPromotion:
+    """Auto-promote is a transport-only optimization, so the request
+    hash MUST remain equal to the pre-promotion inline-content hash on
+    both sides of the promotion (client SP, and a freshly-deserialized
+    sp on the engine-core side).  Otherwise a shared-``[sp]*N`` batch
+    that mixes pre- and post-promotion sps doubles the
+    ``(hash, phase)`` row slots the worker's strict-capacity table has
+    to service the same logical config.
+    """
+
+    def test_promoted_sp_hash_matches_pre_promotion(self):
+        # Two identical sps; promote the second.  Both must carry the
+        # same prefill/decode hash post-promotion.
+        rpc = _RpcSpy()
+        lru = SteeringAutoPromoteLRU(capacity=4)
+        sp_first = _fresh_sp()
+        sp_second = _fresh_sp()
+        h_prefill = sp_first.prefill_steering_config_hash
+        h_decode = sp_first.decode_steering_config_hash
+        maybe_auto_promote_steering_modules(sp_first, rpc, lru)
+        maybe_auto_promote_steering_modules(sp_second, rpc, lru)
+        # sp_first untouched (first sight); sp_second promoted.
+        assert sp_first.steering_module_ref is None
+        assert sp_second.steering_module_ref is not None
+        # Hash equality is the invariant.
+        assert sp_first.prefill_steering_config_hash == h_prefill
+        assert sp_second.prefill_steering_config_hash == h_prefill
+        assert sp_first.decode_steering_config_hash == h_decode
+        assert sp_second.decode_steering_config_hash == h_decode
+
+    def test_post_ipc_view_recovers_hash_from_module_ref(self):
+        # Simulate the engine-core view: a freshly-constructed sp with
+        # only the post-promotion fields populated (inline cleared,
+        # packed cleared, module_ref set) and no cached_property values
+        # carried across IPC.
+        rpc = _RpcSpy()
+        lru = SteeringAutoPromoteLRU(capacity=4)
+        sp_seed = _fresh_sp()
+        sp_promoted = _fresh_sp()
+        h_prefill = sp_seed.prefill_steering_config_hash
+        h_decode = sp_seed.decode_steering_config_hash
+        maybe_auto_promote_steering_modules(sp_seed, rpc, lru)
+        maybe_auto_promote_steering_modules(sp_promoted, rpc, lru)
+        module_ref = sp_promoted.steering_module_ref
+        assert module_ref is not None
+
+        # Build the engine-core's view: an sp that looks like what
+        # arrived on the wire (inline/packed cleared, module_ref set,
+        # no cached_property dict entries).
+        sp_engine_view = _fresh_sp()
+        sp_engine_view.steering_vectors = None
+        sp_engine_view.prefill_steering_vectors = None
+        sp_engine_view.decode_steering_vectors = None
+        sp_engine_view._effective_prefill_steering_packed = None
+        sp_engine_view._effective_decode_steering_packed = None
+        sp_engine_view.steering_module_ref = module_ref
+        # Hash recovery from the auto-name must produce the same value
+        # the client saw before promotion.
+        assert sp_engine_view.prefill_steering_config_hash == h_prefill
+        assert sp_engine_view.decode_steering_config_hash == h_decode
+
+    def test_user_named_module_ref_keeps_module_ref_in_hash(self):
+        # Sanity: user-named modules (non-_auto_ prefix) still fold
+        # (name, scale) into the hash, so this regression-style change
+        # doesn't silently weaken named-module identity.
+        sp_a = _fresh_sp()
+        sp_b = _fresh_sp()
+        sp_a.steering_module_ref = ("my_module", 1.0)
+        sp_b.steering_module_ref = ("my_module", 2.0)
+        # Different scale -> different hash.
+        assert (
+            sp_a.prefill_steering_config_hash
+            != sp_b.prefill_steering_config_hash
+        )
+
+    def test_recover_helper_returns_none_for_non_auto(self):
+        assert auto_promote_hashes_from_module_ref(None) is None
+        assert (
+            auto_promote_hashes_from_module_ref(("user_module", 1.0)) is None
+        )
+        assert auto_promote_hashes_from_module_ref(("_auto_short", 1.0)) is None
+
+    def test_recover_helper_parses_auto_name(self):
+        h_p, h_d = 0x7FFFFFFFFFFFFFFF, 0x0123456789ABCDEF
+        name = f"_auto_{h_p:016x}_{h_d:016x}"
+        recovered = auto_promote_hashes_from_module_ref((name, 1.0))
+        assert recovered == (h_p, h_d)
