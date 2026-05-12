@@ -1366,6 +1366,7 @@ def test_stream_interval_content_between_tool_calls(
     assert args0 == {"city": "Beijing"}
     assert args1 == {"city": "Shanghai"}
 
+
 def test_extract_tool_calls_with_responses_format_tools(glm4_moe_tokenizer):
     """Test extract tool call with Responses API FunctionTool input.
 
