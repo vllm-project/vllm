@@ -1,18 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""OBJ (S3) secondary tier implementation."""
+"""Object store secondary tier implementation."""
 
-from collections.abc import Collection, Iterable
+from collections.abc import Iterable
+from typing import NamedTuple
+
+import numpy as np
+import torch
+from nixl._api import nixl_agent, nixl_agent_config, nixl_xfer_handle
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, get_offload_block_hash, get_offload_group_idx
+from vllm.v1.kv_offload.base import (
+    OffloadKey,
+    ReqContext,
+    get_offload_block_hash,
+    get_offload_group_idx,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
-from nixl._api import nixl_agent, nixl_agent_config
-
-from vllm.v1.kv_offload.tiering.obj.nixl_engine import NixlEngine, READ, WRITE
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 logger = init_logger(__name__)
+
+WRITE = "WRITE"
+READ = "READ"
+NIXL_PROC = "PROC"
+NIXL_DONE = "DONE"
+
+class TransferEntry(NamedTuple):
+    xfer_handle: nixl_xfer_handle
+    files_desc: object
 
 
 class ObjectStoreSecondaryTierManager(SecondaryTierManager):
@@ -28,63 +44,133 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         prefix: str = "",
         io_threads: int = 4,
     ):
-        self._engine = NixlEngine(obj_config, io_threads=io_threads)
-        lookup_agent_config = nixl_agent_config(backends=[])
-        self._lookup_agent = nixl_agent("ObjLookup", lookup_agent_config)
-        self._lookup_agent.create_backend("OBJ", obj_config.to_nixl_params())
+        agent_config = nixl_agent_config(backends=[])
+        self._agent = nixl_agent("ObjAgent", agent_config)
+        params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
+        self._agent.create_backend("OBJ", params)
+        self._transfers: dict[int, TransferEntry] = {}
+        self._primary_tensor: torch.Tensor | None = None
+        self._primary_reg = None
+        self._base_addr: int = 0
+        self._stride: int = 0
         self._prefix = f"{prefix}/" if prefix else ""
 
         self._probe_connectivity()
 
     def _probe_connectivity(self) -> None:
-        """Verify S3 connectivity at startup via a NIXL lookup probe.
+        """Verify object store connectivity at startup via a NIXL lookup probe.
 
         Performs a single exists() check against a synthetic key that will
         never exist. A True/False result confirms the bucket is reachable;
-        an exception indicates misconfigured S3 params and raises RuntimeError.
+        an exception indicates misconfigured obj store params and raises RuntimeError.
         """
         probe_key = "__nixl_probe__/connectivity_test"
         try:
             self._exists(probe_key)
-            logger.info("OBJ tier S3 connectivity probe succeeded")
+            logger.info("Object store tier connectivity probe succeeded")
         except Exception as e:
             raise RuntimeError(
-                f"OBJ tier S3 connectivity probe failed — check bucket, "
+                f"Object store tier connectivity probe failed — check bucket, "
                 f"endpoint_override, access_key, secret_key, and scheme. "
                 f"Error: {e}"
             ) from e
 
     def set_primary_view(self, view: memoryview) -> None:
-        self._engine.set_primary_view(view)
+        """Register the entire primary CPU buffer with NIXL once."""
+        np_arr = np.asarray(view)
+        self._primary_tensor = torch.as_tensor(np_arr)
+        self._primary_reg = self._agent.register_memory([self._primary_tensor])
+        self._base_addr = self._primary_tensor.data_ptr()
+        self._stride = view.strides[0]
 
-    def _exists(self, s3_key: str) -> bool:
-        return self._lookup_agent.query_memory([(0, 1, 0, s3_key)], "OBJ", "OBJ")[0] is not None
+    def _exists(self, obj_key: str) -> bool:
+        return self._agent.query_memory([(0, 1, 0, obj_key)], "OBJ", "OBJ")[0] is not None
 
     def _get_obj_key(self, key: OffloadKey) -> str:
         h = get_offload_block_hash(key)[-8:].hex()
         g = get_offload_group_idx(key)
         return f"{self._prefix}group_{g}/{h[:3]}/{h[3:5]}/{h}.bin"
 
+    def _submit_transfer(
+        self,
+        job_id: int,
+        block_ids: Iterable[int],
+        obj_keys: Iterable[str],
+        op: str,
+    ) -> bool:
+        """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
+        blocks_data = [
+            (self._base_addr + int(bid) * self._stride, self._stride, 0)
+            for bid in block_ids
+        ]
+        nixl_files = [(0, self._stride, 0, key) for key in obj_keys]
+
+        xfer_desc = self._agent.get_xfer_descs(blocks_data, "DRAM")
+        if xfer_desc is None:
+            logger.warning("get_xfer_descs failed for job %d", job_id)
+            return False
+
+        files_desc = self._agent.register_memory(nixl_files, "OBJ")
+        if files_desc is None:
+            logger.warning("register_memory (OBJ) failed for job %d", job_id)
+            return False
+
+        xfer_handle = self._agent.initialize_xfer(
+            op, xfer_desc, files_desc.trim(), "ObjNixlEngine"
+        )
+        if not xfer_handle:
+            logger.warning("initialize_xfer failed for job %d", job_id)
+            self._agent.deregister_memory(files_desc)
+            return False
+
+        state = self._agent.transfer(xfer_handle)
+        if state == "ERR":
+            logger.warning("agent.transfer failed for job %d", job_id)
+            self._agent.deregister_memory(files_desc)
+            self._agent.release_xfer_handle(xfer_handle)
+            return False
+
+        self._transfers[job_id] = TransferEntry(xfer_handle, files_desc)
+        return True
+
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         return self._exists(self._get_obj_key(key))
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        s3_keys = (self._get_obj_key(k) for k in job_metadata.keys)
-        self._engine.submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, s3_keys, WRITE
-        )
+        obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
+        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, WRITE)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        s3_keys = (self._get_obj_key(k) for k in job_metadata.keys)
-        self._engine.submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, s3_keys, READ
-        )
+        obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
+        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, READ)
 
     def get_finished(self) -> Iterable[JobResult]:
-        return self._engine.get_finished()
+        """Poll in-flight transfers; return completed (job_id, success) pairs."""
+        results: list[JobResult] = []
+        for job_id, entry in list(self._transfers.items()):
+            try:
+                state = self._agent.check_xfer_state(entry.xfer_handle)
+            except Exception as exc:
+                logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
+            if state == NIXL_PROC:
+                continue
+            del self._transfers[job_id]
+            self._agent.deregister_memory(entry.files_desc)
+            self._agent.release_xfer_handle(entry.xfer_handle)
+            if state == NIXL_DONE:
+                logger.warning("transfer failed job=%d state=%s", job_id, state)
+            results.append(JobResult(job_id=job_id))
+        return results
 
     def shutdown(self) -> None:
-        self._engine.shutdown()
+        for entry in self._transfers.values():
+            self._agent.release_xfer_handle(entry.xfer_handle)
+            self._agent.deregister_memory(entry.files_desc)
+        self._transfers.clear()
+        if self._primary_reg is not None:
+            self._agent.deregister_memory(self._primary_reg)
+            self._primary_reg = None
+        self._primary_tensor = None
 
     @classmethod
     def from_config(cls, config: dict) -> "ObjectStoreSecondaryTierManager":

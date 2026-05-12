@@ -26,7 +26,7 @@ import torch
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
-from vllm.v1.kv_offload.tiering.obj import ObjectStoreSecondaryTierManager
+from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
 # ---------------------------------------------------------------------------
 # S3 credentials — skip entire module if not configured
@@ -122,7 +122,7 @@ def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 200) -> list[
     results: list[JobResult] = []
     for _ in range(max_rounds):
         results.extend(tier.get_finished())
-        if not tier._engine._transfers:
+        if not tier._transfers:
             break
         time.sleep(0.1)
     return results
