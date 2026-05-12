@@ -208,9 +208,8 @@ def run_tests(
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
-    # PROBE: switch from FLEX_ATTENTION to TORCH_SDPA (also fp32-capable,
-    # routes through cuDNN/oneDNN — bypasses flex_attention's Triton kernel).
-    attention_config = {"backend": "TORCH_SDPA"}
+    # Flex attention supports float32.
+    attention_config = {"backend": "FLEX_ATTENTION"}
 
     with monkeypatch.context() as m:
         # lock matmul precision to full FP32 (IEEE)
