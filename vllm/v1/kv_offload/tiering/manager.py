@@ -47,7 +47,7 @@ logger = init_logger(__name__)
 
 
 @dataclass
-class _PendingPromotion:
+class PendingPromotion:
     """Accumulator for blocks awaiting submit_load() for one (tier, request)."""
 
     keys: list[OffloadKey] = field(default_factory=list)
@@ -155,7 +155,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Outer key: tier. Inner key: id(req_context) — the same ReqContext
         # object is reused for all block lookups of a given request per engine step.
         self._pending_load_submissions: dict[
-            SecondaryTierManager, dict[int, _PendingPromotion]
+            SecondaryTierManager, dict[int, PendingPromotion]
         ] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
@@ -310,7 +310,7 @@ class TieringOffloadingManager(OffloadingManager):
         tier_pending = self._pending_load_submissions.setdefault(tier, {})
         ctx_id = id(req_context)
         if ctx_id not in tier_pending:
-            tier_pending[ctx_id] = _PendingPromotion(
+            tier_pending[ctx_id] = PendingPromotion(
                 keys=[], block_ids=[], req_context=req_context
             )
         entry = tier_pending[ctx_id]
