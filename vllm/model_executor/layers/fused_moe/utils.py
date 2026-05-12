@@ -146,7 +146,13 @@ def _fp8_quantize(
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        A, A_scale = per_token_group_quant_fp8(
+            A,
+            block_k,
+            column_major_scales=True,
+            tma_aligned_scales=True,
+        )
+        A_scale = A_scale.contiguous()
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
