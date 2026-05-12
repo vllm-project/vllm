@@ -18,6 +18,9 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
@@ -161,6 +164,9 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
     ) -> torch.Tensor:
         # if batch invariant mode is enabled, use BF16 dequant
         if envs.VLLM_BATCH_INVARIANT:
+            if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
+                return self.fp8_linear.apply_weights(layer, x, bias)
+
             weight_fp8 = layer.weight.to(torch.bfloat16)
             weight_scale = layer.weight_scale.to(torch.bfloat16)
             if weight_scale.numel() == 1:
@@ -348,7 +354,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
                 shared_experts=layer.shared_experts,
             )
 
