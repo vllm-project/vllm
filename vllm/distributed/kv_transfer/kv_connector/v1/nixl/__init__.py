@@ -9,6 +9,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    NixlSplitKAndVMetadata,
+    SplitKAndVMode,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
@@ -28,4 +30,6 @@ __all__ = [
     "NixlConnectorWorker",
     "NixlHandshakePayload",
     "NixlKVConnectorStats",
+    "NixlSplitKAndVMetadata",
+    "SplitKAndVMode",
 ]

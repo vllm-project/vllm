@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
+    NixlSplitKAndVMetadata,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -999,6 +1000,20 @@ class NixlConnectorWorker:
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
             attn_backend_name=self.backend_name,
+            split_k_and_v=self.transfer_topo.split_k_and_v,
+        )
+        logger.debug(
+            "Local agent metadata: engine_id=%s, split_k_and_v=%s, "
+            "num_regions=%s, block_lens=%s, kv_cache_layout=%s, "
+            "block_size=%s, num_blocks=%s, is_kv_layout_blocks_first=%s",
+            self.engine_id,
+            self.transfer_topo.split_k_and_v,
+            len(self.kv_caches_base_addr[self.engine_id][self.tp_rank]),
+            self.block_len_per_layer,
+            agent_metadata.kv_cache_layout,
+            self.block_size,
+            self.num_blocks,
+            self.transfer_topo.is_kv_layout_blocks_first,
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
@@ -1306,6 +1321,18 @@ class NixlConnectorWorker:
             group_spec_types=self._group_spec_types,
         )
 
+        # Determine whether the remote agent splits K and V into separate
+        # NIXL regions. Older agents that predate the `split_k_and_v` field
+        # will decode it as the `False` default, which matches their joint
+        # K+V layout, so no explicit fallback is needed.
+        remote_split_k_and_v = nixl_agent_meta.split_k_and_v
+        split_k_and_v_meta = NixlSplitKAndVMetadata(
+            local_split=transfer_topo.split_k_and_v,
+            remote_split=remote_split_k_and_v,
+            enable_permute_local_kv=(
+                self.kv_transfer_config.enable_permute_local_kv),
+        )
+
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
         )
@@ -1326,17 +1353,21 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
             nixl_agent_meta.kv_caches_base_addr
         )
-        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
+        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size,
+                                               split_k_and_v_meta)
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
         tp_ratio = transfer_topo.tp_ratio(remote_tp_size)
 
         logger.debug(
-            "Registering remote agent (%s, rank %s) memory regions with tp_ratio %s",
+            "Registering remote agent (%s, rank %s) memory regions with "
+            "tp_ratio %s and local_split_k_and_v=%s remote_split_k_and_v=%s",
             engine_id,
             remote_tp_rank,
             tp_ratio,
+            transfer_topo.split_k_and_v,
+            remote_split_k_and_v,
         )
 
         plan = self.tp_mappings[engine_id]
@@ -1382,6 +1413,7 @@ class NixlConnectorWorker:
             remote_tp_rank,
             self.tp_rank,
         )
+
         if self._has_mamba:
             logger.debug(
                 "Registering remote Mamba blocks for engine %s rank %s",
@@ -1412,7 +1444,8 @@ class NixlConnectorWorker:
         return remote_agent_name
 
     def _validate_remote_agent_handshake(
-        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
+        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int,
+        split_k_and_v_meta: NixlSplitKAndVMetadata,
     ):
         """
         Validate the remote agent handshake metadata ensuring the
@@ -1481,6 +1514,7 @@ class NixlConnectorWorker:
                     "Or enable experimental feature to use HND to NHD support by "
                     "setting 'enable_permute_local_kv'=True in --kv-transfer-config."
                 )
+
         # if remote_agent used attn is not same as local,
         # hint heterogenuous attn post process
         if (
@@ -1535,11 +1569,17 @@ class NixlConnectorWorker:
             # max(attn_page, mamba_page), so the linear tp_ratio scaling
             # assumption only holds for pure-attention models.
             if not self._has_mamba:
+                rescaled_local_block_len = (
+                    split_k_and_v_meta.rescale_by_split_k_and_v_ratio(
+                        self.block_len_per_layer[0]
+                    )
+                )
                 if tp_ratio > 0:
-                    assert (
-                        remote_block_len
-                        == (self.block_len_per_layer[0] * tp_ratio) // block_size_ratio
-                    ), (
+                    expected_remote_block_len = (
+                        rescaled_local_block_len * tp_ratio
+                    ) // block_size_ratio
+                    
+                    assert remote_block_len == expected_remote_block_len, (
                         "Remote P worker KV layer cache must be of shape [2, N,"
                         " local_kv_heads*tp_ratio, page_size, head_dim] and "
                         "same dtype."
@@ -1549,9 +1589,11 @@ class NixlConnectorWorker:
                         "Different local/remote block sizes are not supported"
                         " when P TP > D TP."
                     )
-                    assert remote_block_len == self.block_len_per_layer[0] // (
-                        -tp_ratio
-                    ), (
+                    expected_remote_block_len = (
+                        rescaled_local_block_len // (-tp_ratio)
+                    )
+                    
+                    assert remote_block_len == expected_remote_block_len, (
                         "Remote P worker KV layer cache must be of shape [2, N,"
                         " local_kv_heads/tp_ratio, page_size, head_dim] and "
                         "same dtype."
@@ -1560,7 +1602,10 @@ class NixlConnectorWorker:
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
         # Same number of regions/~layers.
-        assert len(nixl_agent_meta.kv_caches_base_addr) == len(self.block_len_per_layer)
+        expected_num_regions = split_k_and_v_meta.rescale_by_split_k_and_v_ratio(
+            len(nixl_agent_meta.kv_caches_base_addr)
+        )
+        assert expected_num_regions == len(self.block_len_per_layer)
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """copy recved kv from host buffer to device."""
