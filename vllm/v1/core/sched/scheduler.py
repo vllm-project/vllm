@@ -246,6 +246,8 @@ class Scheduler(SchedulerInterface):
         self._unieai_dsc_enable_decode_tokens = 0
         self._unieai_dsc_disable_waiting_reqs = 0
         self._unieai_dsc_enable_waiting_reqs = 0
+        self._unieai_dsc_disable_pressure_score = 1.0
+        self._unieai_dsc_enable_pressure_score = 0.0
         self._unieai_dsc_switch_cooldown_sec = 0.0
         self._unieai_dsc_last_switch_time = 0.0
         self._unieai_dsc_disable_condition_streak = 0
@@ -303,26 +305,36 @@ class Scheduler(SchedulerInterface):
                 self._unieai_dsc_enable_waiting_reqs = min(
                     enable_waiting_reqs, disable_waiting_reqs
                 )
+                (
+                    self._unieai_dsc_disable_pressure_score,
+                    self._unieai_dsc_enable_pressure_score,
+                ) = self._get_unieai_dsc_pressure_thresholds(
+                    speculative_config.method
+                )
                 self._unieai_dsc_switch_cooldown_sec = (
                     speculative_config.unieai_dsc_switch_cooldown_sec
                 )
                 self._unieai_dsc_disable_required_samples = 2
                 self._unieai_dsc_enable_required_samples = 3
                 logger.info(
-                    "UNIEAI_DSC_INIT disable_decode_tokens=%d "
-                    "enable_decode_tokens=%d disable_waiting_reqs=%d "
-                    "enable_waiting_reqs=%d disable_required_samples=%d "
+                    "UNIEAI_DSC_INIT policy=pressure method=%s "
+                    "disable_pressure=%.3f enable_pressure=%.3f "
+                    "disable_required_samples=%d "
                     "enable_required_samples=%d switch_cooldown_sec=%.2f "
-                    "method=%s max_num_seqs=%d max_num_scheduled_tokens=%d "
+                    "disable_decode_tokens=%d enable_decode_tokens=%d "
+                    "disable_waiting_reqs=%d enable_waiting_reqs=%d "
+                    "max_num_seqs=%d max_num_scheduled_tokens=%d "
                     "max_num_batched_tokens=%d",
+                    speculative_config.method,
+                    self._unieai_dsc_disable_pressure_score,
+                    self._unieai_dsc_enable_pressure_score,
+                    self._unieai_dsc_disable_required_samples,
+                    self._unieai_dsc_enable_required_samples,
+                    self._unieai_dsc_switch_cooldown_sec,
                     self._unieai_dsc_disable_decode_tokens,
                     self._unieai_dsc_enable_decode_tokens,
                     self._unieai_dsc_disable_waiting_reqs,
                     self._unieai_dsc_enable_waiting_reqs,
-                    self._unieai_dsc_disable_required_samples,
-                    self._unieai_dsc_enable_required_samples,
-                    self._unieai_dsc_switch_cooldown_sec,
-                    speculative_config.method,
                     self.max_num_running_reqs,
                     self.max_num_scheduled_tokens,
                     self.max_num_batched_tokens,
@@ -1988,6 +2000,14 @@ class Scheduler(SchedulerInterface):
             spec_value_score=spec_value_score,
         )
 
+    @staticmethod
+    def _get_unieai_dsc_pressure_thresholds(method: str) -> tuple[float, float]:
+        if method in ("ngram", "ngram_gpu"):
+            return 0.10, 0.06
+        if method == "mtp":
+            return 0.50, 0.20
+        return 0.12, 0.08
+
     def _reset_unieai_dsc_diagnostics_window(self) -> None:
         self._unieai_dsc_window_draft_tokens = 0
         self._unieai_dsc_window_accepted_tokens = 0
@@ -2024,9 +2044,12 @@ class Scheduler(SchedulerInterface):
             self._unieai_dsc_last_eval_time = now
 
             if self._unieai_dsc_spec_enabled:
+                diagnostics = self._collect_unieai_dsc_diagnostics(
+                    now, decode_token_load, waiting_request_load
+                )
                 disable_condition = (
-                    decode_token_load >= self._unieai_dsc_disable_decode_tokens
-                    and waiting_request_load >= self._unieai_dsc_disable_waiting_reqs
+                    diagnostics.pressure_score
+                    >= self._unieai_dsc_disable_pressure_score
                 )
                 if disable_condition:
                     self._unieai_dsc_disable_condition_streak += 1
@@ -2038,9 +2061,6 @@ class Scheduler(SchedulerInterface):
                     self._unieai_dsc_disable_condition_streak
                     >= self._unieai_dsc_disable_required_samples
                 ):
-                    diagnostics = self._collect_unieai_dsc_diagnostics(
-                        now, decode_token_load, waiting_request_load
-                    )
                     self._unieai_dsc_spec_enabled = False
                     self._unieai_dsc_last_switch_time = now
                     self._unieai_dsc_disable_condition_streak = 0
@@ -2048,7 +2068,7 @@ class Scheduler(SchedulerInterface):
                         "UNIEAI_DSC_SWITCH from=spec_decode to=normal_decode "
                         "method=%s dec=%d wait=%d age=%.2fs "
                         "pressure=%.3f value=%.3f disable_streak=%d "
-                        "disable_dec_th=%d disable_wait_th=%d cooldown=%.2fs",
+                        "disable_pressure=%.3f cooldown=%.2fs",
                         self._unieai_dsc_method,
                         decode_token_load,
                         waiting_request_load,
@@ -2056,8 +2076,7 @@ class Scheduler(SchedulerInterface):
                         diagnostics.pressure_score,
                         diagnostics.spec_value_score,
                         self._unieai_dsc_disable_required_samples,
-                        self._unieai_dsc_disable_decode_tokens,
-                        self._unieai_dsc_disable_waiting_reqs,
+                        self._unieai_dsc_disable_pressure_score,
                         self._unieai_dsc_switch_cooldown_sec,
                     )
             else:
@@ -2065,9 +2084,12 @@ class Scheduler(SchedulerInterface):
                     now - self._unieai_dsc_last_switch_time
                     >= self._unieai_dsc_switch_cooldown_sec
                 ):
+                    diagnostics = self._collect_unieai_dsc_diagnostics(
+                        now, decode_token_load, waiting_request_load
+                    )
                     enable_condition = (
-                        decode_token_load <= self._unieai_dsc_enable_decode_tokens
-                        and waiting_request_load <= self._unieai_dsc_enable_waiting_reqs
+                        diagnostics.pressure_score
+                        <= self._unieai_dsc_enable_pressure_score
                     )
                     if enable_condition:
                         self._unieai_dsc_enable_condition_streak += 1
@@ -2079,9 +2101,6 @@ class Scheduler(SchedulerInterface):
                         self._unieai_dsc_enable_condition_streak
                         >= self._unieai_dsc_enable_required_samples
                     ):
-                        diagnostics = self._collect_unieai_dsc_diagnostics(
-                            now, decode_token_load, waiting_request_load
-                        )
                         self._unieai_dsc_spec_enabled = True
                         self._unieai_dsc_last_switch_time = now
                         self._unieai_dsc_enable_condition_streak = 0
@@ -2089,7 +2108,7 @@ class Scheduler(SchedulerInterface):
                             "UNIEAI_DSC_SWITCH from=normal_decode to=spec_decode "
                             "method=%s dec=%d wait=%d age=%.2fs "
                             "pressure=%.3f value=%.3f enable_streak=%d "
-                            "enable_dec_th=%d enable_wait_th=%d cooldown=%.2fs",
+                            "enable_pressure=%.3f cooldown=%.2fs",
                             self._unieai_dsc_method,
                             decode_token_load,
                             waiting_request_load,
@@ -2097,8 +2116,7 @@ class Scheduler(SchedulerInterface):
                             diagnostics.pressure_score,
                             diagnostics.spec_value_score,
                             self._unieai_dsc_enable_required_samples,
-                            self._unieai_dsc_enable_decode_tokens,
-                            self._unieai_dsc_enable_waiting_reqs,
+                            self._unieai_dsc_enable_pressure_score,
                             self._unieai_dsc_switch_cooldown_sec,
                         )
                 else:
