@@ -299,13 +299,10 @@ async def test_abort_timeout_exits_quickly(wait_for_engine_idle: float):
         start_time = time.time()
         proc.send_signal(signal.SIGTERM)
 
-        # abort timeout (0) should exit promptly
-        for _ in range(40):
-            if proc.poll() is not None:
-                break
-            time.sleep(0.1)
-
-        if proc.poll() is None:
+        # abort timeout (0) should stop the server promptly.
+        try:
+            proc.wait(timeout=4.0)
+        except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=5)
             pytest.fail("Process did not exit after SIGTERM with abort timeout")
