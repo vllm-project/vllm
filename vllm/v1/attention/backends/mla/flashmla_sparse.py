@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
@@ -112,7 +112,7 @@ class FlashMLASparseBackend(AttentionBackend):
         return FlashMLASparseMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> type["FlashMLASparseImpl"]:
+    def get_impl_cls() -> type[SparseMLAAttentionImpl[Any]]:
         return FlashMLASparseImpl
 
     @classmethod
