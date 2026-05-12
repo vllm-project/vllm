@@ -42,8 +42,8 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from collections.abc import Callable, Iterable
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -67,18 +67,16 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 
-# s_tensor_list, d_tensor_list, s_indices, d_indices, direction
-class CopyBlocksOp(Protocol):
-    def __call__(
-        self,
-        src_kv_caches: dict[str, torch.Tensor],
-        dst_kv_caches: dict[str, torch.Tensor],
-        src_block_ids: list[int],
-        dst_block_ids: list[int],
-        direction: Literal["h2d", "d2h"],
-        *,
-        block_dim: int = ...,
-    ) -> None: ...
+CopyBlocksOp = Callable[
+    [
+        dict[str, torch.Tensor],
+        dict[str, torch.Tensor],
+        list[int],
+        list[int],
+        Literal["h2d", "d2h"],
+    ],
+    None,
+]
 
 
 logger = init_logger(__name__)
