@@ -418,11 +418,12 @@ class Fp8LinearMethod(LinearMethodBase):
                 assert input_scale is not None
                 input_scale = input_scale.max()
 
-            # torch._scaled_mm under torch.compile does not support
-            # 0-D scales; reshape to 1-D.
-            weight_scale = weight_scale.reshape(1)
-            if input_scale is not None and input_scale.dim() == 0:
-                input_scale = input_scale.reshape(1)
+            if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
+                # torch._scaled_mm under torch.compile does not support
+                # 0-D scales; reshape to 1-D.
+                weight_scale = weight_scale.reshape(1)
+                if input_scale is not None and input_scale.dim() == 0:
+                    input_scale = input_scale.reshape(1)
 
             weight = weight.t()
 
