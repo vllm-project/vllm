@@ -3,9 +3,9 @@
 
 import pytest
 import torch
-from transformers import LlamaConfig
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
@@ -28,8 +28,8 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
         dtype=torch.bfloat16,
         compress_ratio=4,
     )
-    hf_config = LlamaConfig(
-        architectures=["LlamaForCausalLM"],
+    hf_config = DeepseekV4Config(
+        architectures=["DeepseekV4ForCausalLM"],
         hidden_size=128,
         intermediate_size=256,
         max_position_embeddings=2048,
