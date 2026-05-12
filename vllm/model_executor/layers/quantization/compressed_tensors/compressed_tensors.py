@@ -42,10 +42,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -625,7 +625,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsW4A16Fp4()
 
         if self._is_mxfp4(weight_quant):
-            return CompressedTensorsW4A16Mxfp4()
+            return CompressedTensorsW4A4Mxfp4()
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
