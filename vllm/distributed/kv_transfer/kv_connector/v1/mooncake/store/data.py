@@ -129,7 +129,13 @@ class ChunkedTokenDatabase:
             if start_idx < mask_num:
                 continue
             else:
-                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
+                yield (
+                    start_idx,
+                    end_idx,
+                    self._make_key_by_hash(
+                        hash_val  # type: ignore[arg-type]
+                    ),
+                )
 
 
 @dataclass

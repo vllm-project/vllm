@@ -96,8 +96,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         super().__init__(
             vllm_config=vllm_config,
             role=role,
-            kv_cache_config=kv_cache_config,
+            kv_cache_config=kv_cache_config,  # type: ignore[arg-type]
         )
+        assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self._kv_cache_events: MooncakeStoreKVEvents | None = None
 

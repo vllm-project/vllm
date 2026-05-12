@@ -53,9 +53,7 @@ def test_scheduler_role_initializes_store_scheduler_only():
             "connector.MooncakeStoreWorker"
         ) as mock_worker,
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
 
     mock_scheduler.assert_called_once_with(vllm_config)
     mock_worker.assert_not_called()
@@ -77,9 +75,7 @@ def test_worker_role_initializes_store_worker_on_rank0():
             "connector.MooncakeStoreWorker"
         ) as mock_worker,
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
 
     mock_scheduler.assert_not_called()
     mock_worker.assert_called_once_with(vllm_config)
@@ -98,9 +94,7 @@ def test_worker_role_initializes_on_nonzero_rank():
             "connector.MooncakeStoreWorker"
         ) as mock_worker,
     ):
-        connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER
-        )
+        connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
 
     mock_worker.assert_called_once_with(vllm_config)
 
@@ -139,9 +133,7 @@ def test_worker_methods_delegate_to_store_worker():
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
 
     worker_inst = mock_worker_cls.return_value
     worker_inst.get_finished.return_value = ({"req-1"}, {"req-2"})
@@ -165,9 +157,7 @@ def test_get_kv_connector_kv_cache_events_returns_none_when_empty():
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
 
     mock_worker_cls.return_value.get_kv_events.return_value = []
     assert conn.get_kv_connector_kv_cache_events() is None
@@ -184,9 +174,7 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
 
     mock_worker_cls.return_value.get_kv_events.return_value = [event]
     kv_events = conn.get_kv_connector_kv_cache_events()
@@ -206,9 +194,7 @@ def test_prefer_cross_layer_blocks_from_config():
             "connector.MooncakeStoreScheduler"
         ),
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
     assert conn.prefer_cross_layer_blocks is False
 
     # Enabled via config
@@ -240,18 +226,14 @@ def test_register_cross_layers_kv_cache_delegates_to_worker():
             "connector.MooncakeStoreWorker"
         ) as mock_worker_cls,
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.WORKER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.WORKER)
 
     fake_tensor = MagicMock()
     fake_backend = MagicMock()
     conn.register_cross_layers_kv_cache(fake_tensor, fake_backend)
 
     worker_inst = mock_worker_cls.return_value
-    worker_inst.register_cross_layers_kv_caches.assert_called_once_with(
-        fake_tensor
-    )
+    worker_inst.register_cross_layers_kv_caches.assert_called_once_with(fake_tensor)
 
 
 def test_update_connector_output_and_take_events():
@@ -265,9 +247,7 @@ def test_update_connector_output_and_take_events():
             "connector.MooncakeStoreScheduler"
         ),
     ):
-        conn = connector.MooncakeStoreConnector(
-            vllm_config, KVConnectorRole.SCHEDULER
-        )
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
 
     kv_events = connector.MooncakeStoreKVEvents(num_workers=1)
     kv_events.add_events([event])

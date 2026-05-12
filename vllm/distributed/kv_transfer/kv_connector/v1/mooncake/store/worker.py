@@ -515,6 +515,7 @@ class MooncakeStoreWorker:
         self.dcp_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
+        assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", True
@@ -969,6 +970,7 @@ def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
     base_url = envs.VLLM_RPC_BASE_PATH
     rpc_port = 0
+    assert vllm_config.kv_transfer_config is not None
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     if "lookup_rpc_port" in extra_config:
         rpc_port = extra_config["lookup_rpc_port"]

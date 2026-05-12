@@ -22,7 +22,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
 )
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.request import Request
 
@@ -47,6 +46,7 @@ class MooncakeStoreScheduler:
     """Scheduler-side component for MooncakeStoreConnector."""
 
     def __init__(self, vllm_config: VllmConfig):
+        assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", True
