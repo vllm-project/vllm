@@ -131,10 +131,10 @@ class SimpleCPUOffloadScheduler:
         # the worker reports completions by event index, not request id.
         self._load_event_to_reqs: dict[int, list[str]] = {}
 
-        # Pending CPU hits from get_num_new_matched_tokens() (Phase A) awaiting
-        # consumption in update_state_after_alloc() (Phase B). Found blocks are
+        # Pending CPU hits from get_num_new_matched_tokens() awaiting
+        # consumption in update_state_after_alloc(). Found blocks are
         # temporarily pinned via touch() while pending, preventing LRU eviction
-        # in the window between the two scheduler phases (#39702).
+        # in the window between the two scheduler phases.
         self._pending_cpu_hits: dict[
             str, tuple[tuple[list[KVCacheBlock], ...], int]
         ] = {}
@@ -225,11 +225,10 @@ class SimpleCPUOffloadScheduler:
         window between this call and the matching update_state_after_alloc().
         The temporary pin is released in update_state_after_alloc() once the
         persistent load pin takes over, or in request_finished() if the request
-        never reaches Phase B (#39702).
+        never reaches update_state_after_alloc().
         """
-        # Defensive: release any stale pin from a prior Phase A call on this
-        # request (e.g., allocate_slots() failed and the request was requeued
-        # without an intervening Phase B).
+        # Release any stale pin from a prior
+        # get_num_new_matched_tokens() call on this request
         stale = self._pending_cpu_hits.pop(request.request_id, None)
         if stale is not None:
             self._free_pending_cpu_hit(stale)
@@ -282,30 +281,20 @@ class SimpleCPUOffloadScheduler:
                 num_stored_blocks=[0] * num_groups,
             )
 
-        # Pop the CPU hit cached by Phase A (get_num_new_matched_tokens). The
+        # Pop the CPU hit cached by get_num_new_matched_tokens(). The
         # found blocks were pinned there to survive LRU eviction in the window
-        # between the two phases (#39702).
+        # between get_num_new_matched_tokens() and this matching call.
         pending = self._pending_cpu_hits.pop(req_id, None)
 
         if num_external_tokens == 0:
-            # Phase A reported no external hit. Defensive: release any
-            # unexpected pending pin.
+            # get_num_new_matched_tokens() reported no external hit.
+            # Release any unexpected pending pin.
             if pending is not None:
                 self._free_pending_cpu_hit(pending)
             return
 
         if pending is None:
-            # Phase B invoked with num_external_tokens > 0 but Phase A never
-            # recorded a hit for this request. Should not happen in normal
-            # flow; degrade gracefully instead of crashing the scheduler.
-            logger.warning(
-                "SimpleCPUOffloadScheduler: update_state_after_alloc called "
-                "for req_id=%s with num_external_tokens=%d but no pending "
-                "CPU hit from Phase A; skipping load.",
-                req_id,
-                num_external_tokens,
-            )
-            return
+            return  # graceful fallback instead of assert
 
         cpu_hit_blocks_full, _ = pending
 
@@ -315,15 +304,15 @@ class SimpleCPUOffloadScheduler:
         skipped = sum(blk.block_hash is not None for blk in blocks.blocks[self.fa_gidx])
         num_computed_tokens = skipped * self.block_size
 
-        # Build transfer pairs across all groups using the cached cpu_hit_blocks
-        # from Phase A — no second find_longest_cache_hit() call needed.
+        # Build transfer pairs across all groups
         total_computed_tokens = num_computed_tokens + num_external_tokens
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
 
-        # The scheduler may have accepted fewer blocks than Phase A reported
-        # (e.g. due to token budget). Take only the leading N blocks per group
-        # matching num_external_tokens; the rest will be released along with
-        # the temp pin below.
+        # The scheduler may have accepted fewer blocks than
+        # get_num_new_matched_tokens() reported.
+        # (e.g. due to token budget in test_partial_gpu_prefix_plus_cpu_load).
+        # Take only the leading N blocks per group matching num_external_tokens;
+        # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
             g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
@@ -356,9 +345,9 @@ class SimpleCPUOffloadScheduler:
                 cpu_block_ids.append(cpu_blk.block_id)
                 cpu_blocks_to_touch.append(cpu_blk)
 
-        # Take a persistent pin on the CPU blocks for the async load.
+        # Touch CPU blocks to prevent eviction during async load.
         self.cpu_block_pool.touch(cpu_blocks_to_touch)
-        # Release the temporary pin held since Phase A.
+        # Release the temporary pin held since get_num_new_matched_tokens().
         self._free_pending_cpu_hit(pending)
 
         # Touch GPU blocks to prevent freeing during async load
@@ -720,8 +709,8 @@ class SimpleCPUOffloadScheduler:
         so the scheduler can free blocks immediately."""
         req_id = request.request_id
 
-        # Release any temp CPU hit pin from Phase A that never reached Phase B
-        # (request canceled or preempted before update_state_after_alloc()).
+        # Release any temp CPU hit pin from get_num_new_matched_tokens()
+        # if request is canceled or preempted before update_state_after_alloc()
         pending = self._pending_cpu_hits.pop(req_id, None)
         if pending is not None:
             self._free_pending_cpu_hit(pending)
@@ -753,10 +742,7 @@ class SimpleCPUOffloadScheduler:
         return self.request_finished(request, block_ids=[])
 
     def _free_pending_cpu_hit(self, pending: tuple) -> None:
-        """Release the temporary CPU block pin taken in Phase A
-        (get_num_new_matched_tokens). Called when Phase B consumes the pending
-        entry, or when the request is canceled before Phase B runs.
-        """
+        """Release the temporary CPU block pin taken in get_num_new_matched_tokens()."""
         cpu_hit_blocks, _ = pending
         blocks_to_free = [
             blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
