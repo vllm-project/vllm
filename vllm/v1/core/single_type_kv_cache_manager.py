@@ -444,7 +444,6 @@ class SingleTypeKVCacheManager(ABC):
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Track block hashes committed to the cache in the current scheduling
@@ -486,8 +485,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             # used by MambaManager, see PR #29387).
             return self.block_pool.num_gpu_blocks + 1
         return super().get_num_blocks_to_allocate(
-            request_id, num_tokens, new_computed_blocks,
-            total_computed_tokens, num_tokens_main_model,
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
         )
 
