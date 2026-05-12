@@ -138,9 +138,7 @@ class Glm4MoeModelToolParser(ToolParser):
             if parameters is None:
                 return False
             arg_type = (
-                parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
+                parameters.get("properties", {}).get(arg_name, {}).get("type", None)
             )
             return arg_type == "string"
         logger.debug("No tool named '%s'.", tool_name)
