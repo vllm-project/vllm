@@ -116,3 +116,23 @@ class TestGetLayerConfigFusedQKV:
         }
         with pytest.raises(ValueError, match="consistent quant config"):
             cfg.get_layer_config(layer, "model.layers.0.self_attn.qkv_proj")
+
+    def test_fusion_triggered_by_regex_configured_sub_name(self):
+        """Fusion step 4 is still triggered when sub_names match via regex.
+
+        Ensures the guard does not regress when extra_config uses regex
+        patterns instead of exact keys to configure sub-modules.
+        """
+        # A single regex pattern that matches q_proj, k_proj and v_proj
+        extra_config = {
+            r"model\.layers\.\d+\.self_attn\.(q|k|v)_proj": {"bits": 8},
+        }
+        cfg = _make_inc(extra_config=extra_config)
+        layer = _FakeLayer()
+        cfg.packed_modules_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        }
+        # All three sub_names match the regex → fusion is triggered and
+        # consistent bits=8 is returned.
+        bits, _, _ = cfg.get_layer_config(layer, "model.layers.0.self_attn.qkv_proj")
+        assert bits == 8
