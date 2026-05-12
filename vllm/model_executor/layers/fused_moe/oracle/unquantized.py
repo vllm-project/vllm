@@ -95,26 +95,28 @@ def backend_to_kernel_cls(
         return TrtLlmBf16Experts
 
     elif backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
         return FlashInferExperts
 
     elif backend == UnquantizedMoeBackend.AITER:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
         return AiterExperts
 
     elif backend == UnquantizedMoeBackend.TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+        from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+            TritonExperts,
+        )
 
         return TritonExperts
 
     elif backend == UnquantizedMoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
             BatchedTritonExperts,
         )
 

@@ -34,7 +34,7 @@ class CustomRoutingRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        from vllm.model_executor.models.cohere_moe import token_choice_with_bias
+        from vllm.model_executor.models.cohere2_moe import token_choice_with_bias
         from vllm.model_executor.models.llama4 import Llama4MoE
 
         # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
