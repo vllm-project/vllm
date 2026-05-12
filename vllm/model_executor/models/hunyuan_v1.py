@@ -930,7 +930,10 @@ class HunyuanV1ModelBase(
         self.config = config
         self.quant_config = quant_config
 
-        self.model = HunYuanModel(vllm_config=vllm_config, prefix="model")
+        self.model = HunYuanModel(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
