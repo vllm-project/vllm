@@ -19,10 +19,17 @@ from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.model_manager import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.v1.worker.gpu_worker import Worker
+from vllm.platforms import current_platform
+
+if current_platform.is_xpu():
+    from vllm.v1.worker.xpu_worker import XPUWorker as Worker
+else:
+    from vllm.v1.worker.gpu_worker import Worker
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 NUM_LORAS = 16
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @patch.dict(os.environ, {"RANK": "0"})
@@ -61,7 +68,7 @@ def test_worker_apply_lora(qwen3_lora_files):
             max_num_seqs=32,
             max_num_partial_prefills=32,
         ),
-        device_config=DeviceConfig("cuda"),
+        device_config=DeviceConfig(DEVICE_TYPE),
         cache_config=CacheConfig(
             block_size=16,
             cache_dtype="auto",

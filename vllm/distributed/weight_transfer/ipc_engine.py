@@ -283,6 +283,11 @@ class IPCWeightTransferEngine(
         Use ``async_trainer_send_weights`` when ``send_mode`` is an
         async callable.
 
+        .. note::
+            This method calls ``update_weights`` internally. The caller must
+            call ``start_weight_update`` before and ``finish_weight_update``
+            after this method.
+
         Args:
             iterator: Iterator of (name, tensor) pairs. For multi-GPU,
                      each rank should yield the full tensor on its own GPU
@@ -439,8 +444,6 @@ class IPCWeightTransferEngine(
                     ipc_handles=ipc_handle,
                     tensor_sizes=chunk.tensor_sizes,
                     packed=True,
-                    first_chunk=chunk.is_first,
-                    last_chunk=chunk.is_last,
                 )
                 if maybe_coro is not None:
                     yield maybe_coro
@@ -456,8 +459,6 @@ class IPCWeightTransferEngine(
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
         tensor_sizes: list[int] | None = None,
         packed: bool = False,
-        first_chunk: bool = True,
-        last_chunk: bool = True,
     ) -> Coroutine[Any, Any, None] | None:
         """Send a single update payload via the configured transport.
 
@@ -468,8 +469,6 @@ class IPCWeightTransferEngine(
             "dtype_names": dtype_names,
             "shapes": shapes,
             "packed": packed,
-            "first_chunk": first_chunk,
-            "last_chunk": last_chunk,
         }
         if tensor_sizes is not None:
             update_fields["tensor_sizes"] = tensor_sizes

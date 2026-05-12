@@ -10,6 +10,7 @@ from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -19,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -231,8 +232,13 @@ class AWQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> "QuantizationMethods | None":
+        # Skip override to marlin kernels, as they are not
+        # batch invariant
+        if envs.VLLM_BATCH_INVARIANT:
+            return None
+
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (
             user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"
@@ -758,7 +764,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             )
 
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             BatchedMarlinExperts,
             MarlinExperts,
         )

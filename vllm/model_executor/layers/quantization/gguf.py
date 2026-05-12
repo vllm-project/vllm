@@ -84,7 +84,7 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg: dict[str, Any], user_quant: str | None
+        cls, hf_quant_cfg: dict[str, Any], user_quant: str | None, hf_config=None
     ) -> "QuantizationMethods | None":
         # When user explicitly specifies --quantization gguf, override
         # whatever quantization method is in the HF model config (e.g. fp8).

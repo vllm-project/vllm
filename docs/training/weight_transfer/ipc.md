@@ -20,7 +20,7 @@ The IPC weight transfer engine uses **CUDA IPC** (Inter-Process Communication) h
 By default, all weights are sent in a single API call. For large models, this requires the full model to reside in GPU memory on both sides simultaneously. Setting `packed=True` enables **chunked transfer** with bounded GPU memory:
 
 - Weights are concatenated into fixed-size packed buffers (controlled by `packed_buffer_size_bytes`).
-- Each chunk is sent as a separate API call with `first_chunk` and `last_chunk` flags so that vLLM only initializes/finalizes the reload pass on the first/last chunk.
+- Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
 - After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
 
 ```python
@@ -54,11 +54,15 @@ trainer_args = IPCTrainerSendWeightsArgs(
     send_mode="ray",
     llm_handle=llm_actor_handle,
 )
-
+# start
+ray.get(llm_actor_handle.start_weight_update.remote(is_checkpoint_format=True))
+# send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
+# finish
+ray.get(llm_actor_handle.finish_weight_update.remote())
 ```
 
 In Ray mode, the engine calls `llm_handle.update_weights.remote(...)` directly, passing the IPC handles via Ray's serialization.
@@ -73,10 +77,20 @@ trainer_args = IPCTrainerSendWeightsArgs(
     url="http://localhost:8000",
 )
 
+# start
+base_url = "http://localhost:8000"
+url = f"{base_url}/start_weight_update"
+response = requests.post(url, json={"is_checkpoint_format": True}, timeout=60)
+response.raise_for_status()
+# send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
+# finish
+url = f"{base_url}/finish_weight_update"
+response = requests.post(url, json={}, timeout=60)
+response.raise_for_status()
 ```
 
 In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. The pickled payload contains only `rebuild_cuda_tensor` argument tuples (ints, bytes, strings) — no arbitrary callables — so no special environment flags are required.
@@ -119,5 +133,5 @@ See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main
 
 ## Examples
 
-- [RLHF with IPC weight syncing (offline, Ray)](../../examples/rl/rlhf_ipc.md) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
-- [RLHF with IPC weight syncing (online serving, HTTP)](../../examples/rl/rlhf_http_ipc.md) - Weight transfer with a vLLM HTTP server where both server and trainer share the same GPU
+- [RLHF with IPC weight syncing (offline, Ray)](../../../examples/rl/rlhf_ipc.py) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
+- [RLHF with IPC weight syncing (online serving, HTTP)](../../../examples/rl/rlhf_http_ipc.py) - Weight transfer with a vLLM HTTP server where both server and trainer share the same GPU

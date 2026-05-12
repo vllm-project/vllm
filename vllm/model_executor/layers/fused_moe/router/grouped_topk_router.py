@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
@@ -292,6 +292,8 @@ class GroupedTopKRouter(BaseRouter):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using grouped top-k."""
 
@@ -308,6 +310,7 @@ class GroupedTopKRouter(BaseRouter):
                 topk_weights, topk_ids = fused_topk_bias(
                     hidden_states=hidden_states,
                     gating_output=router_logits,
+                    scoring_func=self.scoring_func,
                     e_score_correction_bias=self.e_score_correction_bias.data,
                     topk=self.top_k,
                     renormalize=self.renormalize,

@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Plugin Tests (2 GPUs)
+  key: plugin-tests-2-gpus
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 2

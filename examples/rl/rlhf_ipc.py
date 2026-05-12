@@ -137,7 +137,11 @@ for output in outputs:
 
 ray.get(llm.sleep.remote(level=0))
 
-ray.get(train_model.broadcast_weights.remote(llm, packed=False))
+ray.get(train_model.init_weight_transfer.remote())
+# Start weight update, sync weights, then finish
+ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+ray.get(train_model.broadcast_weights.remote(llm))
+ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
