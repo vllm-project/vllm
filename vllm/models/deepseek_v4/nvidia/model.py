@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from itertools import islice
 
 import regex as re
@@ -41,7 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -112,6 +112,48 @@ class DeepseekV4MLP(nn.Module):
         return x
 
 
+_EPLB_REPLICA_HASH_MULTIPLIER = 2654435769
+
+
+def _map_mega_moe_logical_to_physical_and_record_load(
+    topk_ids: torch.Tensor,
+    *,
+    expert_load_view: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+) -> torch.Tensor:
+    # Clamp invalid IDs before indexing; the mask restores them afterward.
+    valid_expert_mask = topk_ids >= 0
+    safe_logical_expert_ids = topk_ids.clamp(min=0).long()
+
+    # Pick a replica slot for each routed logical expert:
+    # replica_idx[token, slot] = hash(token) % replica_count.
+    replica_counts = logical_replica_count[safe_logical_expert_ids]
+    num_routed_tokens, top_k = topk_ids.shape
+    route_positions = torch.arange(
+        num_routed_tokens * top_k, device=topk_ids.device, dtype=torch.long
+    ).view(num_routed_tokens, top_k)
+    token_indices = route_positions // top_k
+    hashed_token_indices = (token_indices * _EPLB_REPLICA_HASH_MULTIPLIER) & 0xFFFFFFFF
+    replica_indices = hashed_token_indices % replica_counts.clamp(min=1)
+
+    # Replace logical expert IDs with physical expert IDs.
+    physical_expert_ids = logical_to_physical_map[
+        safe_logical_expert_ids, replica_indices
+    ]
+    topk_ids = torch.where(
+        valid_expert_mask,
+        physical_expert_ids.to(topk_ids.dtype),
+        topk_ids,
+    )
+
+    # Record one load unit per valid routed expert assignment.
+    flat_physical_expert_ids = topk_ids.flatten().clamp(min=0).long()
+    load_increments = valid_expert_mask.flatten().to(expert_load_view.dtype)
+    expert_load_view.scatter_add_(0, flat_physical_expert_ids, load_increments)
+    return topk_ids
+
+
 def make_deepseek_v4_expert_params_mapping(
     num_experts: int,
 ) -> list[tuple[str, str, int, str]]:
@@ -145,6 +187,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         prefix: str = "",
+        num_logical_experts: int | None = None,
     ):
         super().__init__()
         self.prefix = prefix
@@ -156,6 +199,15 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+        self.num_logical_experts = (
+            num_logical_experts if num_logical_experts is not None else num_experts
+        )
+
+        # EPLB state
+        self.expert_load_view: torch.Tensor | None = None
+        self.logical_to_physical_map: torch.Tensor | None = None
+        self.logical_replica_count: torch.Tensor | None = None
 
         weight_attrs = {"weight_loader": self.weight_loader}
         self.w13_weight = nn.Parameter(
@@ -207,10 +259,22 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self._transformed_l1_weights: tuple[torch.Tensor, torch.Tensor] | None = None
         self._transformed_l2_weights: tuple[torch.Tensor, torch.Tensor] | None = None
 
-    def _map_global_expert_id(self, expert_id: int) -> int:
-        if expert_id < self.experts_start_idx or expert_id >= self.experts_end_idx:
-            return -1
-        return expert_id - self.experts_start_idx
+        # Register in the static forward context so the custom-op wrapper
+        # can look up this module by name from within a torch.compile graph.
+        compilation_config = vllm_config.compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+    def _map_global_expert_id(self, expert_id: int) -> list[int]:
+        """Return local (per-rank) slot offsets where logical expert
+        `expert_id` should land on this rank.
+        """
+        physical_ids: list[int] = []
+        for p in range(self.experts_start_idx, self.experts_end_idx):
+            if p % self.num_logical_experts == expert_id:
+                physical_ids.append(p - self.experts_start_idx)
+        return physical_ids
 
     def weight_loader(
         self,
@@ -221,30 +285,38 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        local_expert_id = self._map_global_expert_id(expert_id)
-        if local_expert_id == -1:
+        local_expert_ids = self._map_global_expert_id(expert_id)
+        if not local_expert_ids:
             return False if return_success else None
 
-        expert_data = param.data[local_expert_id]
-        if shard_id in ("w1", "w3"):
-            if "w13_" not in weight_name:
-                return False if return_success else None
-            shard_offset = 0 if shard_id == "w1" else self.intermediate_size
-            expert_data = expert_data.narrow(0, shard_offset, self.intermediate_size)
-        elif shard_id == "w2":
-            if "w2_" not in weight_name:
-                return False if return_success else None
-        else:
-            raise ValueError(f"Unsupported expert shard id: {shard_id}")
+        loaded_any = False
+        for local_expert_id in local_expert_ids:
+            expert_data = param.data[local_expert_id]
+            if shard_id in ("w1", "w3"):
+                if "w13_" not in weight_name:
+                    continue
+                shard_offset = 0 if shard_id == "w1" else self.intermediate_size
+                expert_data = expert_data.narrow(
+                    0, shard_offset, self.intermediate_size
+                )
+            elif shard_id == "w2":
+                if "w2_" not in weight_name:
+                    continue
+            else:
+                raise ValueError(f"Unsupported expert shard id: {shard_id}")
 
-        if expert_data.shape != loaded_weight.shape:
-            raise ValueError(
-                f"DeepSeek V4 MegaMoE expert weight shape mismatch for "
-                f"{weight_name}: parameter shard {tuple(expert_data.shape)} "
-                f"vs checkpoint {tuple(loaded_weight.shape)}"
-            )
-        expert_data.copy_(loaded_weight)
-        return True if return_success else None
+            if expert_data.shape != loaded_weight.shape:
+                raise ValueError(
+                    f"DeepSeek V4 MegaMoE expert weight shape mismatch for "
+                    f"{weight_name}: parameter shard {tuple(expert_data.shape)} "
+                    f"vs checkpoint {tuple(loaded_weight.shape)}"
+                )
+            expert_data.copy_(loaded_weight)
+            loaded_any = True
+
+        if return_success:
+            return loaded_any
+        return None
 
     @staticmethod
     def _ue8m0_uint8_to_float(sf: torch.Tensor) -> torch.Tensor:
@@ -265,7 +337,9 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return
 
         self._check_runtime_supported()
-        import vllm.third_party.deep_gemm as deep_gemm
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
 
         w13_scale = deep_gemm.transform_sf_into_required_layout(
             self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
@@ -299,7 +373,9 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        import vllm.third_party.deep_gemm as deep_gemm
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
 
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
@@ -324,6 +400,49 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             )
             self._symm_buffer_cache[key] = symm_buffer
         return symm_buffer
+
+    def set_eplb_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.expert_load_view = expert_load_view[moe_layer_idx]
+        self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
+        self.logical_replica_count = logical_replica_count[moe_layer_idx]
+
+    def get_expert_weights(self) -> list[torch.Tensor]:
+        self.finalize_weights()
+        assert self._transformed_l1_weights is not None
+        assert self._transformed_l2_weights is not None
+
+        def _to_eplb_view(name: str, t: torch.Tensor) -> torch.Tensor:
+            """Return a (num_local_experts, -1) view with contiguous memory layout."""
+            assert t.shape[0] == self.num_local_experts
+            if t.is_contiguous():
+                return t.view(self.num_local_experts, -1)
+            elif t.dim() == 3 and t.stride(1) == 1 and t.stride(2) == t.shape[1]:
+                # scales have shape (E, M, N) with memory layout (E, N, M)
+                back = torch.transpose(t, 1, 2)
+                assert back.is_contiguous()
+                return back.view(self.num_local_experts, -1)
+
+            raise AssertionError(
+                f"DSv4 EPLB {name}: non-contiguous expert tensor with "
+                f"unexpected layout shape={tuple(t.shape)} "
+                f"stride={tuple(t.stride())} dtype={t.dtype}"
+            )
+
+        return [
+            _to_eplb_view("l1_packed", self._transformed_l1_weights[0]),
+            _to_eplb_view("l1_scale", self._transformed_l1_weights[1]),
+            _to_eplb_view("l2_weight", self._transformed_l2_weights[0]),
+            _to_eplb_view("l2_scale", self._transformed_l2_weights[1]),
+        ]
+
+    def update_expert_map(self) -> None:
+        pass
 
     def forward(
         self,
@@ -359,10 +478,28 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         activation_clamp: float | None,
         fast_math: bool,
     ) -> None:
-        import vllm.third_party.deep_gemm as deep_gemm
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
+
+        # EPLB: map logical expert IDs to physical replicas.
+        logical_to_physical_map = self.logical_to_physical_map
+        if logical_to_physical_map is not None:
+            logical_replica_count = self.logical_replica_count
+            expert_load_view = self.expert_load_view
+            assert logical_replica_count is not None
+            assert expert_load_view is not None
+
+            topk_ids = _map_mega_moe_logical_to_physical_and_record_load(
+                topk_ids,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
         prepare_megamoe_inputs(
             hidden_states,
             topk_weights,
@@ -494,17 +631,33 @@ class DeepseekV4MoE(nn.Module):
         self.ep_group = get_ep_group()
         self.ep_size = self.ep_group.world_size
         self.ep_rank = self.ep_group.rank_in_group
-        assert config.n_routed_experts % self.ep_size == 0
 
-        self.n_local_experts = config.n_routed_experts // self.ep_size
-        self.experts_start_idx = self.ep_rank * self.n_local_experts
-        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
+        eplb_config = vllm_config.parallel_config.eplb_config
+        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_routed_experts = config.n_routed_experts
+        self.n_shared_experts = config.n_shared_experts or 0
+        self.n_logical_experts = self.n_routed_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        assert self.n_physical_experts % self.ep_size == 0, (
+            f"n_physical_experts={self.n_physical_experts} must be divisible by "
+            f"ep_size={self.ep_size}. Adjust num_redundant_experts."
+        )
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
+
+        self.n_local_experts = self.n_local_physical_experts
+        self.experts_start_idx = self.physical_expert_start
+        self.experts_end_idx = self.physical_expert_end
 
         self.experts = DeepseekV4MegaMoEExperts(
             vllm_config,
-            num_experts=config.n_routed_experts,
-            num_local_experts=self.n_local_experts,
-            experts_start_idx=self.experts_start_idx,
+            num_experts=self.n_physical_experts,
+            num_local_experts=self.n_local_physical_experts,
+            experts_start_idx=self.physical_expert_start,
+            num_logical_experts=self.n_logical_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
@@ -1259,7 +1412,44 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
-class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
+class DeepseekV4MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list["DeepseekV4MoE"]
+
+    def extract_moe_parameters(self, example_moe: "DeepseekV4MoE | None") -> None:
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
@@ -1290,6 +1480,28 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
+
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.expert_weights: MutableSequence[Sequence[torch.Tensor]] = []
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+        self.num_moe_layers = self.config.num_hidden_layers
+        self.moe_layers: list[nn.Module] = []
+        self.moe_mlp_layers: list[DeepseekV4MoE] = []
+        example_moe: DeepseekV4MoE | None = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if not isinstance(layer, DeepseekV4DecoderLayer):
+                continue
+            if isinstance(layer.ffn, DeepseekV4MoE):
+                example_moe = layer.ffn
+                self.moe_mlp_layers.append(layer.ffn)
+                self.moe_layers.append(layer.ffn.experts)
+
+        self.num_moe_layers = len(self.moe_layers)
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
