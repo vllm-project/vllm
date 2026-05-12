@@ -30,6 +30,7 @@ steps:
 - label: Engine (1 GPU)
   key: engine-1-gpu
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
     - vllm/v1/engine/
     - tests/v1/engine/
@@ -50,6 +51,7 @@ steps:
 - label: e2e Core (1 GPU)
   key: e2e-core-1-gpu
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
     - vllm/v1/
     - tests/v1/e2e/general/
