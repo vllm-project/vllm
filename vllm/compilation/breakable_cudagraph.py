@@ -67,8 +67,9 @@ def eager_break_during_capture(fn: F) -> F:
     segment, runs the function eagerly on the capture stream, records the
     callable for replay, and starts a fresh segment.
 
-    This is the only seam ops should touch -- they don't need to import
-    or know about :class:`BreakableCUDAGraphCapture` directly.
+    **In-place output buffer required.** Decorated ops must write into a
+    caller-provided output tensor; a fresh tensor returned by ``fn`` would
+    change address each replay and break downstream graph segments.
 
     **Decorator order matters.** Apply as the *outermost* decorator if
     there are other decorators that introduce host-side side effects
@@ -183,13 +184,6 @@ class BreakableCUDAGraphCapture:
         if not self._capturing:
             return
         assert self._current_graph is not None
-        # TODO
-        # Some segments are legitimately empty (e.g. between consecutive
-        # custom ops with no kernels in between, like kv_cache_update
-        # immediately followed by attention_with_output). PyTorch emits a
-        # UserWarning("CUDA Graph is empty") for those. The warning is
-        # informational and we let it through -- if it ever fires from a
-        # segment that should have had work, it points at a real bug.
         self._current_graph.capture_end()
         self.segments.append(self._current_graph.replay)
         self._num_graphs += 1
