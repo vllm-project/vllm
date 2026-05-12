@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from types import SimpleNamespace
-
-from vllm import envs
 import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+from vllm import envs
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -15,7 +13,8 @@ from vllm.platforms import current_platform
 class Kernel(w16a16.Kernel):
     @classmethod
     def is_supported(
-        cls, compute_capability: int | None = None,
+        cls,
+        compute_capability: int | None = None,
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
             return False, "CPU platform not available"
@@ -34,19 +33,18 @@ class Kernel(w16a16.Kernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         params = self._get_layer_params(layer)
+        assert params.processed_weight is not None
         processed = params.processed_weight.detach()
         is_prepacked = False
 
         if envs.VLLM_ZENTORCH_WEIGHT_PREPACK and hasattr(
             torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
         ):
-            processed = torch.ops.zentorch.zentorch_weight_prepack_for_linear(
-                processed
-            )
+            processed = torch.ops.zentorch.zentorch_weight_prepack_for_linear(processed)
             is_prepacked = True
 
         replace_parameter(layer, w16a16.Params.PROCESSED_WEIGHT, processed)
-        layer.extras = SimpleNamespace(is_prepacked=is_prepacked)
+        layer.extras = {"is_prepacked": is_prepacked}
 
     def apply_weights(
         self,
@@ -56,6 +54,8 @@ class Kernel(w16a16.Kernel):
     ) -> torch.Tensor:
         params = self._get_layer_params(layer)
         return torch.ops.zentorch.zentorch_linear_unary(
-            x, params.processed_weight, bias,
-            is_weight_prepacked=params.extra_kwargs.is_prepacked,
+            x,
+            params.processed_weight,
+            bias,
+            is_weight_prepacked=params.extra_kwargs["is_prepacked"],
         )

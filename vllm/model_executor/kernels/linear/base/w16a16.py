@@ -4,8 +4,7 @@
 # w16a16_dispatch_fn relies on PEP-3107 runtime annotations for infer_schema.
 
 from dataclasses import dataclass, field
-from types import SimpleNamespace
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -29,7 +28,7 @@ class Params:
     weight: torch.Tensor
     processed_weight: torch.Tensor | None
     # kernel-specific state that doesn't fit the standard fields (e.g. opaque handles)
-    extra_kwargs: SimpleNamespace = field(default_factory=SimpleNamespace)
+    extra_kwargs: dict[str, Any] = field(default_factory=dict)
 
     WEIGHT: ClassVar[str] = "weight"
     PROCESSED_WEIGHT: ClassVar[str] = "processed_weight"
@@ -40,7 +39,7 @@ class Params:
         return cls(
             weight=getattr(layer, cls.WEIGHT),
             processed_weight=getattr(layer, cls.PROCESSED_WEIGHT, None),
-            extra_kwargs=getattr(layer, cls.EXTRA_KWARGS, SimpleNamespace()),
+            extra_kwargs=getattr(layer, cls.EXTRA_KWARGS, {}),
         )
 
 

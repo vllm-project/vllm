@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import torch
 
-from types import SimpleNamespace
-
-from vllm import _custom_ops as ops
 import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+from vllm import _custom_ops as ops
 from vllm.platforms import CpuArchEnum, current_platform
 
 
 class Kernel(w16a16.Kernel):
     @classmethod
     def is_supported(
-        cls, compute_capability: int | None = None,
+        cls,
+        compute_capability: int | None = None,
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
             return False, "CPU platform not available"
@@ -39,8 +38,9 @@ class Kernel(w16a16.Kernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         params = self._get_layer_params(layer)
+        assert params.processed_weight is not None
         handler = ops.create_onednn_mm(params.processed_weight.t(), 32)
-        layer.extras = SimpleNamespace(handler=handler)
+        layer.extras = {"handler": handler}
 
     def apply_weights(
         self,
@@ -49,4 +49,4 @@ class Kernel(w16a16.Kernel):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         params = self._get_layer_params(layer)
-        return ops.onednn_mm(params.extra_kwargs.handler, x, bias)
+        return ops.onednn_mm(params.extra_kwargs["handler"], x, bias)
