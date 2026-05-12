@@ -61,10 +61,14 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
-        if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
+        if self.disable_any_whitespace and self.backend not in (
+            "auto",
+            "xgrammar",
+            "guidance",
+        ):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
-                "xgrammar and guidance backends."
+                "auto, xgrammar, and guidance backends."
             )
         if self.disable_additional_properties and self.backend != "guidance":
             raise ValueError(
