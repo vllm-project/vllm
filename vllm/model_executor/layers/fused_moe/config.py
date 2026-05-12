@@ -269,7 +269,7 @@ class _FusedMoEQuantDesc:
 
 
 @dataclass
-class _FusedMoEWeightDesc:
+class _FusedMoERuntimeQuantDesc:
     """
     A quantization descriptor for fused MoE ops. This class can describe
     either activations or weights.
@@ -302,10 +302,10 @@ class _FusedMoEWeightDesc:
 
 @dataclass
 class FusedMoERuntimeQuantConfig:
-    _a1_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
-    _a2_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
-    _w1_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
-    _w2_w: _FusedMoEWeightDesc = field(default_factory=_FusedMoEWeightDesc)
+    _a1_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+    _a2_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+    _w1_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+    _w2_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
 
     @property
     def a1_scale(self) -> torch.Tensor | None:
@@ -412,7 +412,7 @@ class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
     removed in the future when the classes are fully separated) and adds
     four _FusedMoEQuantDescs (_a1, _a2, _w1, _w2) that describe the
     quantization dtype and group shape for each activation and weight.
-    The inherited FusedMoEWeightDescs (_a1_w, _a2_w, _w1_w, _w2_w) contain
+    The inherited FusedMoERuntimeQuantDescs (_a1_w, _a2_w, _w1_w, _w2_w) contain
     the runtime quantization parameters (scales, zero points, biases, etc.).
 
     Each FusedMoEMethodBase must implement a get_fused_moe_quant_config
@@ -796,7 +796,7 @@ class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
             _a2=_FusedMoEQuantDesc(quant_dtype, a_shape),
             _w1=_FusedMoEQuantDesc(weight_dtype, w_shape),
             _w2=_FusedMoEQuantDesc(weight_dtype, w_shape),
-            _a1_w=_FusedMoEWeightDesc(
+            _a1_w=_FusedMoERuntimeQuantDesc(
                 scale=a1_scale,
                 alpha_or_gscale=a1_gscale,
                 is_scale_swizzled=is_scale_swizzled,
@@ -804,11 +804,11 @@ class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
                 gemm_beta=gemm1_beta,
                 gemm_clamp_limit=gemm1_clamp_limit,
             ),
-            _a2_w=_FusedMoEWeightDesc(scale=a2_scale, alpha_or_gscale=a2_gscale),
-            _w1_w=_FusedMoEWeightDesc(
+            _a2_w=_FusedMoERuntimeQuantDesc(scale=a2_scale, alpha_or_gscale=a2_gscale),
+            _w1_w=_FusedMoERuntimeQuantDesc(
                 scale=w1_scale, alpha_or_gscale=g1_alphas, zp=w1_zp, bias=w1_bias
             ),
-            _w2_w=_FusedMoEWeightDesc(
+            _w2_w=_FusedMoERuntimeQuantDesc(
                 scale=w2_scale, alpha_or_gscale=g2_alphas, zp=w2_zp, bias=w2_bias
             ),
         )
@@ -913,8 +913,8 @@ def gptq_marlin_moe_quant_config(
         _a2=_FusedMoEQuantDesc(dtype=None, shape=a_shape),
         _w1=_FusedMoEQuantDesc(weight_dtype, w_shape),
         _w2=_FusedMoEQuantDesc(weight_dtype, w_shape),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, zp=w1_zp, bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, zp=w2_zp, bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp, bias=w2_bias),
     )
 
 
@@ -935,13 +935,13 @@ def mxfp4_w4a16_moe_quant_config(
         _a2=_FusedMoEQuantDesc(),
         _w1=_FusedMoEQuantDesc("mxfp4"),
         _w2=_FusedMoEQuantDesc("mxfp4"),
-        _a1_w=_FusedMoEWeightDesc(
+        _a1_w=_FusedMoERuntimeQuantDesc(
             gemm_alpha=gemm1_alpha,
             gemm_beta=gemm1_beta,
             gemm_clamp_limit=gemm1_clamp_limit,
         ),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
     )
 
 
@@ -967,14 +967,14 @@ def mxfp4_mxfp8_moe_quant_config(
         _a2=_FusedMoEQuantDesc("mxfp8"),
         _w1=_FusedMoEQuantDesc("mxfp4"),
         _w2=_FusedMoEQuantDesc("mxfp4"),
-        _a1_w=_FusedMoEWeightDesc(
+        _a1_w=_FusedMoERuntimeQuantDesc(
             gemm_alpha=gemm1_alpha,
             gemm_beta=gemm1_beta,
             gemm_clamp_limit=gemm1_clamp_limit,
             is_scale_swizzled=is_scale_swizzled,
         ),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
         mx_alignment=mx_alignment,
     )
 
@@ -1001,14 +1001,14 @@ def mxfp4_fp8_moe_quant_config(
         _a2=_FusedMoEQuantDesc(current_platform.fp8_dtype(), block_shape),
         _w1=_FusedMoEQuantDesc("mxfp4"),
         _w2=_FusedMoEQuantDesc("mxfp4"),
-        _a1_w=_FusedMoEWeightDesc(
+        _a1_w=_FusedMoERuntimeQuantDesc(
             gemm_alpha=gemm1_alpha,
             gemm_beta=gemm1_beta,
             gemm_clamp_limit=gemm1_clamp_limit,
             is_scale_swizzled=is_scale_swizzled,
         ),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
         mx_alignment=mx_alignment,
     )
 
@@ -1030,10 +1030,10 @@ def mxfp4_w4a8_moe_quant_config(
         _a2=_FusedMoEQuantDesc("fp8"),
         _w1=_FusedMoEQuantDesc("mxfp4"),
         _w2=_FusedMoEQuantDesc("mxfp4"),
-        _a1_w=_FusedMoEWeightDesc(scale=a1_scale),
-        _a2_w=_FusedMoEWeightDesc(scale=a2_scale),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, bias=w2_bias),
+        _a1_w=_FusedMoERuntimeQuantDesc(scale=a1_scale),
+        _a2_w=_FusedMoERuntimeQuantDesc(scale=a2_scale),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
     )
 
 
@@ -1158,8 +1158,8 @@ def int4_w4a16_moe_quant_config(
         _a2=_FusedMoEQuantDesc(shape=group_shape),
         _w1=_FusedMoEQuantDesc("int4", group_shape),
         _w2=_FusedMoEQuantDesc("int4", group_shape),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, zp=w1_zp),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, zp=w2_zp),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp),
     )
 
 
@@ -1175,8 +1175,8 @@ def fp8_w8a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _w1=_FusedMoEQuantDesc(current_platform.fp8_dtype(), group_shape),
         _w2=_FusedMoEQuantDesc(current_platform.fp8_dtype(), group_shape),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale),
     )
 
 
@@ -1196,8 +1196,8 @@ def int8_w8a16_moe_quant_config(
         _a2=_FusedMoEQuantDesc(shape=group_shape),
         _w1=_FusedMoEQuantDesc(torch.int8, group_shape),
         _w2=_FusedMoEQuantDesc(torch.int8, group_shape),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, zp=w1_zp),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, zp=w2_zp),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp),
     )
 
 
@@ -1259,8 +1259,8 @@ def awq_marlin_moe_quant_config(
         _a2=_FusedMoEQuantDesc(dtype=None, shape=a_shape),
         _w1=_FusedMoEQuantDesc(weight_dtype, shape=w_shape),
         _w2=_FusedMoEQuantDesc(weight_dtype, shape=w_shape),
-        _w1_w=_FusedMoEWeightDesc(scale=w1_scale, zp=w1_zp, bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(scale=w2_scale, zp=w2_zp, bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp, bias=w2_bias),
     )
 
 
@@ -1272,8 +1272,8 @@ def biased_moe_quant_config(
     Construct a quant config for unquantized activations with biases.
     """
     return FusedMoEQuantConfig(
-        _w1_w=_FusedMoEWeightDesc(bias=w1_bias),
-        _w2_w=_FusedMoEWeightDesc(bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(bias=w2_bias),
     )
 
 
@@ -1306,14 +1306,14 @@ def humming_moe_quant_config(
         shape=weight_group_shape,
     )
 
-    w1_weight_desc = _FusedMoEWeightDesc(
+    w1_weight_desc = _FusedMoERuntimeQuantDesc(
         scale=w13_scale,
         alpha_or_gscale=w13_gscale,
         zp=w13_zp,
         bias=w13_bias,
     )
 
-    w2_weight_desc = _FusedMoEWeightDesc(
+    w2_weight_desc = _FusedMoERuntimeQuantDesc(
         scale=w2_scale,
         alpha_or_gscale=w2_gscale,
         zp=w2_zp,
