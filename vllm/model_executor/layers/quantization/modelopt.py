@@ -250,7 +250,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         """
         if hf_quant_cfg is None:
             return None
-        if hf_quant_cfg.get("quant_method", "").lower() != "modelopt":
+        if not hf_quant_cfg.get("quant_method", "").lower().startswith("modelopt"):
             return None
         if "quantization" in hf_quant_cfg:
             quant_config = hf_quant_cfg["quantization"]
@@ -901,7 +901,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
             shared_experts=layer.shared_experts,
         )
 
@@ -1590,7 +1590,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             shared_experts=layer.shared_experts,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
