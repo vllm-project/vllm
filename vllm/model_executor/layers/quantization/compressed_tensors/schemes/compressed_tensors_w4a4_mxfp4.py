@@ -5,24 +5,21 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    apply_fp4_marlin_linear,
-    prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
 
-__all__ = ["CompressedTensorsW4A16Mxfp4"]
+__all__ = ["CompressedTensorsW4A4Mxfp4"]
 
 
-class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
+class CompressedTensorsW4A4Mxfp4(CompressedTensorsScheme):
     """
-    Compressed tensors scheme for MXFP4 weight-only quantization.
+    Compressed tensors scheme for MXFP4.
 
     Supports models quantized with the compressed-tensors mxfp4-pack-quantized
     format.
@@ -31,10 +28,14 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
     - 4-bit float weights (E2M1) packed into uint8
     - Per-group E8M0 scales with group_size=32
     - No global scale (unlike NVFP4)
+
+    On SM100+ with FlashInfer: true W4A4 (activations dynamically quantized).
+    Otherwise: W4A16 weight-only via Marlin.
     """
 
     def __init__(self):
         self.group_size = 32
+        self.kernel = init_mxfp4_linear_kernel()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -82,11 +83,9 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename weight_packed to weight that marlin expects
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
-
-        prepare_fp4_layer_for_marlin(layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -94,13 +93,4 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_fp4_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            weight_global_scale=None,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias,
-        )
+        return self.kernel.apply_weights(layer, x, bias)
