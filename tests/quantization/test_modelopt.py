@@ -344,3 +344,86 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is None
     else:
         assert kwargs["activation_key"] is kNvfp4Dynamic
+
+
+@pytest.mark.parametrize(
+    "per_layer_algo, expected_linear_cls_name",
+    [
+        ("NVFP4", "ModelOptNvFp4LinearMethod"),
+        ("W4A16_NVFP4", "ModelOptNvFp4W4A16LinearMethod"),
+    ],
+)
+def test_modelopt_mixed_precision_dispatches_w4a16_layer(
+    per_layer_algo, expected_linear_cls_name
+):
+    """``ModelOptMixedPrecisionConfig.get_quant_method`` must route a Linear
+    layer to the right LinearMethod based on its per-layer ``quant_algo``
+    entry in ``quantized_layers``. Verifies the new ``W4A16_NVFP4`` branch
+    coexists with the existing ``NVFP4`` branch without regression. A
+    regression here would mean a W4A16 layer in a mixed-precision ckpt
+    silently fell through to ``UnquantizedLinearMethod``.
+
+    NOTE: FP8 dispatch (the third branch of get_quant_method) is not
+    covered here because ``ModelOptFp8LinearMethod.__init__`` reads
+    ``get_current_vllm_config().model_config.dtype``, which requires a
+    fully constructed ``ModelConfig`` (real model path). FP8 routing in
+    mixed-precision is exercised by the existing integration tests
+    above that use the ``vllm_runner`` fixture (e.g.
+    ``test_modelopt_fp8_checkpoint_setup``). Our PR doesn't change the
+    FP8 branch, so this isn't a coverage gap.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    hf_quant_config = {
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "group_size": 16,
+            "quantized_layers": {
+                "model.layers.0.fake_proj": {"quant_algo": per_layer_algo},
+            },
+        }
+    }
+    config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
+
+    fake_layer = MagicMock(spec=LinearBase)
+    method = config.get_quant_method(fake_layer, "model.layers.0.fake_proj")
+
+    expected_cls = getattr(m, expected_linear_cls_name)
+    assert isinstance(method, expected_cls), (
+        f"Expected {expected_linear_cls_name}, got {type(method).__name__}"
+    )
+
+
+def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
+    """Sanity: ``ModelOptMixedPrecisionConfig._from_config`` builds **two**
+    NVFP4 sub-configs — one for W4A4 (default) and one tagged
+    ``quant_method='W4A16_NVFP4'`` — so per-layer dispatch can hand
+    Marlin-bound layers the right config without re-instantiating it on
+    every call.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    hf_quant_config = {
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "group_size": 16,
+            "quantized_layers": {
+                "model.layers.0.a": {"quant_algo": "NVFP4"},
+                "model.layers.0.b": {"quant_algo": "W4A16_NVFP4"},
+            },
+        }
+    }
+    config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
+
+    assert config.nvfp4_config.quant_method == "NVFP4"
+    assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
+    assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
+    assert (
+        config.w4a16_nvfp4_config.LinearMethodCls
+        is m.ModelOptNvFp4W4A16LinearMethod
+    )
