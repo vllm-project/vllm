@@ -39,17 +39,17 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranslationRequest,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     TokenizeChatRequest,
     TokenizeCompletionRequest,
     TokenizeResponse,
+)
+from vllm.entrypoints.speech_to_text import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+    TranslationRequest,
 )
 from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
