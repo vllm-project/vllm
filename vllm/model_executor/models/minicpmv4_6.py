@@ -565,9 +565,7 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         self.scale = self.head_dim**-0.5
 
-        tp_size = (
-            1 if use_data_parallel else get_tensor_model_parallel_world_size()
-        )
+        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
         assert self.num_heads % tp_size == 0
         self.num_heads_per_partition = self.num_heads // tp_size
 
@@ -1066,7 +1064,7 @@ class MiniCPMV4_6ForConditionalGeneration(
         if use_vit_merger_tensors is not None:
             if isinstance(use_vit_merger_tensors, torch.Tensor):
                 use_vit_merger = bool(use_vit_merger_tensors.any().item())
-            elif isinstance(use_vit_merger_tensors, (list, tuple)):
+            elif isinstance(use_vit_merger_tensors, list | tuple):
                 use_vit_merger = any(
                     bool(t.any().item()) if isinstance(t, torch.Tensor) else bool(t)
                     for t in use_vit_merger_tensors
