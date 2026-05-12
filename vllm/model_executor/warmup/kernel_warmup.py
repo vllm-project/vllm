@@ -46,6 +46,11 @@ _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 # value via _clamp_warmup_tokens at the call site, smaller caps clamp
 # down naturally.
 _DEEPSEEK_V4_SPARSE_MLA_PREFILL_WARMUP_TOKENS = 8192
+# Steady-state MTP decode shapes to warm. We always include 1 and 2; the
+# scheduler's `max_num_seqs` is appended dynamically at the call site so
+# kernels selected per-shape (e.g. `_fp8_paged_mqa_logits_kernel`'s
+# adaptive BLOCK_M) are covered for the largest in-flight batch the
+# server will ever issue.
 _DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS = (1, 2)
 _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS = tuple(range(1, 17)) + (
     32,
@@ -104,11 +109,8 @@ def _deepseek_v4_mtp_uniform_decode_warmup_requests(
         return ()
 
     max_warmup_reqs = min(max_reqs, max_tokens // query_len)
-    return tuple(
-        reqs
-        for reqs in _DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS
-        if reqs <= max_warmup_reqs
-    )
+    candidates = sorted(set(_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS) | {max_reqs})
+    return tuple(reqs for reqs in candidates if reqs <= max_warmup_reqs)
 
 
 def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
@@ -392,6 +394,28 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
             is_profile=True,
             force_attention=True,
             create_single_prefill=True,
+        )
+        # Simulate the second-and-later chunk of a chunked prefill so
+        # `_build_prefill_chunk_metadata_kernel` and the alt-shape
+        # `_w8a8_triton_block_scaled_mm` configs that fire when the
+        # indexer sees prior context get JIT-compiled here, not on the
+        # first user request that exceeds `max_num_batched_tokens`.
+        runner._dummy_run(
+            num_tokens=prefill_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            create_single_prefill=True,
+            profile_seq_lens=prefill_tokens * 2,
+        )
+        # Multi-request prefill (max_num_seqs prefills sharing the
+        # batched-token budget) covers the other dense-GEMM shape bucket
+        # plus the multi-prefill indexer path.
+        runner._dummy_run(
+            num_tokens=prefill_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
         )
     query_len = getattr(runner, "uniform_decode_query_len", 0)
     for num_reqs in uniform_decode_reqs:
