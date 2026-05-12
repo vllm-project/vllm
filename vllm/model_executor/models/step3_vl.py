@@ -921,11 +921,11 @@ class Step3VLForConditionalGeneration(
     def postprocess_encoder_output(
         self,
         output: torch.Tensor,
-        batch_mm_kwargs: dict[str, Any],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
     ):
         """CPU-side per-item merge after graph replay.
 
