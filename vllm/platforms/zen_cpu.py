@@ -12,7 +12,8 @@ logger = init_logger(__name__)
 class ZenCpuPlatform(CpuPlatform):
     """CPU platform with AMD Zen (ZenDNN/zentorch) optimizations.
 
-    Model-load time (dispatch_cpu_unquantized_gemm in layers/utils.py):
+    Model-load time (zentorch w16a16 kernel in
+    model_executor/kernels/linear/zentorch/w16a16.py):
       - Routes linear ops to zentorch_linear_unary.
       - When VLLM_ZENTORCH_WEIGHT_PREPACK=1 (default), eagerly prepacks
         weights via zentorch_weight_prepack_for_linear.

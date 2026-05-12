@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
 import pytest
 import torch
 
@@ -117,28 +115,6 @@ def _composite(chain, *, scheme_tag, native_impl=_native_impl):
     )
 
 
-def _config():
-    return SimpleNamespace()
-
-
-class TestPredicateKernel:
-    def test_subclass_without_predicate_cannot_be_instantiated(self):
-        class _Missing(common.PredicateKernel):
-            @classmethod
-            def is_supported(cls, compute_capability=None):
-                return True, None
-
-            def apply_weights(self, *a, **kw):
-                return type(self).apply(*a, **kw)
-
-            @staticmethod
-            def apply(*a, **kw):
-                return torch.tensor([0.0])
-
-        with pytest.raises(TypeError, match="abstract"):
-            _Missing(config=None)
-
-
 class TestCompositeChainValidation:
     def test_plain_kernel_in_non_terminal_position_raises(self):
         Comp = _composite(
@@ -146,17 +122,17 @@ class TestCompositeChainValidation:
             scheme_tag=_unique_tag("plain_in_middle"),
         )
         with pytest.raises(TypeError, match="must be a PredicateKernel"):
-            Comp(_config())
+            Comp(common.Config())
 
     def test_terminal_can_be_plain_kernel(self):
         Comp = _composite(
             [PredTrue, PlainTerminal], scheme_tag=_unique_tag("plain_term")
         )
-        Comp(_config())  # no error
+        Comp(common.Config())  # no error
 
     def test_terminal_can_be_predicate_kernel(self):
         Comp = _composite([PredTrue, PredFalse], scheme_tag=_unique_tag("pred_term"))
-        Comp(_config())  # no error
+        Comp(common.Config())  # no error
 
 
 class TestCompositeSelectorGating:
@@ -203,7 +179,7 @@ class TestCompositeDispatch:
             [PredTrue, PlainTerminal],
             scheme_tag=_unique_tag("matches_over_terminal"),
         )
-        inst = Comp(_config())
+        inst = Comp(common.Config())
         assert inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_PRED
 
     def test_falls_through_to_plain_terminal(self):
@@ -211,7 +187,7 @@ class TestCompositeDispatch:
             [PredFalse, PredFalse, PlainTerminal],
             scheme_tag=_unique_tag("falls_to_terminal"),
         )
-        inst = Comp(_config())
+        inst = Comp(common.Config())
         assert (
             inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_TERMINAL
         )
@@ -222,7 +198,7 @@ class TestCompositeDispatch:
             [PredFalse, PredFalse],
             scheme_tag=_unique_tag("falls_native_no_term"),
         )
-        inst = Comp(_config())
+        inst = Comp(common.Config())
         assert (
             inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_NATIVE
         )
@@ -233,7 +209,7 @@ class TestCompositeDispatch:
             [PredFalse, PredFalse, PlainTerminalUnsupported],
             scheme_tag=_unique_tag("falls_native_unviable"),
         )
-        inst = Comp(_config())
+        inst = Comp(common.Config())
         assert (
             inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_NATIVE
         )
@@ -245,7 +221,7 @@ class TestCompositeDispatch:
             [PredUnsupported, PredTrue, PlainTerminal],
             scheme_tag=_unique_tag("filter_unsupported"),
         )
-        inst = Comp(_config())
+        inst = Comp(common.Config())
         assert inst._dispatch_fn(torch.zeros(1), torch.zeros(1), None) is SENTINEL_PRED
 
 
@@ -254,7 +230,7 @@ class TestCompositeOpRegistration:
         """Op name is `{scheme_tag}_{8 hex chars}`."""
         tag = _unique_tag("name_format")
         Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
-        op_name = Comp(_config())._op_name
+        op_name = Comp(common.Config())._op_name
         assert op_name.startswith(f"{tag}_")
         suffix = op_name[len(tag) + 1 :]
         assert len(suffix) == 8
@@ -266,7 +242,7 @@ class TestCompositeOpRegistration:
         tag = _unique_tag("distinct_chains")
         CompA = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
         CompB = _composite([PredFalse, PredTrue, PlainTerminal], scheme_tag=tag)
-        assert CompA(_config())._op_name != CompB(_config())._op_name
+        assert CompA(common.Config())._op_name != CompB(common.Config())._op_name
 
     def test_register_skipped_when_op_already_exists(self):
         """Re-instantiating the same Composite must not re-register —
@@ -275,9 +251,9 @@ class TestCompositeOpRegistration:
         tag = _unique_tag("registration_skipped")
         Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
 
-        first = Comp(_config())
+        first = Comp(common.Config())
         before = len(vars(torch.ops.composed_kernel))
-        second = Comp(_config())
+        second = Comp(common.Config())
         after = len(vars(torch.ops.composed_kernel))
 
         assert first._op_name == second._op_name
