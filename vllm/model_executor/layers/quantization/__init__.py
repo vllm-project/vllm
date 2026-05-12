@@ -11,6 +11,7 @@ logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
+    "bitnet",
     "fp8",
     "fbgemm_fp8",
     "fp_quant",
@@ -113,6 +114,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
+    from .bitnet import BitNetBitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
@@ -140,6 +142,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
         "awq": AWQConfig,
+        "bitnet": BitNetBitBLASConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,

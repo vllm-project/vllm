@@ -6,13 +6,11 @@ Architecture: LLaMA-like with three key differences:
   1. SubLN: Extra RMSNorm layers inside attention (attn_sub_norm) and MLP
      (ffn_sub_norm) blocks.
   2. Activation: Uses ReLU² instead of SiLU.
-  3. BitNet quantization: All linear layers use 1.58-bit ternary weights
-     ({-1, 0, +1}) and 8-bit activation quantization on every forward pass.
+  3. BitNet quantization: All linear layers use online 1.58-bit weight
+     quantization (ternary: -1, 0, +1 via WeightQuant) and 8-bit activation
+     quantization (ActQuant) on every forward pass.
 
-Supported checkpoints:
-  - microsoft/bitnet-b1.58-2B-4T-bf16  (BF16 weights, quantized at load)
-  - microsoft/bitnet-b1.58-2B-4T       (packed uint8, via BitNetBitBLASConfig)
-
+Reference checkpoint: microsoft/bitnet-b1.58-2B-4T-bf16
 Reference: transformers.integrations.bitnet.AutoBitLinear
 """
 
@@ -41,11 +39,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -407,14 +407,6 @@ class BitNetModel(nn.Module):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-
-        # Detect if we're using the quantization backend (packed mode).
-        # When quant_config is active, linear layers have "qweight" and
-        # "weight_scale" parameters instead of "weight".
-        has_quant = any(
-            ".qweight" in name for name, _ in self.named_parameters()
-        )
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -426,6 +418,10 @@ class BitNetModel(nn.Module):
             ):
                 continue
 
+            # Apply BitNet ternary weight quantization at load time.
+            # This replicates the online WeightQuant from AutoBitLinear,
+            # but we do it once at load time since it's deterministic.
+            # Only apply to projection weights (not norms or embeddings).
             is_proj_weight = (
                 any(proj in name for proj in [
                     "q_proj", "k_proj", "v_proj", "o_proj",
@@ -433,21 +429,14 @@ class BitNetModel(nn.Module):
                 ])
                 and name.endswith(".weight")
             )
-
-            if has_quant and is_proj_weight:
-                # Packed mode: remap "weight" → "qweight" for the
-                # quantization backend. The backend's weight_loader
-                # handles the packed uint8 format directly.
-                name = name.replace(".weight", ".qweight")
-            elif is_proj_weight:
-                # BF16 mode: apply ternary weight quantization at load
-                # time. This replicates AutoBitLinear's WeightQuant.
+            if is_proj_weight:
                 loaded_weight = weight_quant(loaded_weight)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
@@ -457,11 +446,10 @@ class BitNetModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(
