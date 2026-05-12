@@ -1,4 +1,4 @@
-use super::{JsonToolCallConfig, JsonToolCallParser};
+use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
 use crate::parser::tool::{Result, ToolParseResult, ToolParser};
 use crate::request::ChatTool;
 
@@ -6,6 +6,10 @@ const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Hermes",
     start_marker: "<tool_call>",
     end_marker: "</tool_call>",
+    marker_whitespace: JsonToolCallWhitespace::Optional,
+    delimiter: None,
+    name_key: "name",
+    arguments_key: "arguments",
 };
 
 /// Tool parser for Hermes XML-wrapped JSON tool calls.
