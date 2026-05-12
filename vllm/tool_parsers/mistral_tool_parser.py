@@ -43,7 +43,7 @@ from vllm.logger import init_logger
 from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer, adapt_inplace_to_mistral_tool
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
@@ -91,7 +91,12 @@ class MistralToolCall(ToolCall):
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
-    return not (is_mistral_tokenizer(model_tokenizer) and model_tokenizer.version >= 11)
+    if is_mistral_tokenizer(model_tokenizer):
+        return model_tokenizer.version < 11
+    # For HF tokenizers, check if [ARGS] token exists in vocab
+    # which indicates a v11+ equivalent tokenizer
+    vocab: dict[str, int] = getattr(model_tokenizer, "get_vocab", lambda: {})()
+    return "[ARGS]" not in vocab
 
 
 @dataclass
@@ -118,6 +123,8 @@ class MistralToolParser(ToolParser):
     set.
     """
 
+    IS_MISTRAL_TOOL_PARSER = True  # used by vllm.utils.mistral
+
     # Used to generate correct grammar in `adjust_request`
     model_can_reason: bool = False
 
@@ -137,7 +144,8 @@ class MistralToolParser(ToolParser):
         self.current_tool_name: str | None = None
         self.current_tool_mistral_id: str | None = None
         self.starting_new_tool = False
-        if _is_pre_v11_tokeniser(self.model_tokenizer):
+        self._is_pre_v11 = _is_pre_v11_tokeniser(self.model_tokenizer)
+        if self._is_pre_v11:
             self.parse_coro = ijson.parse_coro(
                 self.update_stream_state_pre_v11_tokenizer()
             )
@@ -145,7 +153,6 @@ class MistralToolParser(ToolParser):
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
-        self._is_pre_v11 = _is_pre_v11_tokeniser(self.model_tokenizer)
 
         if self.bot_token_id is None:
             raise RuntimeError(
@@ -234,12 +241,7 @@ class MistralToolParser(ToolParser):
         )
 
         mistral_tools = (
-            [
-                MistralTool.model_validate(
-                    adapt_inplace_to_mistral_tool(tool.model_dump())
-                )
-                for tool in request.tools
-            ]
+            [MistralTool.from_openai(tool.model_dump()) for tool in request.tools]
             if request.tools is not None
             else None
         )
@@ -468,6 +470,8 @@ class MistralToolParser(ToolParser):
                     raw_tool_call[end_name:],
                 )
 
+                # HF tokenizers may include [ARGS] in the text
+                tool_name = tool_name.replace("[ARGS]", "")
                 tool_calls.append({"name": tool_name, "arguments": args})
 
         # < v11: content[BOT] [{tool_call1},{tool_call2}]
@@ -556,7 +560,7 @@ class MistralToolParser(ToolParser):
         # if the tool call token IS in the tokens generated so far, that
         # means we're parsing as tool calls now
         try:
-            if _is_pre_v11_tokeniser(self.model_tokenizer):
+            if self._is_pre_v11:
                 return self._extract_tool_calls_streaming_pre_v11_tokenizer(
                     delta_text=delta_text,
                     delta_token_ids=delta_token_ids,
@@ -614,13 +618,6 @@ class MistralToolParser(ToolParser):
         if len(delta_tool_calls) > 0:
             delta.tool_calls = delta_tool_calls
 
-        # HACK: serving_chat.py inspects the internal state of tool parsers
-        # when determining its final streaming delta, automatically
-        # adding autocompleted JSON.
-        # These two lines avoid that nonsense while ensuring finish_reason
-        # is set to tool_calls when at least one tool is called.
-        if delta_tool_calls and not self.prev_tool_call_arr:
-            self.prev_tool_call_arr = [{"arguments": {}}]
         return delta
 
     def _generate_delta_tool_call(self, delta_text: str) -> list[DeltaToolCall]:
@@ -633,6 +630,8 @@ class MistralToolParser(ToolParser):
             StreamingState.PARSING_ARGUMENTS,
         ] and delta_text.startswith(self.bot_token):
             self.current_tool_id += 1
+            self.streamed_args_for_tool.append("")
+            self.prev_tool_call_arr.append({})
             self.streaming_state = StreamingState.PARSING_NAME
             delta_text = delta_text.replace(self.bot_token, "", 1)
         if self.streaming_state == StreamingState.PARSING_NAME:
@@ -644,6 +643,11 @@ class MistralToolParser(ToolParser):
                 tool_id = MistralToolCall.generate_random_id()
                 delta_function_name = delta_text.split("{")[0]
                 self.current_tool_name += delta_function_name
+                # HF tokenizers may include [ARGS] in the text
+                self.current_tool_name = self.current_tool_name.replace("[ARGS]", "")
+                self.prev_tool_call_arr[self.current_tool_id]["name"] = (
+                    self.current_tool_name
+                )
                 delta_text = delta_text[len(delta_function_name) :]
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS
             else:
@@ -660,6 +664,10 @@ class MistralToolParser(ToolParser):
                 self.streaming_state = StreamingState.TOOL_COMPLETE
             else:
                 delta_arguments = delta_text
+            self.streamed_args_for_tool[self.current_tool_id] += delta_arguments
+            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
+                self.streamed_args_for_tool[self.current_tool_id]
+            )
             ret = []
             if self.current_tool_name or delta_arguments:
                 ret += [
@@ -809,9 +817,12 @@ class MistralToolParser(ToolParser):
                     if self.current_tool_mistral_id is not None:
                         current_tool_call.id = self.current_tool_mistral_id
                         self.current_tool_mistral_id = None
+                    self._track_streamed_args_pre_v11(current_tool_call)
                     delta_tool_calls.append(current_tool_call)
                 current_tool_call_modified = False
                 self.current_tool_id += 1
+                self.streamed_args_for_tool.append("")
+                self.prev_tool_call_arr.append({})
                 self.current_tool_mistral_id = MistralToolCall.generate_random_id()
                 current_tool_call = DeltaToolCall(
                     index=self.current_tool_id,
@@ -824,6 +835,9 @@ class MistralToolParser(ToolParser):
                 # we have the complete tool name
                 current_tool_call_modified = True
                 current_tool_call.function.name = self.current_tool_name
+                self.prev_tool_call_arr[self.current_tool_id]["name"] = (
+                    self.current_tool_name
+                )
                 self.current_tool_name = None
             if self.streaming_state == StreamingState.PARSING_NAME_COMPLETED:
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
@@ -849,15 +863,8 @@ class MistralToolParser(ToolParser):
             if self.current_tool_mistral_id is not None:
                 current_tool_call.id = self.current_tool_mistral_id
                 self.current_tool_mistral_id = None
+            self._track_streamed_args_pre_v11(current_tool_call)
             delta_tool_calls.append(current_tool_call)
-
-        # HACK: serving_chat.py inspects the internal state of tool parsers
-        # when determining it's final streaming delta, automatically
-        # adding autocompleted JSON.
-        # These two lines avoid that nonsense while ensuring finish_reason
-        # is set to tool_calls when at least one tool is called.
-        if delta_tool_calls and not self.prev_tool_call_arr:
-            self.prev_tool_call_arr = [{"arguments": {}}]
 
         if content or len(delta_tool_calls) > 0:
             delta_message = DeltaMessage()
@@ -871,6 +878,16 @@ class MistralToolParser(ToolParser):
                 return DeltaMessage()
             else:
                 return None
+
+    def _track_streamed_args_pre_v11(self, tool_call: DeltaToolCall) -> None:
+        r"""Accumulate `tool_call` arguments into the streaming state."""
+        if tool_call.function is not None and tool_call.function.arguments is not None:
+            self.streamed_args_for_tool[self.current_tool_id] += (
+                tool_call.function.arguments
+            )
+            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = (
+                self.streamed_args_for_tool[self.current_tool_id]
+            )
 
     def _split_delta(
         self,

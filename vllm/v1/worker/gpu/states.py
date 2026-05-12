@@ -57,6 +57,8 @@ class RequestState:
         self.num_computed_tokens = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
+        # Optimistic CPU mirror of num_computed_tokens (upper bound on GPU value).
+        self.num_computed_tokens_np = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
@@ -100,9 +102,10 @@ class RequestState:
         self.total_len.stage_write_elem(req_idx, prefill_len)
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
-        if num_computed_tokens > 0 and num_computed_tokens <= prefill_len:
+        if 0 < num_computed_tokens <= prefill_len:
             # For PD disagg or resumed requests: set last_sampled to the last
             # computed token so the first decode step gets the right input_id.
             # For fresh prefill requests (num_computed_tokens == 0) the tensor
@@ -130,8 +133,8 @@ class RequestState:
         self.free_indices.append(req_idx)
         return True
 
-    def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(
+    def is_prefilling(self, idx_mapping_np: np.ndarray) -> np.ndarray:
+        return (
             self.num_computed_prefill_tokens[idx_mapping_np]
             < self.prefill_len.np[idx_mapping_np]
         )

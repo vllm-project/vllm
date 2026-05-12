@@ -31,6 +31,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    kE2M1ToFloat_handle,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -86,7 +89,7 @@ def backend_to_kernel_cls(
         ]
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -107,14 +110,14 @@ def backend_to_kernel_cls(
         return [FlashInferCuteDSLBatchedExperts]
 
     elif backend == NvFp4MoeBackend.VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassExpertsFp4,
         )
 
         return [CutlassExpertsFp4]
 
     elif backend == NvFp4MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
@@ -168,10 +171,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.EMULATION,
     ]
 
-    # NOTE(rob): this is kind of a hack. We need to peak into
-    # the prepare-finalize selection to determine if we are using
-    # the batched or standard expert format.
-    use_batched = config.moe_parallel_config.use_deepep_ll_kernels
+    use_batched = config.moe_parallel_config.use_batched_activation_format
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if use_batched
@@ -278,7 +278,6 @@ def select_nvfp4_moe_backend(
                 activation_key,
                 activation_format,
             )
-
             if supported:
                 logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
@@ -380,6 +379,10 @@ def convert_to_nvfp4_moe_kernel_format(
             is_act_and_mul=is_act_and_mul,
         )
     elif nvfp4_backend == NvFp4MoeBackend.EMULATION:
+        # Move the E2M1 lookup table to the device now, because
+        # `.to(device)` is not allowed during CUDA graph capture.
+        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(w13.device)
+
         if a13_scale is None or a2_scale is None:
             raise ValueError(
                 "Activation global scales should not be None, got"
@@ -458,7 +461,7 @@ def make_nvfp4_moe_quant_config(
         # NOTE(rob): this is a hack until the MoE kernels
         # create their own quant configs. TRTLLM kernel
         # does not accept swizzled input quant scales.
-        is_nvfp4_scale_swizzled=(
+        is_scale_swizzled=(
             backend
             not in (
                 NvFp4MoeBackend.FLASHINFER_TRTLLM,

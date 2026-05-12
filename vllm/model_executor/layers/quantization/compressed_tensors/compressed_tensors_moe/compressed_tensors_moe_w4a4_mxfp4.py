@@ -14,10 +14,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     mxfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsMxfp4,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
@@ -149,7 +149,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         if self.use_cutlass_mxfp4:
             # Swizzle weight scales from flat checkpoint layout [E, N, K//32]
             # to CUTLASS tiled layout [E, numMTiles*numKTiles*512].
-            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
                 swizzle_mxfp4_scales,
             )
 
