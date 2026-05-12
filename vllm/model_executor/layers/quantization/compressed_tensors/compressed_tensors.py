@@ -413,7 +413,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_group_size_32 = quant_args.group_size == 32
         is_float_type = quant_args.type == QuantizationType.FLOAT
         is_8_bits = quant_args.num_bits == 8
-        is_mxfp8_scale_dtype = quant_args.scale_dtype == torch.uint8
 
         return (
             is_group_quant
@@ -421,7 +420,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_8_bits
             and is_group_size_32
             and is_symmetric
-            and is_mxfp8_scale_dtype
         )
 
     @staticmethod
@@ -625,10 +623,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             return CompressedTensorsW4A16Fp4()
 
         if self._is_mxfp4(weight_quant):
-            return CompressedTensorsW4A4Mxfp4()
+            return CompressedTensorsW4A4Mxfp4(
+                use_a16=input_quant is None or not self._is_mxfp4(input_quant)
+            )
 
         if self._is_mxfp8(weight_quant):
-            return CompressedTensorsW8A8Mxfp8()
+            return CompressedTensorsW8A8Mxfp8(
+                use_a16=input_quant is None or not self._is_mxfp8(input_quant)
+            )
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
