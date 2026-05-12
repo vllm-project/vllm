@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.common.cli_args import init_parser_plugin
+from vllm.entrypoints.warmup import load_warmup_config, warmup_engine
 from vllm.logger import configure_logging_from_args, init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
@@ -191,6 +192,10 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
+        warmup_cfg = load_warmup_config(args.warmup_config)
+        if warmup_cfg is not None:
+            await warmup_engine(engine_client, warmup_cfg)
+
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, peer_loads, **uvicorn_kwargs
         )
