@@ -13,6 +13,9 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -38,9 +41,10 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenVLAConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .module_mapping import MultiModelKeys
-from .utils import init_vllm_registered_model, maybe_prefix
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 _OPENVLA_IMAGE_SIZE = 224
 _OPENVLA_PATCH_SIZE = 14
@@ -58,6 +62,151 @@ class OpenVLAImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     data: Annotated[torch.Tensor, TensorShape("bn", 6, "h", "w")]
+
+
+class PrismaticVisionBackbone(nn.Module):
+    """OpenVLA's fused DINOv2 + SigLIP vision backbone."""
+
+    def __init__(
+        self,
+        *,
+        image_sizes: Sequence[int],
+        timm_model_ids: Sequence[str],
+        use_fused_vision_backbone: bool,
+    ) -> None:
+        super().__init__()
+        self.image_sizes = list(image_sizes)
+        self.timm_model_ids = list(timm_model_ids)
+        self.use_fused_vision_backbone = use_fused_vision_backbone
+        self.embed_dim = 2176 if use_fused_vision_backbone else 1024
+        self.featurizer: nn.Module | None = None
+        self.fused_featurizer: nn.Module | None = None
+
+    def init_timm_models(self) -> None:
+        if self.featurizer is not None:
+            return
+
+        try:
+            import timm
+        except ImportError as e:
+            raise ImportError("Please install timm to use OpenVLA.") from e
+
+        image_size = self.image_sizes[0]
+        with set_default_torch_dtype(torch.float16):
+            self.featurizer = timm.create_model(
+                self.timm_model_ids[0],
+                pretrained=False,
+                num_classes=0,
+                img_size=image_size,
+            )
+            if self.use_fused_vision_backbone:
+                self.fused_featurizer = timm.create_model(
+                    self.timm_model_ids[1],
+                    pretrained=False,
+                    num_classes=0,
+                    img_size=image_size,
+                )
+
+        self.featurizer = self.featurizer.to(dtype=torch.get_default_dtype())
+        if self.fused_featurizer is not None:
+            self.fused_featurizer = self.fused_featurizer.to(
+                dtype=torch.get_default_dtype()
+            )
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        if self.featurizer is None:
+            raise RuntimeError("OpenVLA vision backbone is not initialized.")
+        if pixel_values.shape[1] != 6:
+            raise ValueError(
+                "OpenVLA expects 6-channel image inputs, "
+                f"got {pixel_values.shape[1]} channels."
+            )
+
+        dinov2_pixels = pixel_values[:, :3]
+        siglip_pixels = pixel_values[:, 3:]
+
+        n_blocks = len(self.featurizer.blocks)
+        features = self.featurizer.get_intermediate_layers(
+            dinov2_pixels, n={n_blocks - 2}
+        )[0]
+
+        if self.fused_featurizer is not None:
+            n_fused_blocks = len(self.fused_featurizer.blocks)
+            fused_features = self.fused_featurizer.get_intermediate_layers(
+                siglip_pixels, n={n_fused_blocks - 2}
+            )[0]
+            features = torch.cat([features, fused_features], dim=-1)
+
+        return features
+
+
+class PrismaticProjector(nn.Module):
+    """Project Prismatic vision features into the language-model hidden size."""
+
+    def __init__(
+        self,
+        *,
+        vision_dim: int,
+        text_dim: int,
+        use_fused_vision_backbone: bool,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.use_fused_vision_backbone = use_fused_vision_backbone
+
+        if use_fused_vision_backbone:
+            intermediate_dim = 4 * vision_dim
+            self.fc1 = ColumnParallelLinear(
+                vision_dim,
+                intermediate_dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fc1",
+            )
+            self.act_fn1 = get_act_fn("gelu")
+            self.fc2 = RowParallelLinear(
+                intermediate_dim,
+                text_dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fc2",
+            )
+            self.act_fn2 = get_act_fn("gelu")
+            self.fc3 = RowParallelLinear(
+                text_dim,
+                text_dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fc3",
+            )
+        else:
+            self.fc1 = ColumnParallelLinear(
+                vision_dim,
+                text_dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fc1",
+            )
+            self.act_fn1 = get_act_fn("gelu")
+            self.fc2 = RowParallelLinear(
+                text_dim,
+                text_dim,
+                bias=True,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fc2",
+            )
+
+    def forward(self, image_features: torch.Tensor) -> torch.Tensor:
+        hidden_states, _ = self.fc1(image_features)
+        hidden_states = self.act_fn1(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
+
+        if self.use_fused_vision_backbone:
+            hidden_states = self.act_fn2(hidden_states)
+            hidden_states, _ = self.fc3(hidden_states)
+
+        return hidden_states
 
 
 class OpenVLAProcessingInfo(BaseProcessingInfo):
@@ -271,10 +420,26 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.multimodal_config = vllm_config.model_config.multimodal_config
         self.image_token_id = config.image_token_index
+        self.n_action_bins = config.n_action_bins
         self.num_patches = _OPENVLA_NUM_IMAGE_TOKENS
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_backbone = PrismaticVisionBackbone(
+                image_sizes=config.image_sizes,
+                timm_model_ids=config.timm_model_ids,
+                use_fused_vision_backbone=config.use_fused_vision_backbone,
+            )
+            self.projector = PrismaticProjector(
+                vision_dim=self.vision_backbone.embed_dim,
+                text_dim=config.text_config.hidden_size,
+                use_fused_vision_backbone=config.use_fused_vision_backbone,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "projector"),
+            )
 
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
@@ -307,12 +472,20 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             },
         )
 
+    def _process_image_input(
+        self,
+        image_input: OpenVLAImagePixelInputs,
+    ) -> torch.Tensor:
+        pixel_values = image_input["data"]
+        vision_features = self.vision_backbone(pixel_values)
+        return self.projector(vision_features)
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
 
-        raise NotImplementedError("OpenVLA vision tower is implemented in phase 4")
+        return self._process_image_input(image_input)
 
     def forward(
         self,
@@ -336,7 +509,11 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        return MultiModelKeys.from_string_field(language_model="language_model")
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="projector",
+            tower_model="vision_backbone",
+        )
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         return num_image_tokens
@@ -345,4 +522,15 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         return num_vision_tokens
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        raise NotImplementedError("OpenVLA execution is implemented in a later phase")
+        self.vision_backbone.init_timm_models()
+
+        def maybe_rename_layerscale(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if ".ls1.scale_factor" in name or ".ls2.scale_factor" in name:
+                    name = name.replace(".scale_factor", ".gamma")
+                yield name, weight
+
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(maybe_rename_layerscale(weights))
