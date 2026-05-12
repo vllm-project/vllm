@@ -182,13 +182,27 @@ class StructuredOutputManager:
         assert self.backend is not None
         return self.backend.compile_grammar(request_type, grammar_spec)
 
+    def _mask_token(self, index: int, token_id: int) -> None:
+        assert self._grammar_bitmask is not None
+        word_index = token_id // 32
+        if token_id < 0 or word_index >= self._grammar_bitmask.shape[1]:
+            return
+        bit_index = token_id % 32
+        mask = ~(1 << bit_index) & 0xFFFFFFFF
+        if mask >= 2**31:
+            mask -= 2**32
+        self._grammar_bitmask[index, word_index].bitwise_and_(mask)
+
     def _fill_bitmasks(
-        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
+        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool, set[int], bool]]
     ) -> None:
         assert self._grammar_bitmask is not None
-        for grammar, index, apply_bitmask in batch:
+        for grammar, index, apply_bitmask, stop_token_ids, mask_stop_tokens in batch:
             if apply_bitmask and not grammar.is_terminated():
                 grammar.fill_bitmask(self._grammar_bitmask, index)
+                if mask_stop_tokens:
+                    for token_id in stop_token_ids:
+                        self._mask_token(index, token_id)
             else:
                 # Note that for thinking support, we will need to
                 # reset the relevant part of the bitmask for consequent
@@ -196,7 +210,7 @@ class StructuredOutputManager:
                 self._grammar_bitmask[index].fill_(self._full_mask)
 
     def _async_submit_fill_bitmask(
-        self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
+        self, batch: list[tuple[StructuredOutputGrammar, int, bool, set[int], bool]]
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
 
@@ -241,6 +255,7 @@ class StructuredOutputManager:
         ):
             promises = []
             batch = []
+            mask_stop_tokens = isinstance(self.backend, XgrammarBackend)
             for req_id in structured_output_request_ids:
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
@@ -250,7 +265,16 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
 
                 apply_bitmask = self.should_fill_bitmask(request)
-                batch.append((grammar, cumulative_index, apply_bitmask))
+                assert request.sampling_params is not None
+                batch.append(
+                    (
+                        grammar,
+                        cumulative_index,
+                        apply_bitmask,
+                        request.sampling_params.all_stop_token_ids,
+                        mask_stop_tokens,
+                    )
+                )
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -273,11 +297,24 @@ class StructuredOutputManager:
                     assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
+                assert request.sampling_params is not None
+                stop_token_ids = request.sampling_params.all_stop_token_ids
+                mask_stop_tokens = isinstance(self.backend, XgrammarBackend)
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 for token in itertools.chain(req_tokens, (-1,)):
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    self._fill_bitmasks(
+                        (
+                            (
+                                grammar,
+                                cumulative_index,
+                                apply_bitmask,
+                                stop_token_ids,
+                                mask_stop_tokens,
+                            ),
+                        )
+                    )
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
