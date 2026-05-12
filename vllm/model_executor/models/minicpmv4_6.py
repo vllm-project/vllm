@@ -6,11 +6,16 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import MiniCPMV4_6Config
 
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.linear import (
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -50,6 +55,7 @@ from .utils import (
     flatten_bn,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 
 def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -546,28 +552,54 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
-    def __init__(self, config):
+    def __init__(
+        self,
+        config,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = self.embed_dim // self.num_heads
         self.scale = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        tp_size = (
+            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+        assert self.num_heads % tp_size == 0
+        self.num_heads_per_partition = self.num_heads // tp_size
+
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.num_heads,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.out_proj = RowParallelLinear(
+            self.embed_dim,
+            self.embed_dim,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.attn = MMEncoderAttention(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        B, L, _ = hidden_states.shape
-        qkv_shape = (B, L, self.num_heads, self.head_dim)
-        q = self.q_proj(hidden_states).view(qkv_shape).transpose(1, 2)
-        k = self.k_proj(hidden_states).view(qkv_shape).transpose(1, 2)
-        v = self.v_proj(hidden_states).view(qkv_shape).transpose(1, 2)
-
-        attn_out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        attn_out = attn_out.transpose(1, 2).reshape(B, L, self.embed_dim)
-        return self.out_proj(attn_out)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.chunk(3, dim=-1)
+        attn_out = self.attn(q, k, v)
+        out, _ = self.out_proj(attn_out)
+        return out
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
@@ -581,7 +613,11 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
         self.window_kernel_size = (2, 2)
         self.embed_dim = config.hidden_size
 
-        self.self_attn = MiniCPMV4_6ViTWindowAttentionSelfAttn(config)
+        self.self_attn = MiniCPMV4_6ViTWindowAttentionSelfAttn(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.layer_norm1 = nn.LayerNorm(
             self.embed_dim,
             eps=config.layer_norm_eps,
