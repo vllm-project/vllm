@@ -97,10 +97,9 @@ In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `
 
 ### Custom Callable Mode
 
-For custom transport mechanisms, pass a callable as `send_mode`. The callable receives an `IPCWeightTransferUpdateInfo` object and is responsible for delivering it to the inference engine. Both sync and async callables are supported — use `async_trainer_send_weights` for async callables:
+For custom transport mechanisms, pass a callable as `send_mode`. The callable receives an `IPCWeightTransferUpdateInfo` object and is responsible for delivering it to the inference engine:
 
 ```python
-# Sync callable — use trainer_send_weights
 def my_custom_sender(update_info: IPCWeightTransferUpdateInfo):
     # Custom logic to deliver update_info to vLLM
     ...
@@ -110,20 +109,6 @@ trainer_args = IPCTrainerSendWeightsArgs(
 )
 
 IPCWeightTransferEngine.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=trainer_args,
-)
-
-# Async callable — use async_trainer_send_weights
-async def my_async_sender(update_info: IPCWeightTransferUpdateInfo):
-    # Custom async logic to deliver update_info to vLLM
-    ...
-
-trainer_args = IPCTrainerSendWeightsArgs(
-    send_mode=my_async_sender,
-)
-
-await IPCWeightTransferEngine.async_trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
