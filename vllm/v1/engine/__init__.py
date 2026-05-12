@@ -4,6 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import msgspec
@@ -14,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
 
@@ -26,12 +27,21 @@ PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
+
+EEP_NOTIFICATION_CALL_ID = -1
+
+
+class EEPNotificationType(enum.Enum):
+    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
+    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
+    RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
+    SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
 
 class FinishReason(enum.IntEnum):
     """
-    Reason a request finished - stop, length, abort, or error.
+    Reason a request finished - stop, length, abort, error, or repetition.
 
     Int rather than Str for more compact serialization.
 
@@ -40,6 +50,7 @@ class FinishReason(enum.IntEnum):
     abort - aborted by client
     error - retryable request-level internal error (e.g., KV load failure).
             Invariant: always converted to 500 Internal Server Error.
+    repetition - repetitive token pattern detected (hallucination)
 
     """
 
@@ -47,9 +58,23 @@ class FinishReason(enum.IntEnum):
     LENGTH = 1
     ABORT = 2
     ERROR = 3
+    REPETITION = 4
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
+
+
+@dataclass
+class EngineCoreReadyResponse:
+    """Sent from EngineCore to each frontend at the end of engine startup.
+
+    Contains post-initialization config that may differ from the original
+    values (e.g. max_model_len after KV cache auto-fitting).
+    """
+
+    max_model_len: int
+    num_gpu_blocks: int
+    dp_stats_address: str | None
 
 
 class EngineCoreRequest(
@@ -63,12 +88,17 @@ class EngineCoreRequest(
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
-    eos_token_id: int | None
     arrival_time: float
     lora_request: LoRARequest | None
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). `True` means the position is a real
+    # token ID; `False` means the position uses a pre-computed entry from
+    # `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    prompt_is_token_ids: list[bool] | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -90,6 +120,13 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
+
+    # If True, the request should be added to the scheduler's waiting queue
+    # and immediately aborted, so connector-side cleanup runs via the standard
+    # request_finished hook. Used to free P-side prefill blocks when a
+    # KV-transfer request is rejected on the D node before engine admission.
+    abort_immediately: bool = False
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -147,10 +184,9 @@ class EngineCoreOutput(
     kv_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
-    # The number of tokens with prefix cache hits (local + external).
-    num_cached_tokens: int = 0
-    # The number of tokens computed remotely (original count from connector).
-    num_external_computed_tokens: int = 0
+
+    prefill_stats: PrefillStats | None = None
+
     routed_experts: np.ndarray | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
@@ -216,6 +252,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Sentinel to wake up input_queue.get() during shutdown.
+    WAKEUP = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -224,6 +262,8 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_rank_local: int
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
+    new_data_parallel_master_port_list: list[int]
+    coord_store_port: int
 
 
 class ReconfigureRankType(enum.IntEnum):

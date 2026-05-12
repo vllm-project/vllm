@@ -68,7 +68,7 @@ class TileGemm161 {
                          const int64_t ldb, const int64_t ldc,
                          const int32_t block_size, const int32_t dynamic_k_size,
                          const bool accum_c) {
-    static_assert(0 < M <= 16);
+    static_assert(0 < M && M <= 16);
     using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
 
     kv_cache_t* __restrict__ curr_b_0 = b_tile;
@@ -116,9 +116,9 @@ class TileGemm161 {
 }  // namespace
 
 // This is a general but naive implementation based on vector instructions
-template <typename scalar_t, int64_t head_dim>
-class AttentionImpl<ISA::VEC16, scalar_t, head_dim>
-    : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::VEC16, scalar_t, head_dim, kv_cache_scalar_t>
+    : public AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
   using query_t = scalar_t;
   using q_buffer_t = float;

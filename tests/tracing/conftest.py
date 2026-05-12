@@ -107,6 +107,22 @@ class FakeTraceService(TraceServiceServicer):
         self.evt.clear()
 
 
+def _wait_for_server_ready(address: str, timeout: float = 5.0) -> bool:
+    """Wait for the gRPC server to be ready to accept connections."""
+    import socket
+    import time
+
+    host, port = address.rsplit(":", 1)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, int(port)), timeout=0.5):
+                return True
+        except (OSError, ConnectionRefusedError):
+            time.sleep(0.1)
+    return False
+
+
 @pytest.fixture
 def trace_service() -> Generator[FakeTraceService, None, None]:
     """Fixture to set up a fake gRPC trace service."""
@@ -115,6 +131,13 @@ def trace_service() -> Generator[FakeTraceService, None, None]:
     add_TraceServiceServicer_to_server(service, server)
     server.add_insecure_port(FAKE_TRACE_SERVER_ADDRESS)
     server.start()
+
+    # Wait for the server to be ready to accept connections
+    if not _wait_for_server_ready(FAKE_TRACE_SERVER_ADDRESS):
+        server.stop(grace=None)
+        raise RuntimeError(
+            f"Fake trace server failed to start on {FAKE_TRACE_SERVER_ADDRESS}"
+        )
 
     yield service
 

@@ -233,9 +233,10 @@ class TestStateManagement:
         # Initial state should be empty
         assert len(connector._mm_datas_need_loads) == 0
 
-        # Update state for all 3 items
-        for i in range(3):
-            connector.update_state_after_alloc(mock_request_with_3_mm, index=i)
+        # Update state for all 3 items (mock cache existence)
+        with patch.object(connector, "has_cache_item", return_value=True):
+            for i in range(3):
+                connector.update_state_after_alloc(mock_request_with_3_mm, index=i)
 
         # Check state updated for all 3
         assert len(connector._mm_datas_need_loads) == 3
@@ -255,9 +256,10 @@ class TestStateManagement:
             role=ECConnectorRole.SCHEDULER,
         )
 
-        # Setup state for all 3 items
-        for i in range(3):
-            connector.update_state_after_alloc(mock_request_with_3_mm, index=i)
+        # Setup state for all 3 items (mock cache existence)
+        with patch.object(connector, "has_cache_item", return_value=True):
+            for i in range(3):
+                connector.update_state_after_alloc(mock_request_with_3_mm, index=i)
 
         # Build metadata
         scheduler_output = Mock(spec=SchedulerOutput)
@@ -298,9 +300,10 @@ class TestStateManagement:
             role=ECConnectorRole.SCHEDULER,
         )
 
-        # Add state
-        for i in range(3):
-            connector.update_state_after_alloc(mock_request_with_3_mm, index=i)
+        # Add state (mock cache existence)
+        with patch.object(connector, "has_cache_item", return_value=True):
+            for i in range(3):
+                connector.update_state_after_alloc(mock_request_with_3_mm, index=i)
         assert len(connector._mm_datas_need_loads) == 3
 
         # Build metadata (should clear state)
@@ -608,16 +611,13 @@ class TestEdgeCases:
         with pytest.raises(FileNotFoundError):
             connector.start_load_caches(encoder_cache=encoder_cache)
 
-    def test_has_caches_empty_request(self, mock_vllm_config_producer):
-        """Test has_caches with request that has no MM data."""
+    def test_has_cache_item_empty_request(self, mock_vllm_config_producer):
+        """Test has_cache_item with a nonexistent identifier."""
         connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
         )
 
-        mock_request = MockRequest("req_empty", [], [])
+        result = connector.has_cache_item("nonexistent_hash")
 
-        result = connector.has_caches(mock_request)
-
-        assert len(result) == 0
-        assert result == []
+        assert result is False

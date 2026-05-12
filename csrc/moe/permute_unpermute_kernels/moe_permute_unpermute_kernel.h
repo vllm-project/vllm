@@ -57,7 +57,7 @@ void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
 
 template <typename T>
 void expandInputRowsKernelLauncher(
-    T const* unpermuted_input, T* permuted_output, int* sorted_experts,
+    T const* unpermuted_input, T* permuted_output,
     int const* expanded_dest_row_to_expanded_source_row,
     int* expanded_source_row_to_expanded_dest_row, int* permuted_idx,
     int64_t const* expert_first_token_offset, int64_t const num_rows,

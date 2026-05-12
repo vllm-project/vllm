@@ -6,7 +6,7 @@ import pytest
 from vllm.assets.video import VideoAsset
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import batched_tensors_equal
-from vllm.multimodal.video import OpenCVDynamicVideoBackend, OpenCVVideoBackend
+from vllm.multimodal.video import DynamicVideoBackend, VideoBackend
 
 from ...utils import build_model_context
 
@@ -52,7 +52,7 @@ def test_processor_override(
     metadata["fps"] = fps
     mm_data = {"video": [(video, metadata)]}
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -70,9 +70,11 @@ def test_processor_override(
 
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("fps", [2])
+@pytest.mark.parametrize("backend", ["opencv", "pyav"])
 def test_video_loader_consistency(
     model_id: str,
     fps: int,
+    backend: str,
 ):
     """
     Ensure dynamic video loader (pre-sampled by loader) and normal video
@@ -93,9 +95,11 @@ def test_video_loader_consistency(
     with open(video_path, "rb") as f:
         video_bytes = f.read()
 
-    static_video, static_metadata = OpenCVVideoBackend.load_bytes(video_bytes)
-    dynamic_video, dynamic_metadata = OpenCVDynamicVideoBackend.load_bytes(
-        video_bytes, fps=fps
+    static_video, static_metadata = VideoBackend.load_bytes(
+        video_bytes, backend=backend
+    )
+    dynamic_video, dynamic_metadata = DynamicVideoBackend.load_bytes(
+        video_bytes, fps=fps, backend=backend
     )
 
     # pre-sampled loader shouldn't read all frames
@@ -104,12 +108,12 @@ def test_video_loader_consistency(
     static_mm_data = {"video": [(static_video, static_metadata)]}
     dynamic_mm_data = {"video": [(dynamic_video, dynamic_metadata)]}
 
-    static_outputs = processor.apply(
+    static_outputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(static_mm_data),
         hf_processor_mm_kwargs=hf_processor_mm_kwargs,
     )
-    dynamic_outputs = processor.apply(
+    dynamic_outputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(dynamic_mm_data),
         hf_processor_mm_kwargs=hf_processor_mm_kwargs,

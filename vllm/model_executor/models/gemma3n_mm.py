@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
-import numpy as np
 import torch
 from torch import nn
 from transformers import AutoModel, BatchFeature
@@ -19,7 +18,8 @@ from transformers.models.siglip import SiglipImageProcessorFast
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TextPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import MultiModalDataDict, PromptType, TextPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
@@ -32,7 +32,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -131,7 +130,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3nProcessor | None,
+        processor: Gemma3nProcessor,
     ) -> str:
         """
         Get the replacement text for image tokens.
@@ -139,9 +138,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         For Gemma3n, this should return the full_image_sequence which includes
         BOI token, repeated image tokens, and EOI token.
         """
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return PromptUpdateDetails.select_token_id(
             processor.full_image_sequence, processor.image_token_id
         )
@@ -149,7 +145,7 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
     def get_audio_repl(
         self,
         *,
-        processor: Gemma3nProcessor | None,
+        processor: Gemma3nProcessor,
     ) -> str:
         """
         Get the replacement text for audio tokens.
@@ -157,9 +153,6 @@ class Gemma3nProcessingInfo(BaseProcessingInfo):
         For Gemma3n, this should return the full_audio_sequence which includes
         BOA token, repeated audio tokens, and EOA token.
         """
-        if processor is None:
-            processor = self.get_hf_processor()
-
         # Return the full audio sequence as defined by the processor
         return PromptUpdateDetails.select_token_id(
             processor.full_audio_sequence, processor.audio_token_id
@@ -181,7 +174,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_audios = mm_counts.get("audio", 0)
@@ -194,8 +187,8 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        image_overrides = mm_options.get("image")
+        audio_overrides = mm_options.get("audio")
 
         return {
             "image": self._get_dummy_images(
@@ -205,7 +198,9 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
                 overrides=image_overrides,
             ),
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             ),
         }
 
@@ -689,7 +684,6 @@ class Gemma3nForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         # NOTE (NickLucche) Each pass needs tokens to compute PLE so we cache
         # them here, as the model  forward has only access to the input_embeds.
@@ -714,7 +708,6 @@ class Gemma3nForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
@@ -776,21 +769,17 @@ class Gemma3nForConditionalGeneration(
             raise ValueError(f"Unsupported modality: {modality}")
 
     @classmethod
-    def get_generation_prompt(
-        cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
-    ) -> PromptType:
+    def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
         """
         Gemma3n supports "free-form" transcription.
         We fix its prompt here to standardize transcriptions/translations
         requests.
         """
+        audio = stt_params.audio
+        stt_config = stt_params.stt_config
+        language = stt_params.language
+        task_type = stt_params.task_type
+        to_language = stt_params.to_language
         # Transcribe this audio [into <>] | for transcription
         # Translate this audio [from <> into <>] | for translation
         prompt = "<start_of_turn>user\n"

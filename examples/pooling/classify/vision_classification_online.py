@@ -7,8 +7,8 @@ NOTE:
     vllm serve muziyongshixin/Qwen2.5-VL-7B-for-VideoCls \
          --runner pooling \
          --max-model-len 5000 \
-         --limit-mm-per-prompt '{"video": 1}' \
-         --hf-overrides '{"text_config": {"architectures": ["Qwen2_5_VLForSequenceClassification"]}}'
+         --limit-mm-per-prompt.video 1 \
+         --hf-overrides '{"architectures": ["Qwen2_5_VLForSequenceClassification"]}'
 """
 
 import argparse

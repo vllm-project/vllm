@@ -127,6 +127,39 @@ def test_chat_image_base64_request(server: RemoteOpenAIServer, model_name: str):
     assert output.usage.prompt_tokens == 767
 
 
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_chat_image_with_media_io_kwargs(server: RemoteOpenAIServer, model_name: str):
+    rgba_image_url = (
+        "https://vllm-public-assets.s3.us-west-2.amazonaws.com"
+        "/vision_model_images/RGBA_comp.png"
+    )
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Represent the user's input."},
+                {"type": "image_url", "image_url": {"url": rgba_image_url}},
+            ],
+        }
+    ]
+
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": messages,
+            "media_io_kwargs": {
+                "image": {"rgba_background_color": [0, 0, 0]},
+            },
+        },
+    )
+    response.raise_for_status()
+
+    output = EmbeddingResponse.model_validate(response.json())
+    assert len(output.data) == 1
+    assert len(output.data[0].embedding) == 3072
+
+
 def get_hf_prompt_tokens(model_name, content, image_url):
     processor = AutoProcessor.from_pretrained(
         model_name, trust_remote_code=True, num_crops=4

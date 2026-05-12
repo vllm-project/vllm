@@ -7,8 +7,8 @@ NOTE:
 """
 
 import argparse
-import base64
 
+import pybase64 as base64
 import requests
 import torch
 

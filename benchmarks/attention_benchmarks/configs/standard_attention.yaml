@@ -36,11 +36,11 @@ batch_specs:
   - "q1ks2k"          # 1k query, 2k sequence
   - "2q1ks4k"         # 2 requests: 1k query, 4k sequence
 
-# Available backends: flash, triton, flashinfer
+# Available backends: FLASH_ATTN, TRITON_ATTN, FLASHINFER
 backends:
-  - flash
-  - triton
-  - flashinfer
+  - FLASH_ATTN
+  - TRITON_ATTN
+  - FLASHINFER
 
 device: "cuda:0"
 repeats: 5

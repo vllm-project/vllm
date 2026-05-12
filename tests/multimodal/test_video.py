@@ -7,7 +7,13 @@ import numpy as np
 import numpy.typing as npt
 import pytest
 
-from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
+from vllm.assets.base import get_vllm_public_assets
+from vllm.multimodal.video import (
+    VIDEO_LOADER_REGISTRY,
+    VideoLoader,
+)
+
+from .utils import create_video_from_image
 
 pytestmark = pytest.mark.cpu_test
 
@@ -65,7 +71,9 @@ def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
             video_data = f.read()
 
         loader = VIDEO_LOADER_REGISTRY.load("opencv")
-        frames, metadata = loader.load_bytes(video_data, num_frames=-1)
+        frames, metadata = loader.load_bytes(
+            video_data, num_frames=-1, backend="opencv"
+        )
 
         # Verify metadata consistency:
         # frames_indices must match actual loaded frames
@@ -152,12 +160,12 @@ def test_video_recovery_simulated_failures(monkeypatch: pytest.MonkeyPatch):
 
         # Test WITHOUT recovery - should have fewer frames due to failures
         frames_no_recovery, meta_no = loader.load_bytes(
-            video_data, num_frames=8, frame_recovery=False
+            video_data, num_frames=8, frame_recovery=False, backend="opencv"
         )
 
         # Test WITH recovery - should recover using next valid frames
         frames_with_recovery, meta_yes = loader.load_bytes(
-            video_data, num_frames=8, frame_recovery=True
+            video_data, num_frames=8, frame_recovery=True, backend="opencv"
         )
 
         # With recovery should have MORE frames than without
@@ -208,12 +216,12 @@ def test_video_recovery_with_corrupted_file(monkeypatch: pytest.MonkeyPatch):
 
         # Test without recovery - frame 17 will be skipped
         frames_no_recovery, meta_no_recovery = loader.load_bytes(
-            video_data, num_frames=8, frame_recovery=False
+            video_data, num_frames=8, frame_recovery=False, backend="opencv"
         )
 
         # Test with recovery - frame 18 should fill in for frame 17
         frames_with_recovery, meta_with_recovery = loader.load_bytes(
-            video_data, num_frames=8, frame_recovery=True
+            video_data, num_frames=8, frame_recovery=True, backend="opencv"
         )
 
         # Verify metadata consistency for both modes
@@ -265,12 +273,16 @@ def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
 
         # Test without recovery
         frames_no_recovery, meta_no = loader.load_bytes(
-            video_data, fps=2, max_duration=10, frame_recovery=False
+            video_data,
+            fps=2,
+            max_duration=10,
+            frame_recovery=False,
+            backend="opencv",
         )
 
         # Test with frame_recovery enabled
         frames_with_recovery, meta_with = loader.load_bytes(
-            video_data, fps=2, max_duration=10, frame_recovery=True
+            video_data, fps=2, max_duration=10, frame_recovery=True, backend="opencv"
         )
 
         # Verify basic properties
@@ -291,3 +303,157 @@ def test_video_recovery_dynamic_backend(monkeypatch: pytest.MonkeyPatch):
             f"Got {frames_with_recovery.shape[0]} with recovery vs "
             f"{frames_no_recovery.shape[0]} without"
         )
+
+
+@pytest.fixture
+def dummy_video_path(tmp_path):
+    image_path = get_vllm_public_assets(
+        filename="stop_sign.jpg", s3_prefix="vision_model_images"
+    )
+
+    video_path = tmp_path / "test_RGB_video.mp4"
+    create_video_from_image(str(image_path), str(video_path), num_frames=1800, fps=30)
+    return video_path
+
+
+# ============================================================================
+# PyAV Backend Tests
+# ============================================================================
+
+
+def test_pyav_backend_loads_frames(dummy_video_path, monkeypatch: pytest.MonkeyPatch):
+    """Test that the pyav codec backend can load frames from a valid video."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+
+        with open(dummy_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        frames, metadata = loader.load_bytes(video_data, num_frames=8, backend="pyav")
+
+        assert frames.ndim == 4
+        assert frames.shape[3] == 3  # RGB
+        assert frames.shape[0] == 8
+        assert frames.shape[0] == len(metadata["frames_indices"])
+        assert metadata["video_backend"] == "pyav"
+        assert "total_num_frames" in metadata
+        assert "fps" in metadata
+        assert "duration" in metadata
+
+
+def test_pyav_dynamic_backend_loads_frames(
+    dummy_video_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Test that the pyav codec with dynamic sampling can load frames."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv_dynamic")
+
+        with open(dummy_video_path, "rb") as f:
+            video_data = f.read()
+
+        loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+        frames, metadata = loader.load_bytes(
+            video_data, fps=2, max_duration=10, backend="pyav"
+        )
+
+        assert frames.ndim == 4
+        assert frames.shape[3] == 3  # RGB
+        assert frames.shape[0] > 0
+        assert frames.shape[0] == len(metadata["frames_indices"])
+        assert metadata["video_backend"] == "pyav_dynamic"
+
+
+@pytest.mark.parametrize(
+    "loader_key, kwargs, expected_num_frames",
+    [
+        # uniform sampling + opencv codec
+        pytest.param(
+            "opencv",
+            {"num_frames": 32, "backend": "opencv"},
+            32,
+            id="opencv-num_frames",
+        ),
+        pytest.param("opencv", {"fps": 2, "backend": "opencv"}, 120, id="opencv-fps"),
+        pytest.param(
+            "opencv",
+            {"num_frames": 500, "fps": 2, "backend": "opencv"},
+            120,
+            id="opencv-num_frames_wins_fps",
+        ),
+        # dynamic sampling + opencv codec
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 1, "max_duration": 60, "backend": "opencv"},
+            60,
+            id="opencv_dynamic-within_max_duration",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 2, "max_duration": 30, "backend": "opencv"},
+            60,
+            id="opencv_dynamic-exceeds_max_duration",
+        ),
+        pytest.param(
+            "openpangu", {"num_frames": 32, "fps": -1}, 32, id="openpangu-num_frames"
+        ),
+        pytest.param(
+            "molmo2",
+            {"num_frames": 32, "frame_sample_mode": "uniform_last_frame"},
+            32,
+            id="molmo2-uniform_last_frame",
+        ),
+        pytest.param(
+            "molmo2",
+            {"fps": 2, "frame_sample_mode": "fps"},
+            119,
+            id="molmo2-fps",
+        ),
+        # uniform sampling + pyav codec (same frame counts as opencv)
+        pytest.param(
+            "opencv",
+            {"num_frames": 32, "backend": "pyav"},
+            32,
+            id="pyav-num_frames",
+        ),
+        pytest.param("opencv", {"fps": 2, "backend": "pyav"}, 120, id="pyav-fps"),
+        pytest.param(
+            "opencv",
+            {"num_frames": 500, "fps": 2, "backend": "pyav"},
+            120,
+            id="pyav-num_frames_wins_fps",
+        ),
+        # dynamic sampling + pyav codec
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 1, "max_duration": 60, "backend": "pyav"},
+            60,
+            id="pyav_dynamic-within_max_duration",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 2, "max_duration": 30, "backend": "pyav"},
+            60,
+            id="pyav_dynamic-exceeds_max_duration",
+        ),
+    ],
+)
+def test_video_loader_frames_sampling(
+    dummy_video_path,
+    monkeypatch: pytest.MonkeyPatch,
+    loader_key: str,
+    kwargs: dict,
+    expected_num_frames: int,
+):
+    """Test video loader frames sampling functionality."""
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", loader_key)
+    loader = VIDEO_LOADER_REGISTRY.load(loader_key)
+
+    with open(dummy_video_path, "rb") as f:
+        long_video_bytes = f.read()
+
+    frames, _ = loader.load_bytes(long_video_bytes, **kwargs)
+
+    assert frames.ndim == 4
+    assert frames.shape[3] == 3  # RGB
+    assert frames.shape[0] == expected_num_frames
