@@ -1393,11 +1393,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # Select experts implementation.
+        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
+        # activation_key=None every W4A4 backend's _supports_quant_scheme
+        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
+        # exactly); only Marlin survives. Marlin's MoE path drops
+        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
+        # other change is needed.
+        self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            activation_key=None if self.use_a16 else kNvfp4Dynamic,
         )
 
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
