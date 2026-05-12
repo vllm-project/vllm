@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,21 +17,14 @@ composed_kernel_lib = Library("composed_kernel", "FRAGMENT")  # noqa
 
 
 @dataclass
-class Config(ABC):
-    """Abstract base class for kernel layer configurations.
+class Config:
+    """Base class for kernel layer configurations.
 
     Scheme-specific bases (e.g. ``base/w16a16.py``) subclass this to define
     the concrete fields required by their kernels. Passing a typed
     ``Config`` subclass through ``Kernel.__init__`` and ``can_implement``
     ensures that configuration validation is scheme-aware at the call site.
-
-    ``prefix`` is the per-layer state-dict prefix (e.g.
-    ``"model.layers.0.self_attn.qkv_proj"``); ``Composite`` uses it to create a
-    unique torch op name per layer (different layers might construct different
-    predicate chains on init).
     """
-
-    prefix: str
 
 
 ConfigT = TypeVar("ConfigT", bound=Config)
@@ -123,6 +117,12 @@ class PredicateKernel(Kernel[ConfigT]):
     def predicate(*args, **kwargs) -> bool: ...
 
 
+def _hash_chain_name(kernel_names: list[str]) -> str:
+    """Hash an ordered list of kernel identity strings to a short 8-hex
+    digest."""
+    return hashlib.sha1(".".join(kernel_names).encode()).hexdigest()[:8]
+
+
 class Composite(Kernel[ConfigT]):
     """Generic dispatching Kernel built from a list of inner kernels.
 
@@ -192,26 +192,19 @@ class Composite(Kernel[ConfigT]):
                 dispatch_fn,
             )
 
-        # Per-layer op name. `config.prefix` comes from the layer (e.g.
-        # "model.layers.0.self_attn.qkv_proj"); dots become underscores so the
-        # name is a valid torch op identifier. When prefix is empty, use the
-        # scheme_tag alone — empty-prefix Composites of the same scheme share
-        # one op (guarded by the hasattr check below, which makes re-init a
-        # no-op rather than a double-define error).
-        prefix_part = config.prefix.replace(".", "_")
-        op_name = (
-            f"{prefix_part}_{self._scheme_tag}" if prefix_part else self._scheme_tag
+        kernel_names = [k.get_name() for k in viable]
+        kernel_names.append(
+            f"{terminal_apply.__module__}.{terminal_apply.__qualname__}"
         )
-        self._op_name = op_name
+        self._op_name = f"{self._scheme_tag}_{_hash_chain_name(kernel_names)}"
         self._dispatch_fn = dispatch_fn
 
-        # Skip re-registration if this (prefix × scheme_tag) op is already in
-        # the library
-        if not hasattr(torch.ops.composed_kernel, op_name):
+        # Skip re-registration if this op is already in the library.
+        if not hasattr(torch.ops.composed_kernel, self._op_name):
             from vllm.utils.torch_utils import direct_register_custom_op
 
             direct_register_custom_op(
-                op_name,
+                self._op_name,
                 dispatch_fn,
                 fake_impl=self._native_impl,
                 target_lib=composed_kernel_lib,
@@ -219,7 +212,7 @@ class Composite(Kernel[ConfigT]):
 
         # Cache the op handle so apply_weights doesn't re-resolve via getattr
         # on every forward.
-        self._op = getattr(torch.ops.composed_kernel, op_name)
+        self._op = getattr(torch.ops.composed_kernel, self._op_name)
 
     def apply_weights(
         self,

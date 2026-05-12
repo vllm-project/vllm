@@ -117,8 +117,8 @@ def _composite(chain, *, scheme_tag, native_impl=_native_impl):
     )
 
 
-def _config(prefix: str = ""):
-    return SimpleNamespace(prefix=prefix)
+def _config():
+    return SimpleNamespace()
 
 
 class TestPredicateKernel:
@@ -250,43 +250,36 @@ class TestCompositeDispatch:
 
 
 class TestCompositeOpRegistration:
-    def test_op_name_is_scheme_tag_when_no_prefix(self):
-        tag = _unique_tag("name_no_prefix")
+    def test_op_name_format(self):
+        """Op name is `{scheme_tag}_{8 hex chars}`."""
+        tag = _unique_tag("name_format")
         Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
-        assert Comp(_config())._op_name == tag
+        op_name = Comp(_config())._op_name
+        assert op_name.startswith(f"{tag}_")
+        suffix = op_name[len(tag) + 1 :]
+        assert len(suffix) == 8
+        assert all(c in "0123456789abcdef" for c in suffix)
 
-    def test_op_name_combines_prefix_and_scheme_tag(self):
-        tag = _unique_tag("name_with_prefix")
-        Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
-        inst = Comp(_config(prefix="model.layers.0.qkv_proj"))
-        assert inst._op_name == f"model_layers_0_qkv_proj_{tag}"
-
-    def test_register_called_per_distinct_op_name(self):
-        """Different prefixes register distinct ops under
-        torch.ops.composed_kernel."""
-        tag = _unique_tag("registration_distinct")
-        Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
-
-        before = len(vars(torch.ops.composed_kernel))
-        Comp(_config(prefix="layer.0"))
-        Comp(_config(prefix="layer.1"))
-        after = len(vars(torch.ops.composed_kernel))
-
-        assert hasattr(torch.ops.composed_kernel, f"layer_0_{tag}")
-        assert hasattr(torch.ops.composed_kernel, f"layer_1_{tag}")
-        assert after - before == 2
+    def test_distinct_chains_register_distinct_ops(self):
+        """Different chain composition under the same scheme_tag hashes to a
+        different op — the case that used to collide under empty prefix."""
+        tag = _unique_tag("distinct_chains")
+        CompA = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
+        CompB = _composite([PredFalse, PredTrue, PlainTerminal], scheme_tag=tag)
+        assert CompA(_config())._op_name != CompB(_config())._op_name
 
     def test_register_skipped_when_op_already_exists(self):
-        """Re-instantiating with the same prefix must not re-register —
+        """Re-instantiating the same Composite must not re-register —
         torch.library rejects duplicate defines, so the second Comp(...) here
         would raise if the hasattr guard in Composite.__init__ were removed."""
         tag = _unique_tag("registration_skipped")
         Comp = _composite([PredTrue, PlainTerminal], scheme_tag=tag)
 
-        Comp(_config(prefix="layer.same"))
+        first = Comp(_config())
         before = len(vars(torch.ops.composed_kernel))
-        Comp(_config(prefix="layer.same"))
+        second = Comp(_config())
         after = len(vars(torch.ops.composed_kernel))
 
-        assert hasattr(torch.ops.composed_kernel, f"layer_same_{tag}")
+        assert first._op_name == second._op_name
+        assert hasattr(torch.ops.composed_kernel, first._op_name)
         assert after == before

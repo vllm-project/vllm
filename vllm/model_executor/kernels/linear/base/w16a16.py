@@ -28,13 +28,11 @@ class Config(common.Config):
 class Params:
     weight: torch.Tensor
     processed_weight: torch.Tensor | None
-    bias_f32: torch.Tensor | None
     # kernel-specific state that doesn't fit the standard fields (e.g. opaque handles)
     extra_kwargs: SimpleNamespace = field(default_factory=SimpleNamespace)
 
     WEIGHT: ClassVar[str] = "weight"
     PROCESSED_WEIGHT: ClassVar[str] = "processed_weight"
-    BIAS_F32: ClassVar[str] = "bias_f32"
     EXTRA_KWARGS: ClassVar[str] = "extras"
 
     @classmethod
@@ -42,7 +40,6 @@ class Params:
         return cls(
             weight=getattr(layer, cls.WEIGHT),
             processed_weight=getattr(layer, cls.PROCESSED_WEIGHT, None),
-            bias_f32=getattr(layer, cls.BIAS_F32, None),
             extra_kwargs=getattr(layer, cls.EXTRA_KWARGS, SimpleNamespace()),
         )
 
