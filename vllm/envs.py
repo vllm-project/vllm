@@ -569,7 +569,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default this is 1.
     # If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU.
     "NVCC_THREADS": lambda: os.getenv("NVCC_THREADS", None),
-    # If set, vllm will use precompiled native binaries (*.so)
+    # If set, vllm will use precompiled native binaries (*.so and vllm-rs).
     "VLLM_USE_PRECOMPILED": lambda: (
         os.environ.get("VLLM_USE_PRECOMPILED", "").strip().lower() in ("1", "true")
         or bool(os.environ.get("VLLM_PRECOMPILED_WHEEL_LOCATION"))

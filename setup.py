@@ -761,8 +761,10 @@ class precompiled_wheel_utils:
                         continue
 
                     if (
-                        flash_attn_regex.match(member.filename)
-                        and member.filename not in flash_attn_files_to_skip
+                        (
+                            flash_attn_regex.match(member.filename)
+                            and member.filename not in flash_attn_files_to_skip
+                        )
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
