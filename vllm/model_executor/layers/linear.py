@@ -1125,11 +1125,15 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # works correctly while preserving the parameter shape.
                 for idx in range(param.data.shape[0]):
                     param.load_qkv_weight(
-                        loaded_weight=loaded_weight, shard_id=idx, tp_rank=self.tp_rank
+                        loaded_weight=loaded_weight,
+                        shard_id=idx,
+                        tp_rank=self._qkv_tp_rank,
                     )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
-                param.load_qkv_weight(loaded_weight=loaded_weight, tp_rank=self.tp_rank)
+                param.load_qkv_weight(
+                    loaded_weight=loaded_weight, tp_rank=self._qkv_tp_rank
+                )
                 return
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(param, loaded_weight)
@@ -1153,7 +1157,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_id=loaded_shard_id,
             shard_offset=shard_offset,
             shard_size=shard_size,
-            tp_rank=self.tp_rank,
+            tp_rank=self._qkv_tp_rank,
         )
 
     def weight_loader(
