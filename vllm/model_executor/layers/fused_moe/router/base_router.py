@@ -161,15 +161,10 @@ class BaseRouter(FusedMoERouter):
             global_num_experts: Total number of experts
             eplb_state: Optional EPLBLayerState for load balancing
         """
-        super().__init__()
+        super().__init__(eplb_state=eplb_state)
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self._eplb_state = eplb_state
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
-
-    @property
-    def eplb_state(self) -> EplbLayerState | None:
-        return self._eplb_state
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
         """Set a capture callback for logical routed expert IDs."""
@@ -177,27 +172,21 @@ class BaseRouter(FusedMoERouter):
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
-        if self._eplb_state is not None:
-            eplb_state = self._eplb_state
+        if self.eplb_state is not None:
+            eplb_state = self.eplb_state
             if eplb_state.expert_load_view is None:
-                raise ValueError("enable_eplb=True requires expert_load_view != None")
+                raise ValueError("EPLB requires expert_load_view != None")
             if eplb_state.logical_to_physical_map is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_to_physical_map != None"
-                )
+                raise ValueError("EPLB requires logical_to_physical_map != None")
             if eplb_state.logical_replica_count is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_replica_count != None"
-                )
+                raise ValueError("EPLB requires logical_replica_count != None")
             if eplb_state.should_record_tensor is None:
-                raise ValueError(
-                    "enable_eplb=True requires should_record_tensor != None"
-                )
+                raise ValueError("EPLB requires should_record_tensor != None")
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
-        if self._eplb_state is not None:
-            eplb_state = self._eplb_state
+        if self.eplb_state is not None:
+            eplb_state = self.eplb_state
             assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_to_physical_map is not None
             assert eplb_state.logical_replica_count is not None
@@ -276,7 +265,7 @@ class BaseRouter(FusedMoERouter):
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 3: Compute routing (delegated to subclass)
+        # Step 2: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
@@ -285,10 +274,10 @@ class BaseRouter(FusedMoERouter):
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
 
-        # Step 4: Apply EPLB mapping
+        # Step 3: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
 
-        # Step 5: Convert indices dtype
+        # Step 4: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, topk_indices_dtype)
 
         return topk_weights, topk_ids

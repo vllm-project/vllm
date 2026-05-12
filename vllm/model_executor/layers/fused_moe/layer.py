@@ -7,7 +7,7 @@ from typing import Any
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_pcp_group,
@@ -41,19 +41,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 
 logger = init_logger(__name__)
-
-
-def register_layer_for_moe_forward_op(
-    vllm_config: VllmConfig,
-    layer: MoERunner,
-):
-    # For smuggling this layer into the fused moe custom op
-    prefix = layer.layer_name
-    compilation_config = vllm_config.compilation_config
-    if prefix in compilation_config.static_forward_context:
-        raise ValueError("Duplicate layer name: {}".format(prefix))
-    compilation_config.static_forward_context[prefix] = layer
-    compilation_config.static_all_moe_layers.append(prefix)
 
 
 def make_parallel_config(
@@ -150,6 +137,7 @@ def FusedMoE(
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
+    shared_expert_gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
     apply_routed_scale_to_output: bool = False,
@@ -216,8 +204,9 @@ def FusedMoE(
     # Initialize EPLB manager (or None?)
     eplb_state: EplbLayerState | None = None
     if enable_eplb:
+        use_ep = moe_parallel_config.use_ep
         ep_size = moe_parallel_config.ep_size
-        if global_num_experts % ep_size != 0:
+        if use_ep and global_num_experts % ep_size != 0:
             raise ValueError(
                 f"EPLB currently only supports even distribution of "
                 f"experts across ranks. Got {global_num_experts} experts "
@@ -231,7 +220,9 @@ def FusedMoE(
 
     max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-    # Create expert map manager
+    # Create ExpertMapManager to handle expert mapping and placement for EP.
+    # See ExpertMapManager for a detailed description of what it does and when
+    # it is required.
     expert_map_manager = ExpertMapManager(
         max_num_batched_tokens=max_num_batched_tokens,
         top_k=top_k,
@@ -251,6 +242,7 @@ def FusedMoE(
         router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
@@ -267,18 +259,10 @@ def FusedMoE(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
-            eplb_state=eplb_state,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
         )
-
-    # TODO: move this???????????  is this even needed???
-    # When using zero experts, slice e_score_correction_bias to cover
-    # only real experts, for compatibility with monolithic kernels that
-    # read it directly.
-    # if False and zero_expert_type is not None and e_score_correction_bias is not None:
-    #    e_score_correction_bias = e_score_correction_bias[logical_num_experts]
 
     # FIXME (varun): We should have a better way of inferring the activation
     # datatype. This works for now as the tensor datatype entering the MoE
@@ -319,6 +303,7 @@ def FusedMoE(
     # This will hold all expert weight parameters
     if routed_experts_cls is None:
         routed_experts_cls = RoutedExperts
+
     routed_experts = routed_experts_cls(
         layer_name,
         params_dtype,
@@ -327,7 +312,7 @@ def FusedMoE(
         expert_map_manager=expert_map_manager,
         expert_mapping=expert_mapping,
         # Extra params that are needed by quant_methods, pass along for now
-        top_k=top_k,  # can get from moe_config
+        top_k=top_k,  # TODO: can get from moe_config
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
         topk_group=topk_group,
@@ -349,12 +334,13 @@ def FusedMoE(
         layer_name=layer_name,
         moe_config=moe_config,
         router=router,
-        routed_input_transform=routed_input_transform,
-        routed_output_transform=routed_output_transform,
-        gate=gate,
-        shared_experts=shared_experts,
         routed_experts=routed_experts,
         enable_dbo=vllm_config.parallel_config.enable_dbo,
+        gate=gate,
+        shared_expert_gate=shared_expert_gate,
+        shared_experts=shared_experts,
+        routed_input_transform=routed_input_transform,
+        routed_output_transform=routed_output_transform,
         # When apply_routed_scale_to_output is True, we allow
         # the scaling factor to be passed to the runner, otherwise
         # we pass 1.0 so it ends up being a nop.
@@ -363,9 +349,6 @@ def FusedMoE(
         else 1.0,
         **runner_args if runner_args is not None else {},
     )
-
-    # For smuggling this layer into the fused moe custom op
-    register_layer_for_moe_forward_op(vllm_config, runner)
 
     return runner
 

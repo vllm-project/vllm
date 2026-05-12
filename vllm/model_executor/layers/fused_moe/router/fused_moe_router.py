@@ -15,8 +15,9 @@ class FusedMoERouter(ABC):
     method that is used for routing hidden states based on router logits.
     """
 
-    def __init__(self):
+    def __init__(self, eplb_state: EplbLayerState | None = None):
         self._routing_replay_out: torch.Tensor | None = None
+        self.eplb_state = eplb_state
 
     @abstractmethod
     def set_capture_fn(
@@ -28,11 +29,6 @@ class FusedMoERouter(ABC):
     @property
     @abstractmethod
     def routing_method_type(self) -> RoutingMethodType:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def eplb_state(self) -> EplbLayerState | None:
         raise NotImplementedError
 
     @abstractmethod

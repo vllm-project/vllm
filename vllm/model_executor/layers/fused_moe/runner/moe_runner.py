@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
@@ -53,6 +54,19 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def register_layer_for_moe_forward_op(
+    vllm_config: VllmConfig,
+    layer: "MoERunner",
+):
+    # For smuggling this layer into the fused moe custom op
+    prefix = layer.layer_name
+    compilation_config = vllm_config.compilation_config
+    if prefix in compilation_config.static_forward_context:
+        raise ValueError("Duplicate layer name: {}".format(prefix))
+    compilation_config.static_forward_context[prefix] = layer
+    compilation_config.static_all_moe_layers.append(prefix)
 
 
 def get_layer_from_name(layer_name: str) -> MoERunnerInterface:
@@ -216,12 +230,12 @@ class MoERunner(MoERunnerInterface):
         layer_name: str,
         moe_config: FusedMoEConfig,
         router: FusedMoERouter,
-        routed_input_transform: torch.nn.Module | None,
-        gate: torch.nn.Module | None,
-        shared_experts: torch.nn.Module | None,
         routed_experts: RoutedExperts,
-        enable_dbo: bool,
+        enable_dbo: bool = False,
+        gate: torch.nn.Module | None = None,
+        shared_experts: torch.nn.Module | None = None,
         shared_expert_gate: torch.nn.Module | None = None,
+        routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
     ):
@@ -258,6 +272,9 @@ class MoERunner(MoERunnerInterface):
         self.layer_name = layer_name
 
         self._forward_entry = self._select_forward()
+
+        # For smuggling this layer into the fused moe custom op
+        register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():

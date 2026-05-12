@@ -32,8 +32,8 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState | None,
         num_fused_shared_experts: int,
+        eplb_state: EplbLayerState | None = None,
         scoring_func: str = "softmax",
         renormalize: bool = True,
     ):
