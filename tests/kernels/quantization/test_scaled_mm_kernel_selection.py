@@ -18,8 +18,15 @@ from vllm.model_executor.kernels.linear import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
+    TritonFp8BlockScaledMMKernel,
+    XPUFp8BlockScaledMMKernel,
+    init_fp8_linear_kernel,
     init_int8_linear_kernel,
     register_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
 )
 from vllm.platforms import PlatformEnum
 
@@ -127,3 +134,37 @@ def test_register_oot_linear_kernel(platform_mock):
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
     )
+
+
+@patch("vllm.model_executor.kernels.linear.scaled_mm.triton.current_platform")
+def test_triton_fp8_block_kernel_supports_xpu(platform_mock):
+    platform_mock.is_cuda_alike.return_value = False
+    platform_mock.is_xpu.return_value = True
+
+    supported, reason = TritonFp8BlockScaledMMKernel.is_supported()
+
+    assert supported
+    assert reason is None
+
+
+@patch("vllm.model_executor.kernels.linear.current_platform")
+def test_xpu_block_kernel_uses_triton_as_fallback(platform_mock):
+    platform_mock._enum = PlatformEnum.XPU
+
+    with (
+        patch.object(
+            XPUFp8BlockScaledMMKernel,
+            "is_supported",
+            return_value=(False, "xpu unavailable"),
+        ),
+        patch.object(TritonFp8BlockScaledMMKernel, "is_supported", return_value=(True, None)),
+    ):
+        kernel = init_fp8_linear_kernel(
+            activation_quant_key=kFp8Dynamic128Sym,
+            weight_quant_key=kFp8Static128BlockSym,
+            input_dtype=torch.bfloat16,
+            out_dtype=torch.bfloat16,
+            weight_shape=(128, 128),
+        )
+
+    assert isinstance(kernel, TritonFp8BlockScaledMMKernel)
