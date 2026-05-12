@@ -330,6 +330,35 @@ class Qwen3ForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
+        # PROBE: dump logit row stats at position 1 to find where divergence
+        # originates. Only when VLLM_DEBUG_DUMP_HS=1 and batch is large
+        # enough to be a prefill (not single-token decode).
+        import os as _os
+
+        if (
+            _os.environ.get("VLLM_DEBUG_DUMP_HS", "") == "1"
+            and logits is not None
+            and logits.ndim == 2
+            and logits.shape[0] >= 2
+        ):
+            import sys
+
+            row = logits[1].detach().cpu().float()
+            head8 = row[:8].tolist()
+            tok2701 = float(row[2701].item()) if row.shape[0] > 2701 else None
+            row_max = float(row.max().item())
+            row_argmax = int(row.argmax().item())
+            row_sum = float(row.sum().item())
+            row_abssum = float(row.abs().sum().item())
+            # logsumexp
+            row_lse = float((row - row.max()).exp().sum().log().item() + row_max)
+            print(
+                f"[VLLM_LOGITS] shape={list(logits.shape)} pos=1 "
+                f"head8={head8} tok2701={tok2701} max={row_max} "
+                f"argmax={row_argmax} sum={row_sum} abssum={row_abssum} lse={row_lse}",
+                file=sys.stderr,
+                flush=True,
+            )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
