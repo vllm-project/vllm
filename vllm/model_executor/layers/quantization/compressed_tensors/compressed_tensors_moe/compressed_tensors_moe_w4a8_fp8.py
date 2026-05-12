@@ -11,10 +11,11 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoEActivationFormat,
     FusedMoEExpertsModular,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -136,7 +137,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        # Add PER-GROUP quantization for FusedMoE.weight_loader.
+        # Add PER-GROUP quantization for RoutedExperts.weight_loader.
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
         )
@@ -303,10 +304,11 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         if layer.enable_eplb:

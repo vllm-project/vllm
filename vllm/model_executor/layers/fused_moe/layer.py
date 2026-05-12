@@ -480,7 +480,6 @@ class FusedMoE(PluggableLayer):
                     self,
                     self.base_quant_method,
                     prepare_finalize,
-                    self.shared_experts,
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
