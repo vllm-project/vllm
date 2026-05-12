@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, TypeAlias
 
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -11,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.activation import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
@@ -30,12 +32,19 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.triton_utils import HAS_TRITON
 
 _config: dict[str, Any] | None = None
+
+
+# Temporary alias for FusedMoE, eventually we be its own class.
+RoutedExperts: TypeAlias = FusedMoE
 
 
 @contextmanager
@@ -55,6 +64,8 @@ __all__ = [
     "FusedMoE",
     "FusedMoERouter",
     "FusedMoEConfig",
+    "FusedMoEQuantConfig",
+    "FusedMoEParallelConfig",
     "FusedMoEMethodBase",
     "MoEActivation",
     "UnquantizedFusedMoEMethod",
@@ -64,6 +75,8 @@ __all__ = [
     "FusedMoEPrepareAndFinalizeModular",
     "GateLinear",
     "RoutingMethodType",
+    "RoutedExperts",
+    "SharedExperts",
     "activation_without_mul",
     "apply_moe_activation",
     "fused_moe_make_expert_params_mapping",

@@ -8,7 +8,7 @@ import torch
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -133,7 +133,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
             )
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return cls(layer=layer)
         return cls()
 
@@ -149,7 +149,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
             return method if method is not None else UnquantizedLinearMethod()
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if should_ignore_layer(
                 prefix,
                 ignore=self.ignored_layers,
