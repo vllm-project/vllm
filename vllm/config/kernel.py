@@ -120,7 +120,8 @@ MoEBackend = Literal[
     "marlin",
     "humming",
     "triton_unfused",
-    "aiter",
+    "aiter_mxfp4_bf16",
+    "aiter_mxfp4_fp8",
     "emulation",
 ]
 
@@ -152,7 +153,8 @@ class KernelConfig:
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
-    - "aiter": Use AMD AITer kernels (ROCm only)
+    - "aiter_mxfp4_bf16": Use AMD AITer CK W4A16 MoE kernels
+    - "aiter_mxfp4_fp8": Use AMD AITer Triton W4A8 MoE kernels
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
