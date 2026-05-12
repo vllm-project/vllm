@@ -252,6 +252,20 @@ def test_environment_variables_shim_present():
     assert envs.environment_variables["VLLM_PORT"]() is None
 
 
+def test_invalid_unrelated_var_does_not_poison_reads(monkeypatch):
+    # Regression: a bad value in any one env var must not break reads of
+    # unrelated vars. Pre-refactor, only reading the bad var failed.
+    monkeypatch.setenv("VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS", "container,bogus")
+    envs = _reload_envs()
+
+    # Unrelated read works.
+    assert envs.VLLM_HOST_IP == ""
+
+    # Reading the bad var still raises.
+    with pytest.raises(ValueError, match="bogus"):
+        _ = envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+
+
 def test_compile_factors_builds_settings_once(monkeypatch):
     # Regression: compile_factors() iterates over hundreds of env vars; it
     # must not reparse pydantic Settings on every iteration.

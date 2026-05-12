@@ -51,6 +51,18 @@ def _tpu_pathways_default() -> bool:
     return "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
 
 
+def _env_set(name: str) -> bool:
+    """Case-insensitive ``name in os.environ`` check.
+
+    Sub-models use ``case_sensitive=False`` so an env var set under any
+    casing is honored by pydantic at parse time. Cross-field defaults
+    that gate on "is the env var explicitly set" must mirror that, or
+    explicit lowercase overrides get silently overwritten.
+    """
+    needle = name.lower()
+    return any(k.lower() == needle for k in os.environ)
+
+
 _MCP_LABEL_CHOICES = {"container", "code_interpreter", "web_search_preview"}
 
 # Sentinel `validation_alias` used to keep VLLM_TPU_USING_PATHWAYS off the
@@ -115,6 +127,13 @@ class BuildSettings(BaseSettings):
             lowered = v.lower()
             return lowered or "13.0"
         return v
+
+    @model_validator(mode="after")
+    def _force_use_precompiled_when_wheel_set(self) -> "BuildSettings":
+        # If VLLM_PRECOMPILED_WHEEL_LOCATION is set, force VLLM_USE_PRECOMPILED True.
+        if not self.use_precompiled and _env_set("VLLM_PRECOMPILED_WHEEL_LOCATION"):
+            self.use_precompiled = True
+        return self
 
 
 class PathSettings(BaseSettings):
@@ -199,7 +218,7 @@ class ServerSettings(BaseSettings):
     @field_validator("port", mode="before")
     @classmethod
     def _parse_port(cls, v: Any) -> Any:
-        if v is None or v == "":
+        if v is None:
             return None
         try:
             return int(v)
@@ -304,6 +323,13 @@ class DistributedSettings(BaseSettings):
         ),
     )
 
+    @model_validator(mode="after")
+    def _default_dp_rank_local_to_dp_rank(self) -> "DistributedSettings":
+        # If VLLM_DP_RANK_LOCAL is not explicitly set, fall back to VLLM_DP_RANK.
+        if not _env_set("VLLM_DP_RANK_LOCAL"):
+            self.dp_rank_local = self.dp_rank
+        return self
+
 
 class CompilationSettings(BaseSettings):
     model_config = _SUB_CONFIG
@@ -320,6 +346,33 @@ class CompilationSettings(BaseSettings):
     compile_cache_save_format: Literal["binary", "unpacked"] = "binary"
     use_layername: bool = True
     use_v2_model_runner: bool = False
+
+    @model_validator(mode="after")
+    def _apply_aot_compile_defaults(self) -> "CompilationSettings":
+        # VLLM_USE_AOT_COMPILE: dynamic default based on torch version and
+        # disable_compile_cache.
+        if not _env_set("VLLM_USE_AOT_COMPILE"):
+            try:
+                from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+                self.use_aot_compile = (
+                    is_torch_equal_or_newer("2.10.0") and not self.disable_compile_cache
+                )
+            except ImportError:
+                pass
+
+        # VLLM_USE_MEGA_AOT_ARTIFACT: depends on torch version AND use_aot_compile.
+        if not _env_set("VLLM_USE_MEGA_AOT_ARTIFACT"):
+            try:
+                from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+                self.use_mega_aot_artifact = (
+                    is_torch_equal_or_newer("2.12.0.dev") and self.use_aot_compile
+                )
+            except ImportError:
+                pass
+
+        return self
 
 
 class MediaSettings(BaseSettings):
@@ -352,6 +405,20 @@ class MediaSettings(BaseSettings):
     @classmethod
     def _lower_mm_hasher(cls, v: Any) -> Any:
         return v.lower() if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _autogen_object_storage_shm_buffer_name(self) -> "MediaSettings":
+        # If unset, auto-generate a UUID-suffixed name and write it back to
+        # os.environ so subprocesses inherit the same value.
+        if self.object_storage_shm_buffer_name is None:
+            env_val = os.environ.get("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME")
+            if env_val is not None:
+                self.object_storage_shm_buffer_name = env_val
+            else:
+                new_name = f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}"
+                os.environ["VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"] = new_name
+                self.object_storage_shm_buffer_name = new_name
+        return self
 
 
 class CpuSettings(BaseSettings):
@@ -658,68 +725,10 @@ class Settings(BaseSettings):
     connector: ConnectorSettings = Field(default_factory=ConnectorSettings)
     usage: UsageSettings = Field(default_factory=UsageSettings)
 
-    @model_validator(mode="after")
-    def _apply_cross_field_logic(self) -> "Settings":
-        # Sub-models use case_sensitive=False, so an env var set under any
-        # casing is honored by pydantic. Mirror that here so explicit
-        # overrides aren't silently clobbered by the cross-field defaults.
-        env_keys_lower = {k.lower() for k in os.environ}
-
-        def _env_set(name: str) -> bool:
-            return name.lower() in env_keys_lower
-
-        # VLLM_USE_PRECOMPILED: if VLLM_PRECOMPILED_WHEEL_LOCATION set, force True.
-        if not self.build.use_precompiled and _env_set(
-            "VLLM_PRECOMPILED_WHEEL_LOCATION"
-        ):
-            self.build.use_precompiled = True
-
-        # VLLM_DP_RANK_LOCAL: if unset, fall back to VLLM_DP_RANK value.
-        if not _env_set("VLLM_DP_RANK_LOCAL"):
-            self.distributed.dp_rank_local = self.distributed.dp_rank
-
-        # VLLM_USE_AOT_COMPILE: dynamic default based on torch version and
-        # disable_compile_cache.
-        if not _env_set("VLLM_USE_AOT_COMPILE"):
-            try:
-                from vllm.utils.torch_utils import is_torch_equal_or_newer
-
-                default_aot = (
-                    "1"
-                    if is_torch_equal_or_newer("2.10.0")
-                    and not self.compilation.disable_compile_cache
-                    else "0"
-                ) == "1"
-                self.compilation.use_aot_compile = default_aot
-            except ImportError:
-                pass
-
-        # VLLM_USE_MEGA_AOT_ARTIFACT: depends on torch version AND use_aot_compile.
-        if not _env_set("VLLM_USE_MEGA_AOT_ARTIFACT"):
-            try:
-                from vllm.utils.torch_utils import is_torch_equal_or_newer
-
-                default_mega = (
-                    "1"
-                    if is_torch_equal_or_newer("2.12.0.dev")
-                    and self.compilation.use_aot_compile
-                    else "0"
-                ) == "1"
-                self.compilation.use_mega_aot_artifact = default_mega
-            except ImportError:
-                pass
-
-        # VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: generate UUID default if unset.
-        if self.media.object_storage_shm_buffer_name is None:
-            env_val = os.environ.get("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME")
-            if env_val is not None:
-                self.media.object_storage_shm_buffer_name = env_val
-            else:
-                new_name = f"VLLM_OBJECT_STORAGE_SHM_BUFFER_{uuid.uuid4().hex}"
-                os.environ["VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME"] = new_name
-                self.media.object_storage_shm_buffer_name = new_name
-
-        return self
+    # Cross-field defaults live on each sub-model's own model_validator so
+    # that reading one field doesn't trigger validation of unrelated env
+    # vars. See BuildSettings, DistributedSettings, CompilationSettings,
+    # and MediaSettings.
 
 
 # ----------------------------------------------------------------------------
@@ -775,6 +784,18 @@ def _build_registry() -> dict[str, tuple[str, str]]:
 _VAR_TO_PATH: dict[str, tuple[str, str]] = _build_registry()
 
 
+def _build_sub_classes() -> dict[str, type[BaseSettings]]:
+    out: dict[str, type[BaseSettings]] = {}
+    for sub_attr, sub_field in Settings.model_fields.items():
+        annotation = sub_field.annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseSettings):
+            out[sub_attr] = annotation
+    return out
+
+
+_SUB_CLASSES: dict[str, type[BaseSettings]] = _build_sub_classes()
+
+
 # ----------------------------------------------------------------------------
 # Lazy settings accessor
 # ----------------------------------------------------------------------------
@@ -793,12 +814,15 @@ def _get_settings() -> Settings:
 
 def _get_attr(name: str) -> Any:
     sub_attr, field_name = _VAR_TO_PATH[name]
-    # When the cache wrapper is active we read from the cached singleton.
-    # Otherwise construct a fresh Settings each access so subsequent
-    # mutations to os.environ are visible (matching the pre-refactor
-    # lambda behavior of re-evaluating env vars on every read).
-    settings = _get_settings() if _is_envs_cache_enabled() else Settings()
-    sub = getattr(settings, sub_attr)
+    if _is_envs_cache_enabled():
+        # Cached path: read off the singleton.
+        sub = getattr(_get_settings(), sub_attr)
+    else:
+        # Construct only the requested sub-model so an invalid value in an
+        # unrelated env var (validated by a different sub-model) doesn't
+        # poison reads of this one. Matches the pre-refactor per-getter
+        # behavior where only the var being read could fail.
+        sub = _SUB_CLASSES[sub_attr]()
     return getattr(sub, field_name)
 
 
