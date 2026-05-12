@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
 import math
 from importlib.util import find_spec
 
@@ -253,6 +254,22 @@ class ApplyRotaryEmb(CustomOp):
         sin: torch.Tensor,
     ) -> torch.Tensor:
         if self.apply_rotary_emb_flash_attn is not None:
+            # The flash_attn Triton rotary kernel on AMD requires the rotary_dim
+            # (= cos.shape[-1] * 2) to be a power of 2.  When it is not (e.g.
+            # head_dim=72 in the Qwen3.5 ViT encoder), the HIP cooperative-grid
+            # launch raises hipErrorInvalidValue.  Detect this upfront and disable
+            # the kernel permanently so we never pay the HIP error penalty.
+            rotary_dim = cos.shape[-1] * 2
+            if rotary_dim & (rotary_dim - 1):  # not a power of 2
+                logger.warning(
+                    "ROCm: flash_attn Triton rotary kernel requires power-of-2 "
+                    "rotary_dim, but got %d. Falling back to native PyTorch "
+                    "implementation permanently for this layer.",
+                    rotary_dim,
+                )
+                self.apply_rotary_emb_flash_attn = None
+
+        if self.apply_rotary_emb_flash_attn is not None:
             x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
 
             """
@@ -266,12 +283,31 @@ class ApplyRotaryEmb(CustomOp):
             try:
                 flash_attn_func = self.apply_rotary_emb_flash_attn
                 if flash_attn_func is None:
-                    raise RuntimeError("Flash attention kernel was disabled by another thread.")
-                output = flash_attn_func(
-                    x, cos, sin, interleaved=interleaved
-                ).type_as(x)
+                    raise RuntimeError(
+                        "Flash attention kernel was disabled by another thread."
+                    )
+                output = flash_attn_func(x, cos, sin, interleaved=interleaved).type_as(
+                    x
+                )
             except RuntimeError:
                 self.apply_rotary_emb_flash_attn = None
+                logger.warning(
+                    "ROCm: flash_attn Triton rotary kernel failed. Clearing "
+                    "stale HIP runtime error and falling back to native PyTorch "
+                    "implementation permanently for this layer."
+                )
+                # The failed Triton/HIP kernel leaves a sticky error in the HIP
+                # runtime error slot.  Any subsequent HIP op (including plain
+                # PyTorch tensor arithmetic) will inherit and raise that error.
+                # hipGetLastError() reads and resets the slot so forward_static
+                # can execute cleanly.
+                try:
+                    _hip_rt = ctypes.CDLL("libamdhip64.so")
+                    _hip_rt.hipGetLastError.restype = ctypes.c_int
+                    _hip_rt.hipGetLastError.argtypes = []
+                    _hip_rt.hipGetLastError()
+                except OSError:
+                    pass  # not on ROCm; no stale error to clear
                 output = self.forward_static(
                     x, cos, sin, self.is_neox_style, self.enable_fp32_compute
                 )
