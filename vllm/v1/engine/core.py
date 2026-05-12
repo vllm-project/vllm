@@ -345,7 +345,7 @@ class EngineCore:
 
         if (
             request.ec_transfer_params is not None
-            and self.scheduler.ec_connector is None
+            and self.scheduler.get_ec_connector() is None
         ):
             logger.warning(
                 "Got ec_transfer_params, but no ECConnector found. "

@@ -11,6 +11,7 @@ from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
+    ECConnectorBase,
     ECConnectorMetadata,
     ECConnectorRole,
 )
@@ -1944,6 +1945,9 @@ class Scheduler(SchedulerInterface):
 
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
+
+    def get_ec_connector(self) -> ECConnectorBase | None:
+        return self.ec_connector
 
     def _connector_finished(
         self, request: Request
