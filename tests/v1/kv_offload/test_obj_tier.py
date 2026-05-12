@@ -26,7 +26,7 @@ import torch
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
-from vllm.v1.kv_offload.tiering.obj import ObjectStoreSecondaryTierManager, ObjStoreConfig
+from vllm.v1.kv_offload.tiering.obj import ObjectStoreSecondaryTierManager
 
 # ---------------------------------------------------------------------------
 # S3 credentials — skip entire module if not configured
@@ -46,27 +46,20 @@ if not all([_S3_BUCKET, _S3_ENDPOINT, _S3_ACCESS_KEY, _S3_SECRET_KEY]):
         allow_module_level=True,
     )
 
-_OBJ_CONFIG = ObjStoreConfig(
-    bucket=_S3_BUCKET,
-    endpoint_override=_S3_ENDPOINT,
-    access_key=_S3_ACCESS_KEY,
-    secret_key=_S3_SECRET_KEY,
-    scheme=_S3_SCHEME,
-    ca_bundle=_S3_CA_BUNDLE,
-)
+_STORE_CONFIG = {
+    "bucket": _S3_BUCKET,
+    "endpoint_override": _S3_ENDPOINT,
+    "access_key": _S3_ACCESS_KEY,
+    "secret_key": _S3_SECRET_KEY,
+    "scheme": _S3_SCHEME,
+    "ca_bundle": _S3_CA_BUNDLE,
+}
 
 # Probe NIXL OBJ plugin availability
 try:
-    _probe = ObjectStoreSecondaryTierManager(
-        obj_config=_OBJ_CONFIG,
-        model_name="_probe",
-        gpu_block_size=16,
-        tp_size=1,
-        pp_size=1,
-        pcp_size=1,
-        rank=0,
-        dtype="float32",
-    )
+    _probe = ObjectStoreSecondaryTierManager.from_config({
+        "store_config": _STORE_CONFIG,
+    })
     del _probe
 except RuntimeError as _e:
     pytest.skip(f"NIXL OBJ plugin not available: {_e}", allow_module_level=True)
@@ -107,18 +100,11 @@ def make_tier(
     key_prefix: str = _RUN_PREFIX,
     **kwargs,
 ) -> ObjectStoreSecondaryTierManager:
-    return ObjectStoreSecondaryTierManager(
-        obj_config=_OBJ_CONFIG,
-        model_name="test_model",
-        gpu_block_size=16,
-        tp_size=1,
-        pp_size=1,
-        pcp_size=1,
-        rank=0,
-        dtype="float32",
-        key_prefix=key_prefix,
+    return ObjectStoreSecondaryTierManager.from_config({
+        "store_config": _STORE_CONFIG,
+        "prefix": key_prefix,
         **kwargs,
-    )
+    })
 
 
 def make_tier_with_view(
@@ -136,7 +122,7 @@ def drain(tier: ObjectStoreSecondaryTierManager, max_rounds: int = 200) -> list[
     results: list[JobResult] = []
     for _ in range(max_rounds):
         results.extend(tier.get_finished())
-        if not tier._pending_jobs:
+        if not tier._engine._transfers:
             break
         time.sleep(0.1)
     return results

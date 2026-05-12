@@ -5,11 +5,12 @@
 from collections.abc import Collection, Iterable
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, get_offload_block_hash
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, get_offload_block_hash, get_offload_group_idx
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult, SecondaryTierManager
+from nixl._api import nixl_agent, nixl_agent_config
+
 from vllm.v1.kv_offload.tiering.obj.nixl_engine import NixlEngine, READ, WRITE
-from vllm.v1.kv_offload.tiering.obj.nixl_lookup import NixlLookup
-from vllm.v1.kv_offload.tiering.obj.obj_store_config import ObjStoreConfig
+from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 logger = init_logger(__name__)
 
@@ -28,10 +29,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         io_threads: int = 4,
     ):
         self._engine = NixlEngine(obj_config, io_threads=io_threads)
-        self._nixl_lookup = NixlLookup(obj_config)
+        lookup_agent_config = nixl_agent_config(backends=[])
+        self._lookup_agent = nixl_agent("ObjLookup", lookup_agent_config)
+        self._lookup_agent.create_backend("OBJ", obj_config.to_nixl_params())
         self._prefix = f"{prefix}/" if prefix else ""
-
-        self._pending_jobs: set[int] = set()
 
         self._probe_connectivity()
 
@@ -44,7 +45,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         """
         probe_key = "__nixl_probe__/connectivity_test"
         try:
-            self._nixl_lookup.exists(probe_key)
+            self._exists(probe_key)
             logger.info("OBJ tier S3 connectivity probe succeeded")
         except Exception as e:
             raise RuntimeError(
@@ -56,63 +57,42 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def set_primary_view(self, view: memoryview) -> None:
         self._engine.set_primary_view(view)
 
-    def _get_obj_key(self, block_hash: bytes) -> str:
-        h = block_hash[-8:].hex()
-        return f"{self._prefix}{h[:3]}/{h[3:5]}/{h}.bin"
+    def _exists(self, s3_key: str) -> bool:
+        return self._lookup_agent.query_memory([(0, 1, 0, s3_key)], "OBJ", "OBJ")[0] is not None
+
+    def _get_obj_key(self, key: OffloadKey) -> str:
+        h = get_offload_block_hash(key)[-8:].hex()
+        g = get_offload_group_idx(key)
+        return f"{self._prefix}group_{g}/{h[:3]}/{h[3:5]}/{h}.bin"
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        s3_key = self._get_obj_key(get_offload_block_hash(key))
-        return self._nixl_lookup.exists(s3_key)
+        return self._exists(self._get_obj_key(key))
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
-        s3_keys = (
-            self._get_obj_key(get_offload_block_hash(k))
-            for k in job_metadata.keys
-        )
-        ok = self._engine.submit_transfer(
+        s3_keys = (self._get_obj_key(k) for k in job_metadata.keys)
+        self._engine.submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, s3_keys, WRITE
         )
-        if ok:
-            self._pending_jobs.add(job_metadata.job_id)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
-        s3_keys = (
-            self._get_obj_key(get_offload_block_hash(k))
-            for k in job_metadata.keys
-        )
-        ok = self._engine.submit_transfer(
+        s3_keys = (self._get_obj_key(k) for k in job_metadata.keys)
+        self._engine.submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, s3_keys, READ
         )
-        if ok:
-            self._pending_jobs.add(job_metadata.job_id)
 
     def get_finished(self) -> Iterable[JobResult]:
-        for job_id, success in self._engine.get_finished():
-            if job_id not in self._pending_jobs:
-                continue
-            self._pending_jobs.discard(job_id)
-            yield JobResult(job_id=job_id, success=success)
-
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        pass
+        return self._engine.get_finished()
 
     def shutdown(self) -> None:
         self._engine.shutdown()
 
     @classmethod
     def from_config(cls, config: dict) -> "ObjectStoreSecondaryTierManager":
-        config = config.copy()
-        obj_config = ObjStoreConfig(
-            bucket=config.pop("bucket"),
-            endpoint_override=config.pop("endpoint_override"),
-            access_key=config.pop("access_key"),
-            secret_key=config.pop("secret_key"),
-            scheme=config.pop("scheme", "http"),
-            ca_bundle=config.pop("ca_bundle", ""),
+        return cls(
+            obj_config=ObjStoreConfig(**config["store_config"]),
+            prefix=config.get("prefix", ""),
+            io_threads=config.get("io_threads", 4),
         )
-        prefix = config.pop("prefix", "")
-        io_threads = config.pop("io_threads", 4)
-        return cls(obj_config=obj_config, prefix=prefix, io_threads=io_threads)
 
     @staticmethod
     def get_tier_type() -> str:

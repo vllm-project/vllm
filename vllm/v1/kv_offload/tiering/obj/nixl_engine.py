@@ -3,7 +3,6 @@
 """Async NIXL CPU DRAM <-> S3 transfer engine."""
 
 import contextlib
-from collections import deque
 from collections.abc import Iterable
 from typing import NamedTuple
 
@@ -12,8 +11,8 @@ import torch
 from nixl._api import nixl_agent, nixl_agent_config, nixl_xfer_handle
 
 from vllm.logger import init_logger
-
-from vllm.v1.kv_offload.tiering.obj.obj_store_config import ObjStoreConfig
+from vllm.v1.kv_offload.tiering.base import JobResult
+from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 logger = init_logger(__name__)
 
@@ -22,7 +21,6 @@ READ = "READ"
 
 
 class TransferEntry(NamedTuple):
-    job_id: int
     xfer_handle: nixl_xfer_handle
     files_desc: object
 
@@ -36,7 +34,7 @@ class NixlEngine:
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
         self._agent.create_backend("OBJ", params)
 
-        self._in_flight: deque[TransferEntry] = deque()
+        self._transfers: dict[int, TransferEntry] = {}
         self._primary_tensor: torch.Tensor | None = None
         self._primary_reg = None
         self._base_addr: int = 0
@@ -68,66 +66,61 @@ class NixlEngine:
 
         xfer_desc = self._agent.get_xfer_descs(blocks_data, "DRAM")
         if xfer_desc is None:
-            logger.error("get_xfer_descs failed for job %d", job_id)
+            logger.warning("get_xfer_descs failed for job %d", job_id)
             return False
 
         files_desc = self._agent.register_memory(nixl_files, "OBJ")
         if files_desc is None:
-            logger.error("register_memory (OBJ) failed for job %d", job_id)
+            logger.warning("register_memory (OBJ) failed for job %d", job_id)
             return False
 
         xfer_handle = self._agent.initialize_xfer(
             op, xfer_desc, files_desc.trim(), "ObjNixlEngine"
         )
         if not xfer_handle:
-            logger.error("initialize_xfer failed for job %d", job_id)
+            logger.warning("initialize_xfer failed for job %d", job_id)
             self._agent.deregister_memory(files_desc)
             return False
 
         state = self._agent.transfer(xfer_handle)
         if state == "ERR":
-            logger.error("agent.transfer failed for job %d", job_id)
+            logger.warning("agent.transfer failed for job %d", job_id)
             self._agent.deregister_memory(files_desc)
             self._agent.release_xfer_handle(xfer_handle)
             return False
 
-        self._in_flight.append(TransferEntry(job_id, xfer_handle, files_desc))
+        self._transfers[job_id] = TransferEntry(xfer_handle, files_desc)
         return True
 
-    def get_finished(self) -> list[tuple[int, bool]]:
+    def get_finished(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
-        results: list[tuple[int, bool]] = []
-        still_in_flight: deque[TransferEntry] = deque()
-
-        for entry in self._in_flight:
+        results: list[JobResult] = []
+        for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
             except Exception as exc:
-                logger.error("check_xfer_state raised for job %d: %s", entry.job_id, exc)
+                logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
                 state = "ERR"
             if state == "PROC":
-                still_in_flight.append(entry)
                 continue
+            del self._transfers[job_id]
             self._agent.deregister_memory(entry.files_desc)
             self._agent.release_xfer_handle(entry.xfer_handle)
             success = state == "DONE"
             if not success:
-                logger.error("transfer failed job=%d state=%s", entry.job_id, state)
-            results.append((entry.job_id, success))
-
-        self._in_flight = still_in_flight
+                logger.warning("transfer failed job=%d state=%s", job_id, state)
+            results.append(JobResult(job_id=job_id, success=success))
         return results
 
     def shutdown(self) -> None:
-        for entry in self._in_flight:
+        for entry in self._transfers.values():
             self._agent.deregister_memory(entry.files_desc)
             self._agent.release_xfer_handle(entry.xfer_handle)
-        self._in_flight.clear()
+        self._transfers.clear()
         if self._primary_reg is not None:
             self._agent.deregister_memory(self._primary_reg)
             self._primary_reg = None
         self._primary_tensor = None
 
     def __del__(self) -> None:
-        with contextlib.suppress(Exception):
-            self.shutdown()
+        self.shutdown()

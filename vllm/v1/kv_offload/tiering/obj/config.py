@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Connection configuration for the OBJ secondary tier."""
+"""Connection configuration for the object store secondary tier."""
 
 from dataclasses import dataclass
 
