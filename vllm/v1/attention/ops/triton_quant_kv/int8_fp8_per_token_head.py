@@ -75,12 +75,19 @@ def _reshape_cache_per_token_head_kernel(
     HEAD_SIZE_PADDED: tl.constexpr,
     QUANT_MAX: tl.constexpr,
     QUANT_MIN: tl.constexpr,
+    IS_INT_QUANT: tl.constexpr,
 ):
     """Per-(token, head) dynamic quantization for INT8 / FP8.
 
     One scale = absmax / QUANT_MAX per (token, head).  Cache storage
     dtype (int8 / fp8_e4m3 / fp8_e4m3fnuz / fp8_e5m2) is inferred from
     the cache pointer.
+
+    ``IS_INT_QUANT`` selects explicit round-half-away-from-zero for the
+    integer path (the fp32 → int8 cast in ``tl.store`` truncates toward
+    zero, which biases every write by ~0.5 LSB and degrades long-context
+    generation).  FP8 keeps the implicit cast — fp8's native RNE on the
+    GPU cvt instruction is the correct rounding for sub-integer values.
     """
     tok = tl.program_id(0)
     head = tl.program_id(1)
@@ -111,7 +118,10 @@ def _reshape_cache_per_token_head_kernel(
         k_scale,
     )
 
-    k_q = tl.clamp(k_h * (1.0 / k_scale), QUANT_MIN, QUANT_MAX)
+    k_q = k_h * (1.0 / k_scale)
+    if IS_INT_QUANT:
+        k_q = tl.where(k_q >= 0, k_q + 0.5, k_q - 0.5)
+    k_q = tl.clamp(k_q, QUANT_MIN, QUANT_MAX)
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -139,7 +149,10 @@ def _reshape_cache_per_token_head_kernel(
         v_scale,
     )
 
-    v_q = tl.clamp(v_h * (1.0 / v_scale), QUANT_MIN, QUANT_MAX)
+    v_q = v_h * (1.0 / v_scale)
+    if IS_INT_QUANT:
+        v_q = tl.where(v_q >= 0, v_q + 0.5, v_q - 0.5)
+    v_q = tl.clamp(v_q, QUANT_MIN, QUANT_MAX)
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -162,6 +175,7 @@ def _run_reshape_and_cache(
     *,
     quant_max: float,
     quant_min: float,
+    is_int_quant: bool,
 ) -> None:
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
@@ -203,6 +217,7 @@ def _run_reshape_and_cache(
         HEAD_SIZE_PADDED=head_size_padded,
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
+        IS_INT_QUANT=is_int_quant,
         num_warps=num_warps,
     )
 
@@ -220,6 +235,7 @@ class _PerTokenHeadFactory(QuantKVFactory):
 
     _quant_max: float
     _quant_min: float
+    _is_int_quant: bool = False
 
     def reshape_and_cache(
         self,
@@ -245,6 +261,7 @@ class _PerTokenHeadFactory(QuantKVFactory):
             slot_mapping=slot_mapping,
             quant_max=self._quant_max,
             quant_min=self._quant_min,
+            is_int_quant=self._is_int_quant,
         )
 
 
@@ -254,6 +271,7 @@ class Int8PerTokenHeadFactory(_PerTokenHeadFactory):
     mode = KVQuantMode.INT8_PER_TOKEN_HEAD
     _quant_max = _INT8_QUANT_MAX
     _quant_min = _INT8_QUANT_MIN
+    _is_int_quant = True
 
 
 class Fp8PerTokenHeadFactory(_PerTokenHeadFactory):
