@@ -38,15 +38,11 @@ class ScoringRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     # --8<-- [end:scoring-common-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        encoder_config = model_config.encoder_config or {}
-
-        return TokenizeParams(
+        return self._build_pooling_tok_params(
+            model_config,
+            add_special_tokens=True,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            truncation_side=self.truncation_side,
-            do_lower_case=encoder_config.get("do_lower_case", False),
-            max_total_tokens_param="max_model_len",
         )
 
     def to_pooling_params(self, task: PoolingTask = "classify"):
