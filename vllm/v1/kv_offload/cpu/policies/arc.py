@@ -3,8 +3,8 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
-from vllm.v1.kv_offload.abstract import OffloadKey
-from vllm.v1.kv_offload.cpu.policies.abstract import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
 class ARCCachePolicy(CachePolicy):
