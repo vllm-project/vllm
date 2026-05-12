@@ -103,6 +103,9 @@ class KVConnectorModelRunnerMixin:
                 kv_connector.get_finished(scheduler_output.finished_req_ids)
             )
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
+            output.failed_recv_request_ids = (
+                kv_connector.get_request_ids_with_load_errors()
+            )
 
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
