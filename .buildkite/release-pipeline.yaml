@@ -438,59 +438,6 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
-      - block: "Publish release images to DockerHub"
-        key: block-publish-release-images
-        depends_on:
-          - create-multi-arch-manifest
-          - create-multi-arch-manifest-cuda-12-9
-          - create-multi-arch-manifest-ubuntu2404
-          - create-multi-arch-manifest-cuda-12-9-ubuntu2404
-          - build-rocm-release-image
-          - input-release-version
-          # Wait for CPU builds if their block steps were unblocked, so publish
-          # doesn't race the in-progress CPU build. allow_failure lets publish
-          # proceed when the operator legitimately leaves the CPU block steps
-          # unblocked or the CPU build fails.
-          - step: build-cpu-release-image-x86
-            allow_failure: true
-          - step: build-cpu-release-image-arm64
-            allow_failure: true
-        if: build.env("NIGHTLY") != "1"
-
-      - label: "Publish release images to DockerHub"
-        depends_on:
-          - block-publish-release-images
-        key: publish-release-images-dockerhub
-        agents:
-          queue: small_cpu_queue_release
-        commands:
-          - "bash .buildkite/scripts/publish-release-images.sh"
-        plugins:
-          - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
-        env:
-          DOCKER_BUILDKIT: "1"
-          DOCKERHUB_USERNAME: "vllmbot"
-
-  - group: "Publish wheels"
-    key: "publish-wheels"
-    steps:
-      - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
-        key: block-upload-release-wheels
-        depends_on:
-          - input-release-version
-          - build-wheels
-
-      - label: "Upload release wheels to PyPI"
-        depends_on:
-          - block-upload-release-wheels
-        id: upload-release-wheels
-        agents:
-          queue: small_cpu_queue_release
-        commands:
-          - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
-
   # =============================================================================
   # ROCm Release Pipeline (x86_64 only)
   # =============================================================================
@@ -847,3 +794,60 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllmbot"
+
+  # =============================================================================
+  # Publish to DockerHub and PyPI (at the end so all builds complete first)
+  # =============================================================================
+
+  - block: "Publish release images to DockerHub"
+    key: block-publish-release-images
+    depends_on:
+      - create-multi-arch-manifest
+      - create-multi-arch-manifest-cuda-12-9
+      - create-multi-arch-manifest-ubuntu2404
+      - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+      - build-rocm-release-image
+      - input-release-version
+      # Wait for CPU builds if their block steps were unblocked, so publish
+      # doesn't race the in-progress CPU build. allow_failure lets publish
+      # proceed when the operator legitimately leaves the CPU block steps
+      # unblocked or the CPU build fails.
+      - step: build-cpu-release-image-x86
+        allow_failure: true
+      - step: build-cpu-release-image-arm64
+        allow_failure: true
+    if: build.env("NIGHTLY") != "1"
+
+  - label: "Publish release images to DockerHub"
+    depends_on:
+      - block-publish-release-images
+    key: publish-release-images-dockerhub
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/publish-release-images.sh"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
+  - group: "Publish wheels"
+    key: "publish-wheels"
+    steps:
+      - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
+        key: block-upload-release-wheels
+        depends_on:
+          - input-release-version
+          - build-wheels
+
+      - label: "Upload release wheels to PyPI"
+        depends_on:
+          - block-upload-release-wheels
+        id: upload-release-wheels
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
