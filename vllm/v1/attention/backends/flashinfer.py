@@ -1364,25 +1364,6 @@ class FlashInferImpl(AttentionImpl):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
-    def _get_dcp_decode_buffers(
-        self,
-        query: torch.Tensor,
-        num_decode_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.dcp_world_size > 1
-        total_num_heads = self.num_heads * self.dcp_world_size
-        buffer_shape = (
-            num_decode_tokens,
-            total_num_heads,
-            self.head_size,
-        )
-        lse_shape = (num_decode_tokens, total_num_heads)
-        output_buffer, lse_buffer = current_workspace_manager().get_simultaneous(
-            (buffer_shape, query.dtype),
-            (lse_shape, torch.float32),
-        )
-        return output_buffer, lse_buffer
-
     def forward(
         self,
         layer: torch.nn.Module,
@@ -1736,8 +1717,16 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    output_tmp, lse = self._get_dcp_decode_buffers(
-                        decode_query, num_decode_tokens
+                    total_num_heads = self.num_heads * self.dcp_world_size
+                    buffer_shape = (
+                        num_decode_tokens,
+                        total_num_heads,
+                        self.head_size,
+                    )
+                    lse_shape = (num_decode_tokens, total_num_heads)
+                    output_tmp, lse = current_workspace_manager().get_simultaneous(
+                        (buffer_shape, query.dtype),
+                        (lse_shape, torch.float32),
                     )
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
