@@ -289,12 +289,6 @@ def maybe_convert_int(value: str | None) -> int | None:
     return int(value)
 
 
-def maybe_convert_float(value: str | None) -> float | None:
-    if value is None:
-        return None
-    return float(value)
-
-
 def maybe_convert_bool(value: str | None) -> bool | None:
     if value is None:
         return None

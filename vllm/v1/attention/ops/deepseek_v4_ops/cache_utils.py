@@ -66,7 +66,7 @@ def _apply_gptj_rope_512(
 
 
 @triton.jit
-def _qnorm_rope_kernel(
+def _qnorm_rope_insert_full_cache_kernel(
     q_ptr,
     q_stride0,
     q_stride1,
@@ -75,14 +75,23 @@ def _qnorm_rope_kernel(
     q_fp8_stride0,
     q_fp8_stride1,
     q_fp8_scale_inv_ptr,
+    kv_ptr,
+    kv_stride0,
+    slot_mapping_ptr,
     positions_ptr,
     cos_sin_cache_ptr,
     cos_sin_stride,
+    k_cache_ptr,
+    cache_stride0,
+    cache_stride1,
+    cache_block_size,
+    fp8_scale_ptr,
     eps,
     HEAD_SIZE: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     STORE_Q_FP8: tl.constexpr,
+    STORE_KV_FP8: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
@@ -98,12 +107,13 @@ def _qnorm_rope_kernel(
         )
         return
 
+    position = tl.load(positions_ptr + token_idx)
+
     q_row = q_ptr + token_idx * q_stride0 + head_idx * q_stride1
     values = tl.load(q_row + offsets, mask=mask, other=0.0).to(tl.float32)
     variance = tl.sum(values * values, axis=0) / HEAD_SIZE
     values *= tl.rsqrt(variance + eps)
 
-    position = tl.load(positions_ptr + token_idx)
     values = _apply_gptj_rope_512(
         values,
         position,
@@ -124,39 +134,18 @@ def _qnorm_rope_kernel(
         )
         tl.store(q_fp8_row + offsets, q_fp8_values.to(tl.float8e4nv), mask=mask)
 
+    if head_idx != 0:
+        return
 
-@triton.jit
-def _kv_rope_insert_full_cache_kernel(
-    kv_ptr,
-    kv_stride0,
-    slot_mapping_ptr,
-    positions_ptr,
-    cos_sin_cache_ptr,
-    cos_sin_stride,
-    k_cache_ptr,
-    cache_stride0,
-    cache_stride1,
-    cache_block_size,
-    fp8_scale_ptr,
-    HEAD_SIZE: tl.constexpr,
-    ROPE_HEAD_DIM: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    STORE_FP8: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
     slot_idx = tl.load(slot_mapping_ptr + token_idx)
     if slot_idx < 0:
         return
 
-    offsets = tl.arange(0, BLOCK_SIZE)
-    mask = offsets < HEAD_SIZE
-    values = tl.load(
+    kv_values = tl.load(
         kv_ptr + token_idx * kv_stride0 + offsets, mask=mask, other=0.0
     ).to(tl.float32)
-
-    position = tl.load(positions_ptr + token_idx)
-    values = _apply_gptj_rope_512(
-        values,
+    kv_values = _apply_gptj_rope_512(
+        kv_values,
         position,
         cos_sin_cache_ptr,
         cos_sin_stride,
@@ -172,12 +161,12 @@ def _kv_rope_insert_full_cache_kernel(
         + block_idx.to(tl.int64) * cache_stride0
         + (pos_in_block * cache_stride1)
     )
-    if STORE_FP8:
+    if STORE_KV_FP8:
         fp8_scale = tl.load(fp8_scale_ptr)
-        values = tl.clamp(values / fp8_scale, -448.0, 448.0)
-        tl.store(cache_row + offsets, values.to(tl.float8e4nv), mask=mask)
+        kv_values = tl.clamp(kv_values / fp8_scale, -448.0, 448.0)
+        tl.store(cache_row + offsets, kv_values.to(tl.float8e4nv), mask=mask)
     else:
-        tl.store(cache_row + offsets, values.to(tl.bfloat16), mask=mask)
+        tl.store(cache_row + offsets, kv_values.to(tl.bfloat16), mask=mask)
 
 
 def qnorm_rope_and_insert_full_k_cache(
@@ -215,7 +204,7 @@ def qnorm_rope_and_insert_full_k_cache(
 
     num_tokens_full, num_heads, _ = q.shape
     q_heads_for_grid = q_fp8.shape[1] if q_fp8 is not None else num_heads
-    _qnorm_rope_kernel[(num_tokens_full, q_heads_for_grid)](
+    _qnorm_rope_insert_full_cache_kernel[(num_tokens_full, q_heads_for_grid)](
         q,
         q.stride(0),
         q.stride(1),
@@ -224,19 +213,6 @@ def qnorm_rope_and_insert_full_k_cache(
         q_fp8.stride(0) if q_fp8 is not None else q.stride(0),
         q_fp8.stride(1) if q_fp8 is not None else q.stride(1),
         q_fp8_scale_inv if q_fp8_scale_inv is not None else fp8_scale,
-        positions,
-        cos_sin_cache,
-        cos_sin_cache.stride(0),
-        eps,
-        HEAD_SIZE=512,
-        ROPE_HEAD_DIM=64,
-        BLOCK_SIZE=512,
-        STORE_Q_FP8=q_fp8 is not None,
-        num_warps=8,
-    )
-
-    num_tokens_insert = slot_mapping.shape[0]
-    _kv_rope_insert_full_cache_kernel[(num_tokens_insert,)](
         kv,
         kv.stride(0),
         slot_mapping,
@@ -248,10 +224,12 @@ def qnorm_rope_and_insert_full_k_cache(
         k_cache.stride(1),
         cache_block_size,
         fp8_scale,
+        eps,
         HEAD_SIZE=512,
         ROPE_HEAD_DIM=64,
         BLOCK_SIZE=512,
-        STORE_FP8=k_cache.dtype == torch.float8_e4m3fn,
+        STORE_Q_FP8=q_fp8 is not None,
+        STORE_KV_FP8=k_cache.dtype == torch.float8_e4m3fn,
         num_warps=8,
     )
 
@@ -621,7 +599,6 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
-    topk_lens_base: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -629,7 +606,6 @@ def compute_global_topk_indices_and_lens(
     1. Block-table lookup (local index → global slot id)
     2. Valid-entry counting (topk_lens per token)
     3. Masking padding tokens to length 0
-    4. Optional constant top-k length base for callers with fixed prefixes
     """
     num_tokens = topk_indices.shape[0]
     global_topk_indices = torch.empty_like(topk_indices)
@@ -646,7 +622,6 @@ def compute_global_topk_indices_and_lens(
         block_table.stride(0),
         block_size,
         is_valid_token,
-        topk_lens_base,
         TRITON_BLOCK_SIZE=1024,
     )
     return global_topk_indices, topk_lens
@@ -655,7 +630,7 @@ def compute_global_topk_indices_and_lens(
 def build_flashinfer_mixed_sparse_indices(
     decode_swa_indices: torch.Tensor,
     decode_compressed_indices: torch.Tensor | None,
-    decode_sparse_topk_lens: torch.Tensor,
+    decode_compressed_topk_lens: torch.Tensor,
     prefill_topk_indices: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -672,7 +647,7 @@ def build_flashinfer_mixed_sparse_indices(
     assert decode_swa_indices.dtype == torch.int32
     assert decode_swa_indices.dim() == 2
     assert decode_swa_indices.shape[-1] == window_size
-    assert decode_sparse_topk_lens.dtype == torch.int32
+    assert decode_compressed_topk_lens.dtype == torch.int32
     assert prefill_topk_indices.dtype == torch.int32
     assert prefill_topk_indices.dim() == 2
     assert query_start_loc.dtype == torch.int32
@@ -684,7 +659,7 @@ def build_flashinfer_mixed_sparse_indices(
     num_prefill_tokens = prefill_topk_indices.shape[0]
     num_tokens = num_decode_tokens + num_prefill_tokens
     assert token_to_req_indices.shape[0] >= num_tokens
-    assert decode_sparse_topk_lens.shape[0] >= num_decode_tokens
+    assert decode_compressed_topk_lens.shape[0] >= num_decode_tokens
 
     decode_compressed_topk = 0
     if decode_compressed_indices is None:
@@ -720,7 +695,7 @@ def build_flashinfer_mixed_sparse_indices(
         decode_swa_indices.stride(0),
         decode_compressed_indices,
         decode_compressed_indices.stride(0),
-        decode_sparse_topk_lens,
+        decode_compressed_topk_lens,
         prefill_topk_indices,
         prefill_topk_indices.stride(0),
         query_start_loc,
@@ -754,7 +729,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     decode_swa_stride,
     decode_compressed_indices_ptr,
     decode_compressed_stride,
-    decode_sparse_topk_lens_ptr,
+    decode_compressed_topk_lens_ptr,
     prefill_topk_indices_ptr,
     prefill_topk_stride,
     query_start_loc_ptr,
@@ -813,7 +788,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
 
         tl.store(
             sparse_topk_lens_ptr + token_idx,
-            tl.load(decode_sparse_topk_lens_ptr + token_idx),
+            WINDOW_SIZE + tl.load(decode_compressed_topk_lens_ptr + token_idx),
         )
         return
 
@@ -894,7 +869,6 @@ def _compute_global_topk_indices_and_lens_kernel(
     block_table_stride,
     block_size,
     is_valid_token_ptr,
-    topk_lens_base: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -929,11 +903,7 @@ def _compute_global_topk_indices_and_lens_kernel(
         )
         count += tl.sum(is_valid.to(tl.int32), axis=0)
 
-    # Mask compressed entries for padding tokens, then add any fixed prefix.
-    tl.store(
-        topk_lens_ptr + token_idx,
-        tl.where(is_valid_token, count, 0) + topk_lens_base,
-    )
+    tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
 
 
 # FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see

@@ -963,9 +963,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         topk_indices = None
         topk_lens = None
-        use_flashinfer_dsv4 = (
-            self.kv_cache_torch_dtype != torch.uint8 and not current_platform.is_rocm()
-        )
         if not swa_only:
             assert attn_metadata is not None
             assert swa_metadata.is_valid_token is not None
@@ -980,7 +977,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     attn_metadata.block_table[:num_decodes],
                     block_size,
                     is_valid,
-                    self.window_size if use_flashinfer_dsv4 else 0,
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
@@ -1072,12 +1068,12 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         assert swa_metadata.query_start_loc_cpu is not None
         assert swa_metadata.token_to_req_indices is not None
         assert swa_metadata.decode_swa_indices is not None
-        assert swa_metadata.decode_swa_sparse_topk_lens is not None
+        assert swa_metadata.decode_zero_compressed_lens is not None
 
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
             num_decode_tokens, self.window_size
         )
-        decode_sparse_topk_lens = swa_metadata.decode_swa_sparse_topk_lens
+        decode_compressed_topk_lens = swa_metadata.decode_zero_compressed_lens
 
         if swa_only:
             assert self.topk_indices_buffer is not None
@@ -1089,6 +1085,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             compressed_block_table = None
             compressed_block_size = swa_metadata.block_size
             top_k = 0
+            sparse_indices = None
+            sparse_topk_lens = None
         else:
             assert kv_cache is not None
             assert attn_metadata is not None
@@ -1110,14 +1108,13 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 if num_decode_tokens > 0:
                     assert swa_metadata.is_valid_token is not None
                     is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-                    decode_global_indices, decode_sparse_topk_lens = (
+                    decode_global_indices, decode_compressed_topk_lens = (
                         compute_global_topk_indices_and_lens(
                             self.topk_indices_buffer[:num_decode_tokens],
                             swa_metadata.token_to_req_indices,
                             attn_metadata.block_table[:num_decodes],
                             compressed_block_size,
                             is_valid,
-                            self.window_size,
                         )
                     )
                     decode_compressed_indices = decode_global_indices.view(
@@ -1142,7 +1139,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                             num_decode_tokens, -1
                         )
                     )
-                    decode_sparse_topk_lens = attn_metadata.c128a_decode_topk_lens
+                    decode_compressed_topk_lens = attn_metadata.c128a_decode_topk_lens
                     if num_prefill_tokens == 0:
                         prefill_topk_indices = decode_compressed_indices[:0, :0]
                 else:
@@ -1157,7 +1154,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
             decode_swa_indices,
             decode_compressed_indices,
-            decode_sparse_topk_lens,
+            decode_compressed_topk_lens,
             prefill_topk_indices[:num_prefill_tokens],
             query_start_loc,
             seq_lens,

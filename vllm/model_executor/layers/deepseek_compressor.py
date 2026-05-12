@@ -27,7 +27,6 @@ from vllm.v1.attention.ops.deepseek_v4_ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _fused_kv_compress_norm_rope_insert_sparse_attn,
-    _fused_kv_compress_norm_rope_insert_sparse_attn_full_cache,
 )
 from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
     MXFP4_BLOCK_SIZE,
@@ -345,9 +344,10 @@ class DeepseekCompressor(nn.Module):
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
 
-        if self.head_dim == 512 and kv_cache.dtype != torch.uint8:
-            assert kv_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
-            _fused_kv_compress_norm_rope_insert_sparse_attn_full_cache[(num_actual,)](
+        if self.head_dim == 512:
+            if kv_cache.dtype != torch.uint8:
+                assert kv_cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
+            self._fused_kernel[(num_actual,)](
                 # state cache
                 state_cache,
                 state_cache.stride(0),
@@ -369,7 +369,11 @@ class DeepseekCompressor(nn.Module):
                 kv_cache,
                 k_cache_metadata.slot_mapping,
                 kv_cache.shape[1],
-                k_cache_layer._flashinfer_fp8_kv_scale,
+                (
+                    k_cache_layer._flashinfer_fp8_kv_scale
+                    if kv_cache.dtype != torch.uint8
+                    else self.norm.weight
+                ),
                 # constexprs
                 HEAD_SIZE=self.head_dim,
                 TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),
@@ -377,9 +381,16 @@ class DeepseekCompressor(nn.Module):
                 COMPRESS_RATIO=self.compress_ratio,
                 OVERLAP=self.overlap,
                 ROPE_HEAD_DIM=self.rope_head_dim,
+                FP8_MAX=448.0,
+                QUANT_BLOCK=self._quant_block,
+                TOKEN_STRIDE=self._token_stride,
+                SCALE_DIM=self._scale_dim,
                 KV_BLOCK_STRIDE=kv_cache.stride(0),
-                KV_TOKEN_STRIDE=kv_cache.stride(1),
-                STORE_FP8=kv_cache.dtype == torch.float8_e4m3fn,
+                KV_TOKEN_STRIDE=(
+                    kv_cache.stride(1) if kv_cache.dtype != torch.uint8 else 0
+                ),
+                STORE_FULL_CACHE=kv_cache.dtype != torch.uint8,
+                STORE_FULL_FP8=kv_cache.dtype == torch.float8_e4m3fn,
                 num_warps=self._num_warps,
                 **pdl_kwargs,
             )

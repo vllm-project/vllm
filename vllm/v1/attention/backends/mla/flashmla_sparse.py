@@ -255,7 +255,6 @@ class FlashMLASparseMetadata(AttentionMetadata):
     # Prefill: local topk indices (used by combine_topk_swa_indices).
     c128a_prefill_topk_indices: torch.Tensor | None = None
 
-
 def get_prefill_workspace_size(max_model_len: int):
     # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
     # May be tuned later.
@@ -359,11 +358,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         if self.is_deepseek_v4:
             assert hasattr(self.kv_cache_spec, "compress_ratio")
             self.compress_ratio = self.kv_cache_spec.compress_ratio
-            self.sliding_window = hf_config.sliding_window
-            self.use_dsv4_flashinfer_decode = (
-                self.kv_cache_spec.dtype != torch.uint8
-                and not current_platform.is_rocm()
-            )
             # Pre-allocate compressed slot mapping buffer for CUDA graph
             # address stability when compress_ratio > 1.
             if self.compress_ratio > 1:
@@ -703,9 +697,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             self.c128a_decode_lens_buffer,
             self.c128a_prefill_buffer,
             max_compressed_tokens=self.c128a_max_compressed,
-            decode_lens_base=(
-                self.sliding_window if self.use_dsv4_flashinfer_decode else 0
-            ),
         )
 
         result: dict[str, torch.Tensor | None] = {}
@@ -1074,7 +1065,6 @@ def build_c128a_topk_metadata(
     decode_lens_buffer: torch.Tensor,
     prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
-    decode_lens_base: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single kernel for all C128A tokens (decode + prefill).
 
@@ -1109,7 +1099,6 @@ def build_c128a_topk_metadata(
         block_table.stride(0),
         block_size,
         slot_mapping,
-        decode_lens_base,
         BLOCK_SIZE=1024,
     )
     return global_decode, decode_lens, prefill_local
@@ -1134,7 +1123,6 @@ def _build_c128a_topk_metadata_kernel(
     block_table_stride,
     block_size,
     slot_mapping_ptr,
-    decode_lens_base: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -1170,7 +1158,7 @@ def _build_c128a_topk_metadata_kernel(
 
         tl.store(
             decode_lens_ptr + token_idx,
-            tl.where(is_valid_token, count, 0) + decode_lens_base,
+            tl.where(is_valid_token, count, 0),
         )
     else:
         # --- Prefill: write local indices ---
