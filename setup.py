@@ -686,6 +686,7 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    "vllm/spinloop.abi3.so",
                     # ROCm-specific libraries
                     "vllm/_rocm_C.abi3.so",
                 ]
@@ -927,7 +928,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
+        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+        if VLLM_TARGET_DEVICE == "cpu":
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
@@ -990,6 +993,8 @@ if _is_cuda() or _is_hip():
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
+
+ext_modules.append(CMakeExtension(name="vllm.spinloop"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -1107,7 +1112,7 @@ setup(
         #   - .buildkite/test-amd.yaml
         "helion": ["helion==1.0.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoeWeightScaleSupported,
+    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
@@ -65,35 +66,43 @@ __all__ = [
     "RoutingMethodType",
     "activation_without_mul",
     "apply_moe_activation",
+    "fused_moe_make_expert_params_mapping",
     "override_config",
     "get_config",
 ]
 
 if HAS_TRITON:
     # import to register the custom ops
-    from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+        BatchedDeepGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
         CutlassExpertsW4A8Fp8,
         cutlass_moe_w4a8_fp8,
     )
-    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
-        BatchedDeepGemmExperts,
-    )
     from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         DeepGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+        TritonExperts,
+        TritonWNA16Experts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
+        XPUExperts,
+        XPUExpertsFp8,
+        XPUExpertsMXFp4,
     )
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.fused_moe import (
-        TritonExperts,
-        TritonWNA16Experts,
         fused_experts,
         get_config_file_name,
-    )
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-        AiterExperts,
     )
     from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
         fused_topk,
@@ -103,10 +112,6 @@ if HAS_TRITON:
     )
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
-        XPUExperts,
-        XPUExpertsFp8,
     )
 
     __all__ += [
@@ -127,6 +132,7 @@ if HAS_TRITON:
         "TritonOrDeepGemmExperts",
         "XPUExperts",
         "XPUExpertsFp8",
+        "XPUExpertsMXFp4",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders
