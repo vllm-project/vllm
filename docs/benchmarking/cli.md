@@ -39,7 +39,8 @@ th {
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
-| Custom MM | ✅ | ✅ | Local file: `mm_data.jsonl` |
+| Custom Audio | ✅ | ✅ | Local file: `audio_data.jsonl` |
+| Custom Image | ✅ | ✅ | Local file: `image_data.jsonl` |
 
 Legend:
 
@@ -132,7 +133,7 @@ The generated timeline is an interactive visualization in the form of an HTML fi
 
 Example output:
 
-<iframe src="../../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
+<iframe src="../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
 
 ##### Dataset statistics
 
@@ -142,7 +143,7 @@ Example output: ![Dataset Statistics](../assets/contributing/vllm_bench_serve_da
 
 #### Custom Dataset
 
-If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
+If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. At inference time, use the option `--dataset-name custom`. Your data needs to be in the `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
 
 ```json
 {"prompt": "What is the capital of India?"}
@@ -173,9 +174,62 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-#### Custom multimodal dataset
+#### Custom Audio Dataset
 
-If the multimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
+If the audio dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomAudioDataset`. At inference time, use the option `--dataset-name custom_audio`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "audio" fields per entry, e.g., `audio_data.jsonl`:
+
+```json
+{"prompt": "What does this audio say?", "audio": "/path/to/audio_1.wav"}
+{"prompt": "Transcribe the audio.", "audio": "/path/to/audio_2.wav"}
+```
+
+- **Supported models:** The `CustomAudioDataset` class supports two types of audio models: ASR models (e.g. Whisper) which do not require a "prompt" field; and multimodal audio-text chat models (e.g. Qwen2-Audio). Since these model types require different arguments at inference, we are giving two examples.
+
+- **Example 1: Whisper**
+
+Whisper is a dedicated ASR encoder-decoder model, so it uses `--backend openai-audio` and `--endpoint /v1/audio/transcriptions`.
+
+```bash
+# start server
+vllm serve openai/whisper-tiny
+```
+
+```bash
+vllm bench serve \
+  --model openai/whisper-tiny \
+  --backend openai-audio \
+  --endpoint /v1/audio/transcriptions \
+  --dataset-name custom_audio \
+  --dataset-path audio_data.jsonl \
+  --no-oversample \
+  --custom-output-len 256 \
+  --save-result \
+  --save-detailed \
+  --result-filename whisper_bench.json
+```
+
+- **Example 2: Qwen2-Audio**
+
+Qwen2-Audio is a multimodal chat model that can do ASR and speech analysis, so it uses `--backend openai-chat`, and `--endpoint /v1/chat/completions`. It also requires `--enable-multimodal-chat` to enable multimodal chat transformation.
+
+```bash
+vllm bench serve \
+  --model Qwen/Qwen2-Audio-7B-Instruct \
+  --backend openai-chat \
+  --endpoint /v1/chat/completions \
+  --dataset-name custom_audio \
+  --dataset-path audio_data.jsonl \
+  --no-oversample \
+  --custom-output-len 256 \
+  --enable-multimodal-chat \
+  --save-result \
+  --save-detailed \
+  --result-filename qwen_bench.json
+```
+
+#### Custom Image Dataset
+
+If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. At inference time, use the option `--dataset-name custom_image`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "image_files" fields per entry, e.g., `image_data.jsonl`:
 
 ```json
 {"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
@@ -193,8 +247,8 @@ vllm bench serve--save-result --save-detailed \
   --backend openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
-  --dataset-name custom_mm \
-  --dataset-path <path-to-your-mm-data-jsonl> \
+  --dataset-name custom_image \
+  --dataset-path <path-to-your-image-data-jsonl> \
   --allowed-local-media-path /path/to/image/folder
 ```
 

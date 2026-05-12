@@ -55,9 +55,6 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        # TODO (tdoublep) requires testing
-        if mamba_cache_dtype == "float32":
-            raise ValueError("fp32 state for minimax is not yet supported")
         state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         return (state_dtype,)
 
