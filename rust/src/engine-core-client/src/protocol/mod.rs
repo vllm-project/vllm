@@ -299,7 +299,7 @@ impl EngineCoreSamplingParams {
 /// Engine-core add-request payload sent from frontend to engine.
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L66-L110>
+/// <https://github.com/vllm-project/vllm/blob/3f5bd482f5c1a5dbdffbbf68d624e20bb7032013/vllm/v1/engine/__init__.py#L80-L129>
 #[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
 pub struct EngineCoreRequest {
     pub request_id: String,
@@ -322,6 +322,12 @@ pub struct EngineCoreRequest {
     /// tensor/aux-frame encoding path for this field.
     #[serde(default)]
     pub prompt_embeds: Option<OpaqueValue>,
+    /// Per-position mask for mixed-mode inputs (e.g. chat completion with
+    /// `prompt_embeds` content parts). `Some(true)` means real token id;
+    /// `Some(false)` means the position uses a pre-computed entry from
+    /// `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    #[serde(default)]
+    pub prompt_is_token_ids: Option<Vec<bool>>,
     /// Index of the client, used to ensure outputs are sent back to the same
     /// client when scaling out the frontend.
     #[serde(default)]
@@ -340,6 +346,15 @@ pub struct EngineCoreRequest {
     pub external_req_id: Option<String>,
     #[serde(default)]
     pub reasoning_ended: Option<bool>,
+    /// Opaque reasoning-parser kwargs forwarded from the frontend to the
+    /// structured-output backend.
+    #[serde(default)]
+    pub reasoning_parser_kwargs: Option<OpaqueValue>,
+    /// If `true`, the request should be added to the scheduler's waiting queue
+    /// and immediately aborted, so connector-side cleanup runs via the
+    /// standard `request_finished` hook.
+    #[serde(default)]
+    pub abort_immediately: bool,
 }
 
 impl EngineCoreRequest {
@@ -595,24 +610,13 @@ mod tests {
         let request = EngineCoreRequest {
             request_id: "req-1".to_string(),
             prompt_token_ids: Some(vec![1, 2, 3]),
-            mm_features: None,
             sampling_params: Some(EngineCoreSamplingParams {
                 max_tokens: 8,
                 ..EngineCoreSamplingParams::for_test()
             }),
-            pooling_params: None,
             arrival_time: 1234.5,
-            lora_request: None,
-            cache_salt: None,
-            data_parallel_rank: None,
-            prompt_embeds: None,
             client_index: 7,
-            current_wave: 0,
-            priority: 0,
-            trace_headers: None,
-            resumable: false,
-            external_req_id: None,
-            reasoning_ended: None,
+            ..EngineCoreRequest::default()
         };
 
         let encoded = encode_msgpack(&request).unwrap();
@@ -622,11 +626,12 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 17);
+        assert_eq!(array.len(), 20);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
-        assert_eq!(array[10], Value::from(7));
+        assert_eq!(array[10], Value::Nil);
+        assert_eq!(array[11], Value::from(7));
     }
 
     #[test]

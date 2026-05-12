@@ -138,7 +138,6 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
     EngineCoreRequest {
         request_id: request_id.to_string(),
         prompt_token_ids: Some(vec![11, 22]),
-        mm_features: None,
         sampling_params: Some(EngineCoreSamplingParams {
             temperature: 0.8,
             top_p: 0.9,
@@ -150,19 +149,8 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
             ..EngineCoreSamplingParams::for_test()
         }),
-        pooling_params: None,
         arrival_time: 42.5,
-        lora_request: None,
-        cache_salt: None,
-        data_parallel_rank: None,
-        prompt_embeds: None,
-        client_index: 0,
-        current_wave: 0,
-        priority: 0,
-        trace_headers: None,
-        resumable: false,
-        external_req_id: None,
-        reasoning_ended: None,
+        ..EngineCoreRequest::default()
     }
 }
 

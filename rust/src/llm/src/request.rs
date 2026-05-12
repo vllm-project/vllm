@@ -80,6 +80,7 @@ impl GenerateRequest {
                 cache_salt,
                 data_parallel_rank,
                 prompt_embeds: None,
+                prompt_is_token_ids: None,
                 client_index: 0,
                 current_wave: 0,
                 priority,
@@ -87,6 +88,8 @@ impl GenerateRequest {
                 resumable: false,
                 external_req_id: Some(external_request_id),
                 reasoning_ended,
+                reasoning_parser_kwargs: None,
+                abort_immediately: false,
             },
         })
     }

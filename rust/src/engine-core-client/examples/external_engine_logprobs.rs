@@ -71,26 +71,15 @@ fn build_request(
     EngineCoreRequest {
         request_id,
         prompt_token_ids: Some(prompt_token_ids),
-        mm_features: None,
         sampling_params: Some(EngineCoreSamplingParams {
             max_tokens,
             logprobs: Some(logprobs),
             prompt_logprobs: Some(prompt_logprobs),
             ..EngineCoreSamplingParams::for_test()
         }),
-        pooling_params: None,
         arrival_time: 0.0,
-        lora_request: None,
-        cache_salt: None,
-        data_parallel_rank: None,
-        prompt_embeds: None,
         client_index,
-        current_wave: 0,
-        priority: 0,
-        trace_headers: None,
-        resumable: false,
-        external_req_id: None,
-        reasoning_ended: None,
+        ..EngineCoreRequest::default()
     }
 }
 

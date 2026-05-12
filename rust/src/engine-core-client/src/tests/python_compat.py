@@ -60,6 +60,7 @@ class EngineCoreRequest(
     cache_salt: str | None = None
     data_parallel_rank: int | None = None
     prompt_embeds: object | None = None
+    prompt_is_token_ids: list[bool] | None = None
     client_index: int = 0
     current_wave: int = 0
     priority: int = 0
@@ -67,6 +68,8 @@ class EngineCoreRequest(
     resumable: bool = False
     external_req_id: str | None = None
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, object] | None = None
+    abort_immediately: bool = False
 
 
 class EngineCoreOutput(
