@@ -16,6 +16,11 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFuncCalculator,
+    MambaStateDtypeCalculator,
+    MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -23,6 +28,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     NestedTensors,
 )
+from vllm.multimodal.parse import ImageProcessorItems, VideoProcessorItems
 from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdateDetails,
@@ -42,9 +48,11 @@ from .interfaces import (
 from .minicpmv import (
     MiniCPMVDummyInputsBuilder,
     MiniCPMVImageEmbeddingInputs,
+    MiniCPMVImageEmbeddingItems,
     MiniCPMVImagePixelInputs,
     MiniCPMVMultiModalProcessor,
     MiniCPMVProcessingInfo,
+    MiniCPMVVideoEmbeddingItems,
 )
 from .module_mapping import MultiModelKeys
 from .qwen3_5 import Qwen3_5ForCausalLM
@@ -140,14 +148,10 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
-        from vllm.multimodal.parse import ImageProcessorItems
-
         if (images := mm_data.get("images")) is None:
             return {}
 
         mm_items = self.info.parse_mm_data({"image": images}, validate=False)
-        from .minicpmv import MiniCPMVImageEmbeddingItems
-
         parsed_images = mm_items.get_items(
             "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
         )
@@ -211,14 +215,10 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
-        from vllm.multimodal.parse import VideoProcessorItems
-
         if (videos := mm_data.get("videos")) is None:
             return {}
 
         mm_items = self.info.parse_mm_data({"video": videos}, validate=False)
-        from .minicpmv import MiniCPMVVideoEmbeddingItems
-
         parsed_videos = mm_items.get_items(
             "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
         )
@@ -288,16 +288,6 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs,
     ):
-        from vllm.multimodal.parse import (
-            ImageProcessorItems,
-            VideoProcessorItems,
-        )
-
-        from .minicpmv import (
-            MiniCPMVImageEmbeddingItems,
-            MiniCPMVVideoEmbeddingItems,
-        )
-
         ds_mode = self._resolve_downsample_mode(hf_processor_mm_kwargs)
 
         placeholders = [
@@ -1183,10 +1173,6 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     @classmethod
     def get_mamba_state_dtype_from_config(cls, vllm_config):
-        from vllm.model_executor.layers.mamba.mamba_utils import (
-            MambaStateDtypeCalculator,
-        )
-
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -1195,10 +1181,6 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     @classmethod
     def get_mamba_state_shape_from_config(cls, vllm_config):
-        from vllm.model_executor.layers.mamba.mamba_utils import (
-            MambaStateShapeCalculator,
-        )
-
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_text_config
         tp_size = parallel_config.tensor_parallel_size
@@ -1219,8 +1201,4 @@ class MiniCPMV4_6ForConditionalGeneration(
 
     @classmethod
     def get_mamba_state_copy_func(cls):
-        from vllm.model_executor.layers.mamba.mamba_utils import (
-            MambaStateCopyFuncCalculator,
-        )
-
         return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
