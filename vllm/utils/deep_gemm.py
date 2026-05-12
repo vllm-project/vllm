@@ -295,15 +295,17 @@ def fp8_gemm_nt(*args, **kwargs):
     return _fp8_gemm_nt_impl(*args, disable_ue8m0_cast=not use_ue8m0, **kwargs)
 
 
+def _decode_fp8_scale(scale: torch.Tensor) -> torch.Tensor:
+    if scale.dtype == torch.float8_e8m0fnu:
+        return torch.exp2(scale.view(torch.uint8).to(torch.float32) - 127.0)
+    return scale.to(torch.float32)
+
+
 def _dequant_fp8_block(x: torch.Tensor, scale: torch.Tensor | None) -> torch.Tensor:
     if scale is None:
         return x.to(torch.float32)
 
-    if scale.dtype == torch.float8_e8m0fnu:
-        scale_f = torch.exp2(scale.view(torch.uint8).to(torch.float32) - 127.0)
-    else:
-        scale_f = scale.to(torch.float32)
-
+    scale_f = _decode_fp8_scale(scale)
     flat_scale = scale_f.reshape(-1)
     if flat_scale.numel() == 1:
         return x.to(torch.float32) * flat_scale[0]
@@ -316,6 +318,36 @@ def _dequant_fp8_block(x: torch.Tensor, scale: torch.Tensor | None) -> torch.Ten
     block_size = x.numel() // flat_scale.numel()
     expanded_scale = flat_scale.repeat_interleave(block_size)
     return (x.reshape(-1).to(torch.float32) * expanded_scale).reshape(x.shape)
+
+
+def _dequant_fp8_2d_block(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    rows: int,
+    cols: int,
+    block_rows: int = 128,
+    block_cols: int = 128,
+) -> torch.Tensor:
+    """Dequantize a 2D FP8 matrix with row/column block scales.
+
+    DeepSeek-V4 ``wo_a`` stores weights as ``[G * R, D]`` and scales as
+    ``[(G * R) / 128, D / 128]``. The generic fallback flattens scales and
+    repeats them globally, which mixes row and column blocks. Expand each
+    scale along its own matrix dimension instead.
+    """
+    scale_f = _decode_fp8_scale(scale)
+    if scale_f.ndim < 2:
+        return _dequant_fp8_block(x, scale)
+
+    row_blocks, col_blocks = scale_f.shape[-2:]
+    expected_row_blocks = cdiv(rows, block_rows)
+    expected_col_blocks = cdiv(cols, block_cols)
+    if row_blocks != expected_row_blocks or col_blocks != expected_col_blocks:
+        return _dequant_fp8_block(x, scale)
+
+    expanded = scale_f.repeat_interleave(block_rows, dim=-2)[..., :rows, :]
+    expanded = expanded.repeat_interleave(block_cols, dim=-1)[..., :, :cols]
+    return x.reshape(rows, cols).to(torch.float32) * expanded
 
 
 def _reshape_to_subscripts(
@@ -357,14 +389,38 @@ def _rocm_fp8_einsum_fallback(
     del recipe
     a, a_scale = a_tuple
     b, b_scale = b_tuple
-    a_f = _dequant_fp8_block(a, a_scale)
-    b_f = _dequant_fp8_block(b, b_scale)
 
-    lhs, _ = equation.split("->")
+    lhs, rhs = equation.split("->")
     a_subs, b_subs = lhs.split(",")
+
+    a_f = _dequant_fp8_block(a, a_scale)
     dim_map: dict[str, int] = {}
     if a_f.ndim == len(a_subs):
         dim_map.update(zip(a_subs, a_f.shape))
+    if out.ndim == len(rhs):
+        dim_map.update(zip(rhs, out.shape))
+
+    # DeepSeek-V4 MLA output projection: activation is [T, G, D] and
+    # wo_a is stored as [G * R, D] with 128x128 block scales. Preserve the
+    # Triton inverse-RoPE activation path, but dequantize wo_a with its true
+    # 2D scale layout before reshaping to the einsum subscripts.
+    if (
+        current_platform.is_rocm()
+        and equation == "bhr,hdr->bhd"
+        and b_scale is not None
+        and b.ndim == 2
+        and {"h", "d", "r"}.issubset(dim_map)
+    ):
+        h = dim_map["h"]
+        d = dim_map["d"]
+        r = dim_map["r"]
+        if b.numel() == h * d * r:
+            b_f = _dequant_fp8_2d_block(b, b_scale, h * d, r).reshape(h, d, r)
+        else:
+            b_f = _dequant_fp8_block(b, b_scale)
+    else:
+        b_f = _dequant_fp8_block(b, b_scale)
+
     if b_f.ndim == len(b_subs):
         dim_map.update(zip(b_subs, b_f.shape))
 
