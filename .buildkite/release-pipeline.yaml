@@ -37,7 +37,7 @@ steps:
         agents:
           queue: arm64_cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04  --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_AARCH64}\" --build-arg BUILD_OS=manylinux --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -76,7 +76,7 @@ steps:
         agents:
           queue: cpu_queue_release
         commands:
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=13.0.2 --build-arg torch_cuda_arch_list=\"${CUDA_ARCH_X86}\" --build-arg BUILD_OS=manylinux --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh"
@@ -309,6 +309,7 @@ steps:
         depends_on: ~
 
       - label: "Build release image - x86_64 - CPU"
+        key: build-cpu-release-image-x86
         depends_on:
           - block-cpu-release-image-build
           - input-release-version
@@ -327,7 +328,8 @@ steps:
         depends_on: ~
 
       - label: "Build release image - arm64 - CPU"
-        depends_on: 
+        key: build-cpu-release-image-arm64
+        depends_on:
           - block-arm64-cpu-release-image-build
           - input-release-version
         agents:
@@ -435,24 +437,6 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
-
-  - group: "Publish wheels"
-    key: "publish-wheels"
-    steps:
-      - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
-        key: block-upload-release-wheels
-        depends_on:
-          - input-release-version
-          - build-wheels
-
-      - label: "Upload release wheels to PyPI"
-        depends_on:
-          - block-upload-release-wheels
-        id: upload-release-wheels
-        agents:
-          queue: small_cpu_queue_release
-        commands:
-          - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
 
   # =============================================================================
   # ROCm Release Pipeline (x86_64 only)
@@ -723,7 +707,7 @@ steps:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
       S3_BUCKET: "vllm-wheels"
-      VARIANT: "rocm721"
+      VARIANT: "rocm722"
 
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
@@ -810,3 +794,60 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
       DOCKERHUB_USERNAME: "vllmbot"
+
+  # =============================================================================
+  # Publish to DockerHub and PyPI (at the end so all builds complete first)
+  # =============================================================================
+
+  - block: "Publish release images to DockerHub"
+    key: block-publish-release-images
+    depends_on:
+      - create-multi-arch-manifest
+      - create-multi-arch-manifest-cuda-12-9
+      - create-multi-arch-manifest-ubuntu2404
+      - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+      - build-rocm-release-image
+      - input-release-version
+      # Wait for CPU builds if their block steps were unblocked, so publish
+      # doesn't race the in-progress CPU build. allow_failure lets publish
+      # proceed when the operator legitimately leaves the CPU block steps
+      # unblocked or the CPU build fails.
+      - step: build-cpu-release-image-x86
+        allow_failure: true
+      - step: build-cpu-release-image-arm64
+        allow_failure: true
+    if: build.env("NIGHTLY") != "1"
+
+  - label: "Publish release images to DockerHub"
+    depends_on:
+      - block-publish-release-images
+    key: publish-release-images-dockerhub
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/publish-release-images.sh"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
+  - group: "Publish wheels"
+    key: "publish-wheels"
+    steps:
+      - block: "Confirm update release wheels to PyPI (experimental, use with caution)?"
+        key: block-upload-release-wheels
+        depends_on:
+          - input-release-version
+          - build-wheels
+
+      - label: "Upload release wheels to PyPI"
+        depends_on:
+          - block-upload-release-wheels
+        id: upload-release-wheels
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/upload-release-wheels-pypi.sh"
