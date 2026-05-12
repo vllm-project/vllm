@@ -188,8 +188,6 @@ class RequestState:
             deque() if stream_input else None
         )
 
-        self._spec_token_mask: list[bool] = []
-
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
         self.streaming_input = not update.final
@@ -279,17 +277,7 @@ class RequestState:
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
-        num_spec_accepted: int = 0,
-        spec_decode_active: bool = False,
     ) -> RequestOutput | PoolingRequestOutput | None:
-        if spec_decode_active or self._spec_token_mask:
-            if not self._spec_token_mask and self.detokenizer is not None:
-                prior = self.detokenizer.num_output_tokens() - len(new_token_ids)
-                if prior > 0:
-                    self._spec_token_mask.extend([False] * prior)
-            for i in range(len(new_token_ids)):
-                self._spec_token_mask.append(i < num_spec_accepted)
-
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
@@ -346,11 +334,7 @@ class RequestState:
             )
 
         output = self._new_completion_output(
-            new_token_ids,
-            finish_reason,
-            stop_reason,
-            routed_experts,
-            num_spec_accepted,
+            new_token_ids, finish_reason, stop_reason, gen_routed_experts
         )
 
         if self.parent_req is None:
@@ -420,7 +404,6 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         routed_experts: np.ndarray | None = None,
-        num_spec_accepted: int = 0,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -437,13 +420,6 @@ class RequestState:
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
 
-        spec_token_mask = None
-        if self._spec_token_mask:
-            if delta:
-                spec_token_mask = self._spec_token_mask[-len(token_ids) :]
-            else:
-                spec_token_mask = list(self._spec_token_mask[: len(token_ids)])
-
         return CompletionOutput(
             index=self.request_index,
             text=text,
@@ -453,8 +429,6 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
-            num_spec_accepted=num_spec_accepted,
-            spec_token_mask=spec_token_mask,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -699,8 +673,6 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
                 routed_experts,
-                engine_core_output.num_spec_accepted,
-                engine_core_output.spec_decode_active,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
