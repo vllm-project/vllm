@@ -209,7 +209,7 @@ class FusedMoE(PluggableLayer):
 
         self.eplb_state: EplbLayerState | None = None
         if enable_eplb:
-            if self.global_num_experts % self.ep_size != 0:
+            if self.use_ep and self.global_num_experts % self.ep_size != 0:
                 raise ValueError(
                     f"EPLB currently only supports even distribution of "
                     f"experts across ranks. Got {self.global_num_experts} experts "
