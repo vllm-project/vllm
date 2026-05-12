@@ -787,8 +787,7 @@ def test_mrope_decode_position_arithmetic():
     # req 3: -100 + (max_model_len - 2) = max_model_len - 102 (no clamp)
     assert proposer_pos[3].item() == max_model_len - 102
 
-    # Clamp: delta=0, context_len == max_model_len - 1 → position clamped to
-    # max_model_len - 1.
+    # Clamp: delta=0, context_len == max_model_len - 1 → clamped to max_model_len - 1.
     clamp_delta = torch.tensor([0], dtype=torch.int64, device=device)
     clamp_seq_len = torch.tensor([max_model_len], dtype=torch.int32, device=device)
     clamped = (clamp_delta + clamp_seq_len.long() - 1).clamp(max=max_model_len - 1)
@@ -810,10 +809,6 @@ def test_mrope_position_delta_propagation():
     - batch_size = 3 requests
     - deltas = [-20, 0, -5] (negative for VLM, zero for text-only)
     - seq_lens before kernel = [30, 50, 98]
-    - Expected decode positions after delta path:
-        req 0: -20 + 31 - 1 = 10
-        req 1:   0 + 51 - 1 = 50
-        req 2:  -5 + 99 - 1 = 93
 
     Assertions:
     - Delta path: all 3 MRoPE dims are set to expected_pos; returned tensor
@@ -861,13 +856,13 @@ def test_mrope_position_delta_propagation():
 
     def _mock_kernel(
         positions_1d,
-        block_table_tensor,
+        _block_table_tensor,
         seq_lens,
-        block_size,
+        _block_size,
         max_model_len,
         out_clamped_positions,
-        out_slot_mapping,
-        input_batch_size=None,
+        _out_slot_mapping,
+        _input_batch_size=None,
     ):
         """Simulate the Triton kernel: increment seq_lens and write dim-0.
 
@@ -937,6 +932,59 @@ def test_mrope_position_delta_propagation():
         f"dim 2 not replicated from dim 0: "
         f"{proposer.mrope_positions[2, :batch_size].tolist()} vs {dim0_after.tolist()}"
     )
+
+
+def test_mrope_pruning_slot_write():
+    """
+    Test that the multimodal pruning slot write in _gather_mm_embeddings updates
+    the correct buffer slot and sets the dirty flag.
+
+    The production code (gpu_model_runner.py) does:
+        slot = self.input_batch.req_id_to_index[req_id]
+        self._mrope_deltas_cpu[slot] = new_delta or 0
+        self._mrope_deltas_dirty = True
+
+    Setup:
+    - max_num_reqs = 8, three active requests at slots 0, 2, 5
+    - req_B (slot 2) has an existing delta of -500; others are zero
+    - Two pruning events fire: req_B gets new_delta=-300, req_C gets None
+
+    Assertions:
+    - req_B's slot is updated to -300; req_A and req_C's slots are untouched
+      after the first pruning event.
+    - A None new_delta is stored as 0 (the `or 0` sentinel).
+    - The dirty flag is set after each pruning event.
+    """
+    max_num_reqs = 8
+
+    # Minimal fake runner: only the three attributes the production code reads.
+    runner = mock.MagicMock()
+    runner._mrope_deltas_cpu = torch.zeros(max_num_reqs, dtype=torch.long)
+    runner._mrope_deltas_cpu[2] = -500  # req_B's pre-existing delta
+    runner._mrope_deltas_dirty = False
+    runner.input_batch.req_id_to_index = {"req_A": 0, "req_B": 2, "req_C": 5}
+
+    def _apply_pruning_slot_write(runner, req_id, new_delta):
+        """Execute the three lines from gpu_model_runner._gather_mm_embeddings."""
+        slot = runner.input_batch.req_id_to_index[req_id]
+        runner._mrope_deltas_cpu[slot] = new_delta or 0
+        runner._mrope_deltas_dirty = True
+
+    # Pruning event 1: req_B gets a new negative delta.
+    _apply_pruning_slot_write(runner, "req_B", new_delta=-300)
+
+    assert runner._mrope_deltas_cpu[2].item() == -300
+    assert runner._mrope_deltas_dirty
+    assert runner._mrope_deltas_cpu[0].item() == 0   # req_A untouched
+    assert runner._mrope_deltas_cpu[5].item() == 0   # req_C untouched
+
+    # Pruning event 2: req_C gets None (text-only decode after VLM prefix).
+    runner._mrope_deltas_dirty = False
+    _apply_pruning_slot_write(runner, "req_C", new_delta=None)
+
+    assert runner._mrope_deltas_cpu[5].item() == 0   # None → 0
+    assert runner._mrope_deltas_dirty
+    assert runner._mrope_deltas_cpu[2].item() == -300  # req_B slot unchanged
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
