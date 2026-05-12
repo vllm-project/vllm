@@ -299,6 +299,33 @@ class Scheduler(SchedulerInterface):
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
+    def _should_get_num_common_prefix_blocks(self) -> bool:
+        device_config = getattr(self.vllm_config, "device_config", None)
+        device_type = getattr(device_config, "device_type", None)
+
+        # Only the v1 CUDA runner consumes this field for cascade attention.
+        return (
+            device_type == "cuda"
+            and not self.use_v2_model_runner
+            and not getattr(
+                self.vllm_config.model_config,
+                "disable_cascade_attn",
+                False,
+            )
+            and not self.parallel_config.use_ubatching
+        )
+
+    def _get_num_common_prefix_blocks(self) -> list[int]:
+        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
+        if not self.running or not self._should_get_num_common_prefix_blocks():
+            return num_common_prefix_blocks
+
+        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
+            any_request_id = self.running[0].request_id
+            return self.kv_cache_manager.get_num_common_prefix_blocks(
+                any_request_id
+            )
+
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -860,13 +887,7 @@ class Scheduler(SchedulerInterface):
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
-        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
-                any_request_id = self.running[0].request_id
-                num_common_prefix_blocks = (
-                    self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
-                )
+        num_common_prefix_blocks = self._get_num_common_prefix_blocks()
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:

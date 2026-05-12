@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -72,6 +73,60 @@ def test_get_num_unfinished_requests():
     for i, request in enumerate(requests):
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_STOPPED)
         assert scheduler.get_num_unfinished_requests() == len(requests) - i - 1
+
+
+def _make_common_prefix_test_scheduler(
+    *,
+    device_type: str,
+    disable_cascade_attn: bool,
+    use_ubatching: bool,
+    use_v2_model_runner: bool,
+) -> Scheduler:
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler.vllm_config = SimpleNamespace(
+        device_config=SimpleNamespace(device_type=device_type),
+        model_config=SimpleNamespace(disable_cascade_attn=disable_cascade_attn),
+    )
+    scheduler.parallel_config = SimpleNamespace(use_ubatching=use_ubatching)
+    scheduler.use_v2_model_runner = use_v2_model_runner
+    scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[object()])
+    scheduler.running = []
+    scheduler.kv_cache_manager = SimpleNamespace(
+        get_num_common_prefix_blocks=Mock(return_value=[3])
+    )
+    return scheduler
+
+
+def test_get_num_common_prefix_blocks_skips_when_unused():
+    scheduler = _make_common_prefix_test_scheduler(
+        device_type="cpu",
+        disable_cascade_attn=False,
+        use_ubatching=False,
+        use_v2_model_runner=False,
+    )
+    scheduler.running = [SimpleNamespace(request_id="req-0")]
+    scheduler.kv_cache_manager.get_num_common_prefix_blocks = Mock(
+        side_effect=AssertionError("should not be called")
+    )
+
+    assert scheduler._get_num_common_prefix_blocks() == [0]
+    scheduler.kv_cache_manager.get_num_common_prefix_blocks.assert_not_called()
+
+
+def test_get_num_common_prefix_blocks_cuda_cascade_path():
+    scheduler = _make_common_prefix_test_scheduler(
+        device_type="cuda",
+        disable_cascade_attn=False,
+        use_ubatching=False,
+        use_v2_model_runner=False,
+    )
+    request = SimpleNamespace(request_id="req-0")
+    scheduler.running = [request]
+
+    assert scheduler._get_num_common_prefix_blocks() == [3]
+    scheduler.kv_cache_manager.get_num_common_prefix_blocks.assert_called_once_with(
+        request.request_id
+    )
 
 
 @pytest.mark.parametrize(
