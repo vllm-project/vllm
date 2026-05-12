@@ -51,10 +51,12 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.speech_to_text import (
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
     TranscriptionResponseVerbose,
+)
+from vllm.entrypoints.speech_to_text.translation.protocol import (
     TranslationRequest,
     TranslationResponse,
     TranslationResponseVerbose,

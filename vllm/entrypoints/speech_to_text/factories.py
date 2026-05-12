@@ -38,9 +38,7 @@ def register_speech_to_text_api_routers(
 
 
 def add_websocket_metrics_middleware(app: FastAPI):
-    from vllm.entrypoints.speech_to_text.realtime.metrics import (
-        WebSocketMetricsMiddleware,
-    )
+    from .realtime.metrics import WebSocketMetricsMiddleware
 
     app.add_middleware(WebSocketMetricsMiddleware)
 
@@ -53,12 +51,7 @@ def init_speech_to_text_state(
     supported_tasks: tuple["SupportedTask", ...],
 ):
     if "transcription" in supported_tasks:
-        from .transcription.serving import (
-            OpenAIServingTranscription,
-        )
-        from .translation.serving import (
-            OpenAIServingTranslation,
-        )
+        from .transcription.serving import OpenAIServingTranscription
 
         state.openai_serving_transcription = OpenAIServingTranscription(
             engine_client,
@@ -66,6 +59,8 @@ def init_speech_to_text_state(
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
         )
+
+        from .translation.serving import OpenAIServingTranslation
 
         state.openai_serving_translation = OpenAIServingTranslation(
             engine_client,
