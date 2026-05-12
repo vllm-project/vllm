@@ -103,20 +103,33 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
         )
 
 
-class FixedMaxLenTokenizeParamsMixin:
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        build_tok_params = self._build_pooling_tok_params  # type: ignore[attr-defined]
-        add_special_tokens = self.add_special_tokens  # type: ignore[attr-defined]
+class PoolingTokenizeParamsMixin:
+    add_special_tokens: bool
 
-        return build_tok_params(
+    def _build_pooling_tok_params(
+        self,
+        model_config: ModelConfig,
+        *,
+        add_special_tokens: bool,
+        max_total_tokens: int | None,
+        max_output_tokens: int,
+        max_total_tokens_param: str = "max_model_len",
+        max_output_tokens_param: str | None = None,
+    ) -> TokenizeParams:
+        raise NotImplementedError
+
+
+class FixedMaxLenTokenizeParamsMixin(PoolingTokenizeParamsMixin):
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=add_special_tokens,
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
         )
 
 
-class EmbeddingTokenizeParamsMixin:
+class EmbeddingTokenizeParamsMixin(PoolingTokenizeParamsMixin):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         default_max_total_tokens = model_config.max_model_len
         max_total_tokens: int | None = default_max_total_tokens
@@ -130,12 +143,9 @@ class EmbeddingTokenizeParamsMixin:
                 max_embed_len = pooler_config.max_embed_len or default_max_total_tokens
                 max_output_tokens = default_max_total_tokens - max_embed_len
 
-        build_tok_params = self._build_pooling_tok_params  # type: ignore[attr-defined]
-        add_special_tokens = self.add_special_tokens  # type: ignore[attr-defined]
-
-        return build_tok_params(
+        return self._build_pooling_tok_params(
             model_config,
-            add_special_tokens=add_special_tokens,
+            add_special_tokens=self.add_special_tokens,
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
             max_output_tokens_param="max_model_len - max_embed_len",
