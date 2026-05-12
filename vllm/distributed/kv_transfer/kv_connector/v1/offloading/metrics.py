@@ -5,6 +5,7 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    OFFLOAD_CACHE_USAGE_KEY,
     KVConnectorPromMetrics,
     KVConnectorStats,
     PromMetric,
@@ -30,13 +31,13 @@ class OffloadingConnectorStats(KVConnectorStats):
             self.reset()
 
     def reset(self):
-        self.data: dict[str, list[OffloadingOperationMetrics]] = {}
+        self.data: dict[str, list] = {}
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
             for k, v in other.data.items():
                 if k not in self.data:
-                    self.data[k] = v
+                    self.data[k] = list(v)
                 else:
                     accumulator = self.data[k]
                     assert isinstance(accumulator, list)
@@ -51,16 +52,19 @@ class OffloadingConnectorStats(KVConnectorStats):
         stats for the last time interval.
         """
         return_dict: dict[str, int | float] = {}
-        for transfer_type, ops_list in self.data.items():
-            assert isinstance(ops_list, list)
+        for stat_key, samples in self.data.items():
+            assert isinstance(samples, list)
+            if stat_key == OFFLOAD_CACHE_USAGE_KEY:
+                return_dict[OFFLOAD_CACHE_USAGE_KEY] = max(samples) if samples else 0.0
+                continue
             total_bytes = 0
             total_time = 0.0
-            for op in ops_list:
+            for op in samples:
                 assert isinstance(op, dict)
                 total_bytes += op["op_size"]
                 total_time += op["op_time"]
-            return_dict[f"{transfer_type}_total_bytes"] = total_bytes
-            return_dict[f"{transfer_type}_total_time"] = total_time
+            return_dict[f"{stat_key}_total_bytes"] = total_bytes
+            return_dict[f"{stat_key}_total_time"] = total_time
         return return_dict
 
     def is_empty(self) -> bool:
@@ -74,6 +78,12 @@ class OffloadingConnectorStats(KVConnectorStats):
             self.data[transfer_type_key].append(op)
         else:
             self.data[transfer_type_key] = [op]
+
+    def record_offload_usage(self, usage_fraction: float) -> None:
+        usage_fraction = max(0.0, min(1.0, usage_fraction))
+        bucket = self.data.setdefault(OFFLOAD_CACHE_USAGE_KEY, [])
+        assert isinstance(bucket, list)
+        bucket.append(usage_fraction)
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
@@ -130,6 +140,10 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         """
 
         for transfer_type, ops in transfer_stats_data.items():
+            # Non-transfer entries (e.g. CPU KV usage samples) are handled by
+            # the scheduler; skip them here.
+            if transfer_type == OFFLOAD_CACHE_USAGE_KEY:
+                continue
             # Cache:
             if (engine_idx, transfer_type) not in self.histogram_transfer_size:
                 self.histogram_transfer_size[(engine_idx, transfer_type)] = (

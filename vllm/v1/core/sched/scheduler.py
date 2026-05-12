@@ -23,7 +23,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    OFFLOAD_CACHE_USAGE_KEY,
+    KVConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -1268,10 +1271,14 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
-        if kv_connector_stats and self.connector:
+        if self.connector:
             kv_stats = self.connector.get_kv_connector_stats()
             if kv_stats:
-                kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
+                kv_connector_stats = (
+                    kv_connector_stats.aggregate(kv_stats)
+                    if kv_connector_stats
+                    else kv_stats
+                )
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1883,6 +1890,11 @@ class Scheduler(SchedulerInterface):
             else []
         )
         spec_stats = spec_decoding_stats
+        kv_offload_cache_usage = 0.0
+        if kv_connector_stats:
+            kv_offload_samples = kv_connector_stats.data.get(OFFLOAD_CACHE_USAGE_KEY)
+            if kv_offload_samples:
+                kv_offload_cache_usage = float(max(kv_offload_samples))
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
@@ -1891,6 +1903,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            kv_offload_cache_usage=kv_offload_cache_usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
