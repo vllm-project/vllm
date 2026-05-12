@@ -155,6 +155,15 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if use_inductor_graph_partition is enabled."""
+
+    return (
+        cfg.compilation_config.use_inductor_graph_partition
+        or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+    )
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
 
@@ -184,6 +193,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
+            "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -204,6 +214,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
+            "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -226,6 +237,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -248,6 +260,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -712,6 +725,48 @@ class VllmConfig:
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
+
+    def _verify_kv_transfer_compat(self) -> None:
+        """Reject configurations that silently corrupt KV transfers."""
+        if (
+            self.kv_transfer_config is None
+            or self.kv_transfer_config.kv_connector is None
+        ):
+            return
+
+        # PyTorch's expandable_segments allocator uses CUDA VMM, which can
+        # remap a virtual address range to different physical pages over the
+        # engine's lifetime. KV connectors that pin KV cache memory (e.g.
+        # NixlConnector via ibv_reg_mr, MooncakeConnector) end up with their
+        # registrations pointing at stale physical pages after any remap,
+        # producing RDMA failures like IBV_WC_REM_ACCESS_ERR /
+        # NIXL_ERR_REMOTE_DISCONNECT at the first inter-node KV transfer.
+        # We can't enumerate every in-tree and out-of-tree connector that
+        # pins memory, so we conservatively reject the combination whenever
+        # any KV connector is configured.
+        #
+        # Sleep mode is exempt: CuMemAllocator.use_memory_pool toggles
+        # expandable_segments off around its pool (see #40812), so the KV
+        # cache allocated within that context lands on stable physical pages
+        # even when the env var is set.
+        if "expandable_segments:True" not in os.environ.get(
+            "PYTORCH_CUDA_ALLOC_CONF", ""
+        ):
+            return
+        if self.model_config is not None and self.model_config.enable_sleep_mode:
+            return
+
+        raise ValueError(
+            f"KV connector {self.kv_transfer_config.kv_connector} is "
+            "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+            "unless enable_sleep_mode is also enabled. PyTorch's CUDA VMM "
+            "allocator can remap KV cache virtual addresses to different "
+            "physical pages, invalidating any pinned/registered KV memory "
+            "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
+            "unset expandable_segments:True or enable sleep mode (which "
+            "routes KV allocations through CuMemAllocator's pool, where "
+            "expandable_segments is automatically disabled)."
+        )
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
@@ -1353,6 +1408,7 @@ class VllmConfig:
 
         # Handle the KV connector configs
         self._post_init_kv_transfer_config()
+        self._verify_kv_transfer_compat()
 
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()

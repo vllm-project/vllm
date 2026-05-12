@@ -142,7 +142,6 @@ class Sampler:
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
-            self.num_speculative_tokens,
         )
 
         # Apply bad words masking in place.
