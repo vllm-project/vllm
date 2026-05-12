@@ -30,11 +30,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     fused_q_kv_rmsnorm,
     qnorm_rope_and_insert_full_k_cache,
 )
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    rocm_forward_decode_fallback,
-    rocm_inv_rope_einsum,
-    rocm_sparse_attn_prefill,
-)
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import (
@@ -994,25 +990,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
-
-        if current_platform.is_rocm():
-            rocm_forward_decode_fallback(
-                q=q,
-                kv_cache=kv_cache,
-                swa_k_cache=self.swa_cache_layer.kv_cache,
-                swa_only=swa_only,
-                topk_indices=topk_indices,
-                topk_lens=topk_lens,
-                swa_indices=swa_indices,
-                swa_lens=swa_lens,
-                attn_sink=self.attn_sink,
-                scale=self.scale,
-                head_dim=self.head_dim,
-                nope_head_dim=self.nope_head_dim,
-                rope_head_dim=self.rope_head_dim,
-                output=output,
-            )
-            return
 
         assert self.kv_cache_torch_dtype == torch.uint8
 

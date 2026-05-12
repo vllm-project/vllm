@@ -14,10 +14,24 @@ preparation.
   window indices for sparse prefill.
 """
 
+from functools import lru_cache
+
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+
+
+@lru_cache(maxsize=1)
+def _has_dequant_gather_k_cutedsl() -> bool:
+    if not has_cutedsl():
+        return False
+    try:
+        from cutlass import cute
+
+        return hasattr(cute.nvgpu, "LoadCacheMode")
+    except Exception:
+        return False
 
 
 @triton.jit
@@ -587,7 +601,7 @@ def dequantize_and_gather_k_cache(
     offset: int,
 ) -> None:
     assert k_cache.dtype == torch.uint8
-    if has_cutedsl():
+    if _has_dequant_gather_k_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from .dequant_gather_k_cutedsl import dequantize_and_gather_k_cache_cutedsl
 
