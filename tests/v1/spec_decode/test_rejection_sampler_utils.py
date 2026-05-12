@@ -6,8 +6,8 @@ import math
 import pytest
 import torch
 
-from vllm.v1.worker.gpu.spec_decode.probabilistic_rejection_sampler_utils import (
-    probabilistic_rejection_sample,
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    rejection_sample,
 )
 
 VOCAB_SIZE = 4096
@@ -167,7 +167,7 @@ def test_stochastic_rejection_sample(num_speculative_steps: int, temperature: fl
         num_trials=num_trials,
     )
 
-    sampled, num_sampled = probabilistic_rejection_sample(
+    sampled, num_sampled = rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
 
@@ -201,7 +201,7 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
         num_trials=num_trials,
     )
 
-    sampled, num_sampled = probabilistic_rejection_sample(
+    sampled, num_sampled = rejection_sample(
         **inputs, num_speculative_steps=num_speculative_steps
     )
 
@@ -213,3 +213,70 @@ def test_greedy_rejection_sample(num_speculative_steps: int):
     assert (sampled[accepted_mask] == target_argmax).all(), (
         "Greedy sampling produced tokens that are not the target argmax"
     )
+
+
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature,unconditional_rates",
+    [
+        (3, 1.0, [0.9, 0.5, 0.2]),
+        (3, 0.0, [0.9, 0.5, 0.2]),
+        (3, 1.0, [1.0, 1.0, 1.0]),
+        (3, 0.0, [1.0, 1.0, 1.0]),
+        (3, 1.0, [0.0, 0.0, 0.0]),
+        (3, 0.0, [0.0, 0.0, 0.0]),
+        (1, 1.0, [0.7]),
+        (1, 0.0, [0.7]),
+    ],
+)
+def test_synthetic_rejection_sample(
+    num_speculative_steps: int,
+    temperature: float,
+    unconditional_rates: list[float],
+):
+    """
+    Verify that synthetic rejection sampling produces the expected
+    per-position acceptance rates. The unconditional rate at position i
+    is P(all draft steps 0..i accepted) = product(conditional_rates[0:i+1]).
+    This is approximately mean(num accepted >= i + 1) over many trials.
+    """
+    from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
+
+    torch.manual_seed(42)
+    device = "cuda"
+    num_trials = 10 * VOCAB_SIZE
+    deviation_tol = 1e-2
+
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
+
+    if temperature > 0:
+        target_logits_1d /= temperature
+        draft_logits_1d /= temperature
+
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        num_speculative_steps,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+
+    conditional_rates = unconditional_to_conditional_rates(unconditional_rates)
+    synthetic_conditional_rates = torch.tensor(
+        conditional_rates, dtype=torch.float32, device=device
+    )
+
+    _, num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        synthetic_conditional_rates=synthetic_conditional_rates,
+    )
+
+    # num_sampled includes the resampled/bonus token.
+    num_accepted = num_sampled - 1
+    for i, expected_rate in enumerate(unconditional_rates):
+        observed_rate = (num_accepted >= i + 1).float().mean().item()
+        assert abs(observed_rate - expected_rate) < deviation_tol, (
+            f"Step {i}: observed rate {observed_rate:.4f} deviates from "
+            f"expected rate {expected_rate:.4f} by more than {deviation_tol}."
+        )
