@@ -1046,15 +1046,27 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
         q + query_start_off * q_stride + wg_start_head_idx * HEAD_SIZE;
     const _B16x8* q_ptrh8 = reinterpret_cast<const _B16x8*>(q_ptr);
     const int qhead_elemh8 = laneid / 4;
+    // The pre-existing layout assumed HEAD_SIZE/8 == WARP_SIZE/4 (i.e.
+    // HEAD_SIZE=128), so qhead_elemh8 spans [0, 16). For HEAD_SIZE=64 only the
+    // lower half maps to in-head chunks; lanes with qhead_elemh8 >=
+    // chunks_per_head don't broadcast into the QK mfma output, so zero their
+    // Qlocal to avoid loading past the head. See #36180.
+    constexpr int chunks_per_head = HEAD_SIZE / 8;
+    const bool valid_chunk = qhead_elemh8 < chunks_per_head;
 
     for (int h = 0; h < QHLOOP - 1; h++) {
       const int qhead_idx = h * 4 + lane4id;
-      Qlocal[h] = q_ptrh8[qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
+      if (valid_chunk) {
+        Qlocal[h] = q_ptrh8[qhead_idx * chunks_per_head + qhead_elemh8];
+      } else {
+        Qlocal[h].xy[0] = {0};
+        Qlocal[h].xy[1] = {0};
+      }
     }
     const int final_qhead_idx = 4 * (QHLOOP - 1) + lane4id;
-    if (final_qhead_idx < GQA_RATIO) {
+    if (final_qhead_idx < GQA_RATIO && valid_chunk) {
       Qlocal[QHLOOP - 1] =
-          q_ptrh8[final_qhead_idx * HEAD_SIZE / 8 + qhead_elemh8];
+          q_ptrh8[final_qhead_idx * chunks_per_head + qhead_elemh8];
     } else {
       Qlocal[QHLOOP - 1].xy[0] = {0};
       Qlocal[QHLOOP - 1].xy[1] = {0};
