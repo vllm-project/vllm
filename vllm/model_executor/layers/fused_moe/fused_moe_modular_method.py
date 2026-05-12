@@ -65,6 +65,14 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         )
 
     @property
+    def skip_forward_padding(self) -> bool:
+        return self.old_quant_method.skip_forward_padding
+
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.old_quant_method.has_unpadded_output
+
+    @property
     def supports_eplb(self) -> bool:
         return self.old_quant_method.supports_eplb
 

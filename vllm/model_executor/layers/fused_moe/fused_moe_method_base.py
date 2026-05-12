@@ -145,6 +145,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @property
+    def has_unpadded_output(self) -> bool:
+        """
+        Indicates that the hidden_states output might be the unpadded
+        hidden_states shape rather than the full padded shape.
+        """
+        return False
+
+    @property
     def supports_eplb(self) -> bool:
         return False
 
