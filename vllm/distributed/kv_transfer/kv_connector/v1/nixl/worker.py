@@ -390,10 +390,13 @@ class NixlConnectorWorker:
 
         # Invalid blocks from failed NIXL operations (thread-safe queue of block ids)
         self._invalid_block_ids: queue.Queue[set[int]] = queue.Queue()
-        # requests that skipped transfer (handshake or transfer failures)
+        # Requests that skipped transfer (handshake or transfer failures).
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        # Failed recv request IDs from the last get_finished() call,
+        # consumed by get_request_ids_with_load_errors().
+        self._last_failed_recv_reqs: set[str] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -1709,6 +1712,8 @@ class NixlConnectorWorker:
             except queue.Empty:
                 break
 
+        self._last_failed_recv_reqs = failed_recv_reqs
+
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
@@ -2448,6 +2453,17 @@ class NixlConnectorWorker:
                 result.update(self._invalid_block_ids.get_nowait())
             except queue.Empty:
                 break
+        return result
+
+    def get_request_ids_with_load_errors(self) -> set[str]:
+        """
+        Return and clear the set of request IDs whose KV load failed.
+
+        The failed IDs are staged by get_finished() (which drains
+        _failed_recv_reqs) and consumed here.
+        """
+        result = self._last_failed_recv_reqs
+        self._last_failed_recv_reqs = set()
         return result
 
     def __del__(self):
