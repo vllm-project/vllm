@@ -169,10 +169,7 @@ class XPUExpertsFp8(XPUExperts):
             max_num_tokens,
             num_dispatchers,
         )
-        if quant_config.quant_dtype == "mxfp8":
-            self.is_mxfp8 = True
-        else:
-            self.is_fp8 = True
+        self.is_fp8 = True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -182,10 +179,36 @@ class XPUExpertsFp8(XPUExperts):
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-            (kMxfp8Static, None),
-            (kMxfp8Static, kMxfp8Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsMxfp8(XPUExpertsFp8):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        assert quant_config.quant_dtype == "mxfp8"
+        self.is_mxfp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key == kMxfp8Static and activation_key in (
+            (kMxfp8Static, None),
+            (kMxfp8Static, kMxfp8Dynamic),
+        )
 
 
 class XPUExpertsMXFp4(XPUExperts):
