@@ -276,6 +276,7 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
             input,
             group_size=group_size,
             column_major_scales=True,
+            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
             use_ue8m0=use_deep_gemm_e8m0,
         )
         output = torch.empty(
