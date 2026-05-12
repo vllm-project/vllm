@@ -2159,7 +2159,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> torch.Tensor | None:
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -2203,20 +2203,21 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         cache2_dim = self.adjust_N_for_activation(N, activation)
         if use_unwrapped:
+            workspace_dtype = self.workspace_dtype(hidden_states.dtype)
             intermediate_cache1 = torch.empty(
                 (num_tokens, top_k_num, N),
-                dtype=workspace2.dtype,
-                device=workspace2.device,
+                dtype=workspace_dtype,
+                device=hidden_states.device,
             )
             intermediate_cache2 = torch.empty(
                 (num_tokens * top_k_num, cache2_dim),
-                dtype=workspace13.dtype,
-                device=workspace13.device,
+                dtype=workspace_dtype,
+                device=hidden_states.device,
             )
             intermediate_cache3 = torch.empty(
                 (num_tokens, top_k_num, K),
-                dtype=workspace2.dtype,
-                device=workspace2.device,
+                dtype=workspace_dtype,
+                device=hidden_states.device,
             )
         else:
             # Note that the output tensor might be in workspace1
@@ -2404,13 +2405,17 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        return self.moe_sum(intermediate_cache3, output)
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> torch.Tensor | None:
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            torch.sum(input, dim=1, out=output)
-        else:
-            ops.moe_sum(input, output)
+            reduced = torch.sum(input, dim=1)
+            if not torch.compiler.is_compiling():
+                output.copy_(reduced)
+            return reduced
+
+        ops.moe_sum(input, output)
+        return None
 
 
 class TritonWNA16Experts(TritonExperts):
@@ -2469,7 +2474,7 @@ class TritonWNA16Experts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ):
+    ) -> torch.Tensor | None:
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
@@ -2522,20 +2527,21 @@ class TritonWNA16Experts(TritonExperts):
 
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
+            workspace_dtype = self.workspace_dtype(hidden_states.dtype)
             intermediate_cache1 = torch.empty(
                 (num_tokens, top_k_num, N),
-                dtype=workspace2.dtype,
-                device=workspace2.device,
+                dtype=workspace_dtype,
+                device=hidden_states.device,
             )
             intermediate_cache2 = torch.empty(
                 (num_tokens * top_k_num, activation_out_dim),
-                dtype=workspace13.dtype,
-                device=workspace13.device,
+                dtype=workspace_dtype,
+                device=hidden_states.device,
             )
             intermediate_cache3 = torch.empty(
                 (num_tokens, top_k_num, K),
-                dtype=workspace2.dtype,
-                device=workspace2.device,
+                dtype=workspace_dtype,
+                device=hidden_states.device,
             )
         else:
             # Note that the output tensor might be in workspace1
@@ -2602,4 +2608,4 @@ class TritonWNA16Experts(TritonExperts):
         )
 
         # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
+        return self.moe_sum(intermediate_cache3, output)

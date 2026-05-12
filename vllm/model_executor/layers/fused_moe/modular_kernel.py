@@ -353,7 +353,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor | None:
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
@@ -366,6 +366,8 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
           fused_expert_output.
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
+        Returns an optional tensor when the implementation produces the output
+        functionally instead of writing into the output argument.
         """
         raise NotImplementedError
 
@@ -907,7 +909,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ) -> torch.Tensor | None:
         """
         This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
@@ -942,6 +944,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         - apply_router_weight_on_input: True if router weights are already
           applied on the input. This is relevant if the implementation
           chooses to do weight application.
+        Returns an optional tensor when the implementation produces the output
+        functionally instead of writing into the output argument.
         """
         raise NotImplementedError
 
@@ -1064,18 +1068,6 @@ class FusedMoEKernelModularImpl:
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
-        # Get intermediate workspace shapes based off the chunked M size.
-        workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
-            M_chunk,
-            N,
-            K,
-            top_k,
-            global_num_experts,
-            local_num_experts,
-            expert_tokens_meta,
-            activation,
-        )
-
         # Get final output shape based on the full M size.
         _, _, fused_out_shape = self.fused_experts.workspace_shapes(
             M_full,
@@ -1088,25 +1080,30 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        # We can reuse the memory between cache1 and cache3 because by the
-        # time we need cache3, we're done with cache1.
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            workspace13 = torch.empty(
-                workspace13_shape,
-                dtype=workspace_dtype,
-                device=device,
-            )
-            workspace2 = torch.empty(
-                workspace2_shape,
-                dtype=workspace_dtype,
-                device=device,
-            )
+            # Unwrapped experts allocate scratch tensors directly in the graph.
+            # Keep placeholders only to preserve the existing interface.
+            workspace13 = torch.empty(0, dtype=workspace_dtype, device=device)
+            workspace2 = torch.empty(0, dtype=workspace_dtype, device=device)
             fused_out = torch.empty(
                 fused_out_shape,
                 dtype=out_dtype,
                 device=device,
             )
         else:
+            # Get intermediate workspace shapes based off the chunked M size.
+            workspace13_shape, workspace2_shape, _ = (
+                self.fused_experts.workspace_shapes(
+                    M_chunk,
+                    N,
+                    K,
+                    top_k,
+                    global_num_experts,
+                    local_num_experts,
+                    expert_tokens_meta,
+                    activation,
+                )
+            )
             # Reuse workspace13 for the output since there is only one chunk.
             max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
             common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
@@ -1260,7 +1257,7 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        self.fused_experts.apply(
+        maybe_fused_out = self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
             w1=w1,
@@ -1277,6 +1274,8 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+        if maybe_fused_out is not None:
+            fused_out = maybe_fused_out
 
         return fused_out
 
@@ -1304,7 +1303,7 @@ class FusedMoEKernelModularImpl:
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
 
-            self.prepare_finalize.finalize(
+            maybe_output = self.prepare_finalize.finalize(
                 output,
                 fused_out,
                 topk_weights,
@@ -1312,6 +1311,8 @@ class FusedMoEKernelModularImpl:
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
+            if maybe_output is not None:
+                return maybe_output
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,

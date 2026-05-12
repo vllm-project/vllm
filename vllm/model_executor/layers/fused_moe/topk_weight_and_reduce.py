@@ -60,7 +60,10 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         # Weight application and reduction operations are already done.
-        if output is None:
+        if output is None or (
+            envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped"
+            and torch.compiler.is_compiling()
+        ):
             return fused_expert_output
 
         # MoEPrepareAndFinalizeNoDPEPModular needs the output to be in the `output`
@@ -104,19 +107,24 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
         if not apply_router_weight_on_input:
             fused_expert_output.mul_(topk_weights.view(m, -1, 1))
 
-        if output is None:
-            output = torch.empty(
-                (m, k),
-                device=fused_expert_output.device,
-                dtype=fused_expert_output.dtype,
-            )
-        assert output.size() == (m, k), (
-            f"Expected output size {(m, k)}. But got {output.size()}"
-        )
-
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            torch.sum(fused_expert_output, dim=1, out=output)
+            reduced = torch.sum(fused_expert_output, dim=1)
+            if output is None or torch.compiler.is_compiling():
+                return reduced
+            assert output.size() == (m, k), (
+                f"Expected output size {(m, k)}. But got {output.size()}"
+            )
+            output.copy_(reduced)
         else:
+            if output is None:
+                output = torch.empty(
+                    (m, k),
+                    device=fused_expert_output.device,
+                    dtype=fused_expert_output.dtype,
+                )
+            assert output.size() == (m, k), (
+                f"Expected output size {(m, k)}. But got {output.size()}"
+            )
             ops.moe_sum(fused_expert_output, output)
         return output
 

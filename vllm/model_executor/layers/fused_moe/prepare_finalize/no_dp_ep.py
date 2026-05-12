@@ -86,10 +86,10 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor | None:
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
-        weight_and_reduce_impl.apply(
+        return weight_and_reduce_impl.apply(
             output=output,
             fused_expert_output=fused_expert_output,
             topk_weights=topk_weights,
