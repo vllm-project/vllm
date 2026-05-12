@@ -59,7 +59,7 @@ try:
     )
     from humming.utils.weight import quantize_weight
 
-    from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         BatchedHummingGroupedExperts,
         HummingGroupedExperts,
         HummingIndexedExperts,
