@@ -540,6 +540,7 @@ class MoERunner(MoERunnerInterface):
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
 

@@ -4,7 +4,7 @@
 
 import json
 import math
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from humming import dtypes
@@ -38,6 +38,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.v1.worker.workspace import current_workspace_manager
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+
 logger = init_logger(__name__)
 
 
@@ -58,7 +62,7 @@ def get_humming_moe_gemm_type() -> str:
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def __init__(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         max_num_tokens: int | None = None,
