@@ -87,9 +87,10 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         placeholders
     - aux_hidden_state_layer_ids (required): Layer indices from the target
         model whose intermediate hidden states are used as context for the
-        DFlash drafter. Mapped to both eagle_aux_hidden_state_layer_ids
-        (for gpu_model_runner) and dflash_config.target_layer_ids (for the
-        DFlash model).
+        DFlash drafter. Kept as checkpoint layer IDs in
+        dflash_config.target_layer_ids for the DFlash model, and shifted by one
+        in eagle_aux_hidden_state_layer_ids for gpu_model_runner hidden-state
+        extraction, where 0 refers to the embedding output.
 
     Optional sliding-window fields from the speculators manifest are copied
     into the draft HF config when present: layer_types, use_sliding_window,
@@ -109,7 +110,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
             pre_trained_config[key] = config_dict[key]
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
-    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = [
+        layer_id + 1 for layer_id in aux_layer_ids
+    ]
 
     pre_trained_config["dflash_config"] = {
         "mask_token_id": config_dict["mask_token_id"],

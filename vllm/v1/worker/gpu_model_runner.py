@@ -5120,7 +5120,10 @@ class GPUModelRunner(
         if not layer_ids:
             dflash_config = getattr(hf_config, "dflash_config", None)
             if dflash_config and isinstance(dflash_config, dict):
-                layer_ids = dflash_config.get("target_layer_ids")
+                layer_ids = [
+                    layer_id + 1
+                    for layer_id in dflash_config.get("target_layer_ids", [])
+                ]
 
         if layer_ids and isinstance(layer_ids, (list, tuple)):
             return tuple(layer_ids)

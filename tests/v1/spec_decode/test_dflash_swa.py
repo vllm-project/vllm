@@ -87,6 +87,7 @@ def test_dflash_speculators_preserves_swa_config():
     assert hf_config["use_sliding_window"] is True
     assert hf_config["sliding_window"] == 2048
     assert hf_config["max_window_layers"] == len(layer_types)
+    assert hf_config["eagle_aux_hidden_state_layer_ids"] == [2, 7, 12, 18, 23, 28]
     assert hf_config["dflash_config"]["target_layer_ids"] == [1, 6, 11, 17, 22, 27]
 
 
