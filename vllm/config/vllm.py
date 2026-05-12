@@ -523,6 +523,9 @@ class VllmConfig:
         if model_config is None:
             return False
 
+        if model_config.runner_type != "generate":
+            return False
+
         architectures = getattr(model_config, "architectures", [])
         if not any(
             arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
