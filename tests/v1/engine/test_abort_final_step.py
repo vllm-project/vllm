@@ -66,7 +66,7 @@ class DummyKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         # Get the status file path from extra config

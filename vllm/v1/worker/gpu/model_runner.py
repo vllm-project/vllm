@@ -712,14 +712,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.sampler.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
-        # Add new blocks for the existing requests.
+        # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
-        for req_new_block_ids, req_id in zip(reqs.new_block_ids, reqs.req_ids):
+        num_computed_tokens_np = self.req_states.num_computed_tokens_np
+        for req_id, num_computed_tokens, req_new_block_ids in zip(
+            reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
+        ):
+            req_index = self.req_states.req_id_to_index[req_id]
+            num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None:
-                req_index = self.req_states.req_id_to_index[req_id]
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
+
+        # Update num_computed_prefill_tokens.
+        np.minimum(
+            self.req_states.num_computed_tokens_np,
+            self.req_states.prefill_len.np,
+            out=self.req_states.num_computed_prefill_tokens,
+        )
 
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
@@ -787,10 +798,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs_padded + 1]
-        is_prefilling_np = (
-            self.req_states.num_computed_prefill_tokens[idx_mapping_np]
-            < self.req_states.prefill_len.np[idx_mapping_np]
-        )
+        is_prefilling_np = self.req_states.is_prefilling(idx_mapping_np)
 
         # Get prefill tokens if any.
         if np.any(is_prefilling_np):
@@ -971,18 +979,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
             self.req_states.all_token_ids.gpu,
             self.req_states.total_len.gpu,
-        )
-
-        # Update the number of computed prefill tokens.
-        idx_mapping_np = input_batch.idx_mapping_np
-        computed_prefill = self.req_states.num_computed_prefill_tokens
-        computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
-        np.minimum(
-            computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
-        )
-        # Advance the CPU mirror optimistically (assume all scheduled accepted).
-        self.req_states.num_computed_tokens_np[idx_mapping_np] += (
-            input_batch.num_scheduled_tokens
         )
 
         self.model_state.postprocess_state(input_batch, num_sampled)
@@ -1355,18 +1351,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.idx_mapping,
             self.req_states.num_computed_tokens.gpu,
             input_batch.query_start_loc,
-        )
-
-        # Update the number of computed prefill tokens.
-        idx_mapping_np = input_batch.idx_mapping_np
-        computed_prefill = self.req_states.num_computed_prefill_tokens
-        computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
-        np.minimum(
-            computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
-        )
-        # Advance the CPU mirror optimistically (assume all scheduled accepted).
-        self.req_states.num_computed_tokens_np[idx_mapping_np] += (
-            input_batch.num_scheduled_tokens
         )
 
     def shutdown(self) -> None:

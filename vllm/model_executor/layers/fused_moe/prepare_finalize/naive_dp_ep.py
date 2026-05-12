@@ -39,7 +39,7 @@ def _quantize_and_setup_dispatch(
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape,
-            is_fp4_scale_swizzled=False,
+            is_scale_swizzled=False,
             mx_alignment=quant_config.mx_alignment,
         )
 
@@ -59,7 +59,7 @@ def _unwrap_scale_and_prepare_for_moe(
     assert scales is not None and len(scales) == 1
     a1q_scale = scales[0]
     # Apply swizzling after a2a if the MoE kernel needs it.
-    if quant_config.quant_dtype == "nvfp4" and quant_config.is_nvfp4_scale_swizzled:
+    if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
         assert a1q_scale is not None
         if a1q_scale.element_size() == 1:
             a1q_scale = a1q_scale.view(torch.uint8)
@@ -84,6 +84,14 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         super().__init__()
         self.is_sequence_parallel = is_sequence_parallel
         self._num_dispatchers = num_dispatchers
+        # Set by FusedMoEWithLoRA.set_mapping() when LoRA is active. When
+        # present, prepare() dispatches the per-token LoRA mapping alongside
+        # hidden_states and writes the gathered result back to the context so
+        # experts can use the per-rank-local mapping.
+        self._lora_context = None
+
+    def set_lora_context(self, ctx) -> None:
+        self._lora_context = ctx
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -124,22 +132,54 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
 
         a1q, scales = _quantize_and_setup_dispatch(a1, quant_config, defer_input_quant)
 
+        # When LoRA is active, dispatch the per-token LoRA id along with
+        # hidden_states so every rank receives the correct mapping for the
+        # tokens it ends up processing. The punica_wrapper stores indices as
+        # int64 but the moe_lora_align_block_size kernel expects int32, so
+        # pull the pre-cast view from token_mapping_meta.
+        lora_ctx = self._lora_context
+        local_token_lora_mapping = None
+        if lora_ctx is not None:
+            local_token_lora_mapping = (
+                lora_ctx.punica_wrapper.token_mapping_meta.token_lora_mapping[
+                    : a1.shape[0]
+                ]
+            )
+
+        extra_tensors: list[torch.Tensor] | None = None
+        if scales is not None:
+            extra_tensors = list(scales)
+        if local_token_lora_mapping is not None:
+            if extra_tensors is None:
+                extra_tensors = []
+            extra_tensors.append(local_token_lora_mapping)
+
         res = get_ep_group().dispatch(
             a1q,
             topk_weights,
             topk_ids,
             is_sequence_parallel=self.is_sequence_parallel,
-            extra_tensors=scales,
+            extra_tensors=extra_tensors,
         )
 
-        if scales is None:
+        if extra_tensors is None:
             assert len(res) == 3
             a1q, topk_weights, topk_ids = res
             a1q_scale = None
         else:
             assert len(res) == 4
-            a1q, topk_weights, topk_ids, scales = res
-            a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
+            a1q, topk_weights, topk_ids, gathered_extras = res
+            gathered_extras = list(gathered_extras)
+            if local_token_lora_mapping is not None:
+                dispatched_lora_mapping = gathered_extras.pop()
+                assert lora_ctx is not None
+                lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
+            if scales is not None:
+                a1q_scale = _unwrap_scale_and_prepare_for_moe(
+                    gathered_extras, quant_config
+                )
+            else:
+                a1q_scale = None
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 

@@ -620,7 +620,7 @@ class GraniteSpeechForConditionalGeneration(
             self.encoder = GraniteSpeechCTCEncoder(
                 config=config.encoder_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.encoder",
+                prefix=maybe_prefix(prefix, "encoder"),
             )
 
             # Blip2 QFormer
@@ -628,7 +628,7 @@ class GraniteSpeechForConditionalGeneration(
                 config=config,
                 quant_config=quant_config,
                 cache_config=cache_config,
-                prefix=f"{prefix}.projector",
+                prefix=maybe_prefix(prefix, "projector"),
             )
 
         self.make_empty_intermediate_tensors = (
