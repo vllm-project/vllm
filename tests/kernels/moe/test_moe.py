@@ -1588,7 +1588,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.apply_router_weight_on_input = False
         layer.routed_scaling_factor = None
         layer.shared_experts = None
-        layer._maybe_init_expert_routing_tables = lambda: None
+        layer._expert_routing_tables = lambda: None
 
         quant_method.process_weights_after_loading(layer)
 
