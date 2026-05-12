@@ -1165,7 +1165,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             decode_is_valid_token=decode_is_valid_token,
         )
 
-        query = q
+        # CUDA graph execution can pad q/output past the scheduled token count.
+        # The FlashInfer DSV4 launcher validates sparse_indices against the
+        # query length, so pass only the real tokens described by metadata.
+        query = q[:num_tokens]
+        output = output[:num_tokens]
         bmm1_scale: float | torch.Tensor = self.scale
         bmm2_scale: float | torch.Tensor = 1.0
         if self.kv_cache_torch_dtype == torch.float8_e4m3fn:
