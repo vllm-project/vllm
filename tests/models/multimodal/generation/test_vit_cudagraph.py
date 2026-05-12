@@ -111,17 +111,6 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
-    "minicpmv_45": VitCudagraphTestConfig(
-        model="openbmb/MiniCPM-V-4_5",
-        image_prompt=minicpmv_chat_template(
-            "(<image>./</image>)\nWhat is in this image?"
-        ),
-        video_prompt=minicpmv_chat_template(
-            "(<video>./</video>)\nDescribe this video in one sentence."
-        ),
-        vllm_runner_kwargs={"trust_remote_code": True},
-        marks=[pytest.mark.core_model],
-    ),
 }
 
 

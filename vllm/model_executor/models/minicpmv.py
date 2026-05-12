@@ -132,11 +132,6 @@ class MiniCPMVImagePixelInputs(TensorSchema):
         TensorShape("bn"),
     ]
 
-    # Handled as batched input but shape check via TensorShape
-    # isn't strictly necessary since it defaults to None
-    # and has a non-tensor type.
-    temporal_ids: list[list[int]] | None = None
-
 
 class MiniCPMVImageEmbeddingInputs(TensorSchema):
     """
@@ -356,110 +351,88 @@ class Resampler4_5(Resampler2_5):
 
         patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
 
-        # Only adjust the pos cache in eager mode; during CUDA graph capture
-        # the cache was already expanded by the preceding warmup run
-        if not torch.cuda.is_current_stream_capturing():
-            self._adjust_pos_cache(tgt_sizes, device=device)
-
-        max_patch_len = x.shape[1]
+        self._adjust_pos_cache(tgt_sizes, device=device)
 
         temporal_pos_emb = False
         temporal_ids_flatten = None
         if temporal_ids is not None:
-            if isinstance(temporal_ids, torch.Tensor):
-                temporal_ids_flatten = temporal_ids
-                if not torch.cuda.is_current_stream_capturing():
-                    max_temporal_size = temporal_ids_flatten.max().item()
-                    if max_temporal_size > -1:
-                        temporal_pos_emb = True
-                    if max_temporal_size > self.max_temporal_size:
-                        self._adjust_temporal_pos_cache(max_temporal_size, device)
-                else:
-                    temporal_pos_emb = True
-            else:
-                temporal_ids_flatten = list(chain.from_iterable(temporal_ids))
-                max_temporal_size = max(temporal_ids_flatten, default=0)
-                temporal_ids_flatten = torch.tensor(
-                    temporal_ids_flatten, dtype=torch.long, device=device
-                )
-                if max_temporal_size > -1:
-                    temporal_pos_emb = True
-                if max_temporal_size > self.max_temporal_size:
-                    self._adjust_temporal_pos_cache(max_temporal_size, device)
+            # example: [[-1], [-1], [2, 6, 9]]
+            temporal_ids_flatten = list(chain.from_iterable(temporal_ids))
+            max_temporal_size = max(temporal_ids_flatten, default=0)
+            if max_temporal_size > -1:
+                temporal_pos_emb = True
+            if max_temporal_size > self.max_temporal_size:
+                self._adjust_temporal_pos_cache(max_temporal_size, device)
 
-        seq_idx = torch.arange(max_patch_len, device=device).unsqueeze(0)
+        max_patch_len = patch_len.max().item()
+        assert isinstance(max_patch_len, int)
 
-        tgt_w = tgt_sizes[:, 1].unsqueeze(1)
-        tgt_w = torch.clamp(tgt_w, min=1)
-
-        h_idx = seq_idx // tgt_w
-        w_idx = seq_idx % tgt_w
-
-        h_idx = torch.clamp(h_idx, max=self.pos_embed.shape[0] - 1)
-        w_idx = torch.clamp(w_idx, max=self.pos_embed.shape[1] - 1)
-
-        pos_embed_2d = self.pos_embed[h_idx, w_idx].to(dtype)
-
-        key_padding_mask = seq_idx >= patch_len.unsqueeze(1)
-
-        pos_embed_2d = torch.where(
-            key_padding_mask.unsqueeze(-1), torch.zeros_like(pos_embed_2d), pos_embed_2d
-        ).permute(1, 0, 2)  # (L, bs, D)
+        key_padding_mask = torch.zeros(
+            (bs, max_patch_len), dtype=torch.bool, device=device
+        )
 
         x, _ = self.kv_proj(x)  # B * L * D
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
         q = self.ln_q(self.query)  # Q * D
 
+        pos_embed_2d = []
+        pos_embed_temporal = []
+        for i in range(bs):
+            tgt_h, tgt_w = tgt_sizes[i]
+            if temporal_pos_emb:
+                if temporal_ids_flatten[i] == -1:
+                    pos_embed_temporal.append(
+                        torch.zeros(self.embed_dim, dtype=dtype, device=device)
+                    )
+                else:
+                    pos_embed_temporal.append(
+                        self.temporal_pos_embed[temporal_ids_flatten[i]].to(dtype)
+                    )  # D
+
+            pos_embed_2d.append(
+                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
+            )  # patches * D
+            key_padding_mask[i, patch_len[i] :] = True
+
+        pos_embed_2d = torch.nn.utils.rnn.pad_sequence(
+            pos_embed_2d, batch_first=True, padding_value=0.0
+        ).permute(1, 0, 2)  # BLD => L * B * D
+
         k = x + pos_embed_2d
         v = x
+        if pos_embed_temporal:
+            k += torch.stack(pos_embed_temporal, dim=0)
+            bs = len(temporal_ids)
+            merge_k = []
+            merge_v = []
+            merge_key_padding_mask = []
 
-        if temporal_pos_emb:
-            # temporal_ids_flatten is 1D tensor of shape (bs,)
-            pos_embed_temporal = torch.where(
-                (temporal_ids_flatten == -1).unsqueeze(-1),
-                torch.zeros(self.embed_dim, dtype=dtype, device=device),
-                self.temporal_pos_embed[torch.clamp(temporal_ids_flatten, min=0)].to(
-                    dtype
-                ),
-            )  # (bs, D)
+            start = 0
+            for tp in temporal_ids:
+                end = start + len(tp)
+                # L * (end-start) * D -> (end-start) * L * D
+                # -> 1 * L*(end-start) * D
+                merge_k.append(
+                    k[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
+                )
+                merge_v.append(
+                    v[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
+                )
+                merge_key_padding_mask.append(
+                    key_padding_mask[start:end, :].reshape(-1, 1)
+                )
 
-            k += pos_embed_temporal.unsqueeze(0)  # (L, bs, D) + (1, bs, D)
+                start = end
 
-            # skip the cross-frame merge loop when compiling into a CUDA graph
-            # (which occurs when temporal_ids is passed as a flat Tensor) because
-            # dynamic sequence lengths and batch sizes cannot be captured.
-            if not isinstance(temporal_ids, torch.Tensor):
-                bs = len(temporal_ids)
-                merge_k = []
-                merge_v = []
-                merge_key_padding_mask = []
-
-                start = 0
-                for tp in temporal_ids:
-                    end = start + len(tp)
-                    # L * (end-start) * D -> (end-start) * L * D
-                    # -> 1 * L*(end-start) * D
-                    merge_k.append(
-                        k[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
-                    )
-                    merge_v.append(
-                        v[:, start:end, :].permute(1, 0, 2).reshape(-1, self.embed_dim)
-                    )
-                    merge_key_padding_mask.append(
-                        key_padding_mask[start:end, :].reshape(-1, 1)
-                    )
-
-                    start = end
-
-                k = torch.nn.utils.rnn.pad_sequence(
-                    merge_k, batch_first=True, padding_value=0.0
-                ).permute(1, 0, 2)  # L*(end-start)
-                v = torch.nn.utils.rnn.pad_sequence(
-                    merge_v, batch_first=True, padding_value=0.0
-                ).permute(1, 0, 2)  # L*(end-start)
-                key_padding_mask = torch.nn.utils.rnn.pad_sequence(
-                    merge_key_padding_mask, batch_first=True, padding_value=True
-                ).squeeze(-1)
+            k = torch.nn.utils.rnn.pad_sequence(
+                merge_k, batch_first=True, padding_value=0.0
+            ).permute(1, 0, 2)  # L*(end-start)
+            v = torch.nn.utils.rnn.pad_sequence(
+                merge_v, batch_first=True, padding_value=0.0
+            ).permute(1, 0, 2)  # L*(end-start)
+            key_padding_mask = torch.nn.utils.rnn.pad_sequence(
+                merge_key_padding_mask, batch_first=True, padding_value=True
+            ).squeeze(-1)
 
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D
@@ -498,7 +471,6 @@ def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         video_image_sizes=MultiModalFieldConfig.batched("video"),
         video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
-        temporal_ids=MultiModalFieldConfig.batched("video"),
     )
 
 
@@ -1262,11 +1234,10 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         raise NotImplementedError
 
 
-# --- Encoder CUDA graph (MiniCPM-V 2.5 / 2.6 / 4.0 / 4.5; mixed into subclasses) ---
+# --- Encoder CUDA graph (MiniCPM-V 2.5 / 2.6 / 4.0; mixed into subclasses) ---
 # Buffer keys
 _MINICPMV_CUDAGRAPH_BUF_KEY_TGT_SIZES = "minicpmv_tgt_sizes"
 _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK = "minicpmv_patch_attn_mask"
-_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS = "minicpmv_temporal_ids"
 
 # mm_kwargs keys for the flat pixel-value tensor
 _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE = "minicpmv_encoder_input_flat"
@@ -1377,7 +1348,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         query_num = max(1, int(self.config.query_num))
         max_slices_by_token_budget = max(1, token_budget // query_num)
         max_slices_by_content = max_batch_size * (max_slice_num + 1)
-        if self.version in {(2, 6), (4, 0), (4, 5)} and max_frames_per_batch > 0:
+        if self.version in {(2, 6), (4, 0)} and max_frames_per_batch > 0:
             max_slices_by_content = max(
                 max_slices_by_content,
                 max_frames_per_batch * (max_slice_num + 1),
@@ -1389,11 +1360,9 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             _MINICPMV_CUDAGRAPH_BUF_KEY_TGT_SIZES,
             _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK,
         ]
-        if self.version == (4, 5):
-            buffer_keys.append(_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS)
         # Video is only supported from 2.6 onward.
         modalities = ["image"]
-        if self.version in {(2, 6), (4, 0), (4, 5)}:
+        if self.version in {(2, 6), (4, 0)}:
             modalities.append("video")
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -1493,8 +1462,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                     ),
                 }
             )
-            if self.version == (4, 5):
-                subset["temporal_ids"] = None
             return subset
 
         # Select per-item nested slices and matching tgt_sizes rows.
@@ -1525,10 +1492,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 flat_key: packed_flat_pixels,
             }
         )
-        if self.version == (4, 5):
-            temporal_ids = mm_kwargs.get("temporal_ids")
-            if temporal_ids is not None:
-                subset["temporal_ids"] = [temporal_ids[i] for i in indices]
         return subset
 
     def prepare_encoder_cudagraph_capture_inputs(
@@ -1561,10 +1524,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             _MINICPMV_CUDAGRAPH_BUF_KEY_TGT_SIZES: dummy_tgt_sizes,
             _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK: dummy_patch_mask,
         }
-        if self.version == (4, 5):
-            buffers[_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS] = torch.full(
-                (max_num_slices,), -1, dtype=torch.long, device=device
-            )
         mm_kwargs: dict[str, Any] = {
             _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE: flat_pixel_buffer,
         }
@@ -1597,17 +1556,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             _MINICPMV_CUDAGRAPH_BUF_KEY_TGT_SIZES: tgt_sizes.clone(),
             _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK: patch_attention_mask,
         }
-        if self.version == (4, 5):
-            temporal_ids = mm_kwargs.get("temporal_ids")
-            if temporal_ids is not None:
-                flat_ids = torch.tensor(
-                    flatten_2d_lists(temporal_ids), dtype=torch.long, device=device
-                )
-            else:
-                flat_ids = torch.full(
-                    (len(tgt_sizes),), -1, dtype=torch.long, device=device
-                )
-            buffers[_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS] = flat_ids
         return EncoderCudaGraphReplayBuffers(buffers=buffers)
 
     def encoder_cudagraph_forward(
@@ -1640,11 +1588,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             tgt_sizes=vpm_tgt_sizes,
         )
 
-        if self.version == (4, 5):
-            temporal_ids = buffers[_MINICPMV_CUDAGRAPH_BUF_KEY_TEMPORAL_IDS]
-            resampler_out = self.resampler(vision_embedding, tgt_sizes, temporal_ids)
-        else:
-            resampler_out = self.resampler(vision_embedding, tgt_sizes)
+        resampler_out = self.resampler(vision_embedding, tgt_sizes)
 
         query_num = int(self.config.query_num)
         return resampler_out.reshape(max_num_slices * query_num, int(self.embed_dim))
@@ -2059,7 +2003,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA, _MiniCPMVEncoderCudaGraphMixi
         return loaded
 
 
-class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA, _MiniCPMVEncoderCudaGraphMixin):
+class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
