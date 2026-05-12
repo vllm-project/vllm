@@ -143,6 +143,15 @@ def test_models(
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
+    if model == "bigcode/starcoder2-3b":
+        # Replace example.txt's Test1 (an NL prompt) with a code prompt:
+        # starcoder2-3b is a code model, so NL prompts give near-uniform
+        # digit logits where HF<->vLLM bf16 drift can reorder top-K.
+        example_prompts = list(example_prompts)
+        example_prompts[1] = (
+            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
+        )
+
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs

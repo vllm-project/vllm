@@ -690,6 +690,14 @@ class SamplingParams(
                     parameter="logprob_token_ids",
                     value=n,
                 )
+            if self.logprobs is not None and self.logprobs != n:
+                raise VLLMValidationError(
+                    f"When both logprobs and logprob_token_ids are set, "
+                    f"logprobs must equal len(logprob_token_ids). Got "
+                    f"logprobs={self.logprobs}, len(logprob_token_ids)={n}.",
+                    parameter="logprob_token_ids",
+                    value=n,
+                )
 
         # Validate prompt logprobs.
         if num_prompt_logprobs := self.prompt_logprobs:
