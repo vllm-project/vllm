@@ -2102,7 +2102,6 @@ class NixlConnectorWorker:
                 remote_request_id=meta.remote.request_id,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
-                remote_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
             )
 
         if self.use_mla and tp_ratio < 0 and read_specs:
@@ -2122,7 +2121,6 @@ class NixlConnectorWorker:
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
-        remote_physical_per_logical: int,
     ):
         """
         Post a READ point-to-point xfer request from a single local worker to
@@ -2201,7 +2199,8 @@ class NixlConnectorWorker:
             == len(local_block_ids)
             == len(self.kv_cache_config.kv_cache_groups)
         )
-        local_block_ids, remote_block_ids = self._align_block_ids_for_transfer(
+        remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
+        local_block_ids, remote_block_ids = self._apply_prefix_caching(
             local_block_ids, remote_block_ids, remote_physical_per_logical
         )
 
@@ -2300,20 +2299,20 @@ class NixlConnectorWorker:
             for i, group in enumerate(block_ids)
         ]
 
-    def _align_block_ids_for_transfer(
+    def _apply_prefix_caching(
         self,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         remote_physical_per_logical: int,
     ) -> tuple[BlockIds, list]:
-        """Align local and remote block IDs for transfer.
+        """Apply prefix caching by trimming local/remote block ID lists.
 
-        For non-Mamba models (prefix caching supported): end-trim remote
-        to match local count, so that cached prefix blocks are skipped.
+        For non-Mamba models: end-trim remote to match local count, so that
+        already-cached prefix blocks are skipped in the transfer.
 
-        For Mamba hybrid (no prefix caching): front-trim both to min
-        count to handle kernel block count discrepancy from logical
-        block rounding in heterogeneous TP.
+        For Mamba hybrid (prefix caching not yet supported): front-trim both
+        to the minimum count to handle kernel block count discrepancies from
+        logical block rounding in heterogeneous TP.
         """
         # Partial prefix cache hit: just read uncomputed blocks.
         # Skip mamba groups — their blocks represent full state (conv+ssm),
@@ -2326,9 +2325,8 @@ class NixlConnectorWorker:
                 if num_local_blocks < len(remote_group):
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
         else:
-            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support
-            # so far. Heterogeneous TP can cause
-            # different kernel block counts due to logical block rounding.
+            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support so far.HeteroTP
+            # can cause different kernel block counts due to logical block rounding.
             # Example: 640 prompt tokens, kernel_block_size=64
             #   remote physical_per_logical=10, local physical_per_logical=6
             #   remote logical ids from kv_transfer_params = [0]

@@ -240,7 +240,7 @@ def test_read_blocks_for_req_expands_remote_ids(
         ),
     ],
 )
-def test_align_block_ids_for_transfer_mamba_hybrid(
+def test_apply_prefix_caching_mamba_hybrid(
     local_physical_per_logical,
     remote_physical_per_logical,
     local_block_ids,
@@ -248,7 +248,7 @@ def test_align_block_ids_for_transfer_mamba_hybrid(
     expected_local,
     expected_remote,
 ):
-    """_align_block_ids_for_transfer front-trims FA groups to
+    """_apply_prefix_caching front-trims FA groups to
     min(local, remote) for Mamba hybrid models with heterogeneous TP.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
@@ -262,7 +262,7 @@ def test_align_block_ids_for_transfer_mamba_hybrid(
     worker._group_spec_types = (FullAttentionSpec, MambaSpec)
     worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
 
-    aligned_local, aligned_remote = worker._align_block_ids_for_transfer(
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
         local_block_ids, remote_block_ids, remote_physical_per_logical
     )
 
@@ -325,7 +325,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     correct_remote_fa,
     correct_local_fa,
 ):
-    """Demonstrate that _align_block_ids_for_transfer front-trims ([:N])
+    """Demonstrate that _apply_prefix_caching front-trims ([:N])
     in the Mamba hybrid path, which fails when prefix caching produces
     suffix-only local blocks.
 
@@ -352,7 +352,7 @@ def test_mismatched_physical_per_logical_fails_with_prefix_caching(
     local_block_ids = (local_fa_blocks, ssm_blocks)
     remote_block_ids = (remote_fa_blocks, ssm_blocks)
 
-    aligned_local, aligned_remote = worker._align_block_ids_for_transfer(
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
         local_block_ids,
         remote_block_ids,
         remote_physical_per_logical,
