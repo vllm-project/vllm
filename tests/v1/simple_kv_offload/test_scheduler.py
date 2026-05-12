@@ -179,6 +179,7 @@ _req_counter = 0
 def make_request(
     num_blocks: int = 2,
     request_id: str | None = None,
+    extra_tokens: int = 1,
 ) -> Request:
     """Create a Request with deterministic block hashes."""
     global _req_counter
@@ -186,13 +187,7 @@ def make_request(
     if request_id is None:
         request_id = f"req-{_req_counter}"
 
-    # Add one extra token beyond the last full block so that
-    # ``max_cache_hit_length = num_tokens - 1`` (see
-    # KVCacheManager.get_computed_blocks) does not truncate the final
-    # full block: ``find_longest_cache_hit`` uses
-    # ``max_length // block_size`` and would otherwise drop one block
-    # when the prompt is an exact multiple of block_size.
-    num_tokens = num_blocks * BLOCK_SIZE + 1
+    num_tokens = num_blocks * BLOCK_SIZE + extra_tokens
     start = _req_counter * 10000
     prompt_token_ids = list(range(start, start + num_tokens))
     sampling_params = SamplingParams(max_tokens=1)
@@ -386,9 +381,9 @@ def test_eager_store_and_load_roundtrip() -> None:
         block_hasher=req._block_hasher,
     )
     hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
-    # The manager caps max_hit_len at num_tokens - 1 to force recomputing the
-    # last token, which drops the last full block from the hit count.
-    assert hit_tokens == (num_blocks - 1) * BLOCK_SIZE
+    # make_request pads num_tokens by +1 beyond the last full block, so the
+    # manager's max_hit_len = num_tokens - 1 cap leaves all full blocks intact.
+    assert hit_tokens == num_blocks * BLOCK_SIZE
     assert is_async is True
 
     gpu_blocks2 = fix.gpu_block_pool.get_new_blocks(num_blocks)
@@ -407,7 +402,44 @@ def test_eager_store_and_load_roundtrip() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 1b: Lazy store-and-load roundtrip
+# Test 1b: Boundary — max_hit_len cap drops the last full block when the
+# prompt is an exact multiple of BLOCK_SIZE.
+# ---------------------------------------------------------------------------
+def test_max_hit_len_cap_drops_last_full_block() -> None:
+    """When num_tokens is an exact multiple of BLOCK_SIZE, the manager's
+    ``max_hit_len = num_tokens - 1`` cap forces ``find_longest_cache_hit`` to
+    drop the final block (since ``max_length // block_size`` rounds down).
+    """
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks, extra_tokens=0)
+    assert req.num_tokens == num_blocks * BLOCK_SIZE
+
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: kv_blocks.get_block_ids()},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    req2 = Request(
+        request_id="req-cap-boundary",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == (num_blocks - 1) * BLOCK_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Test 1c: Lazy store-and-load roundtrip
 # ---------------------------------------------------------------------------
 def _flush_old_blocks_to_lru_head(
     gpu_pool: BlockPool,
@@ -471,9 +503,9 @@ def test_lazy_store_and_load_roundtrip() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(
         req_old2, num_computed_tokens=0
     )
-    # The manager caps max_hit_len at num_tokens - 1 to force recomputing the
-    # last token, which drops the last full block from the hit count.
-    expected_hit = (num_blocks - 1) * BLOCK_SIZE
+    # make_request pads num_tokens by +1 beyond the last full block, so the
+    # manager's max_hit_len = num_tokens - 1 cap leaves all full blocks intact.
+    expected_hit = num_blocks * BLOCK_SIZE
     assert hit_tokens == expected_hit, (
         f"Expected {expected_hit} hit tokens, got {hit_tokens}"
     )
@@ -1162,11 +1194,10 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
     hit_tokens, is_async = sched.get_num_new_matched_tokens(
         req2, num_computed_tokens=gpu_local_computed
     )
-    # CPU has all 6 blocks stored, but the manager caps max_hit_len at
-    # num_tokens - 1 to force recomputing the last token, which drops the
-    # last full block. Remaining hashable range = 6 - 2 = 4 blocks; the
-    # tail-end constraint trims one, so 3 blocks hit.
-    num_cpu_hit_blocks = 3
+    # CPU has all 6 blocks stored. make_request pads num_tokens by +1, so
+    # the manager's num_tokens - 1 cap leaves all full blocks intact:
+    # remaining hashable range = 6 - 2 = 4 blocks, all hit.
+    num_cpu_hit_blocks = 4
     assert hit_tokens == num_cpu_hit_blocks * BLOCK_SIZE, (
         f"Expected {num_cpu_hit_blocks * BLOCK_SIZE} CPU hit tokens, got {hit_tokens}"
     )
