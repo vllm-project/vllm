@@ -272,6 +272,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         exclude_modules: list[str],
         original_config: dict[str, Any],
         group_size: int | None,
+        **kwargs: Any,
     ) -> "ModelOptQuantConfigBase":
         raise NotImplementedError("Please implement this function in sub classes")
 
@@ -355,12 +356,22 @@ class ModelOptQuantConfigBase(QuantizationConfig):
                 "`hf_quant_config.json` file for your model's "
                 "quant configuration."
             )
+        # Engine-level overrides flow in via private dict keys injected
+        # by weight_utils._maybe_inject_engine_overrides. Read them here
+        # once and propagate to every subclass's _from_config via kwargs.
+        # Subclasses that honor a knob name the kwarg in their signature
+        # (e.g. ModelOptNvFp4Config); others absorb-and-discard via
+        # **kwargs. The keys stay in original_config (no pop) — matches
+        # the total_num_heads precedent in compressed_tensors.
+        override_activation_dtype = config.get("__override_activation_dtype__", "auto")
+
         return cls._from_config(
             quant_method=quant_method,
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
             group_size=group_size,
             original_config=config,
+            override_activation_dtype=override_activation_dtype,
         )
 
 
@@ -1013,6 +1024,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        override_activation_dtype: str = "auto",
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
@@ -1030,10 +1042,30 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
 
-        # Select LinearMethod implementation based on quant_algo (FP8 pattern).
-        # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
-        # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
-        if quant_method == "NVFP4":
+        # Engine-level --override-activation-dtype (orthogonal to
+        # --quantization). When set to bfloat16/float16, behave as if
+        # quant_algo were W4A16_NVFP4 regardless of what's on disk.
+        # ModelOptNvFp4FusedMoE.__init__ reads this same field to decide
+        # whether to force the Marlin MoE backend.
+        self.override_activation_dtype = override_activation_dtype
+        force_w4a16 = override_activation_dtype in ("bfloat16", "float16")
+
+        # LinearMethod selection: override > on-disk per-algo.
+        # NVFP4        -> W4A4: cutlass NVFP4 GEMM with input quantization
+        # W4A16_NVFP4  -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
+        if force_w4a16:
+            self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
+            if quant_method != "W4A16_NVFP4":
+                logger.info(
+                    "ModelOpt NVFP4 W4A16 override active "
+                    "(override_activation_dtype=%s): loading a %s "
+                    "checkpoint via the W4A16 LinearMethod and Marlin "
+                    "MoE backend. Per-tensor input_scale tensors will "
+                    "be ignored.",
+                    override_activation_dtype,
+                    quant_method,
+                )
+        elif quant_method == "NVFP4":
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
         elif quant_method == "W4A16_NVFP4":
             self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
@@ -1098,6 +1130,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            override_activation_dtype=kwargs.get("override_activation_dtype", "auto"),
         )
 
 
@@ -1393,13 +1426,17 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
-        # activation_key=None every W4A4 backend's _supports_quant_scheme
-        # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
-        # exactly); only Marlin survives. Marlin's MoE path drops
-        # activation scales in convert_to_nvfp4_moe_kernel_format, so no
-        # other change is needed.
-        self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
+        # W4A16 mode fires on either a W4A16_NVFP4 on-disk ckpt OR an
+        # engine-level --override-activation-dtype=bfloat16/float16 flag.
+        # With activation_key=None every W4A4 backend's
+        # _supports_quant_scheme rejects itself (they all require
+        # (kNvfp4Static, kNvfp4Dynamic) exactly); only Marlin survives.
+        # Marlin's MoE path drops activation scales in
+        # convert_to_nvfp4_moe_kernel_format, so no other change is needed.
+        self.use_a16 = (
+            quant_config.quant_method == "W4A16_NVFP4"
+            or quant_config.override_activation_dtype in ("bfloat16", "float16")
+        )
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
             weight_key=kNvfp4Static,
