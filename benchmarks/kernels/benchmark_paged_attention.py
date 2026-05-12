@@ -151,6 +151,19 @@ def main(
                         v_scale,
                     )
                 else:
+                    # Pack per-sequence slot offsets into a flat int64 tensor;
+                    # the launcher computes the cumulative offsets internally.
+                    bt_int64 = block_tables.to(torch.int64)
+                    slot_chunks = []
+                    for s, slen in enumerate(seq_lens.tolist()):
+                        tok_idx = torch.arange(
+                            slen, dtype=torch.int64, device=device
+                        )
+                        slot_chunks.append(
+                            bt_int64[s, tok_idx // block_size] * block_size
+                            + (tok_idx % block_size)
+                        )
+                    slot_mapping = torch.cat(slot_chunks, dim=0)
                     ops.paged_attention_rocm(
                         output,
                         exp_sums,
@@ -164,6 +177,7 @@ def main(
                         block_tables,
                         seq_lens,
                         None,
+                        slot_mapping,
                         block_size,
                         max_seq_len,
                         alibi_slopes,
