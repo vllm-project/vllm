@@ -213,8 +213,12 @@ download_guided_generation () {
         "command-r35b_fp8"
         "command-a-reasoning_fp8"
         "c4-25a218t_fp8_eagle_l5"
-        # Cohere2 vision + text (mhl_v2); used by test_gg_melody / test_gg_tools_melody in run_guided_generation
+        # Cohere2 vision + text; used by test_guided_generation_melody / test_guided_generation_tools_melody in run_guided_generation
         "mhl_v2"
+        # BLS (c5-3a30t); used by test_gg_sweep for concurrency sweeps
+        "c5-3a30t_fp8"
+        # BLS Eagle draft; used by test_gg_sweep with --enable-sd
+        "c5-3a30t_eagle_bf16"
     )
 
     # Download each model using the checkpoint mapping
@@ -231,6 +235,9 @@ download_speculative_decoding () {
     download_model_if_missing "command-a_fp8"
     # c4-25a218t_fp8_eagle_l5 contains base at root + draft under eagle/
     download_model_if_missing "c4-25a218t_fp8_eagle_l5"
+    # BLS models used by request cancellation sweeps in run_speculative_decoding
+    download_model_if_missing "c5-3a30t_fp8"
+    download_model_if_missing "c5-3a30t_eagle_bf16"
 
     echo "==> Downloading draft checkpoints for speculative decoding"
     download_model_always "command-a_fp8_draft"

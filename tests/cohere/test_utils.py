@@ -13,7 +13,7 @@ import xgrammar as xgr
 from jsonschema import validate
 from PIL import Image
 
-from vllm import SamplingParams, TokensPrompt
+from vllm import SamplingParams
 from vllm.cohere.guided_decoding.cohere_constants import MODEL_TO_PREFIX_POSTFIX
 from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # noqa: E501
     convert_schema_to_structural_tags,
@@ -266,11 +266,62 @@ def generate_random_image(width, height, channels=3, method="numpy"):
     return image
 
 
+def _build_prompt_string_with_chat_template(tokenizer, engine, prompt_text: str) -> str:
+    """
+    Build the rendered prompt string with the checkpoint Jinja chat template, matching
+    ``test_guided_generation_vision_spec_async`` (``apply_chat_template(..., tokenize=False,
+    add_generation_prompt=True)``). vLLM tokenizes this the same way as when
+    ``multi_modal_data`` is present. Falls back to ``add_system_prompt`` if needed.
+    """
+    model_ref = getattr(engine.model_config, "model", None) or getattr(
+        tokenizer, "name_or_path", None
+    )
+    if not model_ref:
+        return add_system_prompt(prompt_text)
+
+    trust = getattr(engine.model_config, "trust_remote_code", False)
+    try:
+        from transformers import AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(model_ref, trust_remote_code=trust)
+    except Exception:
+        return add_system_prompt(prompt_text)
+
+    # Same user message shapes as test_guided_generation_vision_spec_async (list content, then string).
+    message_variants = [
+        [{"role": "user", "content": [{"type": "text", "text": prompt_text}]}],
+        [{"role": "user", "content": prompt_text}],
+    ]
+    prompt_str: str | None = None
+    for messages in message_variants:
+        try:
+            prompt_str = processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            break
+        except Exception:
+            continue
+    if not prompt_str:
+        return add_system_prompt(prompt_text)
+    return prompt_str
+
+
 async def generate_guided_output(
-    engine, prompt_text, request_id, response_schema, tokenizer
+    engine,
+    prompt_text,
+    request_id,
+    response_schema,
+    tokenizer,
+    *,
+    thinking_token_budget: int | None = None,
 ):
     """Generate output for one long-context prompt."""
-    sampling = SamplingParams(temperature=0.3, top_p=0.75, top_k=-1)
+    sampling_kwargs: dict[str, Any] = {"temperature": 0.3, "top_p": 0.75, "top_k": -1}
+    if thinking_token_budget is not None:
+        sampling_kwargs["thinking_token_budget"] = thinking_token_budget
+    sampling = SamplingParams(**sampling_kwargs)
 
     model_arch = get_text_model_name(engine.model_config)
     # Enforce max tokens to be 8192 for Command A
@@ -308,12 +359,12 @@ async def generate_guided_output(
                 json_object=True, backend="xgrammar"
             )
 
-    tokens = tokenizer.encode(add_system_prompt(prompt_text))
+    prompt_str = _build_prompt_string_with_chat_template(tokenizer, engine, prompt_text)
     final_output = None
     async for out in engine.generate(
+        {"prompt": prompt_str},
         sampling_params=sampling,
-        request_id=request_id,
-        prompt=TokensPrompt(prompt_token_ids=tokens),
+        request_id=str(request_id),
     ):
         final_output = out
 

@@ -44,7 +44,7 @@ This matrix is part of a three-layer documentation structure:
 
 #### 3.1 [MM + GG + TB](./features/mm_gg_tb.md)
 
-- 3.1.1 `test_gg_vision_spec_async` with `--thinking-budgets 500 1000 5000` (c4-25a218t_fp8_eagle_l5, speculative)
+- 3.1.1 `test_gg_vision_spec_async` with `--thinking-budgets 500 1000 5000` (c5-3a30t_fp8, speculative)
 
 ### 4. GG + TB + Melody
 
@@ -52,7 +52,20 @@ This matrix is part of a three-layer documentation structure:
 
 - 4.1.1 `test_bee_task` with `ENABLE_THINKING_BUDGET=1` (c5-3a30t_fp8)
 
+#### 4.2 Guided Generation — Text (BLS)
+
+- 4.2.1 `test_guided_generation --suite merged` non-SD (c5-3a30t_fp8, JSON + tools + long-context with thinking)
+- 4.2.2 `test_guided_generation_melody` SD (c5-3a30t_fp8 + eagle)
+- 4.2.3 `test_guided_generation_tools_melody` SD (c5-3a30t_fp8 + eagle)
+- 4.2.4 `test_thinking_budget` SD (c5-3a30t_fp8 + eagle)
+- 4.2.5 `test_thinking_budget` non-SD (c5-3a30t_fp8)
+
 ### 5. Speculative Decoding
+
+#### 5.1 [Request Cancellation](./features/speculative_decoding_test.md)
+
+- 5.1.1 `test_request_cancellation` SD sweep (c5-3a30t_fp8 + eagle, `--num-requests 32 64`)
+- 5.1.2 `test_request_cancellation` non-SD sweep (c5-3a30t_fp8, `--num-requests 32 64`)
 
 ### 6. vLLM
 

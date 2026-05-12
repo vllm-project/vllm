@@ -16,6 +16,10 @@ C2_RESPONSE_POSTFIX = "<|END_OF_TURN_TOKEN|>"
 C2_TOOL_CALL_PREFIX = "Action: ```json"
 C2_TOOL_CALL_POSTFIX = "```"
 
+# BLS tags
+BLS_RESPONSE_PREFIX = "<|START_TEXT|>"
+BLS_RESPONSE_POSTFIX = "<|END_TEXT|>"
+
 # start thinking token
 START_THINKING_TOKEN = "<|START_THINKING|>"
 # end thinking token
@@ -31,6 +35,9 @@ COMMAND_R_TOOLS_TAG = CohereTagRegistry(
 MODEL_TO_PREFIX_POSTFIX: dict[str, tuple[str, str]] = {
     "Cohere2ForCausalLM": (C3_RESPONSE_PREFIX, C3_RESPONSE_POSTFIX),
     "Cohere2MoeForCausalLM": (C3_RESPONSE_PREFIX, C3_RESPONSE_POSTFIX),
-    "Cohere2VisionForConditionalGeneration": (C3_RESPONSE_PREFIX, C3_RESPONSE_POSTFIX),
+    "Cohere2VisionForConditionalGeneration": (
+        BLS_RESPONSE_PREFIX,
+        BLS_RESPONSE_POSTFIX,
+    ),
     "CohereForCausalLM": (C2_RESPONSE_PREFIX, C2_RESPONSE_POSTFIX),
 }

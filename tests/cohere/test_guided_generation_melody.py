@@ -1,3 +1,4 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -11,16 +12,22 @@ Test guided generation via vLLM serve: Chat Completions and Responses.
 Within each phase, all ``synth_prompts`` requests are sent concurrently
 (``asyncio.gather``) so the server schedules overlapping sequences like production.
 
-CI (``run_guided_generation`` in ``run_tests.sh``) also runs this script against the
-``mhl_v2`` checkpoint (``${ENGINES_DIR}/mhl_v2``), non-speculative, tensor parallel 4,
-after the checkpoint is synced to ``gs://cohere-model-efficiency-ci/engines/mhl_v2``.
+CI (``run_guided_generation`` in ``run_tests.sh``) also runs this script
+against the ``mhl_v2`` checkpoint, non-speculative, TP 4,
+after syncing to ``gs://cohere-model-efficiency-ci/engines/``.
+
+Use ``--debug-engine-request`` to log API sampling fields, the user prompt, and the
+post-chat-template engine prompt (Chat: ``prompt_token_ids``; Responses: ``input_messages``).
 """
 
 import argparse
 import asyncio
+import copy
 import json
 import os
+import pprint
 import sys
+from typing import Any
 
 # Add repo root so tests.utils and vllm are importable when run from tests/cohere
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -35,6 +42,7 @@ from test_utils import (  # noqa: E402
     RunMode,
     make_speculative_config,
 )
+from transformers import AutoTokenizer  # noqa: E402
 
 from tests.utils import RemoteOpenAIServer  # noqa: E402
 
@@ -146,6 +154,165 @@ def _assert_json_object_mode_checks(phase: str, bad: list[int]) -> None:
     assert len(bad) <= 5, f"{phase}: too many invalid JSON objects: {bad}"
 
 
+# Chat / Responses generation knobs (must match the values passed to the APIs below).
+CHAT_TEMPERATURE = 0.3
+CHAT_TOP_P = 0.75
+CHAT_MAX_TOKENS = 32000
+RESPONSES_MAX_OUTPUT_TOKENS = 32000
+
+
+def _response_format_for_log(response_format: dict | None) -> dict | str | None:
+    if response_format is None:
+        return None
+    rf = copy.deepcopy(response_format)
+    if rf.get("type") == "json_schema" and isinstance(rf.get("json_schema"), dict):
+        js = rf["json_schema"]
+        rf["json_schema"] = {
+            "name": js.get("name"),
+            "schema": f"<{len(json.dumps(js.get('schema', {})))} chars>",
+        }
+    return rf
+
+
+def _print_chat_engine_debug(
+    phase: str,
+    request_id: int,
+    user_text: str,
+    response_json: dict,
+    tokenizer: AutoTokenizer,
+    request_kwargs: dict,
+) -> None:
+    print(f"\n{'=' * 16} ENGINE DEBUG {phase} (request {request_id}) {'=' * 16}")
+    print("--- user text (single user message ``content``; before chat template) ---")
+    print(user_text)
+    print(
+        "\n--- OpenAI Chat Completions request fields "
+        "(what this script sends → vLLM; engine merges defaults + structured output) ---"
+    )
+    log_kw = {
+        k: v
+        for k, v in request_kwargs.items()
+        if k not in ("extra_body", "response_format")
+    }
+    log_kw["response_format"] = _response_format_for_log(
+        request_kwargs.get("response_format")
+    )
+    log_kw["extra_body"] = request_kwargs.get("extra_body")
+    pprint.pprint(log_kw, width=120, sort_dicts=False)
+    pt = response_json.get("prompt_token_ids")
+    if pt:
+        rendered = tokenizer.decode(
+            pt,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=True,
+        )
+        print(
+            "\n--- engine prompt string "
+            "(``decode(response['prompt_token_ids'])``; after chat template, "
+            "what the model conditions on) ---"
+        )
+        print(rendered)
+    else:
+        print(
+            "\n(no ``prompt_token_ids`` in response; use ``--debug-engine-request`` "
+            "which sets ``return_token_ids: true``)"
+        )
+
+
+def _print_responses_engine_debug(
+    phase: str,
+    request_id: int,
+    user_text: str,
+    response_json: dict,
+    request_kwargs: dict,
+) -> None:
+    print(f"\n{'=' * 16} ENGINE DEBUG {phase} (request {request_id}) {'=' * 16}")
+    print("--- user text (input user ``content``; before Responses render) ---")
+    print(user_text)
+    print(
+        "\n--- OpenAI Responses ``create`` kwargs "
+        "(script → vLLM; engine adds guided decoding sampling fields server-side) ---"
+    )
+    eb = request_kwargs.get("extra_body") or {}
+    log_kw = {k: v for k, v in request_kwargs.items() if k != "extra_body"}
+    log_kw["extra_body"] = {
+        k: (f"<{len(json.dumps(v))} chars>" if k == "structured_outputs" else v)
+        for k, v in eb.items()
+    }
+    pprint.pprint(log_kw, width=120, sort_dicts=False)
+    in_msgs = response_json.get("input_messages")
+    if in_msgs:
+        print(
+            "\n--- ``input_messages`` from server "
+            "(``enable_response_messages``; includes tokenized / templated input) ---"
+        )
+        pprint.pprint(in_msgs, width=120)
+    else:
+        print(
+            "\n(no ``input_messages`` in response; ensure ``enable_response_messages`` "
+            "is true in the request — set automatically with ``--debug-engine-request``)"
+        )
+
+
+async def _chat_completion_create(
+    client: openai.AsyncOpenAI,
+    args: argparse.Namespace,
+    *,
+    phase: str,
+    request_id: int,
+    user_prompt: str,
+    messages: list[dict],
+    response_format: dict | None,
+    debug_tokenizer: AutoTokenizer | None,
+) -> Any:
+    kwargs: dict = {
+        "model": args.model,
+        "messages": messages,
+        "temperature": CHAT_TEMPERATURE,
+        "top_p": CHAT_TOP_P,
+        "max_tokens": CHAT_MAX_TOKENS,
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    if not getattr(args, "debug_engine_request", False):
+        return await client.chat.completions.create(**kwargs)
+    assert debug_tokenizer is not None
+    kwargs["extra_body"] = {"return_token_ids": True}
+    raw = await client.with_raw_response.chat.completions.create(**kwargs)
+    body = json.loads(raw.http_response.text)
+    _print_chat_engine_debug(
+        phase, request_id, user_prompt, body, debug_tokenizer, kwargs
+    )
+    return raw.parse()
+
+
+async def _responses_create(
+    client: openai.AsyncOpenAI,
+    args: argparse.Namespace,
+    *,
+    phase: str,
+    request_id: int,
+    user_prompt: str,
+    input_items: list[dict],
+    extra_body: dict,
+) -> Any:
+    kwargs: dict = {
+        "model": args.model,
+        "input": input_items,
+        "temperature": CHAT_TEMPERATURE,
+        "top_p": CHAT_TOP_P,
+        "max_output_tokens": RESPONSES_MAX_OUTPUT_TOKENS,
+        "extra_body": dict(extra_body),
+    }
+    if not getattr(args, "debug_engine_request", False):
+        return await client.responses.create(**kwargs)
+    kwargs["extra_body"]["enable_response_messages"] = True
+    raw = await client.with_raw_response.responses.create(**kwargs)
+    body = json.loads(raw.http_response.text)
+    _print_responses_engine_debug(phase, request_id, user_prompt, body, kwargs)
+    return raw.parse()
+
+
 async def run_guided_generation_tests(args: argparse.Namespace) -> None:
     """Chat Completions (response_format) then Responses (structured_outputs).
 
@@ -165,14 +332,21 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
             api_key=RemoteOpenAIServer.DUMMY_API_KEY,
         ) as client:
             schema_map = {i: p["schema"] for i, p in enumerate(synth_prompts)}
+            debug_tokenizer: AutoTokenizer | None = None
+            if getattr(args, "debug_engine_request", False):
+                debug_tokenizer = AutoTokenizer.from_pretrained(
+                    args.model, use_fast=True
+                )
 
             async def chat_json_schema_one(i: int, p: dict) -> str | None:
                 try:
-                    response = await client.chat.completions.create(
-                        model=args.model,
+                    response = await _chat_completion_create(
+                        client,
+                        args,
+                        phase="Chat Completions json_schema",
+                        request_id=i,
+                        user_prompt=p["prompt"],
                         messages=[{"role": "user", "content": p["prompt"]}],
-                        temperature=0.6,
-                        top_p=0.95,
                         response_format={
                             "type": "json_schema",
                             "json_schema": {
@@ -180,7 +354,7 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
                                 "schema": p["schema"],
                             },
                         },
-                        max_tokens=32000,
+                        debug_tokenizer=debug_tokenizer,
                     )
                     choice = response.choices[0] if response.choices else None
                     text = (
@@ -209,15 +383,14 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
             # --- Responses: structured_outputs.json (concurrent) ---
             async def responses_json_schema_one(i: int, p: dict) -> str | None:
                 try:
-                    response = await client.responses.create(
-                        model=args.model,
-                        input=[{"role": "user", "content": p["prompt"]}],
-                        temperature=0.6,
-                        top_p=0.95,
-                        max_output_tokens=32000,
-                        extra_body={
-                            "structured_outputs": {"json": p["schema"]},
-                        },
+                    response = await _responses_create(
+                        client,
+                        args,
+                        phase="Responses structured_outputs json",
+                        request_id=i,
+                        user_prompt=p["prompt"],
+                        input_items=[{"role": "user", "content": p["prompt"]}],
+                        extra_body={"structured_outputs": {"json": p["schema"]}},
                     )
                     return _responses_output_text(response)
                 except Exception as e:
@@ -245,13 +418,15 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
             # JSON object mode (no schema): Chat + Responses; same synth_prompts.
             async def chat_json_object_one(i: int, p: dict) -> str | None:
                 try:
-                    response = await client.chat.completions.create(
-                        model=args.model,
+                    response = await _chat_completion_create(
+                        client,
+                        args,
+                        phase="Chat Completions json_object",
+                        request_id=i,
+                        user_prompt=p["prompt"],
                         messages=[{"role": "user", "content": p["prompt"]}],
-                        temperature=0.6,
-                        top_p=0.95,
                         response_format={"type": "json_object"},
-                        max_tokens=32000,
+                        debug_tokenizer=debug_tokenizer,
                     )
                     choice = response.choices[0] if response.choices else None
                     text = (
@@ -279,12 +454,13 @@ async def run_guided_generation_tests(args: argparse.Namespace) -> None:
 
             async def responses_json_object_one(i: int, p: dict) -> str | None:
                 try:
-                    response = await client.responses.create(
-                        model=args.model,
-                        input=[{"role": "user", "content": p["prompt"]}],
-                        temperature=0.6,
-                        top_p=0.95,
-                        max_output_tokens=32000,
+                    response = await _responses_create(
+                        client,
+                        args,
+                        phase="Responses structured_outputs json_object",
+                        request_id=i,
+                        user_prompt=p["prompt"],
+                        input_items=[{"role": "user", "content": p["prompt"]}],
                         extra_body={"structured_outputs": {"json_object": True}},
                     )
                     return _responses_output_text(response)
@@ -328,6 +504,16 @@ def parse_args():
     p.add_argument("--draft_tp", type=int, default=1)
     p.add_argument("--max_model_len", type=int, default=32000)
     p.add_argument("--server_wait_seconds", type=float, default=4000)
+    p.add_argument(
+        "--debug-engine-request",
+        action="store_true",
+        help=(
+            "Per request: print sampling fields this script sends, the user text, "
+            "and how the engine sees the prompt after the chat template "
+            "(Chat: decode ``prompt_token_ids`` via ``return_token_ids``; "
+            "Responses: ``input_messages`` via ``enable_response_messages``)."
+        ),
+    )
     return p.parse_args()
 
 

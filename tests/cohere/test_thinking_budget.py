@@ -6,24 +6,17 @@ import time
 from enum import Enum
 
 from test_const import REASONING_PROMPT
-from test_schema_data import synth_prompts
 from test_utils import (
     RunMode,
+    _build_prompt_string_with_chat_template,
     _create_reasoning_config,
-    add_reasoning_prompt,
     make_speculative_config,
-    validate_output,
 )
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams, TokensPrompt
+from vllm import SamplingParams
 from vllm.cohere.guided_decoding.cohere_constants import END_THINKING_TOKEN
-from vllm.cohere.guided_decoding.convert_to_structural_tag_format import (  # noqa: E501
-    convert_schema_to_structural_tags,
-)
-from vllm.cohere.utils import get_text_model_name
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
 st = time.time()
@@ -33,7 +26,6 @@ MAX_OUTPUT_TOKEN = 32000  # Global variable for maximum output tokens
 
 class TestMode(Enum):
     REASONING = "reasoning"
-    GUIDED_GENERATION = "guided_generation"
 
 
 # Define the test cases
@@ -62,14 +54,12 @@ def validate_outputs(
     tokenizer,
     reasoning_mode,
     thinking_token_budgets=None,
-    model_arch=None,
     continue_thinking=False,
 ):
     # First validate logprobs
     validate_logprobs(batch_results)
 
-    # Extract text from results for existing validation
-    text_outputs = [result["text"] for result in batch_results]
+    # Extract token streams for validation
     text_tokens = [result["token_ids"] for result in batch_results]
     tokenized_prompts = [result["tokenized_prompt"] for result in batch_results]
     if reasoning_mode == TestMode.REASONING:
@@ -111,12 +101,8 @@ def validate_outputs(
                     , but got {index_et} for request {request_id}"
             )
 
-    elif reasoning_mode == TestMode.GUIDED_GENERATION:
-        validate_output(text_outputs, {}, model_arch)
-        print("✅ Guided generation with reasoning output validation passed.")
-
     else:
-        raise ValueError("Unsupported mode for validation.")
+        raise ValueError(f"Unsupported mode for validation: {reasoning_mode}")
 
 
 async def gen(
@@ -126,7 +112,6 @@ async def gen(
     tokenizer,
     model,
     thinking_budget,
-    reasoning_mode,
     continue_thinking=False,
 ):
     print(
@@ -147,23 +132,19 @@ async def gen(
         f"{sampling_params.thinking_token_budget}"
     )
 
-    if reasoning_mode == TestMode.GUIDED_GENERATION:
-        schema = {"type": "object"}
-        structural_tag = convert_schema_to_structural_tags(schema=schema, engine=engine)
-        sampling_params.structured_outputs = StructuredOutputsParams(
-            structural_tag=structural_tag, backend="xgrammar"
-        )
     if continue_thinking:
         sampling_params.continue_thinking = True
-        example_input = add_reasoning_prompt(example_input, continue_thinking)
-    else:
-        example_input = add_reasoning_prompt(example_input)
 
-    tokenized_prompt = tokenizer.encode(example_input)
+    prompt_str = _build_prompt_string_with_chat_template(
+        tokenizer, engine, example_input
+    )
+    if continue_thinking:
+        prompt_str += r"""<|START_THINKING|>"""
+    tokenized_prompt = tokenizer.encode(prompt_str)
     results_generator = engine.generate(
+        {"prompt": prompt_str},
         sampling_params=sampling_params,
         request_id=str(id),
-        prompt=TokensPrompt(prompt_token_ids=tokenized_prompt),
     )
 
     final_output = None
@@ -204,7 +185,7 @@ async def validate_thinking_token_budget(
         tensor_parallel_size=tensor_parallel_size,
         structured_outputs_config={"backend": "xgrammar"},
         speculative_config=make_speculative_config(args),
-        max_logprobs=5,  # Enable logprobs collection
+        max_logprobs=5,
         reasoning_config=_create_reasoning_config(),
         async_scheduling=True,
     )
@@ -212,7 +193,6 @@ async def validate_thinking_token_budget(
     # Debug: Check speculative config
 
     tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
-    model_arch = get_text_model_name(engine.model_config)
     if reasoning_mode == TestMode.REASONING:
         for request_id, thinking_budget in enumerate(thinking_budgets_reasoning):
             prompt = REASONING_PROMPT
@@ -226,7 +206,6 @@ async def validate_thinking_token_budget(
                         tokenizer,
                         model,
                         thinking_budget=thinking_budget,
-                        reasoning_mode=reasoning_mode,
                     )
                 )
             )
@@ -236,7 +215,6 @@ async def validate_thinking_token_budget(
             tokenizer,
             reasoning_mode,
             thinking_budgets_reasoning,
-            model_arch,
         )
 
         # Test the continue thinking functionality
@@ -256,7 +234,6 @@ async def validate_thinking_token_budget(
                         tokenizer,
                         model,
                         thinking_budget=thinking_budget,
-                        reasoning_mode=reasoning_mode,
                         continue_thinking=True,
                     )
                 )
@@ -267,31 +244,11 @@ async def validate_thinking_token_budget(
             tokenizer,
             reasoning_mode,
             continue_thinking_budgets_reasoning,
-            model_arch,
             continue_thinking=True,
         )
 
-    elif reasoning_mode == TestMode.GUIDED_GENERATION:
-        for prompt_id, prompt in enumerate(synth_prompts):
-            thinking_budget = 500
-            all_prompt[prompt_id] = prompt["prompt"]
-            tasks.append(
-                asyncio.create_task(
-                    gen(
-                        engine,
-                        all_prompt[prompt_id],
-                        prompt_id,
-                        tokenizer,
-                        model,
-                        thinking_budget=thinking_budget,
-                        reasoning_mode=reasoning_mode,
-                    )
-                )
-            )
-        batch_results = await asyncio.gather(*tasks)
-        validate_outputs(
-            batch_results, tokenizer, reasoning_mode, model_arch=model_arch
-        )
+    else:
+        raise ValueError(f"Unsupported reasoning_mode: {reasoning_mode}")
 
     engine.shutdown()
     print("Async vLLM inference time: ", time.time() - st)

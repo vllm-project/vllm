@@ -1,9 +1,10 @@
+# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test guided generation with tools via the Chat Completions API (vLLM serve).
 
-Uses the same tool prompts as test_dynamic_gg (engine-based), but drives the server
+Uses the same tool prompts as test_guided_generation (engine-based), but drives the server
 via client.chat.completions.create() with `tools` in the request so that
 prepare_structured_tag in serving.py is exercised with tools. Tool outputs are
 validated as OpenAI ``tool_calls`` arguments against each tool's ``parameters``
