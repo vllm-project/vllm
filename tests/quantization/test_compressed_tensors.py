@@ -32,6 +32,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    find_matched_target,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
@@ -633,6 +636,24 @@ def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
     assert method is None, (
         f"Expected None for unmatched ParallelLMHead, got {type(method).__name__}"
     )
+
+
+def test_find_matched_target_returns_none_on_no_match():
+    result = find_matched_target(
+        layer_name="model.layers.0.self_attn.qkv_proj",
+        module=Mock(spec=torch.nn.Linear),
+        targets=["no_match_target"],
+    )
+    assert result is None
+
+
+def test_get_scheme_dict_returns_none_on_no_match():
+    config = _make_ct_config(target="matched_layer")
+    result = config.get_scheme_dict(
+        layer=Mock(spec=torch.nn.Linear),
+        layer_name="model.layers.0.unmatched_layer",
+    )
+    assert result is None
 
 
 @pytest.mark.skipif(

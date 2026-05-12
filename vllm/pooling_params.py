@@ -87,13 +87,6 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(self, model_config: ModelConfig) -> None:
-        if self.task == "score":
-            logger.warning_once(
-                "`score` task is deprecated and will be removed in v0.20. "
-                "Please use `classify` instead."
-            )
-            self.task = "classify"
-
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":

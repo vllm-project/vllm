@@ -6,6 +6,7 @@ from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
@@ -31,6 +32,12 @@ def test_parser_selection(tokenizer, thinking, expected_parser_type):
     )
 
     assert isinstance(parser._parser, expected_parser_type)
+
+
+def test_deepseek_v4_reasoning_parser_alias():
+    parser_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v4")
+
+    assert parser_cls is DeepSeekV3ReasoningParser
 
 
 def test_identity_reasoning_parser_basic(tokenizer):

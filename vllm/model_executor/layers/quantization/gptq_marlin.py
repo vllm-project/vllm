@@ -9,7 +9,6 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -19,12 +18,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    convert_to_wna16_moe_kernel_format,
+    make_wna16_moe_kernel,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -42,12 +45,14 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_act_int8_process_scales,
     marlin_make_workspace_new,
-    marlin_moe_permute_scales,
-    marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kInt4StaticGroupScale,
+    kInt8StaticGroupScale,
 )
 from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
@@ -214,7 +219,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
@@ -500,13 +505,20 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
-            self.quant_type = scalar_types.uint4b8
+            quant_type = scalar_types.uint4b8
+            scale = kInt4StaticGroupScale
         elif self.quant_config.quant_type.size_bits == 8:
-            self.quant_type = scalar_types.uint8b128
+            quant_type = scalar_types.uint8b128
+            scale = kInt8StaticGroupScale
         else:
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
         self.input_dtype = None
         self.use_marlin = True
+        weight_key = QuantKey(quant_type, scale)
+
+        self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
+            moe, weight_key, quant_config.weight_bits
+        )
 
     def create_weights(
         self,
@@ -521,7 +533,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_type == scalar_types.uint4b8, (
+            assert self.quant_config.quant_type.size_bits == 8, (
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
@@ -668,134 +680,100 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
-            assert self.quant_type == scalar_types.uint4b8, (
+            assert self.quant_config.quant_type.size_bits == 8, (
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
-        if self.input_dtype == torch.float8_e4m3fn:
-            ops.marlin_int4_fp8_preprocess(layer.w13_qweight, inplace=True)
-            ops.marlin_int4_fp8_preprocess(layer.w2_qweight, inplace=True)
-            layer.w13_scales.data = layer.w13_scales.data * 512
-            layer.w2_scales.data = layer.w2_scales.data * 512
+        (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            w13_bias,
+            w2_bias,
+        ) = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_moe_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=self.input_dtype,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_g_idx=layer.w13_g_idx,
+            w2_g_idx=layer.w2_g_idx,
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
+        )
 
-        # Process act_order
-        if self.quant_config.desc_act:
-            # Get sorting based on g_idx
-            num_experts = layer.w13_g_idx.shape[0]
-            w13_g_idx_sort_indices = torch.empty_like(layer.w13_g_idx)
-            w2_g_idx_sort_indices = torch.empty_like(layer.w2_g_idx)
-            w13_sorted_g_idx = torch.empty_like(layer.w13_g_idx)
-            w2_sorted_g_idx = torch.empty_like(layer.w2_g_idx)
-            for e in range(num_experts):
-                w13_g_idx_sort_indices[e] = torch.argsort(layer.w13_g_idx[e]).to(
-                    torch.int32
+        replace_parameter(layer, "w13_qweight", w13)
+        replace_parameter(layer, "w2_qweight", w2)
+        replace_parameter(layer, "w13_scales", w13_scale)
+        replace_parameter(layer, "w2_scales", w2_scale)
+        replace_parameter(layer, "w13_g_idx", w13_g_idx)
+        replace_parameter(layer, "w2_g_idx", w2_g_idx)
+        replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+        replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+        if w13_input_global_scale is not None:
+            if hasattr(layer, "w13_input_global_scale"):
+                replace_parameter(
+                    layer, "w13_input_global_scale", w13_input_global_scale
                 )
-                w2_g_idx_sort_indices[e] = torch.argsort(layer.w2_g_idx[e]).to(
-                    torch.int32
+            else:
+                layer.register_parameter(
+                    "w13_input_global_scale",
+                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
                 )
-                w13_sorted_g_idx[e] = layer.w13_g_idx[e][w13_g_idx_sort_indices[e]]
-                w2_sorted_g_idx[e] = layer.w2_g_idx[e][w2_g_idx_sort_indices[e]]
-            replace_parameter(layer, "w13_g_idx", w13_sorted_g_idx)
-            replace_parameter(layer, "w2_g_idx", w2_sorted_g_idx)
-            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        else:
-            # Reset g_idx related tensors
-            num_experts = layer.w13_g_idx.shape[0]
-            device = layer.w13_g_idx.device
-            layer.w13_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
-            )
-            layer.w2_g_idx = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
-            )
-            layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
-            )
-            layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-                torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-                requires_grad=False,
-            )
-        # Repack weights
-        marlin_w13_qweight = ops.gptq_marlin_moe_repack(
-            layer.w13_qweight,
-            layer.w13_g_idx_sort_indices,
-            layer.w13_qweight.shape[1] * self.quant_config.pack_factor,
-            layer.w13_qweight.shape[2],
-            self.quant_config.quant_type.size_bits,
-            is_a_8bit=is_a_8bit,
+        if w2_input_global_scale is not None:
+            if hasattr(layer, "w2_input_global_scale"):
+                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
+            else:
+                layer.register_parameter(
+                    "w2_input_global_scale",
+                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+                )
+        if w13_bias is not None:
+            if hasattr(layer, "w13_bias"):
+                replace_parameter(layer, "w13_bias", w13_bias)
+            else:
+                layer.register_parameter(
+                    "w13_bias", torch.nn.Parameter(w13_bias, requires_grad=False)
+                )
+        if w2_bias is not None:
+            if hasattr(layer, "w2_bias"):
+                replace_parameter(layer, "w2_bias", w2_bias)
+            else:
+                layer.register_parameter(
+                    "w2_bias", torch.nn.Parameter(w2_bias, requires_grad=False)
+                )
+
+        self._setup_kernel(layer)
+
+    def _setup_kernel(self, layer: FusedMoE) -> None:
+        """Build the FusedMoEKernel for this layer."""
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            layer=layer,
+            is_k_full=self.is_k_full,
+            w13_g_idx=layer.w13_g_idx,
+            w2_g_idx=layer.w2_g_idx,
+            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
         )
-        replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
-        marlin_w2_qweight = ops.gptq_marlin_moe_repack(
-            layer.w2_qweight,
-            layer.w2_g_idx_sort_indices,
-            layer.w2_qweight.shape[1] * self.quant_config.pack_factor,
-            layer.w2_qweight.shape[2],
-            self.quant_config.quant_type.size_bits,
-            is_a_8bit=is_a_8bit,
-        )
-        replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
 
-        # The modular kernel expects w13_weight and w2_weight,
-        # but GPTQ uses w13_qweight and w2_qweight
-        # Alias for modular kernel
-        layer.w13_weight = layer.w13_qweight
-        # Alias for modular kernel
-        layer.w2_weight = layer.w2_qweight
-
-        # Repack scales
-        marlin_w13_scales = marlin_moe_permute_scales(
-            s=layer.w13_scales,
-            size_k=layer.intermediate_size_per_partition,
-            size_n=layer.w13_scales.shape[2],
-            group_size=self.quant_config.group_size,
-            is_a_8bit=is_a_8bit,
-        )
-        if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
-            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w13_scales
-            )
-            layer.register_parameter(
-                "w13_input_global_scale",
-                torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
-            )
-
-        replace_parameter(layer, "w13_scales", marlin_w13_scales)
-        marlin_w2_scales = marlin_moe_permute_scales(
-            s=layer.w2_scales,
-            size_k=layer.w2_scales.shape[1]
-            * (
-                self.quant_config.group_size
-                if self.quant_config.group_size != -1
-                else self.quant_config.pack_factor
-            ),
-            size_n=layer.w2_scales.shape[2],
-            group_size=self.quant_config.group_size,
-            is_a_8bit=is_a_8bit,
-        )
-        if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
-            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w2_scales
-            )
-            layer.register_parameter(
-                "w2_input_global_scale",
-                torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-            )
-
-        replace_parameter(layer, "w2_scales", marlin_w2_scales)
-
-        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
-            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
-
-        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
-            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
-
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
         )
@@ -820,85 +798,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         prepare_finalize,
         layer: torch.nn.Module,
     ):
-        """
-        Select the GEMM implementation for GPTQ-Marlin MoE.
-
-        Returns MarlinExperts configured for GPTQ quantization.
-        This is ONLY used when LoRA is enabled.
-        Without LoRA, GPTQ uses its own apply() method.
-        """
-        # Only use modular kernels when LoRA is enabled
-        # Without LoRA, GPTQ's own apply() method works fine and is more efficient
-        if not self.moe.is_lora_enabled:
-            raise NotImplementedError(
-                "GPTQ-Marlin uses its own apply() method when LoRA is not enabled. "
-                "Modular kernels are only used for LoRA support."
-            )
-
-        # The modular marlin kernels do not support 8-bit weights.
-        if self.quant_config.weight_bits == 8:
-            raise NotImplementedError(
-                "GPTQ-Marlin kernel does not support 8-bit weights."
-            )
-
-        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            BatchedMarlinExperts,
-            MarlinExperts,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel "
+            "initialization logic. This function should not be called."
         )
-
-        # Ensure quant config is initialized
-        assert self.moe_quant_config is not None, (
-            "moe_quant_config must be initialized before select_gemm_impl"
-        )
-
-        w13_g_idx = (
-            getattr(layer, "w13_g_idx", None) if self.quant_config.desc_act else None
-        )
-        w2_g_idx = (
-            getattr(layer, "w2_g_idx", None) if self.quant_config.desc_act else None
-        )
-        w13_g_idx_sort_indices = (
-            getattr(layer, "w13_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None
-        )
-        w2_g_idx_sort_indices = (
-            getattr(layer, "w2_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None
-        )
-
-        # Check if using batched expert format (for Expert Parallelism)
-        if (
-            prepare_finalize.activation_format
-            == mk.FusedMoEActivationFormat.BatchedExperts
-        ):
-            # For batched format, use BatchedMarlinExperts
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-            return BatchedMarlinExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
-        else:
-            # Standard Marlin experts for GPTQ
-            return MarlinExperts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
 
     def apply(
         self,
@@ -908,28 +811,17 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        return fused_marlin_moe(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scales,
-            layer.w2_scales,
-            topk_weights,
-            topk_ids,
-            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
-            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
-            quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            hidden_states=x,
+            w1=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
-            g_idx1=layer.w13_g_idx,
-            g_idx2=layer.w2_g_idx,
-            sort_indices1=layer.w13_g_idx_sort_indices,
-            sort_indices2=layer.w2_g_idx_sort_indices,
-            workspace=layer.workspace,
-            is_k_full=self.is_k_full,
-            input_dtype=self.input_dtype,
-            inplace=not self.moe.disable_inplace,
+            shared_experts_input=shared_experts_input,
         )
