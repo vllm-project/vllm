@@ -36,6 +36,7 @@ class FusedMoERouter(ABC):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -66,6 +67,7 @@ class FusedMoERouter(ABC):
         topk_weights, topk_ids = self._select_experts(
             hidden_states,
             router_logits,
+            topk_indices_dtype=topk_indices_dtype,
             input_ids=input_ids,
         )
 

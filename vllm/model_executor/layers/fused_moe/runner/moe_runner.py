@@ -648,7 +648,7 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input,
             input_ids,
             self._encode_layer_name(),
-            self._trtllm_mxfp4_unpadded_dim(),
+            # self._trtllm_mxfp4_unpadded_dim(),
         )
 
         #
