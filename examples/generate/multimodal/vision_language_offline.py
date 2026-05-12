@@ -2588,9 +2588,7 @@ def maybe_add_vit_cuda_graph_compilation_config(args, engine_args):
     modality = args.modality
     enable_vit_cuda_graph = args.enable_vit_cuda_graph
 
-    assert model in MODELS_SUPPORT_VIT_CUDA_GRAPH
-
-    if enable_vit_cuda_graph:
+    if enable_vit_cuda_graph and model in MODELS_SUPPORT_VIT_CUDA_GRAPH:
         if modality == "image" or modality == "video":
             vision_items_per_batch = 1
         elif modality == "image+video":

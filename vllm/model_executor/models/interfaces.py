@@ -1503,6 +1503,22 @@ def supports_xdrope(
     return isinstance(model, SupportsXDRoPE)
 
 
+def scatter_output_slices(
+    output: torch.Tensor,
+    indices: list[int],
+    per_item_out_tokens: list[int],
+    dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+    clone: bool = False,
+) -> None:
+    """Slice a concatenated output tensor and scatter into dest by index."""
+    offset = 0
+    for idx in indices:
+        n_tok = per_item_out_tokens[idx]
+        sliced = output[offset : offset + n_tok]
+        dest[idx] = sliced.clone() if clone else sliced
+        offset += n_tok
+
+
 @runtime_checkable
 class SupportsEncoderCudaGraph(Protocol):
     """Interface for models whose vision encoder supports CUDA graph
@@ -1592,6 +1608,25 @@ class SupportsEncoderCudaGraph(Protocol):
         - Batched models (CLIP): index pixel_values along dim 0.
         """
         ...
+
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        batch_mm_kwargs: dict[str, Any],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+    ) -> None:
+        """
+        Post-process encoder output, directly call scatter_output_slices by default.
+
+        By default, delegates directly to scatter_output_slices.
+        Override this for models that require additional processing on the raw
+        encoder output prior to scattering, e.g. Step3-VL, which merges features
+        according to dynamic patch counts before scattering.
+        """
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,

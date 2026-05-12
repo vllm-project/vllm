@@ -46,7 +46,12 @@ from vllm.transformers_utils.processors.step3_vl import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -487,7 +492,9 @@ class Step3VisionTransformer(nn.Module):
     info=Step3VLProcessingInfo,
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
-class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph):
+class Step3VLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -569,10 +576,10 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     @property
     def dtype(self):
         return next(self.parameters()).dtype
-    
+
     @staticmethod
     def _compute_spatial_tokens(size, patch_size, stride):
-        # Compute the number of spatial tokens after two rounds of 
+        # Compute the number of spatial tokens after two rounds of
         # downsampling with given patch size and stride.
         grid = size // patch_size
         vit_tokens = grid * grid
@@ -691,6 +698,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
         )
+
         return EncoderCudaGraphConfig(
             modalities=["image"],
             input_key_by_modality={"image": "pixel_values"},
@@ -715,11 +723,13 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     ) -> tuple[int, int]:
         # An image without patches
         min_budget = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
         )
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
-            self.model_config.max_model_len
+            self.model_config.max_model_len,
         )
         return min_budget, max_budget
 
@@ -728,10 +738,10 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         mm_kwargs: dict[str, Any],
     ) -> int:
         return len(mm_kwargs.get("pixel_values", []))
-    
+
     def get_encoder_cudagraph_per_item_output_tokens(
-            self,
-            mm_kwargs: dict[str, Any],
+        self,
+        mm_kwargs: dict[str, Any],
     ) -> list[int]:
         num_patches = mm_kwargs.get("num_patches")
         img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
@@ -740,23 +750,28 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             self.config.understand_projector_stride,
         )
         patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            504, self.config.vision_config.patch_size,
+            504,
+            self.config.vision_config.patch_size,
             self.config.understand_projector_stride,
         )
         return [
             img_output_tokens + num_patch * patch_output_tokens
             for num_patch in num_patches
         ]
-    
-    def get_encoder_cudagraph_per_item_input_sizes(
-            self,
-            mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        img_grid = self.config.vision_config.image_size // self.config.vision_config.patch_size
 
-        # NOTE: 504 is the hard coded size for each patch after processing by the vision model,
-        # which is determined by the current architecture of the vision model and may need to be updated if the architecture changes. 
-        # The number of tokens for each patch is calculated based on this size and the patch size.
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        img_grid = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        )
+
+        # NOTE: 504 is the hard coded size for each patch after processing
+        # by the vision model, which is determined by the current architecture
+        # of the vision model and may need to be updated if the architecture changes.
+        # The number of tokens for each patch is calculated based on this
+        # size and the patch size.
         patch_grid = 504 // self.config.vision_config.patch_size
         total_image_pixel = img_grid * img_grid
         total_patch_pixel = patch_grid * patch_grid
@@ -766,12 +781,12 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             total_image_pixel + num_patch * total_patch_pixel
             for num_patch in num_patches
         ]
-        
+
     def select_encoder_cudagraph_items(
-            self,
-            mm_kwargs: dict[str, Any],
-            indices: list[int],
-    )-> dict[str, Any]:
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
         pixel_values = mm_kwargs["pixel_values"]
         patch_pixel_values = mm_kwargs["patch_pixel_values"]
         num_patches = mm_kwargs["num_patches"]
@@ -791,7 +806,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         selected_pv = pixel_values[indices]
         selected_np = num_patches[indices]
         selected_ppv = torch.cat(
-            [patch_pixel_values[cum_patches[i]:cum_patches[i+1]] for i in indices]
+            [patch_pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
         )
 
         return {
@@ -799,7 +814,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             "patch_pixel_values": selected_ppv,
             "num_patches": selected_np,
         }
-    
+
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
@@ -814,27 +829,36 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         # For pixel_value, the max input size is max_batch_size
         img_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
         )
         patch_output_tokens = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            504, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
         )
         dummy_pixel_values = torch.randn(
-            max_batch_size, 3,\
+            max_batch_size,
+            3,
             self.config.vision_config.image_size,
-            self.config.vision_config.image_size, 
-            device=device, dtype=dtype
+            self.config.vision_config.image_size,
+            device=device,
+            dtype=dtype,
         )
         # max_num_patches is the max total patches across the whole batch.
         # token_budget = max_batch_size * img_out + max_num_patches * patch_out
         max_num_patches = max(
-          0,
-          (token_budget - max_batch_size * img_output_tokens) // patch_output_tokens
+            0,
+            (token_budget - max_batch_size * img_output_tokens) // patch_output_tokens,
         )
         dummy_patch_pixel_values = torch.randn(
-            max_num_patches, 3,
-            504, 504,
-            device=device, dtype=dtype,
+            max_num_patches,
+            3,
+            504,
+            504,
+            device=device,
+            dtype=dtype,
         )
         # num_patches is NOT in buffers -- the per-item merge is done
         # CPU-side by finalize_encoder_cudagraph_output using the actual
@@ -852,7 +876,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             mm_kwargs=mm_kwargs,
             buffers=buffers,
         )
-    
+
     def encoder_cudagraph_forward(
         self,
         mm_kwargs: dict[str, Any],
@@ -865,12 +889,14 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         patch_pixel_values = buffers["patch_pixel_values"]
 
         image_features = self._process_image_features(
-            self._get_vision_model_output(pixel_values))
+            self._get_vision_model_output(pixel_values)
+        )
 
         has_patches = len(patch_pixel_values) > 0
         if has_patches:
             patch_features = self._process_image_features(
-                self._get_vision_model_output(patch_pixel_values))
+                self._get_vision_model_output(patch_pixel_values)
+            )
 
         # Deterministic single cat: [all_img_flat, all_patch_flat]
         img_flat = image_features.reshape(-1, image_features.shape[-1])
@@ -892,29 +918,35 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         vision_embeddings = self._process_image_input(image_input)
         return torch.cat(vision_embeddings, dim=0)
 
-    def finalize_encoder_cudagraph_output(
+    def postprocess_encoder_output(
         self,
         output: torch.Tensor,
-        mm_kwargs: dict[str, Any],
+        batch_mm_kwargs: dict[str, Any],
         indices: list[int],
         per_item_out_tokens: list[int],
-    ) -> list[torch.Tensor]:
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+    ):
         """CPU-side per-item merge after graph replay.
 
         The graph output is ``[all_img_flat, all_patch_flat]``.
         This method splits the flat output into image and patch features,
         then reassembles per-item embeddings using the *actual* batch
-        ``num_patches`` from ``mm_kwargs`` (not the capture-time values).
+        ``num_patches`` from ``batch_mm_kwargs`` (not the capture-time values).
         """
-        num_patches = mm_kwargs["num_patches"]
+        num_patches = batch_mm_kwargs["num_patches"]
         hidden = output.shape[-1]
         bsz = len(indices)
 
         img_out = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            self.config.vision_config.image_size, self.config.vision_config.patch_size, self.config.understand_projector_stride
-            )
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
         patch_out = Step3VLForConditionalGeneration._compute_spatial_tokens(
-            504, self.config.vision_config.patch_size, self.config.understand_projector_stride
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
         )
 
         # Valid portion: bsz images, actual_total_patches patches
@@ -925,9 +957,8 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
         img_part = output[:img_tokens].reshape(bsz, img_out, hidden)
         if total_patches > 0:
-            patch_part = (
-                output[img_tokens:img_tokens + patch_tokens]
-                .reshape(-1, patch_out, hidden)
+            patch_part = output[img_tokens : img_tokens + patch_tokens].reshape(
+                -1, patch_out, hidden
             )
         else:
             patch_part = None
@@ -938,15 +969,14 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             np = actual_np[i]
             parts: list[torch.Tensor] = []
             if patch_part is not None and np > 0:
-                parts.append(
-                    patch_part[cur_patch:cur_patch + np].reshape(-1, hidden))
+                parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
                 cur_patch += np
             parts.append(img_part[i].reshape(-1, hidden))
-            merged[idx] = (
-                torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
-            )
+            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
 
-        return [merged[i] for i in indices]
+        out = [merged[i] for i in indices]
+        for i, idx in enumerate(indices):
+            dest[idx] = out[i]
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -957,6 +987,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
         )
+
         # Only patch_pixel_values lives in the buffers dict; num_patches is
         # processed CPU-side by finalize_encoder_cudagraph_output.
         return EncoderCudaGraphReplayBuffers(
