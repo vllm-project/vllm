@@ -1344,6 +1344,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+            ec_transfer_params = None
             status_before_stop = request.status
 
             # Check for stop and update request status.
@@ -1387,7 +1388,7 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    kv_transfer_params = self._free_request(request)
+                    kv_transfer_params, ec_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1411,6 +1412,7 @@ class Scheduler(SchedulerInterface):
                 new_token_ids
                 or pooler_output is not None
                 or kv_transfer_params
+                or ec_transfer_params
                 or stopped
             ):
                 # Add EngineCoreOutput for this Request.
@@ -1426,6 +1428,7 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
+                        ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
@@ -1751,10 +1754,20 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
-    ) -> dict[str, Any] | None:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+
+        # EC Connector: mirror the KV hook. The contract requires firing
+        # before the encoder cache is freed so the connector can inspect
+        # per-request state (e.g. which mm_hashes it recorded during
+        # save_caches()) and emit ec_transfer_params for the response body.
+        ec_xfer_params: dict[str, Any] | None = None
+        if self.ec_connector is not None:
+            ec_delay_free, ec_xfer_params = self.ec_connector.request_finished(request)
+            connector_delay_free_blocks |= ec_delay_free
+
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)
@@ -1765,7 +1778,7 @@ class Scheduler(SchedulerInterface):
         if not delay_free_blocks:
             self._free_blocks(request)
 
-        return kv_xfer_params
+        return kv_xfer_params, ec_xfer_params
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()

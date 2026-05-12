@@ -276,6 +276,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
@@ -350,6 +351,7 @@ class RequestState:
             outputs,
             finished,
             kv_transfer_params,
+            ec_transfer_params,
             prompt_routed_experts,
         )
 
@@ -359,6 +361,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        ec_transfer_params: dict[str, Any] | None = None,
         prompt_routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         # If prompt embeds were used, put placeholder prompt token ids
@@ -393,6 +396,7 @@ class RequestState:
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
             prompt_routed_experts=prompt_routed_experts,
@@ -518,6 +522,7 @@ class OutputProcessor:
                         finish_reason=FinishReason.ABORT,
                         stop_reason=None,
                         kv_transfer_params=None,
+                        ec_transfer_params=None,
                     )
                 ):
                     req_state.queue.put(request_output)
@@ -641,6 +646,7 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
+            ec_transfer_params = engine_core_output.ec_transfer_params
             routed_experts = engine_core_output.routed_experts
 
             if req_state.is_prefilling:
@@ -672,6 +678,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
+                ec_transfer_params,
                 routed_experts,
             ):
                 if req_state.streaming_input:
