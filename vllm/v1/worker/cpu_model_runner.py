@@ -21,6 +21,9 @@ logger = init_logger(__name__)
 
 class CPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # avoid calling accelerator APIs for methods inherited from super class
+        _set_torch_accelerator_to_noop()
+
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
@@ -244,3 +247,11 @@ def _set_global_compilation_settings(config: VllmConfig):
         yield
     finally:
         torch_inductor_config.freezing = freezing_value
+
+
+def _set_torch_accelerator_to_noop() -> None:
+    def noop(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    torch.accelerator.synchronize = noop
+    torch.accelerator.empty_cache = noop

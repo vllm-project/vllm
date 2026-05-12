@@ -38,6 +38,14 @@ _TOOL_PARSERS_TO_REGISTER = {
         "deepseekv4_tool_parser",
         "DeepSeekV4ToolParser",
     ),
+    "cohere_command3": (
+        "cohere_command_tool_parser",
+        "CohereCommand3ToolParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_tool_parser",
+        "CohereCommand4ToolParser",
+    ),
     "ernie45": (
         "ernie45_tool_parser",
         "Ernie45ToolParser",
@@ -85,6 +93,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "jamba": (
         "jamba_tool_parser",
         "JambaToolParser",
+    ),
+    "lfm2": (
+        "lfm2_tool_parser",
+        "Lfm2ToolParser",
     ),
     "kimi_k2": (
         "kimi_k2_tool_parser",
