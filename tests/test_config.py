@@ -67,6 +67,71 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-Base",
+                architectures=["Qwen3ForCausalLM"],
+                is_moe=False,
+                is_quantized=lambda: False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-32B",
+                architectures=["Qwen3ForCausalLM"],
+                is_moe=False,
+                is_quantized=lambda: False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="facebook/opt-125m",
+                architectures=["OPTForCausalLM"],
+                is_moe=False,
+                is_quantized=lambda: False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-30B-A3B",
+                architectures=["Qwen3MoeForCausalLM"],
+                is_moe=True,
+                is_quantized=lambda: False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-FP8",
+                architectures=["Qwen3ForCausalLM"],
+                is_moe=False,
+                is_quantized=lambda: True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3.5-4B",
+                architectures=["Qwen3_5ForConditionalGeneration"],
+                is_moe=False,
+                is_quantized=lambda: False,
+            ),
+            False,
+        ),
+    ],
+)
+def test_is_default_v2_model_runner_model(model_config, expected):
+    config = SimpleNamespace(model_config=model_config)
+
+    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+
+
 @pytest.mark.skip_global_cleanup
 def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
     monkeypatch,

@@ -65,12 +65,7 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_MODELS = frozenset(
-    {
-        "Qwen/Qwen3-0.6B",
-        "facebook/opt-125m",
-    }
-)
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
 
 
 class OptimizationLevel(IntEnum):
@@ -503,10 +498,7 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        if (
-            self.model_config is None
-            or self.model_config.model not in DEFAULT_V2_MODEL_RUNNER_MODELS
-        ):
+        if not self._is_default_v2_model_runner_model():
             return False
 
         if not HAS_TRITON:
@@ -525,6 +517,22 @@ class VllmConfig:
             return False
 
         return True
+
+    def _is_default_v2_model_runner_model(self) -> bool:
+        model_config = self.model_config
+        if model_config is None:
+            return False
+
+        architectures = getattr(model_config, "architectures", [])
+        if not any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        ):
+            return False
+
+        if getattr(model_config, "is_moe", False):
+            return False
+
+        return not model_config.is_quantized()
 
     @property
     def needs_dp_coordinator(self) -> bool:
