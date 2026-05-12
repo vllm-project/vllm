@@ -6,7 +6,7 @@ from __future__ import annotations
 import copy
 from collections import Counter
 from dataclasses import dataclass, fields, replace
-from enum import IntEnum
+from enum import Enum, IntEnum
 from math import prod
 from typing import TYPE_CHECKING
 
@@ -76,6 +76,19 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
+
+
+class KVCacheSpecKind(str, Enum):
+    FULL_ATTENTION = "full_attention"
+    MLA_ATTENTION = "mla_attention"
+    SLIDING_WINDOW = "sliding_window"
+    SLIDING_WINDOW_MLA = "sliding_window_mla"
+    MAMBA = "mamba"
+    CHUNKED_LOCAL_ATTENTION = "chunked_local_attention"
+    SINK_FULL_ATTENTION = "sink_full_attention"
+    ENCODER_ONLY_ATTENTION = "encoder_only_attention"
+    CROSS_ATTENTION = "cross_attention"
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -730,6 +743,50 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             cdiv(spec.max_memory_usage_bytes(vllm_config), spec.page_size_bytes)
             for spec in self.kv_cache_specs.values()
         )
+
+
+def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        inner_kinds = {
+            get_kv_cache_spec_kind(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        if len(inner_kinds) == 1:
+            return next(iter(inner_kinds))
+        return KVCacheSpecKind.UNKNOWN
+    # Keep subclass checks before base classes so specialized specs keep their
+    # more precise kind.
+    if isinstance(kv_cache_spec, SlidingWindowMLASpec):
+        return KVCacheSpecKind.SLIDING_WINDOW_MLA
+    if isinstance(kv_cache_spec, MLAAttentionSpec):
+        return KVCacheSpecKind.MLA_ATTENTION
+    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
+        return KVCacheSpecKind.SINK_FULL_ATTENTION
+    if isinstance(kv_cache_spec, FullAttentionSpec):
+        return KVCacheSpecKind.FULL_ATTENTION
+    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+        return KVCacheSpecKind.CHUNKED_LOCAL_ATTENTION
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return KVCacheSpecKind.SLIDING_WINDOW
+    if isinstance(kv_cache_spec, MambaSpec):
+        return KVCacheSpecKind.MAMBA
+    if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
+        return KVCacheSpecKind.ENCODER_ONLY_ATTENTION
+    if isinstance(kv_cache_spec, CrossAttentionSpec):
+        return KVCacheSpecKind.CROSS_ATTENTION
+    return KVCacheSpecKind.UNKNOWN
+
+
+def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        inner_windows = {
+            get_kv_cache_spec_sliding_window(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        return next(iter(inner_windows)) if len(inner_windows) == 1 else None
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        return kv_cache_spec.sliding_window
+    return None
 
 
 @dataclass
