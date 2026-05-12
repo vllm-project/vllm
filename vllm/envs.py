@@ -203,7 +203,6 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -1080,27 +1079,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Master switch for the pre-rebase ROCm-native code paths used by
     # DeepSeek-V4 (DSv4-Flash-FP8). When True (default on ROCm) the model
-    # selects the validated pre-rebase implementations at four call sites:
+    # selects the validated pre-rebase implementations at two call sites:
     #
     #   1. SWA K-cache writer: torch reference
     #      (``_deepseek_v4_qnorm_rope_kv_insert_reference``) instead of
     #      upstream's HIPified ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert``
     #      C++ kernel, whose FP8 dtype is selected at compile time
     #      (``HIP_FP8_TYPE_OCP``) and silently corrupts every K byte on
-    #      MI300X (FNUZ-only). This is the regression fix; the other three
-    #      below are kept for defense in depth and bisection.
-    #   2. MLA decode: ``flash_mla_with_kvcache_rocm`` Triton kernel
-    #      (95% GSM8K validated) instead of upstream's
-    #      ``rocm_forward_decode_fallback``.
-    #   3. MLA sparse prefill: ``flash_mla_sparse_fwd_rocm`` Triton kernel
-    #      instead of upstream's ``rocm_sparse_attn_prefill``.
-    #   4. Sparse indexer: recovered ``rocm_sparse_attn_indexer_no_insert``
+    #      MI300X (FNUZ-only). This is the regression fix.
+    #   2. Sparse indexer: recovered ``rocm_sparse_attn_indexer_no_insert``
     #      orchestration instead of upstream's
     #      ``rocm_aiter_sparse_attn_indexer_native``.
     #
-    # Set to "0" to opt back into the upstream paths for bisection / perf
-    # comparison (note: requires the SWA writer fix below to also be in place
-    # — flipping this alone reproduces the deterministic-garbage regression).
+    # NOTE: the MLA decode/sparse-prefill paths are not gated by this env
+    # var any more — upstream unified the call sites, and our ROCm
+    # ``flash_mla_with_kvcache_rocm`` / ``flash_mla_sparse_fwd_rocm``
+    # Triton kernels are always dispatched on ROCm via
+    # ``vllm.v1.attention.ops.flashmla``.
+    #
+    # Set to "0" to opt back into the upstream paths for bisection (note:
+    # the SWA-writer C++ kernel still produces deterministic garbage on
+    # MI300X, so site 1 is only useful for kernel debugging at present).
     "VLLM_ROCM_USE_V4_TRITON_FALLBACK": lambda: (
         os.getenv("VLLM_ROCM_USE_V4_TRITON_FALLBACK", "True").lower() in ("true", "1")
     ),
@@ -1492,13 +1491,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_NVFP4_CT_EMULATIONS": lambda: bool(
         int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))
     ),
-    # Time (in seconds) after which the KV cache on the producer side is
-    # automatically cleared if no READ notification is received from the
-    # consumer. This is only applicable when using NixlConnector in a
-    # disaggregated decode-prefill setup.
-    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
-        os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
-    ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
         os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower() in ("true", "1")
@@ -1815,6 +1807,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
+    # If set to 1, use Python spinloop extension to poll in a more efficient
+    # way when using the mp backend.
+    "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
 }
 
 
@@ -1911,6 +1906,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
+        "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
