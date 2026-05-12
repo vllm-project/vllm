@@ -46,6 +46,7 @@ def test_request_output_add_propagates_ec_transfer_params():
                     text="",
                     token_ids=[],
                     cumulative_logprob=0.0,
+                    logprobs=None,
                     finish_reason=None,
                 )
             ],
@@ -101,4 +102,30 @@ def test_free_request_calls_ec_connector_and_surfaces_params():
 
     mock_ec.request_finished.assert_called_once_with(request)
     assert ec_params == EC_PARAMS
+    assert kv_params is None
+
+
+def test_free_request_without_ec_connector_returns_none():
+    """When no EC connector is configured, ec_transfer_params must be None."""
+    sp = SamplingParams(max_tokens=1)
+    sp.update_from_generation_config({}, 50256)
+    request = Request(
+        request_id="test-req",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=sp,
+        pooling_params=None,
+    )
+    request.status = RequestStatus.FINISHED_STOPPED
+
+    scheduler = object.__new__(Scheduler)
+    scheduler.connector = None
+    scheduler.ec_connector = None
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler.encoder_cache_manager = MagicMock()
+    scheduler._free_blocks = MagicMock()
+
+    kv_params, ec_params = scheduler._free_request(request)
+
+    assert ec_params is None
     assert kv_params is None
