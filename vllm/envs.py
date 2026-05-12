@@ -1641,18 +1641,29 @@ class QuantSettings(BaseSettings):
             "may not produce correct model outputs."
         ),
     )
-    nvfp4_gemm_backend: str | None = Field(
+    nvfp4_gemm_backend: (
+        Literal[
+            "flashinfer-cudnn",
+            "flashinfer-trtllm",
+            "flashinfer-cutlass",
+            "cutlass",
+            "marlin",
+            "emulation",
+        ]
+        | None
+    ) = Field(
         default=None,
         description=(
             'Supported options: "flashinfer-cudnn" -- use flashinfer cudnn '
             'GEMM backend; "flashinfer-trtllm" -- use flashinfer trtllm '
             'GEMM backend; "flashinfer-cutlass" -- use flashinfer cutlass '
-            'GEMM backend; "marlin" -- use marlin GEMM backend (for GPUs '
-            'without native FP4 support); "emulation" -- use BF16/FP16 '
-            "GEMM, dequantizing weights and running QDQ on activations "
-            "(only meant for research purposes to run on devices where "
-            "NVFP4 GEMM kernels are not available); <none> -- automatically "
-            "pick an available backend."
+            'GEMM backend; "cutlass" -- use cutlass GEMM backend; "marlin" '
+            "-- use marlin GEMM backend (for GPUs without native FP4 "
+            'support); "emulation" -- use BF16/FP16 GEMM, dequantizing '
+            "weights and running QDQ on activations (only meant for "
+            "research purposes to run on devices where NVFP4 GEMM kernels "
+            "are not available); <none> -- automatically pick an available "
+            "backend."
         ),
     )
     use_nvfp4_ct_emulations: bool = Field(
