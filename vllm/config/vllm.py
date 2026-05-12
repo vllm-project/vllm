@@ -529,10 +529,7 @@ class VllmConfig:
         ):
             return False
 
-        if getattr(model_config, "is_moe", False):
-            return False
-
-        return not model_config.is_quantized()
+        return not model_config.is_moe and not model_config.is_quantized
 
     @property
     def needs_dp_coordinator(self) -> bool:
