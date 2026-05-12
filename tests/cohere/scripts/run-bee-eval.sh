@@ -100,16 +100,16 @@ run_bee_eval() {
     non_reasoning_test_args=$(echo "$tests" | jq -r 'map(select(. | index("reasoning") | not)) | map("-I " + .) | join(" ")')
     # Create reasoning test args (include only tests with "reasoning" in name)
     reasoning_test_args=$(echo "$tests" | jq -r 'map(select(. | index("reasoning") | .)) | map("-I " + .) | join(" ")')
-    # Build --extra_body args from eval config if thinking budgets are set
-    non_reasoning_extra_body=""
-    reasoning_extra_body=""
+    # Build --thinking_token_budget args from eval config if set
+    non_reasoning_thinking_budget_arg=""
+    reasoning_thinking_budget_arg=""
     thinking_budget=$(echo "$eval_params" | jq -r '.thinking_token_budget // empty')
     reasoning_thinking_budget=$(echo "$eval_params" | jq -r '.reasoning_thinking_token_budget // empty')
     if [[ -n "$thinking_budget" ]]; then
-      non_reasoning_extra_body="--extra_body '{\"thinking_token_budget\": $thinking_budget}'"
+      non_reasoning_thinking_budget_arg="--thinking_token_budget $thinking_budget"
     fi
     if [[ -n "$reasoning_thinking_budget" ]]; then
-      reasoning_extra_body="--extra_body '{\"thinking_token_budget\": $reasoning_thinking_budget}'"
+      reasoning_thinking_budget_arg="--thinking_token_budget $reasoning_thinking_budget"
     fi
 
 
@@ -128,13 +128,13 @@ run_bee_eval() {
         --log_samples_n 1 \
         --log_every_n_seconds 1800 \
         $non_reasoning_test_args \
-        --estimator openaiapi \
+        --estimator VLLMEstimator \
         --timeout 900 \
         --max_retries 3 \
         --model $eval_model \
         --base_url http://127.0.0.1:8000/v1 \
         --temperature 0.6 \
-        $non_reasoning_extra_body"
+        $non_reasoning_thinking_budget_arg"
     fi
 
     if [[ !  -z "$reasoning_test_args" ]]; then
@@ -146,14 +146,14 @@ run_bee_eval() {
         --log_samples_n 1 \
         --log_every_n_seconds 1800 \
         $reasoning_test_args \
-        --estimator openaiapi \
+        --estimator VLLMEstimator \
         --num_workers 16 \
         --timeout 1500 \
         --max_retries 3 \
         --model $eval_model \
         --base_url http://127.0.0.1:8000/v1 \
         --temperature 0.6 \
-        $reasoning_extra_body"
+        $reasoning_thinking_budget_arg"
     fi
 
     # Concatenate commands with && if both are non-empty
@@ -214,26 +214,24 @@ main() {
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
 
+  # Tell bee to write local-disk output to a fixed, known location so we
+  # don't have to guess site-packages paths.
+  export APIARY_OUTPUT_PATH="${BEE_DIR}/output"
+  mkdir -p "${APIARY_OUTPUT_PATH}"
+
   # generate configs for serving test sweep
   MODEL_NAME=$1 MODEL_PATH=$2 python3 tests/cohere/scripts/generate-serving-config.py --mode eval
 
   # Eval
   run_bee_eval tests/cohere/configs/"${SERVING_JSON:-serving-cohere-tests$ARCH.json}"
 
-  # Bee Output Path
-  if [ "${gpu_type}" == "AMD" ]; then
-    bee_output_path="${BEE_DIR}/.venv/lib/python3.11/site-packages/output"
-  else
-    bee_output_path="${BEE_DIR}/output"
-  fi
-
   # Copy summary_metrics to mounted directory
-  if [[ -z "${bee_output_path}" ]]; then
+  if [[ -z "${APIARY_OUTPUT_PATH}" ]]; then
     echo "Error: Could not extract summary_metrics_path from Bee output."
     exit 1
   fi
   # Loop through each subfolder in the source directory
-  for subfolder in "${bee_output_path}"/*/; do
+  for subfolder in "${APIARY_OUTPUT_PATH}"/*/; do
     # Get just the subfolder name (without path)
     subfolder_name=$(basename "$subfolder")
 
@@ -259,7 +257,7 @@ main() {
       cp "$mfile" "${RESULTS_FOLDER}$1_${subfolder_name}_$(basename "$mfile")"
     done
   done
-  rm -r "${bee_output_path}"
+  rm -r "${APIARY_OUTPUT_PATH}"
 }
 
 main "$@"

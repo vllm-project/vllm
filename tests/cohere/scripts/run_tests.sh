@@ -252,7 +252,7 @@ run_bee_eval() {
 
     echo "Installing Bee"
     cd ${BEE_DIR}
-    uv sync --python 3.11 --group local --no-group publish --no-editable --all-extras || { echo "Failed to install Bee dependencies"; exit 1; }
+    uv sync --python 3.12 --no-editable --extra all || { echo "Failed to install Bee dependencies"; exit 1; }
     echo "Bee installed"
     cd ${VLLM_WORKSPACE}
 

@@ -49,6 +49,7 @@ which lsof >/dev/null 2>&1 || missing_deps+=(lsof)
 which git >/dev/null 2>&1 || missing_deps+=(git)
 if command -v apt-get >/dev/null 2>&1 && command -v dpkg >/dev/null 2>&1; then
   dpkg -s zlib1g-dev >/dev/null 2>&1 || missing_deps+=(zlib1g-dev)
+  dpkg -s libffi-dev >/dev/null 2>&1 || missing_deps+=(libffi-dev)  # required to compile cffi from source for bee eval
 fi
 if [ ${#missing_deps[@]} -gt 0 ]; then
   apt-get update && apt-get install -y "${missing_deps[@]}"
