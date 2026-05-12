@@ -205,10 +205,11 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return weight_key == kMxfp8Static and activation_key in (
+        SUPPORTED_W_A = [
             (kMxfp8Static, None),
             (kMxfp8Static, kMxfp8Dynamic),
-        )
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
 
 class XPUExpertsMXFp4(XPUExperts):
