@@ -64,6 +64,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 # Optional ROCm AITER Triton kernels for the GDN decode fast-path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
@@ -237,8 +238,8 @@ class ChunkGatedDeltaRule(CustomOp):
 @PluggableLayer.register("gated_delta_net_attention")
 class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     @property
-    def mamba_type(self) -> str:
-        return "gdn_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.GDN_ATTN
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
@@ -263,7 +264,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         config: Qwen3NextConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
-        create_in_proj_qkvz: bool = True,
         gqa_interleaved_layout=False,
     ) -> None:
         super().__init__()
@@ -323,32 +323,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # we need to create qkvz_proj adaptively here.
         # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
         # in_proj_qkv and in_proj_z are created separately instead.
-        self.has_lora_projections = not create_in_proj_qkvz
-        if create_in_proj_qkvz:
-            self.in_proj_qkvz = self.create_qkvz_proj(
-                hidden_size=self.hidden_size,
-                key_dim=self.key_dim,
-                value_dim=self.value_dim,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj_qkvz",
-            )
-        else:
-            # LoRA case (Qwen3.5 only): keep q/k/v and z as separate modules
-            # so that LoRA adapters can be applied independently.
-            self.in_proj_qkv = MergedColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_sizes=[self.key_dim, self.key_dim, self.value_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj_qkv",
-            )
-            self.in_proj_z = ColumnParallelLinear(
-                input_size=self.hidden_size,
-                output_size=self.value_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.in_proj_z",
-            )
+        self.in_proj_qkvz = self.create_qkvz_proj(
+            hidden_size=self.hidden_size,
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.in_proj_qkvz",
+        )
+
         # ba_proj doesn't support blockwise fp8 quantization.
         # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
         # layouts, so we use a factory method to create the projection.
@@ -637,7 +619,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         return mixed_qkv_out, z_out, b_out, a_out
 
-    @torch.compile(fullgraph=True)
     def rearrange_mixed_qkv(self, mixed_qkv):
         """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
 
@@ -708,7 +689,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
     ):
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if not self.has_lora_projections and GDN_AITER_TRITON_AVAILABLE:
+        if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -753,37 +734,27 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        if self.has_lora_projections:
-            # LoRA path (Qwen3.5 only): separate in_proj_qkv and in_proj_z
-            mixed_qkv, _ = self.in_proj_qkv(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-            z, _ = self.in_proj_z(hidden_states)
+        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+        ba, _ = self.in_proj_ba(hidden_states)
+
+        if self.gqa_interleaved_layout:
+            # Qwen3-Next: unpack the interleaved GQA layout
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                mixed_qkvz, ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
+        else:
+            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+            z_size = self.value_dim // self.tp_size
+            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = ba.chunk(2, dim=-1)
             b = b.contiguous()
             a = a.contiguous()
-        else:
-            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            ba, _ = self.in_proj_ba(hidden_states)
-
-            if self.gqa_interleaved_layout:
-                # Qwen3-Next: unpack the interleaved GQA layout
-                query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                    mixed_qkvz, ba
-                )
-                query, key, value = map(
-                    lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-                )
-                mixed_qkv = torch.cat((query, key, value), dim=-1)
-            else:
-                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-                z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
-                z = z.reshape(z.size(0), -1, self.head_v_dim)
-                b, a = ba.chunk(2, dim=-1)
-                b = b.contiguous()
-                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -822,8 +793,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         3. Output projection
         """
         num_tokens = hidden_states.size(0)
-
-        assert not self.has_lora_projections, "lora isn't supported on XPU."
 
         # ============================================================
         # Part 1: Input Projection

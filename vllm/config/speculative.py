@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import ast
 import copy
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -145,9 +144,6 @@ class SpeculativeConfig:
     provided. Defaults to 1."""
 
     # Alternative drafting strategies
-    speculative_token_tree: str | None = None
-    """Specifies the tree structure for speculative token generation.
-    """
     parallel_drafting: bool = False
     """Enable parallel drafting, where all speculative tokens are generated
     in parallel rather than sequentially. This can improve performance but
@@ -739,23 +735,10 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
-                if self.speculative_token_tree is None:
-                    if self.num_speculative_tokens is None:
-                        raise ValueError(
-                            "A speculative model was provided, but neither "
-                            "`speculative_token_tree` nor `num_speculative_tokens` "
-                            "was provided"
-                        )
-
-                    # Generate chain of tokens.
-                    self.speculative_token_tree = str(
-                        [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
-                    )
-                else:
-                    # Sort the token tree breadth-first.
-                    tree_choices = ast.literal_eval(self.speculative_token_tree)
-                    self.speculative_token_tree = str(
-                        sorted(tree_choices, key=lambda t: (len(t), t))
+                if self.num_speculative_tokens is None:
+                    raise ValueError(
+                        "A speculative model was provided, but "
+                        "`num_speculative_tokens` was not provided"
                     )
 
                 self.draft_tensor_parallel_size = (
