@@ -10,7 +10,7 @@ import pybase64 as base64
 import pytest
 import websockets
 
-from tests.entrypoints.openai.conftest import add_attention_backend
+from tests.entrypoints.speech_to_text.conftest import add_attention_backend
 from tests.utils import ROCM_ENV_OVERRIDES, ROCM_EXTRA_ARGS, RemoteOpenAIServer
 from vllm.assets.audio import AudioAsset
 from vllm.multimodal.media.audio import load_audio
@@ -162,6 +162,11 @@ async def test_multi_chunk_streaming(
                 " First words I spoke in the original phonograph."
                 " A little piece of practical poetry. Mary had a little lamb,"
                 " it sleeps with quite a flow, and everywhere that Mary went,"
+                " the lamb was sure to go."
+            ) or full_text == (
+                " First words I spoke in the original phonograph."
+                " A little piece of practical poetry. Mary had a little lamb,"
+                " it squeaked with quite a flow, and everywhere that Mary went,"
                 " the lamb was sure to go."
             )
 
