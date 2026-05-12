@@ -11,6 +11,7 @@ from transformers import MiniCPMV4_6Config
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -616,7 +617,7 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
 
         self.pre_norm = nn.LayerNorm(hidden_4x, eps=config.layer_norm_eps)
         self.linear_1 = nn.Linear(hidden_4x, inter_4x, bias=True)
-        self.act = nn.GELU(approximate="tanh")
+        self.act = get_act_fn("gelu_pytorch_tanh")
         self.linear_2 = nn.Linear(inter_4x, self.embed_dim, bias=True)
 
     def _apply_window_attention(
@@ -736,7 +737,7 @@ class MiniCPMV4_6DownsampleMLP(nn.Module):
         self.hidden_size = hidden_size * merge_kernel_size[0] * merge_kernel_size[1]
         self.pre_norm = nn.LayerNorm(self.hidden_size, eps=1e-6)
         self.linear_1 = nn.Linear(self.hidden_size, self.hidden_size, bias=True)
-        self.act = nn.GELU()
+        self.act = get_act_fn("gelu")
         self.linear_2 = nn.Linear(self.hidden_size, llm_embed_dim, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
