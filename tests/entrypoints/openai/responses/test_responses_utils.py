@@ -429,7 +429,7 @@ class TestShouldContinueFinalMessage:
         assert should_continue_final_message([output_item]) is True
 
 
-class TestConstructInputMessagesInstructionsLeak:
+class TestConstructInputMessagesInstructionsLeakBehavior:
     def test_old_instructions_stripped_from_prev_msg(self):
         prev = [
             {"role": "system", "content": "old instructions"},
@@ -802,7 +802,7 @@ class TestMaybeCombineReasoningAndToolCall:
         assert result is None
 
 
-class TestConstructInputMessagesInstructionsLeak:
+class TestConstructInputMessagesInstructionsLeakRegression:
     """Regression tests for #37697: instructions from a prior response
     should NOT leak through previous_response_id."""
 

@@ -202,32 +202,34 @@ def test_structured_outputs_json(sample_output, should_match):
 
 
 def test_required_schema_reuse_keeps_tool_defs_intact():
-    tools = TypeAdapter(list[ChatCompletionToolsParam]).validate_python([
-        {
-            "type": "function",
-            "function": {
-                "name": "get_weather",
-                "description": "Get weather details",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "options": {"$ref": "#/$defs/WeatherOptions"},
-                    },
-                    "required": ["options"],
-                    "$defs": {
-                        "WeatherOptions": {
-                            "type": "object",
-                            "properties": {
-                                "city": {"type": "string"},
+    tools = TypeAdapter(list[ChatCompletionToolsParam]).validate_python(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather details",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "options": {"$ref": "#/$defs/WeatherOptions"},
+                        },
+                        "required": ["options"],
+                        "$defs": {
+                            "WeatherOptions": {
+                                "type": "object",
+                                "properties": {
+                                    "city": {"type": "string"},
+                                },
+                                "required": ["city"],
                             },
-                            "required": ["city"],
                         },
                     },
                 },
-            },
-            "strict": True,
-        }
-    ])
+                "strict": True,
+            }
+        ]
+    )
 
     expected_defs = deepcopy(tools[0].function.parameters["$defs"])
 

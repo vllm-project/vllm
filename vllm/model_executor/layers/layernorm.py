@@ -14,7 +14,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 

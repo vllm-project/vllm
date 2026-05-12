@@ -322,9 +322,7 @@ class Scheduler(SchedulerInterface):
 
         with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
             any_request_id = self.running[0].request_id
-            return self.kv_cache_manager.get_num_common_prefix_blocks(
-                any_request_id
-            )
+            return self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
 
     def _mamba_block_aligned_split(
         self,

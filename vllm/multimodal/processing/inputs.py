@@ -39,7 +39,9 @@ class ProcessorInputs:
         for modality, data_items in mm_data_items.items():
             if modality in shared_key_set:
 
-                def hash_item(item_to_hash: object) -> str:
+                def hash_item_with_kwargs(
+                    item_to_hash: object, modality: str = modality
+                ) -> str:
                     # Preserve dict unpack overwrite semantics in the unlikely
                     # case of a key collision with processor kwargs.
                     return hasher.hash_kwargs(
@@ -48,15 +50,24 @@ class ProcessorInputs:
                         **hf_processor_mm_kwargs,
                     )
 
+                hash_item = hash_item_with_kwargs
+
             else:
                 insert_idx = bisect_left(shared_keys, modality)
-                prefix = shared_items[:insert_idx]
-                suffix = shared_items[insert_idx:]
+                prefix = tuple(shared_items[:insert_idx])
+                suffix = tuple(shared_items[insert_idx:])
 
-                def hash_item(item_to_hash: object) -> str:
+                def hash_item_with_ordered_items(
+                    item_to_hash: object,
+                    modality: str = modality,
+                    prefix: tuple[tuple[str, object], ...] = prefix,
+                    suffix: tuple[tuple[str, object], ...] = suffix,
+                ) -> str:
                     return hasher.hash_ordered_items(
                         chain(prefix, ((modality, item_to_hash),), suffix)
                     )
+
+                hash_item = hash_item_with_ordered_items
 
             if modality in mm_uuid_items:
                 uuid_items = mm_uuid_items[modality]

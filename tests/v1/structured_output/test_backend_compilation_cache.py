@@ -96,12 +96,13 @@ def test_guidance_compile_grammar_reuses_serialized_grammar(monkeypatch):
 def test_lmfe_compile_grammar_reuses_cached_parser(monkeypatch):
     lmfe_mod._cached_compile_character_level_parser.cache_clear()
     parser_builds: list[tuple[str, object]] = []
-    token_enforcer_parsers: list[object] = []
 
     class FakeParser:
         def __init__(self, kind: str, payload: object):
             self.kind = kind
             self.payload = payload
+
+    token_enforcer_parsers: list[FakeParser] = []
 
     class FakeTokenEnforcer:
         def __init__(self, tokenizer_data, parser):
@@ -110,7 +111,7 @@ def test_lmfe_compile_grammar_reuses_cached_parser(monkeypatch):
             self.eos_token_id = -1
             token_enforcer_parsers.append(parser)
 
-    def build_json_schema_parser(spec_dict):
+    def build_json_schema_parser(spec_dict: dict[str, object]):
         parser_builds.append(("json", spec_dict))
         return FakeParser("json", spec_dict)
 
@@ -191,6 +192,7 @@ def test_lmfe_post_init_falls_back_to_transformers_builder(monkeypatch):
     assert backend.tokenizer_data is sentinel
     assert len(vllm_builder_calls) == 1
     assert len(transformers_builder_calls) == 1
-    assert "falling back to the generic transformers tokenizer-data builder" in (
-        warning_messages[0]
+    assert (
+        "falling back to the generic transformers tokenizer-data builder"
+        in (warning_messages[0])
     )
