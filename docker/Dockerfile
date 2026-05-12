@@ -301,6 +301,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         python3 use_existing_torch.py --prefix; \
     fi
 
+# Provision a bare interpreter for each CPython covered by `requires-python`
+# so DeepGEMM `_C` is built once per Python and bundled side-by-side in the
+# wheel; cmake reads DEEPGEMM_PYTHON_INTERPRETERS in deepgemm.cmake's
+# foreach loop. The matrix is derived from pyproject.toml.
+COPY tools/setup_deepgemm_pythons.sh tools/build_deepgemm_C.py tools/
+ENV DEEPGEMM_VENV_PREFIX=/opt/dgenv
+RUN --mount=type=cache,target=/root/.cache/uv \
+    tools/setup_deepgemm_pythons.sh > /tmp/dg_pythons.txt
+
 # Build the vLLM wheel
 # if USE_SCCACHE is set, use sccache to speed up compilation
 # AWS credentials mounted at ~/.aws/credentials for sccache S3 auth (optional)
@@ -328,6 +337,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" \
         && export VLLM_MAIN_CUDA_VERSION="${VLLM_MAIN_CUDA_VERSION}" \
         && export VLLM_DOCKER_BUILD_CONTEXT=1 \
+        && export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) \
         && sccache --show-stats \
         && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
         && sccache --show-stats; \
@@ -345,6 +355,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
         export VLLM_USE_PRECOMPILED="${VLLM_USE_PRECOMPILED}" && \
         export VLLM_PRECOMPILED_WHEEL_COMMIT="${VLLM_MERGE_BASE_COMMIT}" && \
         export VLLM_DOCKER_BUILD_CONTEXT=1 && \
+        export DEEPGEMM_PYTHON_INTERPRETERS=$(cat /tmp/dg_pythons.txt) && \
         python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
     fi
 
@@ -860,7 +871,7 @@ LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm" \
 # define sagemaker first, so it is not default from `docker build`
 FROM vllm-openai-base AS vllm-sagemaker
 
-COPY examples/online_serving/sagemaker-entrypoint.sh .
+COPY examples/deployment/sagemaker-entrypoint.sh .
 RUN chmod +x sagemaker-entrypoint.sh
 ENTRYPOINT ["./sagemaker-entrypoint.sh"]
 

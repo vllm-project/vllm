@@ -171,6 +171,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         replace_parameter(layer, "w13_weight", w13_new, prefer_copy=is_weight_update)
         replace_parameter(layer, "w2_weight", w2_new, prefer_copy=is_weight_update)
 
+        # AITER backend requires weights to be marked as shuffled.
+        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
+
         if not is_weight_update:
             # Setup moe kernel only on the first call. For the unquantized
             # method, moe_quant_config is either the constant
@@ -186,7 +191,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 moe_config=self.moe,
                 backend=self.unquantized_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
                 shared_experts=layer.shared_experts,
             )
 
