@@ -17,7 +17,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
 
 
 def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
@@ -117,10 +116,10 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
 
     # store [1, 2] and complete
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    manager.complete_store(to_keys([1, 2]))
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
     # touch [1] to make block 2 the LRU candidate
-    manager.touch(to_keys([1]))
+    manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
     # prepare_store([2, 3, 4, 5]):
     #   - block 2 is already stored -> filtered out of keys_to_store
@@ -137,7 +136,7 @@ def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     )
 
     # complete_store must not silently drop block 2
-    manager.complete_store(to_keys([2, 3, 4, 5]))
+    manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
 
     # block 2 must still be present in the cache
     assert manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
@@ -171,7 +170,7 @@ def test_cpu_manager():
     assert list(cpu_manager.take_events()) == []
 
     # complete store [1, 2]
-    cpu_manager.complete_store(to_keys([1, 2]))
+    cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
     # lookup [1, 2]
@@ -199,7 +198,7 @@ def test_cpu_manager():
     assert cpu_manager.prepare_store(to_keys([1, 6]), _EMPTY_REQ_CTX) is None
 
     # complete store [2, 3, 4, 5]
-    cpu_manager.complete_store(to_keys([2, 3, 4, 5]))
+    cpu_manager.complete_store(to_keys([2, 3, 4, 5]), _EMPTY_REQ_CTX)
 
     # lookup (now that we have [2, 3, 4, 5])
     assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is False
@@ -217,7 +216,7 @@ def test_cpu_manager():
     assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
 
     # complete load [2, 3]
-    cpu_manager.complete_load(to_keys([2, 3]))
+    cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
 
     # prepare store [6, 7, 8] -> evicts [2, 3, 4] (oldest)
     prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
@@ -231,10 +230,10 @@ def test_cpu_manager():
     )
 
     # complete store [6, 7, 8]
-    cpu_manager.complete_store(to_keys([6, 7, 8]))
+    cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
     # touch [5, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([5, 6, 7]))
+    cpu_manager.touch(to_keys([5, 6, 7]), _EMPTY_REQ_CTX)
 
     # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
@@ -248,7 +247,7 @@ def test_cpu_manager():
     )
 
     # complete store [7, 9] with failure
-    cpu_manager.complete_store(to_keys([7, 9]), success=False)
+    cpu_manager.complete_store(to_keys([7, 9]), _EMPTY_REQ_CTX, success=False)
 
     # assert [7] is still stored, but [9] is not
     assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is True
@@ -304,7 +303,7 @@ class TestARCPolicy:
         assert list(cpu_manager.take_events()) == []
 
         # complete store [1, 2]
-        cpu_manager.complete_store(to_keys([1, 2]))
+        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
         verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
         # lookup [1, 2]
@@ -325,14 +324,14 @@ class TestARCPolicy:
 
         # store and complete block 1
         cpu_manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1]))
+        cpu_manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
 
         # block 1 starts in T1 (recent)
         assert to_keys([1])[0] in arc_policy.t1
         assert to_keys([1])[0] not in arc_policy.t2
 
         # touch block 1 (simulate second access)
-        cpu_manager.touch(to_keys([1]))
+        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
         # block 1 should now be in T2 (frequent)
         assert to_keys([1])[0] not in arc_policy.t1
@@ -357,7 +356,7 @@ class TestARCPolicy:
                 evicted_keys=[],
             ),
         )
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]))
+        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # prepare load [2, 3] (increases ref_cnt)
         prepare_load_output = cpu_manager.prepare_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
@@ -368,7 +367,7 @@ class TestARCPolicy:
         assert cpu_manager.prepare_store(to_keys([5, 6, 7]), _EMPTY_REQ_CTX) is None
 
         # complete load [2, 3]
-        cpu_manager.complete_load(to_keys([2, 3]))
+        cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
 
         # now prepare store [5, 6, 7] should succeed
         # ARC will evict blocks one at a time from T1 as needed
@@ -389,20 +388,20 @@ class TestARCPolicy:
 
         # store blocks 1, 2 (fills cache)
         cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2]))
+        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         initial_target = arc_policy.target_t1_size
 
         # store block 3, evicting block 1 (moves to B1 ghost list)
         cpu_manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([3]))
+        cpu_manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
 
         # block 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
 
         # touch block 1 (cache miss, but in B1)
         # this should increase target_t1_size (favor recency)
-        cpu_manager.touch(to_keys([1]))
+        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
 
         # target should have increased
         assert arc_policy.target_t1_size > initial_target
@@ -416,10 +415,10 @@ class TestARCPolicy:
 
         # store blocks 1, 2, 3, 4
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]))
+        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # promote blocks 3, 4 to T2 by touching them
-        cpu_manager.touch(to_keys([3, 4]))
+        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
 
         # now: T1 = {1, 2}, T2 = {3, 4}
         assert len(arc_policy.t1) == 2
@@ -434,7 +433,7 @@ class TestARCPolicy:
         assert output is not None
         assert to_keys([1]) == output.evicted_keys
 
-        cpu_manager.complete_store(to_keys([5]))
+        cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX)
 
         # block 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
@@ -450,12 +449,12 @@ class TestARCPolicy:
 
         # fill cache with blocks 1, 2
         cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2]))
+        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         # store many blocks to fill ghost lists
         for i in range(3, 20):
             cpu_manager.prepare_store(to_keys([i]), _EMPTY_REQ_CTX)
-            cpu_manager.complete_store(to_keys([i]))
+            cpu_manager.complete_store(to_keys([i]), _EMPTY_REQ_CTX)
 
         # ghost lists should not exceed cache_capacity
         assert len(arc_policy.b1) <= arc_policy.cache_capacity
@@ -470,14 +469,14 @@ class TestARCPolicy:
 
         # store blocks 1, 2, 3, 4
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]))
+        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # promote 3, 4 to T2
-        cpu_manager.touch(to_keys([3, 4]))
+        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
 
         # T1 = {1, 2}, T2 = {3, 4}
         # touch [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
-        cpu_manager.touch(to_keys([1, 3, 4]))
+        cpu_manager.touch(to_keys([1, 3, 4]), _EMPTY_REQ_CTX)
 
         # T1 = {2}, T2 = {1, 3, 4} (in that order, with 4 most recent)
         assert len(arc_policy.t1) == 1
@@ -503,7 +502,7 @@ class TestARCPolicy:
 
         # store blocks 1, 2, 3, 4
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2, 3, 4]))
+        cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # prepare store block 5 (will evict block 1)
         prepare_store_output = cpu_manager.prepare_store(to_keys([5]), _EMPTY_REQ_CTX)
@@ -511,7 +510,7 @@ class TestARCPolicy:
         assert len(prepare_store_output.evicted_keys) == 1
 
         # complete store with failure
-        cpu_manager.complete_store(to_keys([5]), success=False)
+        cpu_manager.complete_store(to_keys([5]), _EMPTY_REQ_CTX, success=False)
 
         # block 5 should not be in cache
         assert cpu_manager.lookup(to_key(5), _EMPTY_REQ_CTX) is False
@@ -532,7 +531,7 @@ class TestARCPolicy:
 
         # store [1, 2]
         cpu_manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        cpu_manager.complete_store(to_keys([1, 2]))
+        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
         # store [3, 4, 5] -> evicts [1]
         prepare_store_output = cpu_manager.prepare_store(
@@ -540,10 +539,10 @@ class TestARCPolicy:
         )
         assert prepare_store_output is not None
         assert len(prepare_store_output.evicted_keys) == 1
-        cpu_manager.complete_store(to_keys([3, 4, 5]))
+        cpu_manager.complete_store(to_keys([3, 4, 5]), _EMPTY_REQ_CTX)
 
         # promote some blocks to T2
-        cpu_manager.touch(to_keys([2, 3]))
+        cpu_manager.touch(to_keys([2, 3]), _EMPTY_REQ_CTX)
 
         # T1 has {4, 5}, T2 has {2, 3}
         assert len(arc_policy.t1) == 2
@@ -552,7 +551,7 @@ class TestARCPolicy:
         # store [6] -> should evict from T1 (4 is oldest in T1)
         prepare_store_output = cpu_manager.prepare_store(to_keys([6]), _EMPTY_REQ_CTX)
         assert prepare_store_output is not None
-        cpu_manager.complete_store(to_keys([6]))
+        cpu_manager.complete_store(to_keys([6]), _EMPTY_REQ_CTX)
 
         # verify blocks 2, 3 (in T2) are still present
         assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is True
@@ -565,14 +564,14 @@ class TestARCPolicy:
 
 def test_filter_reused_manager():
     """
-    Tests FilterReusedOffloadingManager with a CPUOffloadingManager.
+    Tests CPUOffloadingManager reuse filtering (store_threshold=2).
     """
-    lru_manager = CPUOffloadingManager(
-        num_blocks=4, cache_policy="lru", enable_events=True
-    )
-
-    manager = FilterReusedOffloadingManager(
-        backing=lru_manager, store_threshold=2, max_tracker_size=3
+    manager = CPUOffloadingManager(
+        num_blocks=4,
+        cache_policy="lru",
+        enable_events=True,
+        store_threshold=2,
+        max_tracker_size=3,
     )
 
     # Lookup [1, 2] -> 1st time, added to tracker but not eligible for store yet
@@ -609,4 +608,4 @@ def test_filter_reused_manager():
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == []
 
-    manager.complete_store(to_keys([1]))
+    manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
