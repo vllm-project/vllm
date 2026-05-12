@@ -29,7 +29,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -208,11 +208,9 @@ class MiniCPM3Model(MiniCPMModel):
         self,
         prefix: str,
         config: PretrainedConfig,
-        cache_config: CacheConfig | None,
-        quant_config: QuantizationConfig | None,
-        model_config: ModelConfig | None = None,
+        *,
+        vllm_config: VllmConfig,
     ):
-        vllm_config = get_current_vllm_config()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniCPM3DecoderLayer(

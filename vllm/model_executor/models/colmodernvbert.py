@@ -279,6 +279,7 @@ class ColModernVBertForRetrieval(
             [
                 ModernBertLayer(
                     config=text_config,
+                    vllm_config=vllm_config,
                     layer_id=i,
                     prefix=f"{prefix}.text_layers.{i}",
                 )

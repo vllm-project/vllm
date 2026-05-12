@@ -256,7 +256,6 @@ class DeciModel(nn.Module):
             return layer_type(
                 config,
                 layer_idx,
-                quant_config=quant_config,
                 vllm_config=vllm_config,
                 prefix=prefix,
             )

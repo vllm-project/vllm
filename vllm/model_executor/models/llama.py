@@ -134,9 +134,11 @@ class LlamaAttention(nn.Module):
         bias_o_proj: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
+        if quant_config is None:
+            quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -297,6 +299,7 @@ class LlamaDecoderLayer(nn.Module):
             bias_o_proj=bias_o_proj,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            quant_config=quant_config,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,

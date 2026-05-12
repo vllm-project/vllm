@@ -753,8 +753,6 @@ class OlmoHybridDecoderLayer(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         speculative_config = vllm_config.speculative_config
 
@@ -765,8 +763,6 @@ class OlmoHybridDecoderLayer(nn.Module):
         if self.layer_type == "linear_attention":
             self.linear_attn = OlmoHybridGatedDeltaNet(
                 config,
-                model_config=model_config,
-                cache_config=cache_config,
                 quant_config=quant_config,
                 speculative_config=speculative_config,
                 prefix=f"{prefix}.linear_attn",
