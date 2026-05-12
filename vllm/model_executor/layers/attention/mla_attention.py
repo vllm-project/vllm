@@ -1818,6 +1818,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             if self.dcp_world_size > 1:
                 dcp_tot_seq_lens_device = seq_lens[:num_decodes]
                 seq_lens = dcp_local_seq_lens
+                assert seq_lens is not None
 
                 # After DCP distribution, the maximum number of tokens for any rank is
                 # ceil(L / (N * I)) * I, where L is max_seq_len, N is dcp_world_size,
