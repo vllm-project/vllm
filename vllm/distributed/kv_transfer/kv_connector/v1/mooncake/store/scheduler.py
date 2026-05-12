@@ -167,14 +167,15 @@ class MooncakeStoreScheduler:
             self._unfinished_request_ids.discard(finished_req_id)
             self._preempted_req_ids.discard(finished_req_id)
 
-        self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
-        for req_id in scheduler_output.preempted_req_ids:
+        preempted_ids = scheduler_output.preempted_req_ids or set()
+        self._preempted_req_ids.update(preempted_ids)
+        for req_id in preempted_ids:
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
             self._unfinished_request_ids,
-            scheduler_output.preempted_req_ids,
+            preempted_ids,
         )
 
         # Handle new requests
@@ -236,9 +237,9 @@ class MooncakeStoreScheduler:
                 if req_id in self._preempted_req_ids:
                     # Resumed after preemption
                     if isinstance(new_block_ids, tuple):
-                        new_block_ids = new_block_ids[0].copy()
+                        block_ids_list = new_block_ids[0].copy()
                     else:
-                        new_block_ids = new_block_ids.copy()
+                        block_ids_list = new_block_ids.copy()
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -253,7 +254,7 @@ class MooncakeStoreScheduler:
                     request_tracker = RequestTracker(
                         req_id=req_id,
                         token_len=num_tokens_to_compute,
-                        allocated_block_ids=new_block_ids,
+                        allocated_block_ids=block_ids_list,
                         num_saved_tokens=0,
                         token_ids=prefill_tokens[:num_tokens_to_compute].copy(),
                         prefill_end_tokens=len(prefill_tokens),
@@ -283,9 +284,9 @@ class MooncakeStoreScheduler:
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
                     req_tuple = self._unfinished_requests.get(req_id)
                     if req_tuple:
-                        request = req_tuple[0]
+                        unfinished_req = req_tuple[0]
                         num_current_tokens = request_tracker.token_len
-                        new_token_ids = request.all_token_ids[
+                        new_token_ids = unfinished_req.all_token_ids[
                             num_current_tokens : num_current_tokens + num_new_tokens
                         ]
                         request_tracker.token_len += len(new_token_ids)
@@ -311,7 +312,7 @@ class MooncakeStoreScheduler:
                         self._block_size,
                         load_spec=None,
                         skip_save=force_skip_save,
-                        block_hashes=request.block_hashes,
+                        block_hashes=unfinished_req.block_hashes,
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
@@ -324,14 +325,14 @@ class MooncakeStoreScheduler:
 
         # Handle requests with pending load specs not yet scheduled
         request_ids = [req.req_id for req in scheduler_output.scheduled_new_reqs]
-        for request_id, (request, block_ids) in self._unfinished_requests.items():
+        for request_id, (unfinished_req, block_ids) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
                 if (num_tokens_to_compute % self._block_size != 0) and (
-                    num_tokens_to_compute == request.num_tokens - 1
+                    num_tokens_to_compute == unfinished_req.num_tokens - 1
                 ):
                     num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
@@ -346,7 +347,7 @@ class MooncakeStoreScheduler:
                     self._block_size,
                     load_spec=load_spec,
                     skip_save=None,
-                    block_hashes=request.block_hashes,
+                    block_hashes=unfinished_req.block_hashes,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
