@@ -905,50 +905,705 @@ def rocm_inv_rope_einsum(
     return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
 
 
-def rocm_ref_sparse_attn_prefill(
+_DSV4_SPARSE_NOPE_DIM = 448
+_DSV4_SPARSE_ROPE_DIM = 64
+
+
+def _validate_dsv4_sparse_dims(
+    head_dim: int,
+    nope_head_dim: int,
+    rope_head_dim: int,
+    op_name: str,
+) -> None:
+    assert head_dim == nope_head_dim + rope_head_dim, (
+        f"{op_name} expected head_dim={nope_head_dim + rope_head_dim}, got {head_dim}"
+    )
+    assert (
+        nope_head_dim == _DSV4_SPARSE_NOPE_DIM
+        and rope_head_dim == _DSV4_SPARSE_ROPE_DIM
+    ), (
+        f"{op_name} expects {_DSV4_SPARSE_NOPE_DIM} NoPE dims and "
+        f"{_DSV4_SPARSE_ROPE_DIM} RoPE dims"
+    )
+
+
+@triton.jit
+def _pack_dense_prefix_to_ragged_kernel(
+    indices_ptr,
+    lengths_ptr,
+    indptr_ptr,
+    out_ptr,
+    indices_stride0,
+    num_rows_limit,
+    row_width,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    block_idx = tl.program_id(1)
+    offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+
+    row_len = tl.load(lengths_ptr + row_idx)
+    if block_idx * BLOCK_SIZE >= row_len:
+        return
+
+    mask = offsets < row_len
+    vals = tl.load(
+        indices_ptr + row_idx * indices_stride0 + offsets,
+        mask=mask & (offsets < row_width),
+        other=-1,
+    ).to(tl.int32)
+    if num_rows_limit >= 0:
+        vals = tl.where((vals >= 0) & (vals < num_rows_limit), vals, -1)
+
+    out_start = tl.load(indptr_ptr + row_idx)
+    tl.store(out_ptr + out_start + offsets, vals, mask=mask)
+
+
+def build_ragged_indices_from_dense(
+    indices: torch.Tensor,
+    lengths: torch.Tensor,
+    num_rows: int = -1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    indices = indices.reshape(indices.shape[0], -1)
+    lengths = lengths.to(device=indices.device, dtype=torch.int32).reshape(-1)
+    assert lengths.numel() == indices.shape[0], (
+        f"Expected one length per row, got {lengths.shape} for indices {indices.shape}"
+    )
+
+    max_width = indices.shape[1] if indices.ndim == 2 else 0
+    lengths = lengths.clamp(min=0, max=max_width).contiguous()
+
+    indptr = torch.empty(indices.shape[0] + 1, dtype=torch.int32, device=indices.device)
+    indptr[0] = 0
+    torch.cumsum(lengths, dim=0, out=indptr[1:])
+
+    if indices.numel() == 0:
+        flat = torch.empty(0, dtype=torch.int32, device=indices.device)
+    else:
+        flat = torch.empty(
+            int(indptr[-1].item()), dtype=torch.int32, device=indices.device
+        )
+        if flat.numel() > 0:
+            block_size = 128
+            _pack_dense_prefix_to_ragged_kernel[
+                (indices.shape[0], triton.cdiv(max_width, block_size))
+            ](
+                indices,
+                lengths,
+                indptr,
+                flat,
+                indices.stride(0),
+                int(num_rows),
+                max_width,
+                BLOCK_SIZE=block_size,
+            )
+
+    return flat, indptr
+
+
+def _as_int32_contiguous_1d(x: torch.Tensor) -> torch.Tensor:
+    if x.dtype == torch.int32 and x.ndim == 1 and x.is_contiguous():
+        return x
+    return x.to(torch.int32).contiguous()
+
+
+@triton.jit
+def _sparse_attn_prefill_ragged_kernel(
+    q_ptr,
+    kv_ptr,
+    kv_indices_ptr,
+    kv_indptr_ptr,
+    attn_sink_ptr,
+    out_ptr,
+    q_stride_t,
+    q_stride_h,
+    q_stride_d,
+    kv_stride_n,
+    kv_stride_d,
+    out_stride_t,
+    out_stride_h,
+    out_stride_d,
+    num_heads,
+    head_dim,
+    num_kv,
+    scale,
+    HAS_ATTN_SINK: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    query_idx = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    head_offsets = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    dim_offsets = tl.arange(0, BLOCK_D)
+    head_mask = head_offsets < num_heads
+    dim_mask = dim_offsets < head_dim
+
+    q = tl.load(
+        q_ptr
+        + query_idx * q_stride_t
+        + head_offsets[:, None] * q_stride_h
+        + dim_offsets[None, :] * q_stride_d,
+        mask=head_mask[:, None] & dim_mask[None, :],
+        other=0.0,
+    )
+
+    neg_large = -3.4028234663852886e38
+    m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
+    l_i = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    acc = tl.zeros((BLOCK_H, BLOCK_D), dtype=tl.float32)
+
+    kv_start = tl.load(kv_indptr_ptr + query_idx)
+    kv_end = tl.load(kv_indptr_ptr + query_idx + 1)
+    kv_len = kv_end - kv_start
+
+    k_offsets = tl.arange(0, BLOCK_K)
+    for k_start in tl.range(0, kv_len, BLOCK_K):
+        k_pos = k_start + k_offsets
+        in_range = k_pos < kv_len
+        slot = tl.load(kv_indices_ptr + kv_start + k_pos, mask=in_range, other=-1)
+        valid = in_range & (slot >= 0) & (slot < num_kv)
+
+        kv = tl.load(
+            kv_ptr + slot[:, None] * kv_stride_n + dim_offsets[None, :] * kv_stride_d,
+            mask=valid[:, None] & dim_mask[None, :],
+            other=0.0,
+        )
+        kv = tl.where(valid[:, None] & dim_mask[None, :], kv, 0.0)
+
+        scores = tl.dot(q, tl.trans(kv)) * scale
+        scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
+
+        m_block = tl.max(scores, axis=1)
+        m_new = tl.maximum(m_i, m_block)
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(scores - m_new[:, None])
+        p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
+        l_new = l_i * alpha + tl.sum(p, axis=1)
+
+        acc = acc * alpha[:, None] + tl.dot(p.to(kv.dtype), kv)
+        m_i = m_new
+        l_i = l_new
+
+    if HAS_ATTN_SINK:
+        sink = tl.load(
+            attn_sink_ptr + head_offsets, mask=head_mask, other=neg_large
+        ).to(tl.float32)
+        m_final = tl.maximum(m_i, sink)
+        alpha = tl.exp(m_i - m_final)
+        l_final = l_i * alpha + tl.exp(sink - m_final)
+        denom = tl.maximum(l_final, 1.0e-30)
+        out = tl.where(
+            l_final[:, None] > 0.0,
+            (acc * alpha[:, None]) / denom[:, None],
+            0.0,
+        )
+    else:
+        denom = tl.maximum(l_i, 1.0e-30)
+        out = tl.where(l_i[:, None] > 0.0, acc / denom[:, None], 0.0)
+
+    tl.store(
+        out_ptr
+        + query_idx * out_stride_t
+        + head_offsets[:, None] * out_stride_h
+        + dim_offsets[None, :] * out_stride_d,
+        out,
+        mask=head_mask[:, None] & dim_mask[None, :],
+    )
+
+
+@triton.jit
+def _sparse_attn_decode_ragged_kernel(
+    q_ptr,
+    main_cache_ptr,
+    main_indices_ptr,
+    main_indptr_ptr,
+    extra_cache_ptr,
+    extra_indices_ptr,
+    extra_indptr_ptr,
+    attn_sink_ptr,
+    out_ptr,
+    q_stride0,
+    q_stride1,
+    out_stride0,
+    out_stride1,
+    main_cache_stride0,
+    extra_cache_stride0,
+    main_num_rows,
+    extra_num_rows,
+    main_block_size,
+    extra_block_size,
+    scale,
+    num_heads,
+    HAS_ATTN_SINK: tl.constexpr,
+    HAS_EXTRA: tl.constexpr,
+    NOPE_DIM: tl.constexpr,
+    NOPE_BLOCK: tl.constexpr,
+    ROPE_DIM: tl.constexpr,
+    IS_FNUZ: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    query_idx = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    head_offsets = pid_h * BLOCK_H + tl.arange(0, BLOCK_H)
+    head_mask = head_offsets < num_heads
+    nope_offsets = tl.arange(0, NOPE_BLOCK)
+    nope_mask = nope_offsets < NOPE_DIM
+    rope_offsets = tl.arange(0, ROPE_DIM)
+
+    q_row_ptr = q_ptr + query_idx * q_stride0 + head_offsets[:, None] * q_stride1
+    q_nope = tl.load(
+        q_row_ptr + nope_offsets[None, :],
+        mask=head_mask[:, None] & nope_mask[None, :],
+        other=0.0,
+    )
+    q_rope = tl.load(
+        q_row_ptr + NOPE_DIM + rope_offsets[None, :],
+        mask=head_mask[:, None],
+        other=0.0,
+    )
+
+    neg_large = -3.4028234663852886e38
+    m_i = tl.full((BLOCK_H,), neg_large, dtype=tl.float32)
+    l_i = tl.zeros((BLOCK_H,), dtype=tl.float32)
+    acc_nope = tl.zeros((BLOCK_H, NOPE_BLOCK), dtype=tl.float32)
+    acc_rope = tl.zeros((BLOCK_H, ROPE_DIM), dtype=tl.float32)
+    k_offsets = tl.arange(0, BLOCK_K)
+
+    main_start = tl.load(main_indptr_ptr + query_idx)
+    main_end = tl.load(main_indptr_ptr + query_idx + 1)
+    main_len = main_end - main_start
+
+    zero_nope = tl.zeros((BLOCK_K, NOPE_BLOCK), dtype=tl.bfloat16)
+    zero_rope = tl.zeros((BLOCK_K, ROPE_DIM), dtype=tl.bfloat16)
+
+    for k_start in tl.range(0, main_len, BLOCK_K):
+        k_pos = k_start + k_offsets
+        in_range = k_pos < main_len
+        slot = tl.load(main_indices_ptr + main_start + k_pos, mask=in_range, other=-1)
+        valid = in_range & (slot >= 0) & (slot < main_num_rows)
+        safe_slot = tl.where(valid, slot, 0)
+
+        block_idx = safe_slot // main_block_size
+        pos_in_block = safe_slot % main_block_size
+        cache_block_ptr = main_cache_ptr + block_idx.to(tl.int64) * main_cache_stride0
+        token_data_ptr = cache_block_ptr + pos_in_block * 576
+        token_scale_ptr = cache_block_ptr + main_block_size * 576 + pos_in_block * 8
+
+        x_uint8 = tl.load(
+            token_data_ptr[:, None] + nope_offsets[None, :],
+            mask=valid[:, None] & nope_mask[None, :],
+            other=0,
+        )
+        if IS_FNUZ:
+            x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+        else:
+            x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        encoded_scales = tl.load(
+            token_scale_ptr[:, None] + nope_offsets[None, :] // 64,
+            mask=valid[:, None] & nope_mask[None, :],
+            other=127,
+        )
+        scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+        k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
+        k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
+        k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
+
+        rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+        k_rope = tl.load(
+            rope_ptr[:, None] + rope_offsets[None, :],
+            mask=valid[:, None],
+            other=0.0,
+        )
+        k_rope = tl.where(valid[:, None], k_rope, zero_rope)
+        k_rope = tl.where(k_rope == k_rope, k_rope, zero_rope)
+
+        scores = tl.dot(q_nope, tl.trans(k_nope)) + tl.dot(q_rope, tl.trans(k_rope))
+        scores *= scale
+        scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
+
+        m_block = tl.max(scores, axis=1)
+        m_new = tl.maximum(m_i, m_block)
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(scores - m_new[:, None])
+        p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
+        l_new = l_i * alpha + tl.sum(p, axis=1)
+
+        acc_nope = acc_nope * alpha[:, None] + tl.dot(p.to(k_nope.dtype), k_nope)
+        acc_rope = acc_rope * alpha[:, None] + tl.dot(p.to(k_rope.dtype), k_rope)
+        m_i = m_new
+        l_i = l_new
+
+    if HAS_EXTRA:
+        extra_start = tl.load(extra_indptr_ptr + query_idx)
+        extra_end = tl.load(extra_indptr_ptr + query_idx + 1)
+        extra_len = extra_end - extra_start
+
+        for k_start in tl.range(0, extra_len, BLOCK_K):
+            k_pos = k_start + k_offsets
+            in_range = k_pos < extra_len
+            slot = tl.load(
+                extra_indices_ptr + extra_start + k_pos, mask=in_range, other=-1
+            )
+            valid = in_range & (slot >= 0) & (slot < extra_num_rows)
+            safe_slot = tl.where(valid, slot, 0)
+
+            block_idx = safe_slot // extra_block_size
+            pos_in_block = safe_slot % extra_block_size
+            cache_block_ptr = (
+                extra_cache_ptr + block_idx.to(tl.int64) * extra_cache_stride0
+            )
+            token_data_ptr = cache_block_ptr + pos_in_block * 576
+            token_scale_ptr = (
+                cache_block_ptr + extra_block_size * 576 + pos_in_block * 8
+            )
+
+            x_uint8 = tl.load(
+                token_data_ptr[:, None] + nope_offsets[None, :],
+                mask=valid[:, None] & nope_mask[None, :],
+                other=0,
+            )
+            if IS_FNUZ:
+                x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+            else:
+                x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+            encoded_scales = tl.load(
+                token_scale_ptr[:, None] + nope_offsets[None, :] // 64,
+                mask=valid[:, None] & nope_mask[None, :],
+                other=127,
+            )
+            scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+            k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
+            k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
+            k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
+
+            rope_ptr = (token_data_ptr + NOPE_DIM).to(tl.pointer_type(tl.bfloat16))
+            k_rope = tl.load(
+                rope_ptr[:, None] + rope_offsets[None, :],
+                mask=valid[:, None],
+                other=0.0,
+            )
+            k_rope = tl.where(valid[:, None], k_rope, zero_rope)
+            k_rope = tl.where(k_rope == k_rope, k_rope, zero_rope)
+
+            scores = tl.dot(q_nope, tl.trans(k_nope)) + tl.dot(
+                q_rope,
+                tl.trans(k_rope),
+            )
+            scores *= scale
+            scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
+
+            m_block = tl.max(scores, axis=1)
+            m_new = tl.maximum(m_i, m_block)
+            alpha = tl.exp(m_i - m_new)
+            p = tl.exp(scores - m_new[:, None])
+            p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
+            l_new = l_i * alpha + tl.sum(p, axis=1)
+
+            acc_nope = acc_nope * alpha[:, None] + tl.dot(p.to(k_nope.dtype), k_nope)
+            acc_rope = acc_rope * alpha[:, None] + tl.dot(p.to(k_rope.dtype), k_rope)
+            m_i = m_new
+            l_i = l_new
+
+    if HAS_ATTN_SINK:
+        sink = tl.load(
+            attn_sink_ptr + head_offsets, mask=head_mask, other=neg_large
+        ).to(tl.float32)
+        m_final = tl.maximum(m_i, sink)
+        alpha = tl.exp(m_i - m_final)
+        l_final = l_i * alpha + tl.exp(sink - m_final)
+        denom = tl.maximum(l_final, 1.0e-30)
+        out_nope = tl.where(
+            l_final[:, None] > 0.0,
+            (acc_nope * alpha[:, None]) / denom[:, None],
+            0.0,
+        )
+        out_rope = tl.where(
+            l_final[:, None] > 0.0,
+            (acc_rope * alpha[:, None]) / denom[:, None],
+            0.0,
+        )
+    else:
+        denom = tl.maximum(l_i, 1.0e-30)
+        out_nope = tl.where(l_i[:, None] > 0.0, acc_nope / denom[:, None], 0.0)
+        out_rope = tl.where(l_i[:, None] > 0.0, acc_rope / denom[:, None], 0.0)
+
+    out_row_ptr = (
+        out_ptr + query_idx * out_stride0 + head_offsets[:, None] * out_stride1
+    )
+    tl.store(
+        out_row_ptr + nope_offsets[None, :],
+        out_nope,
+        mask=head_mask[:, None] & nope_mask[None, :],
+    )
+    tl.store(
+        out_row_ptr + NOPE_DIM + rope_offsets[None, :],
+        out_rope,
+        mask=head_mask[:, None],
+    )
+
+
+def _rocm_sparse_attn_prefill_ragged_triton(
     q: torch.Tensor,
     kv: torch.Tensor,
     indices: torch.Tensor,
-    topk_length: torch.Tensor | None,
+    indptr: torch.Tensor,
     scale: float,
-    head_dim: int,
     attn_sink: torch.Tensor | None,
+    nope_head_dim: int,
+    rope_head_dim: int,
 ) -> torch.Tensor:
-    indices = indices.clone().squeeze(1)
-    s_q, h_q, d_qk = q.shape
-    topk = indices.shape[-1]
-    s_kv = kv.shape[0]
-    if topk_length is not None:
-        mask = torch.arange(topk, device=indices.device).unsqueeze(
-            0
-        ) >= topk_length.unsqueeze(1)
-        indices[mask] = -1
-    invalid_mask = (indices < 0) | (indices >= s_kv)
-    indices[invalid_mask] = 0
+    assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
+    assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
+    assert indices.ndim == 1, f"expected indices=[nnz], got {indices.shape}"
+    assert indptr.ndim == 1, f"expected indptr=[sq+1], got {indptr.shape}"
+    assert q.is_cuda and kv.is_cuda and indices.is_cuda and indptr.is_cuda
 
-    qf = q.float()
-    gathered_kv = kv.index_select(0, indices.flatten()).reshape(s_q, topk, d_qk).float()
-    scores = qf @ gathered_kv.transpose(1, 2)
-    scores *= scale
-    scores[invalid_mask.unsqueeze(1).expand_as(scores)] = float("-inf")
+    indices = _as_int32_contiguous_1d(indices)
+    indptr = _as_int32_contiguous_1d(indptr)
+    has_attn_sink = attn_sink is not None
+    if attn_sink is None:
+        attn_sink = torch.empty(1, device=q.device, dtype=torch.float32)
+    else:
+        attn_sink = attn_sink.contiguous()
 
-    orig_lse = torch.logsumexp(scores, dim=-1)
-    lse_for_o = orig_lse
-    if attn_sink is not None:
-        lse_for_o = torch.logsumexp(
-            torch.stack(
-                [orig_lse, attn_sink[:h_q].view(1, h_q).expand_as(orig_lse)],
-                dim=0,
-            ),
-            dim=0,
+    num_queries, num_heads, head_dim = q.shape
+    assert indptr.numel() == num_queries + 1, (
+        f"expected indptr shape [{num_queries + 1}], got {indptr.shape}"
+    )
+    _validate_dsv4_sparse_dims(
+        head_dim,
+        nope_head_dim,
+        rope_head_dim,
+        "_rocm_sparse_attn_prefill_ragged_triton",
+    )
+
+    block_h = 16
+    block_d = triton.next_power_of_2(head_dim)
+    block_k = 16 if head_dim >= 256 else 32
+    out = torch.empty_like(q, dtype=torch.bfloat16)
+    _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
+        q,
+        kv,
+        indices,
+        indptr,
+        attn_sink,
+        out,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        kv.stride(0),
+        kv.stride(1),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        num_heads,
+        head_dim,
+        kv.shape[0],
+        float(scale),
+        HAS_ATTN_SINK=has_attn_sink,
+        BLOCK_H=block_h,
+        BLOCK_D=block_d,
+        BLOCK_K=block_k,
+        num_warps=8,
+    )
+    return out
+
+
+def _rocm_sparse_attn_prefill_triton(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    nope_head_dim: int,
+    rope_head_dim: int,
+    topk_length: torch.Tensor | None = None,
+) -> torch.Tensor:
+    ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
+        indices,
+        topk_length
+        if topk_length is not None
+        else (indices >= 0).sum(dim=-1, dtype=torch.int32),
+        num_rows=kv.shape[0],
+    )
+    return _rocm_sparse_attn_prefill_ragged_triton(
+        q=q,
+        kv=kv,
+        indices=ragged_indices,
+        indptr=ragged_indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=nope_head_dim,
+        rope_head_dim=rope_head_dim,
+    )
+
+
+def _rocm_sparse_attn_decode_ragged_triton(
+    q: torch.Tensor,
+    main_cache: torch.Tensor,
+    main_indices: torch.Tensor,
+    main_indptr: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    nope_head_dim: int,
+    rope_head_dim: int,
+    extra_cache: torch.Tensor | None = None,
+    extra_indices: torch.Tensor | None = None,
+    extra_indptr: torch.Tensor | None = None,
+) -> torch.Tensor:
+    assert q.ndim == 3, f"expected q=[b,h,d], got {q.shape}"
+    assert main_cache.ndim == 3, (
+        f"expected main_cache=[blocks,block,bytes], got {main_cache.shape}"
+    )
+    assert main_indices.ndim == 1, (
+        f"expected main_indices=[nnz], got {main_indices.shape}"
+    )
+    assert main_indptr.ndim == 1, f"expected main_indptr=[b+1], got {main_indptr.shape}"
+    assert (
+        q.is_cuda
+        and main_cache.is_cuda
+        and main_indices.is_cuda
+        and main_indptr.is_cuda
+    )
+
+    main_indices = _as_int32_contiguous_1d(main_indices)
+    main_indptr = _as_int32_contiguous_1d(main_indptr)
+    has_attn_sink = attn_sink is not None
+    if attn_sink is None:
+        attn_sink = torch.empty(1, device=q.device, dtype=torch.float32)
+    else:
+        attn_sink = attn_sink.contiguous()
+
+    num_queries, num_heads, head_dim = q.shape
+    assert main_indptr.numel() == num_queries + 1, (
+        f"expected main_indptr shape [{num_queries + 1}], got {main_indptr.shape}"
+    )
+    _validate_dsv4_sparse_dims(
+        head_dim,
+        nope_head_dim,
+        rope_head_dim,
+        "_rocm_sparse_attn_decode_ragged_triton",
+    )
+
+    has_extra = (
+        extra_cache is not None
+        and extra_indices is not None
+        and extra_indptr is not None
+    )
+    if has_extra:
+        assert extra_cache is not None
+        assert extra_indices is not None
+        assert extra_indptr is not None
+        assert extra_indices.ndim == 1, (
+            f"expected extra_indices=[nnz], got {extra_indices.shape}"
         )
-    lse_for_o = lse_for_o.clone()
-    lse_for_o[lse_for_o == float("-inf")] = float("+inf")
-    probs = torch.exp(scores - lse_for_o.unsqueeze(-1))
-    out = probs @ gathered_kv[..., :head_dim]
-    lonely_q_mask = orig_lse == float("-inf")
-    out[lonely_q_mask.unsqueeze(-1).expand_as(out)] = 0.0
-    return out.to(torch.bfloat16)
+        assert extra_indptr.ndim == 1, (
+            f"expected extra_indptr=[b+1], got {extra_indptr.shape}"
+        )
+        extra_indices = _as_int32_contiguous_1d(extra_indices)
+        extra_indptr = _as_int32_contiguous_1d(extra_indptr)
+        assert extra_indptr.numel() == num_queries + 1, (
+            f"expected extra_indptr shape [{num_queries + 1}], got {extra_indptr.shape}"
+        )
+    else:
+        extra_cache = main_cache
+        extra_indices = torch.empty(0, device=q.device, dtype=torch.int32)
+        extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
+
+    block_h = 16
+    block_k = 16 if head_dim >= 256 else 32
+    out = torch.empty_like(q, dtype=torch.bfloat16)
+    _sparse_attn_decode_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
+        q,
+        main_cache,
+        main_indices,
+        main_indptr,
+        extra_cache,
+        extra_indices,
+        extra_indptr,
+        attn_sink,
+        out,
+        q.stride(0),
+        q.stride(1),
+        out.stride(0),
+        out.stride(1),
+        main_cache.stride(0),
+        extra_cache.stride(0),
+        main_cache.shape[0] * main_cache.shape[1],
+        extra_cache.shape[0] * extra_cache.shape[1],
+        main_cache.shape[1],
+        extra_cache.shape[1],
+        scale,
+        num_heads,
+        HAS_ATTN_SINK=has_attn_sink,
+        HAS_EXTRA=has_extra,
+        NOPE_DIM=nope_head_dim,
+        NOPE_BLOCK=triton.next_power_of_2(nope_head_dim),
+        ROPE_DIM=rope_head_dim,
+        IS_FNUZ=current_platform.is_fp8_fnuz(),
+        BLOCK_H=block_h,
+        BLOCK_K=block_k,
+        num_warps=8,
+    )
+    return out
+
+
+def _rocm_sparse_attn_decode_triton(
+    q: torch.Tensor,
+    main_cache: torch.Tensor,
+    main_indices: torch.Tensor,
+    scale: float,
+    attn_sink: torch.Tensor | None,
+    nope_head_dim: int,
+    rope_head_dim: int,
+    extra_cache: torch.Tensor | None = None,
+    extra_indices: torch.Tensor | None = None,
+    main_lengths: torch.Tensor | None = None,
+    extra_lengths: torch.Tensor | None = None,
+    main_ragged_indices: torch.Tensor | None = None,
+    main_ragged_indptr: torch.Tensor | None = None,
+    extra_ragged_indices: torch.Tensor | None = None,
+    extra_ragged_indptr: torch.Tensor | None = None,
+) -> torch.Tensor:
+    if main_ragged_indices is None or main_ragged_indptr is None:
+        main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
+            main_indices,
+            main_lengths
+            if main_lengths is not None
+            else (main_indices >= 0).sum(dim=-1, dtype=torch.int32),
+            num_rows=main_cache.shape[0] * main_cache.shape[1],
+        )
+
+    if (
+        (extra_ragged_indices is None or extra_ragged_indptr is None)
+        and extra_cache is not None
+        and extra_indices is not None
+    ):
+        extra_ragged_indices, extra_ragged_indptr = build_ragged_indices_from_dense(
+            extra_indices,
+            extra_lengths
+            if extra_lengths is not None
+            else (extra_indices >= 0).sum(dim=-1, dtype=torch.int32),
+            num_rows=extra_cache.shape[0] * extra_cache.shape[1],
+        )
+
+    return _rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_ragged_indices,
+        main_indptr=main_ragged_indptr,
+        scale=scale,
+        attn_sink=attn_sink,
+        nope_head_dim=nope_head_dim,
+        rope_head_dim=rope_head_dim,
+        extra_cache=extra_cache,
+        extra_indices=extra_ragged_indices,
+        extra_indptr=extra_ragged_indptr,
+    )
 
 
 def rocm_sparse_attn_prefill(
@@ -958,132 +1613,49 @@ def rocm_sparse_attn_prefill(
     topk_length: torch.Tensor | None,
     scale: float,
     head_dim: int,
+    nope_head_dim: int,
+    rope_head_dim: int,
     attn_sink: torch.Tensor | None,
     output: torch.Tensor,
+    ragged_indices: torch.Tensor | None = None,
+    ragged_indptr: torch.Tensor | None = None,
 ) -> None:
-    output_chunk = rocm_ref_sparse_attn_prefill(
-        q=q,
-        kv=kv,
-        indices=indices,
-        topk_length=topk_length,
-        scale=scale,
-        head_dim=head_dim,
-        attn_sink=attn_sink,
+    assert kv.ndim == 3 and kv.shape[1] == 1, (
+        f"ROCm Triton sparse prefill expects kv=[skv,1,d], got {kv.shape}"
     )
+    _validate_dsv4_sparse_dims(
+        head_dim,
+        nope_head_dim,
+        rope_head_dim,
+        "rocm_sparse_attn_prefill",
+    )
+    if ragged_indices is not None and ragged_indptr is not None:
+        output_chunk = _rocm_sparse_attn_prefill_ragged_triton(
+            q=q,
+            kv=kv.squeeze(1),
+            indices=ragged_indices,
+            indptr=ragged_indptr,
+            scale=scale,
+            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+        )
+    else:
+        indices_2d = indices.reshape(indices.shape[0], -1)
+        output_chunk = _rocm_sparse_attn_prefill_triton(
+            q=q,
+            kv=kv.squeeze(1),
+            indices=indices_2d,
+            scale=scale,
+            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            topk_length=topk_length,
+        )
     output.copy_(output_chunk.to(output.dtype))
 
 
-def rocm_dequantize_blocked_k_cache(
-    quant_k_cache: torch.Tensor,
-    head_dim: int,
-    nope_head_dim: int,
-    rope_head_dim: int,
-) -> torch.Tensor:
-    fp8_dtype = current_platform.fp8_dtype()
-    tile_size = 64
-    num_tiles = nope_head_dim // tile_size
-
-    num_blocks, block_size, _ = quant_k_cache.shape
-    quant_k_cache = quant_k_cache.view(num_blocks, -1)
-    input_nope_rope = quant_k_cache[
-        :, : block_size * (nope_head_dim + 2 * rope_head_dim)
-    ].view(num_blocks, block_size, nope_head_dim + 2 * rope_head_dim)
-    input_nope = input_nope_rope[:, :, :nope_head_dim].view(fp8_dtype)
-    input_rope = input_nope_rope[:, :, nope_head_dim:].view(torch.bfloat16)
-    input_scale = (
-        quant_k_cache[:, block_size * (nope_head_dim + 2 * rope_head_dim) :]
-        .view(num_blocks, block_size, 8)[:, :, :num_tiles]
-        .view(torch.float8_e8m0fnu)
-    )
-
-    result = torch.empty(
-        (num_blocks, block_size, 1, head_dim),
-        dtype=torch.bfloat16,
-        device=quant_k_cache.device,
-    )
-    result[..., nope_head_dim:] = input_rope.unsqueeze(2)
-    for tile_idx in range(num_tiles):
-        cur_nope = input_nope[
-            ..., tile_idx * tile_size : (tile_idx + 1) * tile_size
-        ].to(torch.bfloat16)
-        cur_scales = input_scale[:, :, tile_idx].to(torch.bfloat16).unsqueeze(-1)
-        result[..., tile_idx * tile_size : (tile_idx + 1) * tile_size] = (
-            cur_nope * cur_scales
-        ).unsqueeze(2)
-    return result
-
-
-def rocm_ref_sparse_attn_decode(
-    q: torch.Tensor,
-    blocked_k: torch.Tensor,
-    indices_in_kvcache: torch.Tensor,
-    topk_length: torch.Tensor | None,
-    scale: float,
-    head_dim: int,
-    attn_sink: torch.Tensor | None,
-    extra_blocked_k: torch.Tensor | None = None,
-    extra_indices_in_kvcache: torch.Tensor | None = None,
-    extra_topk_length: torch.Tensor | None = None,
-) -> torch.Tensor:
-    b, s_q, h_q, d_qk = q.shape
-
-    def process_scope(
-        cur_blocked_k: torch.Tensor,
-        cur_indices: torch.Tensor,
-        cur_topk_length: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        cur_indices = cur_indices.reshape(b, s_q, -1)
-        topk = cur_indices.size(-1)
-        fixed_indices = torch.clamp_min(cur_indices, 0)
-        gathered_kv = (
-            cur_blocked_k.view(-1, d_qk)
-            .index_select(0, fixed_indices.view(-1))
-            .view(b, s_q, topk, d_qk)
-        )
-        invalid_mask = cur_indices == -1
-        if cur_topk_length is not None:
-            cur_topk_length = cur_topk_length.reshape(b)
-            invalid_mask |= torch.arange(0, topk, device=invalid_mask.device).view(
-                1, 1, topk
-            ) >= cur_topk_length.view(b, 1, 1)
-        return gathered_kv, invalid_mask
-
-    gathered_kv, invalid_mask = process_scope(
-        blocked_k, indices_in_kvcache, topk_length
-    )
-    if extra_blocked_k is not None:
-        assert extra_indices_in_kvcache is not None
-        gathered_kv1, invalid_mask1 = process_scope(
-            extra_blocked_k, extra_indices_in_kvcache, extra_topk_length
-        )
-        gathered_kv = torch.cat([gathered_kv, gathered_kv1], dim=2)
-        invalid_mask = torch.cat([invalid_mask, invalid_mask1], dim=2)
-
-    gathered_kv = gathered_kv.view(b * s_q, -1, d_qk).float()
-    gathered_kv[gathered_kv != gathered_kv] = 0.0
-    qf = q.float().view(b * s_q, h_q, d_qk)
-    attn_weight = qf @ gathered_kv.transpose(-1, -2)
-    attn_weight *= scale
-    attn_weight[
-        invalid_mask.view(b * s_q, 1, -1).expand(b * s_q, h_q, invalid_mask.size(-1))
-    ] = float("-inf")
-    lse = attn_weight.logsumexp(dim=-1)
-    attn_weight = torch.exp(attn_weight - lse.unsqueeze(-1))
-    output = attn_weight @ gathered_kv[..., :head_dim]
-    output = output.view(b, s_q, h_q, head_dim)
-    lse = lse.view(b, s_q, h_q)
-
-    if attn_sink is not None:
-        output *= (1.0 / (1.0 + torch.exp(attn_sink.view(1, 1, h_q) - lse))).unsqueeze(
-            -1
-        )
-
-    lonely_q_mask = lse == float("-inf")
-    output[lonely_q_mask.unsqueeze(-1).expand_as(output)] = 0.0
-    return output.squeeze(1).to(torch.bfloat16)
-
-
-def rocm_forward_decode_fallback(
+def rocm_sparse_attn_decode(
     q: torch.Tensor,
     kv_cache: torch.Tensor | None,
     swa_k_cache: torch.Tensor,
@@ -1092,6 +1664,10 @@ def rocm_forward_decode_fallback(
     topk_lens: torch.Tensor | None,
     swa_indices: torch.Tensor,
     swa_lens: torch.Tensor,
+    swa_ragged_indices: torch.Tensor | None,
+    swa_ragged_indptr: torch.Tensor | None,
+    topk_ragged_indices: torch.Tensor | None,
+    topk_ragged_indptr: torch.Tensor | None,
     attn_sink: torch.Tensor | None,
     scale: float,
     head_dim: int,
@@ -1099,31 +1675,49 @@ def rocm_forward_decode_fallback(
     rope_head_dim: int,
     output: torch.Tensor,
 ) -> None:
-    blocked_swa = rocm_dequantize_blocked_k_cache(
-        swa_k_cache,
-        head_dim=head_dim,
-        nope_head_dim=nope_head_dim,
-        rope_head_dim=rope_head_dim,
+    assert swa_k_cache.dtype == torch.uint8, (
+        "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
+        f"got {swa_k_cache.dtype}"
     )
-    blocked_extra = None
+    _validate_dsv4_sparse_dims(
+        head_dim,
+        nope_head_dim,
+        rope_head_dim,
+        "rocm_sparse_attn_decode",
+    )
+
+    main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
+
+    extra_cache = None
+    extra_indices = None
     if not swa_only:
         assert kv_cache is not None
-        blocked_extra = rocm_dequantize_blocked_k_cache(
-            kv_cache,
-            head_dim=head_dim,
-            nope_head_dim=nope_head_dim,
-            rope_head_dim=rope_head_dim,
+        assert topk_indices is not None or (
+            topk_ragged_indices is not None and topk_ragged_indptr is not None
         )
-    attn_out = rocm_ref_sparse_attn_decode(
-        q=q.unsqueeze(1),
-        blocked_k=blocked_swa,
-        indices_in_kvcache=swa_indices.unsqueeze(1),
-        topk_length=swa_lens,
+        assert kv_cache.dtype == torch.uint8, (
+            "ROCm Triton sparse decode expects uint8 fp8_ds_mla extra cache, "
+            f"got {kv_cache.dtype}"
+        )
+        extra_cache = kv_cache
+        if topk_indices is not None:
+            extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+
+    attn_out = _rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=swa_k_cache,
+        main_indices=main_indices,
         scale=scale,
-        head_dim=head_dim,
-        attn_sink=attn_sink[: q.shape[1]] if attn_sink is not None else None,
-        extra_blocked_k=blocked_extra,
-        extra_indices_in_kvcache=topk_indices,
-        extra_topk_length=topk_lens,
+        attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+        nope_head_dim=nope_head_dim,
+        rope_head_dim=rope_head_dim,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        main_lengths=swa_lens,
+        extra_lengths=topk_lens,
+        main_ragged_indices=swa_ragged_indices,
+        main_ragged_indptr=swa_ragged_indptr,
+        extra_ragged_indices=topk_ragged_indices,
+        extra_ragged_indptr=topk_ragged_indptr,
     )
     output.copy_(attn_out.to(output.dtype))

@@ -81,8 +81,24 @@ from .utils import (
 logger = init_logger(__name__)
 
 # Video constants — match transformers Gemma4VideoProcessor defaults.
+_SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+
+
+def _get_max_soft_tokens(
+    merged_kwargs: Mapping[str, object],
+) -> tuple[object | None, bool]:
+    """Return configured image max_soft_tokens and whether it is top-level."""
+    val = merged_kwargs.get("max_soft_tokens")
+    if val is not None:
+        return val, True
+
+    images_kwargs = merged_kwargs.get("images_kwargs")
+    if isinstance(images_kwargs, Mapping):
+        return images_kwargs.get("max_soft_tokens"), False
+
+    return None, False
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +124,12 @@ class Gemma4ImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", "pp"),
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "np", "pp", dynamic_dims={"np"}),
     ]
     pixel_position_ids: Annotated[
-        torch.Tensor,
-        TensorShape("bn", "np", 2),
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "np", 2, dynamic_dims={"np"}),
     ]
 
 
@@ -216,17 +232,29 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         self, seq_len: int, mm_counts: Mapping[str, int]
     ) -> Mapping[str, int] | None:
         config = self.get_hf_config()
-        # Upper bound: the pooler outputs default_output_length slots
-        # per image (280).  After padding is stripped the actual count
-        # is ≤ this value, but vLLM needs the max for memory planning.
+        # Upper bound: the pooler outputs max_soft_tokens slots per image.
+        # After padding is stripped the actual count is ≤ this value, but
+        # vLLM needs the max for memory planning.
         tokens_per_image = config.vision_config.default_output_length
+        merged_kwargs = self.ctx.get_merged_mm_kwargs({})
+        val, _ = _get_max_soft_tokens(merged_kwargs)
+        if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
+            tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
         if config.audio_config is not None:
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
         # Video: each frame ≤ 70 soft tokens + boi + eoi + ~6 ts tokens.
-        tokens["video"] = _VIDEO_MAX_FRAMES * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
+        num_frames = _VIDEO_MAX_FRAMES
+        mm_config = self.ctx.model_config.get_multimodal_config()
+        video_opts = mm_config.limit_per_prompt.get("video")
+        if (
+            isinstance(video_opts, VideoDummyOptions)
+            and video_opts.num_frames is not None
+        ):
+            num_frames = min(num_frames, video_opts.num_frames)
+        tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
@@ -492,13 +520,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # Validate max_soft_tokens early and exit cleanly on bad values.
-        _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
-
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(mm_kwargs)
-        val = merged_kwargs.get("max_soft_tokens")
-        if val is None:
-            val = merged_kwargs.get("images_kwargs", {}).get("max_soft_tokens")
+        val, is_top_level_max_soft_tokens = _get_max_soft_tokens(merged_kwargs)
 
         if val is not None and val not in _SUPPORTED_SOFT_TOKENS:
             raise ValueError(
@@ -645,7 +668,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
         # HF side (Gemma4ProcessorKwargs.images_kwargs) so that
         # _merge_kwargs routes max_soft_tokens into images_kwargs.
         patched_mm_kwargs = dict(mm_kwargs)
-        if val is not None:
+        if val is not None and is_top_level_max_soft_tokens:
             patched_mm_kwargs["max_soft_tokens"] = val
 
         processed_outputs = super()._call_hf_processor(
@@ -755,7 +778,12 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
                     hf_processor_mm_kwargs,
                 )
-                max_soft_tokens = merged_kwargs.get("max_soft_tokens")
+                val, _ = _get_max_soft_tokens(merged_kwargs)
+                max_soft_tokens = (
+                    val
+                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS
+                    else None
+                )
                 return self.info.get_image_repl(
                     image_width=image_size.width,
                     image_height=image_size.height,
@@ -1100,15 +1128,20 @@ class Gemma4ForConditionalGeneration(
         # metadata, and validating numerical equivalence with the
         # current per-image path.
         #
+        # Concurrent requests with different image resolutions may
+        # arrive as a list of per-image tensors, while same-resolution
+        # batches may arrive as a stacked tensor. Both forms are
+        # iterable over the per-image dimension.
+
         # Process each image individually through the vision tower.
         # The vision tower's forward() strips padding and returns a
         # flat tensor of valid tokens. We process per-image to get
         # variable-length outputs matching the dynamic token count
         # from get_image_repl.
         per_image_features = []
-        for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
-            pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
+        for pv, pp in zip(pixel_values, pixel_position_ids, strict=True):
+            pv = pv.unsqueeze(0)  # (1, max_patches, patch_pixels)
+            pp = pp.unsqueeze(0)  # (1, max_patches, 2)
 
             # Derive the pooler's output_length from the total patch
             # count (including padding).  The vision tower encoder
