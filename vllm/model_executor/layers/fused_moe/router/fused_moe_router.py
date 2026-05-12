@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 
 import torch
 
@@ -16,13 +15,6 @@ class FusedMoERouter(ABC):
 
     def __init__(self):
         self._routing_replay_out: torch.Tensor | None = None
-
-    @abstractmethod
-    def set_capture_fn(
-        self,
-        capture_fn: Callable[[torch.Tensor], None] | None,
-    ) -> None:
-        raise NotImplementedError
 
     @property
     @abstractmethod
