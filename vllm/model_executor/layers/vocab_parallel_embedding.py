@@ -438,6 +438,16 @@ class VocabParallelEmbedding(PluggableLayer):
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
+            # AutoQuantize-quantized lm_head emits FP4 scalar scales
+            # (input_scale, weight_scale_2). Their on-disk shape is () while
+            # PerTensorScaleParameter materializes them as (1,) -- same numel,
+            # different rank. Reshape rather than asserting.
+            if (
+                param.data.shape != loaded_weight.shape
+                and param.data.numel() == loaded_weight.numel()
+            ):
+                param.data.copy_(loaded_weight.reshape(param.data.shape))
+                return
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return

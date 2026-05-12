@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -35,6 +36,8 @@ from .nemotron_h import (
     NemotronHAttentionDecoderLayer,
     NemotronHMoEDecoderLayer,
 )
+
+logger = init_logger(__name__)
 
 
 class NemotronHMTPAttentionDecoderLayer(NemotronHAttentionDecoderLayer):
@@ -242,6 +245,53 @@ class NemotronHMultiTokenPredictor(nn.Module):
 
         # Total number of physical layers = num_steps * pattern_len
         total_layers = self.num_mtp_layers * self.pattern_len
+
+        # NVFP4 W4A16-CT (mixed-precision) checkpoints can store the MTP
+        # layer's fused expert weights as BF16 unquantized tensors while the
+        # per-expert MTP linears are not in the compressed-tensors `ignore`
+        # list, so vLLM constructs the FusedMoE quantized and weight loading
+        # fails (see `Qwen3_5MultiTokenPredictor` for the original fix from
+        # PR #41994). Mirror it for NemotronH MTP: extend the active CT
+        # `ignore` list with every per-expert MTP linear so the FusedMoE
+        # picks `UnquantizedFusedMoEMethod` and registers BF16 `w13_weight`
+        # / `w2_weight` matching the checkpoint.
+        quant_config = vllm_config.quant_config
+        if (
+            quant_config is not None
+            and quant_config.get_name() == "compressed-tensors"
+            and hasattr(quant_config, "ignore")
+        ):
+            num_experts = getattr(config, "n_routed_experts", None)
+            if getattr(config, "model_type", None) == "nemotron_h_puzzle":
+                num_experts = getattr(config, "mtp_n_routed_experts", num_experts)
+            if num_experts:
+                # NemotronH MoE is non-gated: only up_proj/down_proj per expert.
+                # We also include the phantom gate_proj name in the ignore list
+                # because CompressedTensorsMoEMethod.get_moe_method hard-codes a
+                # 3-way scheme check (gate/up/down) and requires them to all
+                # resolve to the same scheme. Without this, gate_proj falls
+                # through to the default NVFP4 W4A16 scheme via the
+                # config_groups Linear regex and mismatches the ignored
+                # up/down, raising 'All MoE projections need to have same
+                # quantization scheme but found multiple'.
+                extra: list[str] = []
+                for i in range(total_layers):
+                    if self.pattern_str[i % self.pattern_len] != "E":
+                        continue
+                    for eid in range(num_experts):
+                        for proj in ("gate_proj", "up_proj", "down_proj"):
+                            extra.append(
+                                f"{prefix}.layers.{i}.mixer.experts.{eid}.{proj}"
+                            )
+                new_entries = [n for n in extra if n not in quant_config.ignore]
+                quant_config.ignore.extend(new_entries)
+                if new_entries:
+                    logger.info(
+                        "NemotronH-MTP: extended compressed-tensors ignore "
+                        "with %d per-expert MTP linears (BF16 in the checkpoint)",
+                        len(new_entries),
+                    )
+
         for i in range(total_layers):
             step_rel_idx = i % self.pattern_len
 
@@ -346,6 +396,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
         self.lm_head = ParallelLMHead(
             self.config.vocab_size,
             self.config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 

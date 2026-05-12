@@ -184,6 +184,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD: int = 0
+    VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION: Literal["fp4", "bf16"] = "fp4"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1416,6 +1417,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD overrides this if also set.
     "VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD": lambda: int(
         os.getenv("VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD", "0")
+    ),
+    # Intermediate activation precision for the B12x SM12x MoE wrapper:
+    # "fp4" (W4A4, default) re-quantizes the post-SwiGLU/ReLU2 activations
+    # to FP4 before the FC2 GEMM; "bf16" (W4A16) keeps them in BF16 and
+    # dequantizes weights instead. Same NVFP4 weight bytes for both —
+    # the kernel chooses internally.
+    "VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION": env_with_choices(
+        "VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION",
+        "fp4",
+        ["fp4", "bf16"],
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for

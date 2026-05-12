@@ -18,6 +18,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
+    kNvfp4StaticGroupScale,
+    kStaticTensorScale,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -237,6 +239,12 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             envs.VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD
         )
 
+        # Intermediate activation precision: "fp4" (W4A4, default) or
+        # "bf16" (W4A16). Same FP4 weight bytes for both modes; the
+        # kernel internally chooses whether to re-quantize the
+        # post-SwiGLU/ReLU2 activations or keep them in BF16.
+        self.activation_precision = envs.VLLM_FLASHINFER_B12X_ACTIVATION_PRECISION
+
         # Lazily created on first apply() call.
         self._wrapper: object | None = None
         self._cutlass_registered: bool = False
@@ -382,7 +390,23 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
+        # Original W4A4 NVFP4 (modelopt format).
+        if (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic):
+            return True
+        # W4A16 NVFP4 compressed-tensors `nvfp4-pack-quantized`: weights
+        # are packed as uint8 (two FP4 elements per byte) with the same
+        # NVFP4 group + per-tensor scales; no activation quant. The b12x
+        # kernel reads the same FP4 byte payload, so this is supported.
+        if (
+            weight_key is not None
+            and weight_key.dtype == torch.uint8
+            and weight_key.scale == kNvfp4StaticGroupScale
+            and weight_key.scale2 == kStaticTensorScale
+            and weight_key.symmetric
+            and activation_key is None
+        ):
+            return True
+        return False
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -432,10 +456,12 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         """
         if self._wrapper is None:
             from flashinfer.fused_moe import B12xMoEWrapper
+            import inspect as _inspect
 
-            # activation_precision="fp4" selects the W4A4 path (matching
-            # the NVFP4 weights vLLM loads here); "bf16" would be W4A16.
-            self._wrapper = B12xMoEWrapper(
+            # activation_precision: "fp4" = W4A4, "bf16" = W4A16.
+            # Same NVFP4 weight bytes for both modes; the kernel
+            # picks the intermediate-activation handling internally.
+            b12x_kwargs = dict(
                 num_experts=self.global_num_experts,
                 top_k=self.topk,
                 hidden_size=self.hidden_dim,
@@ -444,9 +470,27 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
                 max_num_tokens=self.max_num_tokens,
                 num_local_experts=self.num_local_experts,
                 activation=self._activation_str,
-                activation_precision="fp4",
-                cutlass_prefill_threshold=self.cutlass_prefill_threshold,
+                activation_precision=self.activation_precision,
             )
+            # cutlass_prefill_threshold is gated on a FlashInfer build with
+            # PR #b12x_decode_cutlass_prefill. Skip the kwarg silently if the
+            # installed FlashInfer lacks it (and threshold is 0); error
+            # cleanly if the user is asking for the hybrid path.
+            if "cutlass_prefill_threshold" in _inspect.signature(
+                B12xMoEWrapper.__init__
+            ).parameters:
+                b12x_kwargs["cutlass_prefill_threshold"] = (
+                    self.cutlass_prefill_threshold
+                )
+            elif self.cutlass_prefill_threshold > 0:
+                raise RuntimeError(
+                    "VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD > 0 "
+                    "requires a FlashInfer build with PR "
+                    "#b12x_decode_cutlass_prefill (e.g. "
+                    "askliar/flashinfer:b12x_micro_kernel_merged); "
+                    "current FlashInfer does not expose the kwarg."
+                )
+            self._wrapper = B12xMoEWrapper(**b12x_kwargs)
 
         if (
             self.cutlass_prefill_threshold > 0
