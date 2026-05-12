@@ -17,10 +17,34 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
+FP4_MARLIN_TILE_N_SIZE = 64
 
 logger = init_logger(__name__)
+
+
+def _pad_tensor_dim(
+    tensor: torch.Tensor,
+    dim: int,
+    padded_size: int,
+) -> torch.Tensor:
+    """Pad tensor along a specific dimension to a given size."""
+    pad_size = padded_size - tensor.size(dim)
+    if pad_size == 0:
+        return tensor
+    if pad_size < 0:
+        raise ValueError(
+            f"Cannot pad dim {dim} from {tensor.size(dim)} to {padded_size}."
+        )
+
+    # No using torch.nn.functional.pad.
+    # Allocating zero block and concatenating along the target dim is more clear.
+    pad_shape = list(tensor.shape)
+    pad_shape[dim] = pad_size
+    pad = tensor.new_zeros(pad_shape)
+    return torch.cat((tensor, pad), dim=dim)
 
 
 def is_fp4_marlin_supported():
@@ -157,15 +181,22 @@ def apply_fp4_marlin_linear(
     bias: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+    padded_size_n: int | None = None,
 ) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP4 quantization
 
     reshaped_x = input.reshape(-1, input.shape[-1])
-    out_shape = input.shape[:-1] + (size_n,)
+    original_size_n = size_n
+    padded_size_n = padded_size_n if padded_size_n is not None else size_n
+    out_shape = input.shape[:-1] + (original_size_n,)
 
     use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0), n=size_n, k=size_k, device=input.device, dtype=input.dtype
+        m=reshaped_x.size(0),
+        n=padded_size_n,
+        k=size_k,
+        device=input.device,
+        dtype=input.dtype,
     )
 
     inputs = reshaped_x
@@ -193,11 +224,14 @@ def apply_fp4_marlin_linear(
         workspace=workspace,
         b_q_type=scalar_types.float4_e2m1f,
         size_m=reshaped_x.size(0),
-        size_n=size_n,
+        size_n=padded_size_n,
         size_k=size_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
     )
+
+    if padded_size_n != original_size_n:
+        output = output[:, :original_size_n]
 
     return output.reshape(out_shape)
 
@@ -214,9 +248,27 @@ def prepare_fp4_layer_for_marlin(
 
     group_size = 16 if is_nvfp4 else 32
 
-    part_size_n = layer.output_size_per_partition
+    unpadded_part_size_n = layer.output_size_per_partition
+    part_size_n = round_up(unpadded_part_size_n, FP4_MARLIN_TILE_N_SIZE)
+    padding_n_required = unpadded_part_size_n != part_size_n
+
     part_size_k = layer.input_size_per_partition
     param_dtype = layer.params_dtype
+
+    if padding_n_required:
+        # Marlin FP4 kernels require the output/N dimension to be tile-aligned.
+        # Without this, repack fails with:
+        # RuntimeError: size_n = ... is not divisible by tile_n_size = 64.
+        logger.warning_once("Padding is required for Marlin FP4 linear kernel.")
+        layer.weight = torch.nn.Parameter(
+            _pad_tensor_dim(layer.weight.data, dim=0, padded_size=part_size_n),
+            requires_grad=False,
+        )
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.bias = torch.nn.Parameter(
+                _pad_tensor_dim(layer.bias.data, dim=0, padded_size=part_size_n),
+                requires_grad=False,
+            )
 
     assert layer.weight.shape == (part_size_n, part_size_k // 2)
 
@@ -240,6 +292,7 @@ def prepare_fp4_layer_for_marlin(
         is_a_8bit=is_a_8bit,
     )
     layer.weight = torch.nn.Parameter(marlin_qweight, requires_grad=False)
+    layer.marlin_padded_size_n = part_size_n
 
     # WEIGHT SCALES
     # Permute scales
@@ -249,6 +302,13 @@ def prepare_fp4_layer_for_marlin(
         weight_scale = weight_scale.view(torch.float8_e8m0fnu)
 
     weight_scale = weight_scale.to(param_dtype)
+    if padding_n_required:
+        # Padding is required
+        weight_scale = _pad_tensor_dim(
+            weight_scale,
+            dim=1,
+            padded_size=part_size_n,
+        )
     weight_scale = marlin_permute_scales(
         s=weight_scale,
         size_k=part_size_k,
