@@ -138,7 +138,7 @@ colorful==0.5.8
     # via ray
 colorlog==6.10.1
     # via optuna
-compressed-tensors==0.14.0.1
+compressed-tensors==0.15.0.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -247,7 +247,6 @@ filelock==3.25.2
     #   python-discovery
     #   ray
     #   torch
-    #   transformers
     #   virtualenv
 fonttools==4.62.1
     # via matplotlib
@@ -345,6 +344,7 @@ httpx==0.27.2
     #   anthropic
     #   fastapi
     #   fastapi-cloud-cli
+    #   huggingface-hub
     #   mcp
     #   model-hosting-container-standards
     #   openai
@@ -352,10 +352,8 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==0.36.2
+huggingface-hub==1.10.2
     # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
     #   accelerate
     #   datasets
     #   evaluate
@@ -412,7 +410,6 @@ isort==8.0.1
     # via datamodel-code-generator
 jinja2==3.1.6
     # via
-    #   -r requirements/test/../common.txt
     #   datamodel-code-generator
     #   fastapi
     #   genai-perf
@@ -695,15 +692,13 @@ orjson==3.11.7
     # via
     #   genai-perf
     #   kaleido
-outlines-core==0.2.11
+outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
 packaging==26.0
     # via
-    #   -c requirements/common.txt
     #   -c requirements/rocm.txt
-    #   -r requirements/test/../common.txt
     #   accelerate
     #   bitsandbytes
     #   black
@@ -1002,7 +997,6 @@ requests==2.32.5
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
-    #   huggingface-hub
     #   lm-eval
     #   mistral-common
     #   msal
@@ -1014,7 +1008,6 @@ requests==2.32.5
     #   schemathesis
     #   starlette-testclient
     #   tiktoken
-    #   transformers
 responses==0.26.0
     # via genai-perf
 rfc3339-validator==0.1.4
@@ -1056,8 +1049,6 @@ sacrebleu==2.6.0
     # via lm-eval
 safetensors==0.7.0
     # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
     #   accelerate
     #   open-clip-torch
     #   peft
@@ -1234,7 +1225,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==4.57.6
+transformers==5.5.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1261,7 +1252,9 @@ typer==0.24.1
     #   fastapi-cli
     #   fastapi-cloud-cli
     #   fastsafetensors
+    #   huggingface-hub
     #   perceptron
+    #   transformers
 typing-extensions==4.15.0
     # via
     #   -c requirements/common.txt

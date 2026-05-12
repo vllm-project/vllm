@@ -27,15 +27,8 @@ jobs:
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      GITHUB_TOKEN: ${{ github.token }}
-      HUST_ASCEND_MANAGER_REPO: ${{ vars.HUST_ASCEND_MANAGER_REPO || '' }}
-      HUST_ASCEND_MANAGER_REPO_URL: ${{ vars.HUST_ASCEND_MANAGER_REPO_URL || 'https://github.com/vLLM-HUST/ascend-runtime-manager.git' }}
-      HUST_ASCEND_MANAGER_PYPI_SPEC: ${{ vars.HUST_ASCEND_MANAGER_PYPI_SPEC || 'hust-ascend-manager' }}
-      VLLM_ASCEND_HUST_REPO: ${{ vars.VLLM_ASCEND_HUST_REPO || '' }}
-      VLLM_ASCEND_HUST_REPO_URL: ${{ vars.VLLM_ASCEND_HUST_REPO_URL || 'https://github.com/vLLM-HUST/vllm-ascend-hust.git' }}
       TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
-      TARGET_REPO_ARCHIVE_URL: https://api.github.com/repos/${{ github.repository }}/tarball/${{ github.sha }}
 
     steps:
       - name: Checkout target repo with retry
@@ -78,141 +71,7 @@ jobs:
             return 1
           }
 
-          download_archive_with_retry() {
-            local archive_url=$1
-            local target_dir=$2
-            local attempts=4
-            local delay_seconds=15
-            local try=1
-            local parent_dir
-            local temp_dir
-            local archive_path
-
-            parent_dir=$(dirname "$target_dir")
-            temp_dir="${parent_dir}/.checkout-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-            archive_path="${parent_dir}/.checkout-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.tar.gz"
-
-            mkdir -p "$parent_dir"
-            rm -rf "$temp_dir" "$archive_path"
-            while [[ "$try" -le "$attempts" ]]; do
-              if curl -fsSL \
-                  -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-                  -H "Accept: application/vnd.github+json" \
-                  "$archive_url" -o "$archive_path"; then
-                rm -rf "$temp_dir"
-                mkdir -p "$temp_dir"
-                tar -xzf "$archive_path" -C "$temp_dir" --strip-components=1
-                rm -rf "$target_dir"
-                mv "$temp_dir" "$target_dir"
-                rm -f "$archive_path"
-                return 0
-              fi
-
-              echo "Archive download failed ($try/$attempts): $archive_url" >&2
-              rm -rf "$temp_dir" "$archive_path"
-              if [[ "$try" -lt "$attempts" ]]; then
-                sleep "$delay_seconds"
-              fi
-              try=$((try + 1))
-            done
-
-            echo "Failed to download $archive_url after ${attempts} attempts" >&2
-            return 1
-          }
-
-          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA" \
-            || download_archive_with_retry "$TARGET_REPO_ARCHIVE_URL" "$GITHUB_WORKSPACE"
-
-      - name: Resolve Ascend plugin repo
-        run: |
-          clone_with_retry() {
-            local repo_url=$1
-            local target_dir=$2
-            local attempts=4
-            local delay_seconds=15
-            local try=1
-
-            rm -rf "$target_dir"
-            while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
-                return 0
-              fi
-              echo "Clone failed ($try/$attempts): $repo_url" >&2
-              if [[ "$try" -lt "$attempts" ]]; then
-                sleep "$delay_seconds"
-              fi
-              try=$((try + 1))
-            done
-
-            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
-            return 1
-          }
-
-          resolved_repo="${VLLM_ASCEND_HUST_REPO:-$GITHUB_WORKSPACE/vllm-ascend-hust}"
-          if [[ -f "$resolved_repo/scripts/use_single_ascend_env.sh" \
-                && -f "$resolved_repo/scripts/install_local_ascend_plugin.sh" ]]; then
-            echo "Using Ascend plugin repo: $resolved_repo"
-          else
-            if [[ -n "${VLLM_ASCEND_HUST_REPO:-}" ]]; then
-              echo "Configured VLLM_ASCEND_HUST_REPO is unavailable or incomplete: $VLLM_ASCEND_HUST_REPO" >&2
-              echo "Falling back to a fresh clone from $VLLM_ASCEND_HUST_REPO_URL" >&2
-            fi
-            clone_with_retry "$VLLM_ASCEND_HUST_REPO_URL" "$GITHUB_WORKSPACE/vllm-ascend-hust"
-            resolved_repo="$GITHUB_WORKSPACE/vllm-ascend-hust"
-          fi
-
-          echo "VLLM_ASCEND_HUST_REPO=$resolved_repo" >> "$GITHUB_ENV"
-
-      - name: Resolve Ascend runtime manager
-        run: |
-          clone_with_retry() {
-            local repo_url=$1
-            local target_dir=$2
-            local attempts=4
-            local delay_seconds=15
-            local try=1
-
-            rm -rf "$target_dir"
-            while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$target_dir"; then
-                return 0
-              fi
-              echo "Clone failed ($try/$attempts): $repo_url" >&2
-              if [[ "$try" -lt "$attempts" ]]; then
-                sleep "$delay_seconds"
-              fi
-              try=$((try + 1))
-            done
-
-            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
-            return 1
-          }
-
-          resolved_manager_repo="${HUST_ASCEND_MANAGER_REPO:-$GITHUB_WORKSPACE/ascend-runtime-manager}"
-          if [[ -f "$resolved_manager_repo/pyproject.toml" ]]; then
-            echo "Using Ascend manager repo: $resolved_manager_repo"
-          else
-            if [[ -n "${HUST_ASCEND_MANAGER_REPO:-}" ]]; then
-              echo "Configured HUST_ASCEND_MANAGER_REPO is unavailable or incomplete: $HUST_ASCEND_MANAGER_REPO" >&2
-              echo "Falling back to a fresh clone from $HUST_ASCEND_MANAGER_REPO_URL" >&2
-            fi
-            clone_with_retry "$HUST_ASCEND_MANAGER_REPO_URL" "$GITHUB_WORKSPACE/ascend-runtime-manager"
-            resolved_manager_repo="$GITHUB_WORKSPACE/ascend-runtime-manager"
-          fi
-
-          echo "HUST_ASCEND_MANAGER_REPO=$resolved_manager_repo" >> "$GITHUB_ENV"
-
-          if command -v hust-ascend-manager >/dev/null 2>&1; then
-            echo "Using preinstalled hust-ascend-manager: $(command -v hust-ascend-manager)"
-          else
-            if ! python -m pip install -e "$resolved_manager_repo" --no-deps; then
-              echo "Editable manager install failed; falling back to ${HUST_ASCEND_MANAGER_PYPI_SPEC}" >&2
-              python -m pip install --upgrade "$HUST_ASCEND_MANAGER_PYPI_SPEC"
-            fi
-          fi
-
-          command -v hust-ascend-manager >/dev/null 2>&1
-          hust-ascend-manager --help >/dev/null
+          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
 
       - name: Prepare Hugging Face cache directories
         run: |
@@ -228,13 +87,13 @@ jobs:
 
       - name: Prepare Ascend runtime and install current checkout
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          bash "${VLLM_ASCEND_HUST_REPO}/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
+          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
+          bash /home/shuhao/vllm-ascend-hust/scripts/install_local_ascend_plugin.sh /home/shuhao/vllm-ascend-hust
           python -m pip install -e . --no-build-isolation --no-deps
 
       - name: Verify installation
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
           which python
           python --version
           python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
@@ -246,16 +105,11 @@ jobs:
           MAX_MODEL_LEN: "256"
           MAX_NUM_SEQS: "1"
         run: |
-          source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
+          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
           bash .github/workflows/scripts/run_e2e_serve_smoke.sh
 
       - name: Cleanup leftover Ascend CI processes
         if: always()
         run: |
-          if [[ -n "${VLLM_ASCEND_HUST_REPO:-}" \
-                && -f "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh" ]]; then
-            source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
-          else
-            echo "Ascend env script unavailable during cleanup; running best-effort cleanup without sourcing."
-          fi
+          source /home/shuhao/vllm-ascend-hust/scripts/use_single_ascend_env.sh
           bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
