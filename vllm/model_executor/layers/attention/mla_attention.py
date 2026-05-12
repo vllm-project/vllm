@@ -188,6 +188,7 @@ return curr_o @ W_O
 """
 
 import functools
+import os
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -534,7 +535,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Store positions for forward_impl's fused RoPE+quant path.
+        self._positions = positions
+
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
                 q,
@@ -659,6 +664,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
+        forward_ctx = get_forward_context()
+        positions = getattr(forward_ctx, "positions", None) or self._positions
+        if positions is not None:
+            positions = positions[: attn_metadata.num_actual_tokens]
+
+        use_fused = (
+            fp8_attention
+            and getattr(self.impl, "use_fused_rope_quant", False)
+            and getattr(self.impl, "rotary_emb", None) is not None
+            and positions is not None
+        )
+
         num_actual_toks = attn_metadata.num_actual_tokens
 
         # Inputs and outputs may be padded for CUDA graphs
@@ -670,6 +687,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        # When use_fused: cache writes happen per-section below
 
         # Sparse MLA impls only support forward_mqa (decode-style attention)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
@@ -686,6 +704,31 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        # When the fused path is active, the wrapper (mla.py) skips RoPE
+        # for ALL tokens — but the fused kernel only handles decode tokens.
+        # Apply RoPE to prefill tokens and re-write the cache since
+        # do_kv_cache_update (called before forward_impl) wrote raw k_pe.
+        if use_fused and num_mha_tokens > 0:
+            rotary_emb = self.impl.rotary_emb
+            prefill_q_pe = q[num_mqa_tokens:, :, self.qk_nope_head_dim:]
+            prefill_k_pe = k_pe[num_mqa_tokens:]
+            prefill_positions = positions[num_mqa_tokens:]
+            prefill_q_pe[:], prefill_k_pe[:] = rotary_emb(
+                prefill_positions, prefill_q_pe, prefill_k_pe
+            )
+            if kv_cache.numel() > 0 and attn_metadata.slot_mapping is not None:
+                prefill_slot_mapping = attn_metadata.slot_mapping[
+                    num_mqa_tokens:
+                ].flatten()
+                self.impl.do_kv_cache_update(
+                    k_c_normed[num_mqa_tokens:],
+                    k_pe[num_mqa_tokens:],
+                    kv_cache,
+                    prefill_slot_mapping,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
+
         if num_mha_tokens > 0:
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
@@ -701,6 +744,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             mqa_q = q[:num_mqa_tokens]
             mqa_output_slice = output[:num_mqa_tokens]
 
+            # Check for CUTLASS FP8 absorption BMM (skips standard BMM)
+            use_fused_absorption = (
+                use_fused
+                and kv_cache.numel() > 0
+                and getattr(self.impl, "use_fused_absorption", False)
+            )
+
             mqa_q_nope, mqa_q_pe = mqa_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
@@ -715,7 +765,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            if self.is_aiter_triton_fp4_bmm_enabled:
+            if use_fused_absorption:
+                # Absorption BMM handled by CUTLASS FP8 path below
+                pass
+            elif self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
                 mqa_ql_nope = batched_gemm_a16wfp4(
@@ -752,7 +805,74 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            if use_fused:
+                assert positions is not None
+                decode_k_c = k_c_normed[:num_mqa_tokens]
+                decode_k_pe = k_pe[:num_mqa_tokens]
+                decode_positions = positions[:num_mqa_tokens]
+                assert attn_metadata.slot_mapping is not None
+                decode_slot_mapping = attn_metadata.slot_mapping[
+                    :num_mqa_tokens
+                ].flatten()
+
+                if use_fused_absorption:
+                    # CUTLASS BF16xBF16->FP8 absorption BMM + RoPE + cache.
+                    mqa_q = self.impl._fused_absorption_rope_cache(
+                        mqa_q_nope,
+                        mqa_q_pe,
+                        decode_k_c,
+                        decode_k_pe.squeeze(1),
+                        decode_positions,
+                        self._q_scale_float,
+                        self._k_scale_float,
+                        self.W_UK_bf16,
+                        kv_cache,
+                        decode_slot_mapping,
+                    )
+                elif kv_cache.numel() > 0 and getattr(
+                    self.impl, "use_fused_rope_cache", False
+                ):
+                    # Fused RoPE + FP8 quant + cache write: applies
+                    # RoPE, quantizes, and scatter-writes K directly
+                    # to paged KV cache (2 kernel launches).
+                    mqa_q = self.impl._fused_rope_quant_cache(
+                        mqa_ql_nope,
+                        mqa_q_pe,
+                        decode_k_c,
+                        decode_k_pe.squeeze(1),
+                        decode_positions,
+                        self._q_scale_float,
+                        self._k_scale_float,
+                        kv_cache,
+                        decode_slot_mapping,
+                    )
+                else:
+                    # Fused RoPE + FP8 quant (no cache fusion)
+                    mqa_q, decode_k_c_out, decode_k_pe_out = (
+                        self.impl._fused_rope_quant(
+                            mqa_ql_nope,
+                            mqa_q_pe,
+                            decode_k_c,
+                            decode_k_pe.squeeze(1),
+                            decode_positions,
+                            self._q_scale_float,
+                            self._k_scale_float,
+                        )
+                    )
+
+                    if kv_cache.numel() > 0:
+                        ops.concat_and_cache_mla(
+                            decode_k_c_out,
+                            decode_k_pe_out,
+                            kv_cache,
+                            decode_slot_mapping,
+                            kv_cache_dtype=self.kv_cache_dtype,
+                            scale=self._k_scale,
+                        )
+
+                kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -917,8 +1037,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Convert from (L, N, V) to (N, L, V)
             self.W_UV = W_UV.transpose(0, 1)
+
             # Convert from (L, N, P) to (N, P, L)
             self.W_UK_T = W_UK.permute(1, 2, 0)
+
+            if os.getenv("VLLM_MLA_FUSED_ABSORPTION", "0") == "1":
+                # BF16 W_UK for CUTLASS absorption BMM: [L, N, P] -> [N, L, P]
+                self.W_UK_bf16 = W_UK.permute(1, 0, 2).contiguous()
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
