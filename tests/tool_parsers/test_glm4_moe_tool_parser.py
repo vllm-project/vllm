@@ -1397,9 +1397,7 @@ def test_extract_tool_calls_with_responses_format_tools(glm4_moe_tokenizer):
 <arg_value>Beijing</arg_value>
 </tool_call>"""
 
-    extracted_tool_calls = parser.extract_tool_calls(
-        model_output, request=request
-    )
+    extracted_tool_calls = parser.extract_tool_calls(model_output, request=request)
 
     assert extracted_tool_calls.tools_called
     assert len(extracted_tool_calls.tool_calls) == 1
