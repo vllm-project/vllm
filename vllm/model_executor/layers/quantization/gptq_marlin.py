@@ -769,7 +769,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             w2_g_idx=layer.w2_g_idx,
             w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
             w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
             shared_experts=layer.shared_experts,
         )
 
