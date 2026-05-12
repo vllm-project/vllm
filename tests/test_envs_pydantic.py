@@ -87,6 +87,16 @@ def test_dp_rank_local_explicit_wins(monkeypatch):
     assert envs.VLLM_DP_RANK_LOCAL == 7
 
 
+def test_dp_rank_local_lowercase_explicit_wins(monkeypatch):
+    # Sub-models are case_sensitive=False so pydantic accepts a lowercase
+    # vllm_dp_rank_local override; the cross-field fallback must honor it
+    # too instead of overwriting it with VLLM_DP_RANK.
+    monkeypatch.setenv("VLLM_DP_RANK", "3")
+    monkeypatch.setenv("vllm_dp_rank_local", "7")
+    envs = _reload_envs()
+    assert envs.VLLM_DP_RANK_LOCAL == 7
+
+
 def test_object_storage_shm_buffer_autogen():
     # Unset -> UUID generated AND written back to os.environ.
     envs = _reload_envs()
@@ -240,6 +250,24 @@ def test_environment_variables_shim_present():
     assert "VLLM_PORT" in envs.environment_variables
     # Calling the lambda returns the resolved value.
     assert envs.environment_variables["VLLM_PORT"]() is None
+
+
+def test_compile_factors_builds_settings_once(monkeypatch):
+    # Regression: compile_factors() iterates over hundreds of env vars; it
+    # must not reparse pydantic Settings on every iteration.
+    envs = _reload_envs()
+    constructed = 0
+    real_settings_cls = envs.Settings
+
+    class CountingSettings(real_settings_cls):  # type: ignore[misc, valid-type]
+        def __init__(self, *a, **kw):
+            nonlocal constructed
+            constructed += 1
+            super().__init__(*a, **kw)
+
+    monkeypatch.setattr(envs, "Settings", CountingSettings)
+    envs.compile_factors()
+    assert constructed == 1, f"compile_factors() built Settings {constructed} times"
 
 
 def test_cache_hides_env_mutation(monkeypatch):

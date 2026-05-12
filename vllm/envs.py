@@ -660,19 +660,27 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_cross_field_logic(self) -> "Settings":
+        # Sub-models use case_sensitive=False, so an env var set under any
+        # casing is honored by pydantic. Mirror that here so explicit
+        # overrides aren't silently clobbered by the cross-field defaults.
+        env_keys_lower = {k.lower() for k in os.environ}
+
+        def _env_set(name: str) -> bool:
+            return name.lower() in env_keys_lower
+
         # VLLM_USE_PRECOMPILED: if VLLM_PRECOMPILED_WHEEL_LOCATION set, force True.
-        if not self.build.use_precompiled and os.environ.get(
+        if not self.build.use_precompiled and _env_set(
             "VLLM_PRECOMPILED_WHEEL_LOCATION"
         ):
             self.build.use_precompiled = True
 
         # VLLM_DP_RANK_LOCAL: if unset, fall back to VLLM_DP_RANK value.
-        if "VLLM_DP_RANK_LOCAL" not in os.environ:
+        if not _env_set("VLLM_DP_RANK_LOCAL"):
             self.distributed.dp_rank_local = self.distributed.dp_rank
 
         # VLLM_USE_AOT_COMPILE: dynamic default based on torch version and
         # disable_compile_cache.
-        if "VLLM_USE_AOT_COMPILE" not in os.environ:
+        if not _env_set("VLLM_USE_AOT_COMPILE"):
             try:
                 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -687,7 +695,7 @@ class Settings(BaseSettings):
                 pass
 
         # VLLM_USE_MEGA_AOT_ARTIFACT: depends on torch version AND use_aot_compile.
-        if "VLLM_USE_MEGA_AOT_ARTIFACT" not in os.environ:
+        if not _env_set("VLLM_USE_MEGA_AOT_ARTIFACT"):
             try:
                 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -979,12 +987,17 @@ def compile_factors() -> dict[str, object]:
 
     from vllm.config.utils import normalize_value
 
+    # Build Settings once; reading hundreds of factors via _get_attr would
+    # otherwise reparse pydantic settings on every iteration when the
+    # module-level cache is disabled.
+    settings = _get_settings() if _is_envs_cache_enabled() else Settings()
+
     factors: dict[str, object] = {}
-    for factor in _VAR_TO_PATH:
+    for factor, (sub_attr, field_name) in _VAR_TO_PATH.items():
         if factor in ignored_factors:
             continue
         try:
-            raw = _get_attr(factor)
+            raw = getattr(getattr(settings, sub_attr), field_name)
         except Exception as exc:  # pragma: no cover - defensive logging
             logger.warning(
                 "Skipping environment variable %s while hashing compile factors: %s",
