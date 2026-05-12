@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 import soundfile as sf
 
-from tests.entrypoints.openai.conftest import add_attention_backend
+from tests.entrypoints.speech_to_text.conftest import add_attention_backend
 from tests.utils import RemoteOpenAIServer
 from vllm.logger import init_logger
 from vllm.multimodal.media.audio import load_audio
