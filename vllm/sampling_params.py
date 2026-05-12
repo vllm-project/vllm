@@ -19,6 +19,7 @@ from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.config.steering_types import (
     SteeringLayerEntry,
     SteeringVectorSpec,
+    auto_promote_hashes_from_module_ref,
     hash_steering_config,
     normalize_layer_entry,
     resolve_effective_vectors,
@@ -880,12 +881,22 @@ class SamplingParams(
 
         When ``steering_module_ref`` is ``None`` this reduces to the
         original inline-only hash bit-for-bit, preserving prefix-cache
-        reuse for requests that don't reference a named module.  When set,
-        the ``(name, scale)`` tuple is folded into the digest so two
-        requests with the same reference + identical inline overrides
-        produce the same hash regardless of when the named module was
-        registered worker-side.
+        reuse for requests that don't reference a named module.  When set
+        to a *user*-named module, the ``(name, scale)`` tuple is folded
+        into the digest so two requests with the same reference plus
+        identical inline overrides produce the same hash regardless of
+        when the module was registered worker-side.
+
+        Auto-promoted module refs (name prefix ``_auto_``) recover the
+        pre-promotion inline-content hash from the auto-generated name
+        itself — auto-promote is a transport-only optimization and the
+        request identity must remain content-derived so siblings in a
+        shared-``[sp]*N`` batch (where the first sp ships inline and
+        the rest ship promoted) all carry the same hash.
         """
+        auto_h = auto_promote_hashes_from_module_ref(self.steering_module_ref)
+        if auto_h is not None:
+            return auto_h[0]
         return hash_steering_config(
             self.effective_prefill_steering,
             module_ref=self.steering_module_ref,
@@ -895,6 +906,9 @@ class SamplingParams(
     def decode_steering_config_hash(self) -> int:
         """Cached hash of ``effective_decode_steering`` plus
         ``steering_module_ref``. See ``prefill_steering_config_hash``."""
+        auto_h = auto_promote_hashes_from_module_ref(self.steering_module_ref)
+        if auto_h is not None:
+            return auto_h[1]
         return hash_steering_config(
             self.effective_decode_steering,
             module_ref=self.steering_module_ref,
