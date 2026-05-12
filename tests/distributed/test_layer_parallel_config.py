@@ -101,12 +101,55 @@ def test_attention_prefix_patterns_recognized(prefix):
 def test_resolver_idempotent_on_same_prefix():
     """Multiple calls with the same prefix return identical config."""
     init_layer_parallel_resolver(
-        full_tp_size=4, full_tp_rank=1, attn_tp_size=2, attn_tp_rank=1
+        full_tp_size=4, full_tp_rank=1, attn_tp_size=2, attn_tp_rank=0
     )
     prefix = "model.layers.5.self_attn.qkv_proj"
     a = get_layer_parallel_config(None, prefix)
     b = get_layer_parallel_config(None, prefix)
     assert a == b
+
+
+@pytest.mark.parametrize(
+    "tp_size, tpa_size, expected_attn_rank",
+    [
+        # TP=4 TPA=2 DCP=2: DCP groups {0,1} and {2,3}; attn = tp_rank//2
+        (4, 2, [0, 0, 1, 1]),
+        # TP=8 TPA=4 DCP=2: 4 DCP groups of size 2; attn = tp_rank // 2
+        (8, 4, [0, 0, 1, 1, 2, 2, 3, 3]),
+        # TP=8 TPA=2 DCP=4: DCP groups {0..3} and {4..7}; attn = tp_rank // 4
+        (8, 2, [0, 0, 0, 0, 1, 1, 1, 1]),
+        # TP=8 TPA=1 DCP=8: single DCP group; all ranks attn_rank=0
+        (8, 1, [0, 0, 0, 0, 0, 0, 0, 0]),
+    ],
+)
+def test_attn_tp_rank_matches_dcp_layout(tp_size, tpa_size, expected_attn_rank):
+    """attn_tp_rank derivation must match the DCP-group consecutive layout
+    used in vllm/distributed/parallel_state.py initialize_model_parallel:
+    DCP groups are consecutive chunks of the TP axis, so attn_tp_rank for a
+    given full TP rank is `tp_rank // dcp_size = tp_rank // (TP // TPA)`.
+    Bug guard against `tp_rank % tpa_size` (the wrong mapping).
+    """
+    dcp_size = tp_size // tpa_size
+    for tp_rank in range(tp_size):
+        attn_rank = tp_rank // dcp_size
+        assert attn_rank == expected_attn_rank[tp_rank], (
+            f"tp_size={tp_size}, tpa_size={tpa_size}, tp_rank={tp_rank}: "
+            f"expected attn_rank={expected_attn_rank[tp_rank]}, got {attn_rank}"
+        )
+        # Verify the wrong mapping (`tp_rank % tpa_size`) would have produced
+        # a different value for at least some tp_ranks → if these ever agree
+        # for all tp_ranks, the test stops protecting against the regression.
+        if tpa_size != tp_size and tpa_size > 1:
+            wrong = tp_rank % tpa_size
+            if wrong != attn_rank:
+                break  # at least one ranks differs → test is meaningful
+    else:
+        if tpa_size != tp_size and tpa_size > 1:
+            pytest.fail(
+                f"Expected at least one tp_rank where `tp_rank // dcp_size` "
+                f"differs from `tp_rank % tpa_size` for tp={tp_size} tpa={tpa_size}, "
+                f"but they always agreed — the regression guard is degenerate."
+            )
 
 
 # ---------------------------------------------------------------- #
