@@ -251,7 +251,7 @@ __global__ void Marlin(
     const float* __restrict__ a_scales_ptr,
     // fp16 quantization scales. shape (k/groupsize, n)
     const int4* __restrict__ scales_ptr,
-    // float global scale (for nvfp4// only)
+    // float global scale (for NVFP4/MixFP4 only)
     const float* __restrict__ global_scale_ptr,
     // 4bit packed zero-points of shape
     // (k/groupsize, n/pack_factor)
@@ -267,7 +267,8 @@ __global__ void Marlin(
     bool has_bias,
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int max_shared_mem) {
+    int max_shared_mem,
+    bool is_mixfp4) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -1210,7 +1211,29 @@ __global__ void Marlin(
       }
     }
 
-    if constexpr (s_type == vllm::kFE4M3fn || s_type == vllm::kFE8M0fnu) {
+    int flags_pair[4] = {0, 0, 0, 0};
+    if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
+      int s_quant_0 = reinterpret_cast<int*>(frag_s[k2])[0];
+      int s_quant_1 = reinterpret_cast<int*>(frag_s[k2])[1];
+
+      if (is_mixfp4) {
+        int fm0 = 0, fm1 = 0;
+        dequant_fp8_scales_mixed_bake_x4<c_scalar_t2>(
+            s_quant_0, reinterpret_cast<c_scalar_t2*>(&frag_s[k2]), fm0);
+        dequant_fp8_scales_mixed_bake_x4<c_scalar_t2>(
+            s_quant_1, reinterpret_cast<c_scalar_t2*>(&frag_s[k2]) + 2, fm1);
+        flags_pair[0] = ((fm0 >> 0) & 1) | (((fm0 >> 2) & 1) << 1);
+        flags_pair[1] = ((fm0 >> 1) & 1) | (((fm0 >> 3) & 1) << 1);
+        flags_pair[2] = ((fm1 >> 0) & 1) | (((fm1 >> 2) & 1) << 1);
+        flags_pair[3] = ((fm1 >> 1) & 1) | (((fm1 >> 3) & 1) << 1);
+      } else {
+        dequant_fp8_scales<c_scalar_t2, s_type_id>(
+            s_quant_0, reinterpret_cast<c_scalar_t2*>(&frag_s[k2]));
+        dequant_fp8_scales<c_scalar_t2, s_type_id>(
+            s_quant_1, reinterpret_cast<c_scalar_t2*>(&frag_s[k2]) + 2);
+      }
+    } else if constexpr (s_type == vllm::kFE4M3fn ||
+                         s_type == vllm::kFE8M0fnu) {
       int s_quant_0 = reinterpret_cast<int*>(frag_s[k2])[0];
       int s_quant_1 = reinterpret_cast<int*>(frag_s[k2])[1];
 
@@ -1241,8 +1264,22 @@ __global__ void Marlin(
         b_quant_1 = frag_b_quant_ptr[j * 2 + 1];
       }
 
-      dequant_data(b_quant_0, reinterpret_cast<scalar_32bit_t*>(&frag_b0));
-      dequant_data(b_quant_1, reinterpret_cast<scalar_32bit_t*>(&frag_b1));
+      if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
+        if (is_mixfp4) {
+          bool b1_int4 = (flags_pair[j] & 1) != 0;
+          bool b2_int4 = ((flags_pair[j] >> 1) & 1) != 0;
+          dequant_mixed_fp4_or_int4(b_quant_0, b1_int4,
+                                    reinterpret_cast<scalar_32bit_t*>(&frag_b0));
+          dequant_mixed_fp4_or_int4(b_quant_1, b2_int4,
+                                    reinterpret_cast<scalar_32bit_t*>(&frag_b1));
+        } else {
+          dequant_data(b_quant_0, reinterpret_cast<scalar_32bit_t*>(&frag_b0));
+          dequant_data(b_quant_1, reinterpret_cast<scalar_32bit_t*>(&frag_b1));
+        }
+      } else {
+        dequant_data(b_quant_0, reinterpret_cast<scalar_32bit_t*>(&frag_b0));
+        dequant_data(b_quant_1, reinterpret_cast<scalar_32bit_t*>(&frag_b1));
+      }
 
       if constexpr (dequant_skip_flop && has_zp && !is_zp_float && !is_a_8bit) {
         sub_zp<a_type_id>(frag_b0, frag_zp[j], 0);
