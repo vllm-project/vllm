@@ -90,11 +90,23 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         DFlash drafter. Mapped to both eagle_aux_hidden_state_layer_ids
         (for gpu_model_runner) and dflash_config.target_layer_ids (for the
         DFlash model).
+
+    Optional sliding-window fields from the speculators manifest are copied
+    into the draft HF config when present: layer_types, use_sliding_window,
+    sliding_window, max_window_layers.
     """
     pre_trained_config["architectures"] = ["DFlashDraftModel"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
+    for key in (
+        "layer_types",
+        "use_sliding_window",
+        "sliding_window",
+        "max_window_layers",
+    ):
+        if key in config_dict:
+            pre_trained_config[key] = config_dict[key]
 
     aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
     pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
