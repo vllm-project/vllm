@@ -374,7 +374,7 @@ def _make_speculator(
 
 
 def test_speculator_propose_basic_single_request():
-    """propose() should populate drafts and num_valid_draft_tokens correctly."""
+    """propose() should return drafts plus per-request valid counts."""
     spec = _make_speculator(min_n=2, max_n=2, k=2, max_num_seqs=4, max_model_len=16)
 
     # State for a single active request with tokens [1, 2, 3, 1, 2]; suffix (1,2)
@@ -394,7 +394,7 @@ def test_speculator_propose_basic_single_request():
     last_sampled = torch.full((4, 1), 99, dtype=torch.int64, device="cuda")
     num_sampled = torch.tensor([1], dtype=torch.int32, device="cuda")
 
-    drafts = spec.propose(
+    drafts, num_valid = spec.propose(
         input_batch=input_batch,
         attn_metadata=None,
         slot_mappings=None,
@@ -410,7 +410,8 @@ def test_speculator_propose_basic_single_request():
 
     assert drafts.shape == (1, 2)
     assert drafts.cpu().tolist() == [[3, 1]]
-    assert spec.get_num_valid_draft_tokens(1).cpu().tolist() == [2]
+    assert num_valid is not None
+    assert num_valid.cpu().tolist() == [2]
 
 
 def test_speculator_propose_zero_sampled_disables_proposal():
@@ -432,7 +433,7 @@ def test_speculator_propose_zero_sampled_disables_proposal():
     # num_sampled=0 must disable speculation for this request.
     num_sampled = torch.tensor([0], dtype=torch.int32, device="cuda")
 
-    spec.propose(
+    _drafts, num_valid = spec.propose(
         input_batch=input_batch,
         attn_metadata=None,
         slot_mappings=None,
@@ -446,7 +447,8 @@ def test_speculator_propose_zero_sampled_disables_proposal():
         seeds=torch.zeros(1, dtype=torch.int64, device="cuda"),
     )
 
-    assert spec.get_num_valid_draft_tokens(1).cpu().tolist() == [0]
+    assert num_valid is not None
+    assert num_valid.cpu().tolist() == [0]
 
 
 def test_speculator_propose_multibatch_noncontiguous_idx_mapping():
@@ -473,7 +475,7 @@ def test_speculator_propose_multibatch_noncontiguous_idx_mapping():
     last_sampled = torch.zeros((4, 1), dtype=torch.int64, device="cuda")
     num_sampled = torch.tensor([1, 1], dtype=torch.int32, device="cuda")
 
-    drafts = spec.propose(
+    drafts, num_valid = spec.propose(
         input_batch=input_batch,
         attn_metadata=None,
         slot_mappings=None,
@@ -488,11 +490,12 @@ def test_speculator_propose_multibatch_noncontiguous_idx_mapping():
     )
 
     assert drafts.cpu().tolist() == [[9, 7], [3, 1]]
-    assert spec.get_num_valid_draft_tokens(2).cpu().tolist() == [2, 2]
+    assert num_valid is not None
+    assert num_valid.cpu().tolist() == [2, 2]
 
 
-def test_speculator_propose_resets_unused_slots():
-    """num_valid_draft_tokens must be zeroed beyond ``num_reqs``."""
+def test_speculator_propose_returns_num_valid_matching_batch_size():
+    """num_valid should be shaped [num_reqs], independent of max_num_seqs."""
     spec = _make_speculator(min_n=2, max_n=2, k=2, max_num_seqs=4, max_model_len=16)
 
     all_token_ids = torch.zeros((4, 16), dtype=torch.int32, device="cuda")
@@ -502,9 +505,6 @@ def test_speculator_propose_resets_unused_slots():
 
     spec.req_states = _FakeRequestState(all_token_ids, total_len)
 
-    # Pre-populate with stale data to verify the slots are zeroed.
-    spec.num_valid_draft_tokens.fill_(123)
-
     input_batch = SimpleNamespace(
         num_reqs=1,
         idx_mapping=torch.tensor([0], dtype=torch.int32, device="cuda"),
@@ -512,7 +512,7 @@ def test_speculator_propose_resets_unused_slots():
     last_sampled = torch.zeros((4, 1), dtype=torch.int64, device="cuda")
     num_sampled = torch.tensor([1], dtype=torch.int32, device="cuda")
 
-    spec.propose(
+    drafts, num_valid = spec.propose(
         input_batch=input_batch,
         attn_metadata=None,
         slot_mappings=None,
@@ -526,8 +526,11 @@ def test_speculator_propose_resets_unused_slots():
         seeds=torch.zeros(1, dtype=torch.int64, device="cuda"),
     )
 
-    # Slot 0 should report 2 valid drafts; slots 1..3 must be zeroed.
-    assert spec.num_valid_draft_tokens.cpu().tolist() == [2, 0, 0, 0]
+    # Returned tensors match the active batch size, not max_num_seqs.
+    assert drafts.shape == (1, 2)
+    assert num_valid is not None
+    assert num_valid.shape == (1,)
+    assert num_valid.cpu().tolist() == [2]
 
 
 def test_speculator_propose_requires_req_states():

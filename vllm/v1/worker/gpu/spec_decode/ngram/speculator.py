@@ -148,10 +148,6 @@ class NgramGPUSpeculator:
             .eval()
         )
 
-        self.num_valid_draft_tokens: torch.Tensor = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, device=device
-        )
-
         self.req_states: RequestState | None = None
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -188,14 +184,13 @@ class NgramGPUSpeculator:
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self.req_states is not None, (
             "NgramGPUSpeculator.req_states was not injected by the model "
             "runner. Ensure model_runner sets `speculator.req_states = "
             "self.req_states` after RequestState is constructed."
         )
 
-        num_reqs = input_batch.num_reqs
         idx_mapping_long = input_batch.idx_mapping.long()
 
         active_tokens: torch.Tensor = self.req_states.all_token_ids.gpu[
@@ -214,14 +209,4 @@ class NgramGPUSpeculator:
                 active_last_sampled,
             )
 
-        self.num_valid_draft_tokens[:num_reqs].copy_(num_valid)
-        if num_reqs < self.max_num_reqs:
-            self.num_valid_draft_tokens[num_reqs:].zero_()
-
-        return drafts
-
-    def get_num_valid_draft_tokens(self, num_reqs: int) -> torch.Tensor:
-        """
-        Return the last step's per-request valid draft counts.
-        """
-        return self.num_valid_draft_tokens[:num_reqs]
+        return drafts, num_valid

@@ -1295,7 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            draft_tokens = self.speculator.propose(
+            draft_tokens, num_valid_draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,
                 slot_mappings_by_layer,
@@ -1310,10 +1310,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            num_valid_draft_tokens: torch.Tensor | None = None
-            get_num_valid = getattr(self.speculator, "get_num_valid_draft_tokens", None)
-            if get_num_valid is not None:
-                num_valid_draft_tokens = get_num_valid(input_batch.num_reqs)
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch, draft_tokens, num_valid_draft_tokens
             )
