@@ -7,6 +7,7 @@ Run: .venv/bin/python -m pytest tests/quantization/test_turboquant.py -v
 
 import math
 from inspect import signature
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -38,6 +39,27 @@ def _assert_strictly_sorted(seq, name="sequence"):
 
 def _is_power_of_2(n: int) -> bool:
     return n > 0 and next_power_of_2(n) == n
+
+
+def _make_turboquant_prefill_impl_stub():
+    from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionImpl
+
+    impl = object.__new__(TurboQuantAttentionImpl)
+    impl.scale = 1.0
+    impl.num_heads = 1
+    impl.num_kv_heads = 1
+    impl.head_size = 2
+    impl.sliding_window = None
+    impl.max_num_kv_splits = 4
+    impl.kv_sharing_target_layer_name = None
+    impl.tq_config = SimpleNamespace(
+        key_mse_bits=4,
+        key_packed_size=2,
+        effective_value_quant_bits=4,
+        key_fp8=False,
+        norm_correction=True,
+    )
+    return impl
 
 
 # Expected concrete values for each preset at head_dim=128.
@@ -97,6 +119,9 @@ class TestTurboQuantConfig:
     def test_backend_supports_known_cache_dtypes(self):
         for preset in ALL_PRESETS:
             assert TurboQuantAttentionBackend.supports_kv_cache_dtype(preset)
+
+    def test_backend_supports_mm_prefix(self):
+        assert TurboQuantAttentionBackend.supports_mm_prefix()
 
     def test_backend_supports_k8v4_for_flash_attention_head_size(self):
         reason = TurboQuantAttentionBackend.supports_combination(
@@ -483,6 +508,349 @@ class TestTurboQuantConfig:
             "sliding_window" in signature(triton_turboquant_decode_attention).parameters
         )
 
+    def test_decode_launcher_accepts_mm_prefix_range(self):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+
+        assert (
+            "mm_prefix_range"
+            in signature(triton_turboquant_decode_attention).parameters
+        )
+
+    def test_sdpa_mask_applies_mm_prefix_after_sliding_window(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionImpl,
+        )
+
+        impl = object.__new__(TurboQuantAttentionImpl)
+        impl.scale = 1.0
+        impl.sliding_window = 2
+
+        captured = {}
+
+        def fake_sdpa(q, k, v, *, attn_mask, scale, enable_gqa):
+            del k, v, scale, enable_gqa
+            captured["mask"] = attn_mask.clone()
+            return torch.zeros_like(q)
+
+        monkeypatch.setattr(
+            turboquant_attn.F, "scaled_dot_product_attention", fake_sdpa
+        )
+
+        query = torch.zeros(3, 1, 2)
+        key = torch.zeros(3, 1, 2)
+        value = torch.zeros(3, 1, 2)
+        mm_prefix_ranges = torch.tensor([[0, 2]], dtype=torch.int32)
+
+        impl._sdpa_with_causal_and_sliding_mask(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=mm_prefix_ranges,
+        )
+
+        assert torch.equal(captured["mask"], torch.ones(3, 3, dtype=torch.bool))
+
+    def test_prefill_with_mm_prefix_skips_flash_attn(self, monkeypatch):
+        from vllm.v1.attention.backends.turboquant_attn import (
+            TurboQuantAttentionImpl,
+        )
+
+        impl = object.__new__(TurboQuantAttentionImpl)
+        impl.scale = 1.0
+        impl.sliding_window = None
+        impl._can_use_flash_attn = True
+
+        def fail_flash(*args, **kwargs):
+            raise AssertionError("flash attention must not run with mm-prefix")
+
+        monkeypatch.setattr(impl, "_flash_attn_varlen", fail_flash)
+        monkeypatch.setattr(
+            impl,
+            "_sdpa_with_causal_and_sliding_mask",
+            lambda query, key, value, **kwargs: torch.full_like(query, 3),
+        )
+
+        query = torch.zeros(2, 1, 2)
+        key = torch.zeros(2, 1, 2)
+        value = torch.zeros(2, 1, 2)
+        out = impl._prefill_attention_with_kv(
+            query,
+            key,
+            value,
+            query_start_pos=0,
+            mm_prefix_ranges=torch.tensor([[0, 1]], dtype=torch.int32),
+        )
+
+        assert torch.equal(out, torch.full_like(query, 3))
+
+    def test_large_continuation_without_flash_uses_decode_chunks(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = _make_turboquant_prefill_impl_stub()
+        impl._can_use_flash_attn = False
+
+        def fail_continuation(*args, **kwargs):
+            raise AssertionError("full-dequant continuation path must not run")
+
+        calls = []
+
+        def fake_decode_attention(**kwargs):
+            calls.append(kwargs)
+            return torch.full_like(kwargs["query"], len(calls))
+
+        monkeypatch.setattr(impl, "_continuation_prefill", fail_continuation)
+        monkeypatch.setattr(
+            turboquant_attn,
+            "triton_turboquant_decode_attention",
+            fake_decode_attention,
+        )
+
+        q_len = turboquant_attn._CONTINUATION_DECODE_THRESHOLD + 1
+        cached_len = 200
+        seq_len = cached_len + q_len
+        query = torch.zeros(q_len, 1, 2)
+        key = torch.zeros_like(query)
+        value = torch.zeros_like(query)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, q_len], dtype=torch.int32),
+            seq_lens=torch.tensor([seq_len], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int32),
+            block_table=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+            max_query_len=q_len,
+            max_seq_len=seq_len,
+        )
+
+        out = impl._prefill_attention(
+            query,
+            key,
+            value,
+            torch.empty(0),
+            metadata,
+            torch.empty(0),
+            torch.empty(0),
+        )
+
+        assert len(calls) == 2
+        assert (
+            calls[0]["query"].shape[0] == turboquant_attn._CONTINUATION_DECODE_THRESHOLD
+        )
+        assert calls[1]["query"].shape[0] == 1
+        assert calls[0]["seq_lens"].tolist() == list(range(cached_len + 1, seq_len))
+        assert calls[1]["seq_lens"].tolist() == [seq_len]
+        assert calls[0]["mm_prefix_range"] is None
+        assert torch.equal(
+            out,
+            torch.cat(
+                (
+                    torch.ones(turboquant_attn._CONTINUATION_DECODE_THRESHOLD, 1, 2),
+                    torch.full((1, 1, 2), 2.0),
+                )
+            ),
+        )
+
+    def test_continuation_threshold_uses_single_decode_chunk(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = _make_turboquant_prefill_impl_stub()
+        impl._can_use_flash_attn = True
+
+        def fail_continuation(*args, **kwargs):
+            raise AssertionError("threshold continuation must use decode chunk")
+
+        calls = []
+
+        def fake_decode_attention(**kwargs):
+            calls.append(kwargs)
+            return torch.zeros_like(kwargs["query"])
+
+        monkeypatch.setattr(impl, "_continuation_prefill", fail_continuation)
+        monkeypatch.setattr(
+            turboquant_attn,
+            "triton_turboquant_decode_attention",
+            fake_decode_attention,
+        )
+
+        q_len = turboquant_attn._CONTINUATION_DECODE_THRESHOLD
+        cached_len = 200
+        seq_len = cached_len + q_len
+        query = torch.zeros(q_len, 1, 2)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, q_len], dtype=torch.int32),
+            seq_lens=torch.tensor([seq_len], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int32),
+            block_table=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+            max_query_len=q_len,
+            max_seq_len=seq_len,
+        )
+
+        impl._prefill_attention(
+            query,
+            torch.zeros_like(query),
+            torch.zeros_like(query),
+            torch.empty(0),
+            metadata,
+            torch.empty(0),
+            torch.empty(0),
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["query"].shape[0] == q_len
+        assert calls[0]["seq_lens"].tolist() == list(range(cached_len + 1, seq_len + 1))
+
+    def test_large_continuation_with_flash_keeps_flash_path(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = _make_turboquant_prefill_impl_stub()
+        impl._can_use_flash_attn = True
+
+        def fail_decode(*args, **kwargs):
+            raise AssertionError("decode chunk path must not run")
+
+        called = {}
+
+        def fake_continuation(*args, **kwargs):
+            called["ran"] = True
+            query = args[1]
+            return torch.full_like(query, 5)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "triton_turboquant_decode_attention",
+            fail_decode,
+        )
+        monkeypatch.setattr(impl, "_continuation_prefill", fake_continuation)
+
+        q_len = turboquant_attn._CONTINUATION_DECODE_THRESHOLD + 1
+        seq_len = 200 + q_len
+        query = torch.zeros(q_len, 1, 2)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, q_len], dtype=torch.int32),
+            seq_lens=torch.tensor([seq_len], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int32),
+            block_table=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+            max_query_len=q_len,
+            max_seq_len=seq_len,
+        )
+
+        out = impl._prefill_attention(
+            query,
+            torch.zeros_like(query),
+            torch.zeros_like(query),
+            torch.empty(0),
+            metadata,
+            torch.empty(0),
+            torch.empty(0),
+        )
+
+        assert called["ran"]
+        assert torch.equal(out, torch.full_like(query, 5))
+
+    def test_continuation_with_mm_prefix_uses_decode_chunks(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = _make_turboquant_prefill_impl_stub()
+        impl._can_use_flash_attn = True
+
+        def fail_continuation(*args, **kwargs):
+            raise AssertionError("mm-prefix continuation must not use SDPA fallback")
+
+        calls = []
+
+        def fake_decode_attention(**kwargs):
+            calls.append(kwargs)
+            return torch.zeros_like(kwargs["query"])
+
+        monkeypatch.setattr(impl, "_continuation_prefill", fail_continuation)
+        monkeypatch.setattr(
+            turboquant_attn,
+            "triton_turboquant_decode_attention",
+            fake_decode_attention,
+        )
+
+        q_len = turboquant_attn._CONTINUATION_DECODE_THRESHOLD + 1
+        seq_len = 200 + q_len
+        query = torch.zeros(q_len, 1, 2)
+        mm_prefix_range_tensor = torch.tensor(
+            [[[0, 64], [128, 192]]],
+            dtype=torch.int32,
+        )
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, q_len], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, q_len], dtype=torch.int32),
+            seq_lens=torch.tensor([seq_len], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([seq_len], dtype=torch.int32),
+            block_table=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+            max_query_len=q_len,
+            max_seq_len=seq_len,
+            mm_prefix_range_tensor=mm_prefix_range_tensor,
+        )
+
+        impl._prefill_attention(
+            query,
+            torch.zeros_like(query),
+            torch.zeros_like(query),
+            torch.empty(0),
+            metadata,
+            torch.empty(0),
+            torch.empty(0),
+        )
+
+        assert len(calls) == 2
+        assert calls[0]["mm_prefix_range"].shape == (
+            turboquant_attn._CONTINUATION_DECODE_THRESHOLD,
+            2,
+            2,
+        )
+        assert calls[1]["mm_prefix_range"].shape == (1, 2, 2)
+        assert torch.equal(calls[0]["mm_prefix_range"][0], mm_prefix_range_tensor[0])
+
+    def test_kv_shared_prefill_without_flash_uses_decode_chunks(self, monkeypatch):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        impl = _make_turboquant_prefill_impl_stub()
+        impl._can_use_flash_attn = False
+
+        def fail_dequant(*args, **kwargs):
+            raise AssertionError("KV-sharing prefill must not full-dequant for SDPA")
+
+        calls = []
+
+        def fake_decode_attention(**kwargs):
+            calls.append(kwargs)
+            return torch.zeros_like(kwargs["query"])
+
+        monkeypatch.setattr(impl, "_dequant_cached_kv", fail_dequant)
+        monkeypatch.setattr(
+            turboquant_attn,
+            "triton_turboquant_decode_attention",
+            fake_decode_attention,
+        )
+
+        q_len = turboquant_attn._CONTINUATION_DECODE_THRESHOLD + 1
+        query = torch.zeros(q_len, 1, 2)
+        layer = SimpleNamespace(_tq_PiT=torch.full((2, 2), 9.0))
+        impl._cache_prefill_attention(
+            layer=layer,
+            query=query,
+            kv_cache=torch.empty(0),
+            block_table=torch.tensor([[1, 2, 3]], dtype=torch.int32),
+            seq_len=300 + q_len,
+            query_start_pos=300,
+            Pi=torch.empty(0),
+            centroids=torch.empty(0),
+        )
+
+        assert len(calls) == 2
+        assert calls[0]["seq_lens"].tolist()[0] == 301
+        assert torch.equal(calls[0]["PiT"], layer._tq_PiT)
+
     def test_decode_workspace_reservation_uses_safe_upper_bound(self):
         from vllm.v1.attention.backends.turboquant_attn import (
             _get_turboquant_decode_workspace_shapes,
@@ -575,7 +943,9 @@ class TestTurboQuantConfig:
             query_start_pos,
             Pi,
             centroids,
+            mm_prefix_ranges=None,
         ):
+            del mm_prefix_ranges
             calls.append((block_table.clone(), seq_len, query_start_pos))
             return torch.full_like(query, 7)
 

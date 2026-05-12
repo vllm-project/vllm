@@ -1980,6 +1980,22 @@ def test_generate_uniform_type_kv_cache_specs():
     uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
     assert uniform_spec is None
 
+    # TQ specs subclass native specs for scheduling semantics, but their
+    # physical KV layout is different and must not be merged as uniform native.
+    kv_cache_specs = {
+        "layer_1": new_tq_full_attention_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
+    kv_cache_specs = {
+        "layer_1": new_tq_sliding_window_spec(sliding_window=1),
+        "layer_2": new_sliding_window_spec(sliding_window=1),
+    }
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is None
+
 
 def test_generate_scheduler_kv_cache_config():
     kv_cache_specs = {

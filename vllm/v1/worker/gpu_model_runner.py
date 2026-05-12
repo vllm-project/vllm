@@ -6802,8 +6802,8 @@ class GPUModelRunner(
         for metadata in metadata_list:
             metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
-            # Only compute tensor for TritonAttentionMetadata
-            if isinstance(metadata, TritonAttentionMetadata):
+            # Compute tensor for backends that expose mm_prefix_range_tensor.
+            if hasattr(metadata, "mm_prefix_range_tensor"):
                 if shared_tensor is None:
                     shared_tensor = (
                         TritonAttentionMetadata.compute_mm_prefix_range_tensor(
