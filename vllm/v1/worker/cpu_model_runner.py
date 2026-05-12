@@ -111,6 +111,8 @@ class CPUModelRunner(GPUModelRunner):
             logger.info_once("Loading drafter model...")
             self.drafter.load_model(self.model)
 
+        self._setup_aux_hidden_state_outputs()
+
     def get_model(self) -> nn.Module:
         return self.model
 

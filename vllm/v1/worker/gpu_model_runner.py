@@ -4911,27 +4911,7 @@ class GPUModelRunner(
                         )
                         eplb_models += 1
 
-                if self.use_aux_hidden_state_outputs:
-                    if not supports_eagle3(self.get_model()):
-                        raise RuntimeError(
-                            "Model does not support EAGLE3 interface but "
-                            "aux_hidden_state_outputs was requested"
-                        )
-
-                    # Try to get auxiliary layers from speculative config,
-                    # otherwise use model's default layers
-                    aux_layers = self._get_eagle3_aux_layers_from_config()
-                    if aux_layers:
-                        logger.info(
-                            "Using auxiliary layers from speculative config: %s",
-                            aux_layers,
-                        )
-                    else:
-                        aux_layers = (
-                            self.model.get_eagle3_default_aux_hidden_state_layers()
-                        )
-
-                    self.model.set_aux_hidden_state_layers(aux_layers)
+                self._setup_aux_hidden_state_outputs()
 
                 if (
                     is_mixture_of_experts(self.model)
@@ -5027,6 +5007,27 @@ class GPUModelRunner(
                 )
 
         get_offloader().post_init()
+
+    def _setup_aux_hidden_state_outputs(self) -> None:
+        if not self.use_aux_hidden_state_outputs:
+            return
+
+        if not supports_eagle3(self.get_model()):
+            raise RuntimeError(
+                "Model does not support EAGLE3 interface but "
+                "aux_hidden_state_outputs was requested"
+            )
+        # Try to get auxiliary layers from speculative config,
+        # otherwise use model's default layers
+        aux_layers = self._get_eagle3_aux_layers_from_config()
+        if aux_layers:
+            logger.info(
+                "Using auxiliary layers from speculative config: %s", aux_layers
+            )
+        else:
+            aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+
+        self.model.set_aux_hidden_state_layers(aux_layers)
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
