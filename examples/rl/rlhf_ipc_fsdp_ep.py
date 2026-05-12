@@ -134,6 +134,16 @@ class FSDPTrainWorker:
         """
 
         def _full_param_iter():
+            # HF's Qwen3MoeExperts (and other recent HF MoE impls) packs
+            # all experts into two fused 3-D tensors per layer:
+            #   experts.gate_up_proj  shape (E, 2*I, H)
+            #   experts.down_proj     shape (E, H, I)
+            # vLLM's Qwen3MoE load_weights still expects the older
+            # per-expert HF layout (experts.<i>.gate_proj.weight,
+            # experts.<i>.up_proj.weight, experts.<i>.down_proj.weight),
+            # so we un-fuse on the fly. Split order matches HF's forward:
+            #   gate, up = linear(x, gate_up_proj[i]).chunk(2, dim=-1)
+            # → rows [:I] of gate_up_proj[i] are gate, rows [I:] are up.
             params = self.model.state_dict()
             for name in list(params.keys()):
                 param = params.pop(name)
@@ -142,7 +152,33 @@ class FSDPTrainWorker:
                 else:
                     tensor = param.detach().contiguous()
                 del param
-                yield name, tensor
+
+                if name.endswith(".experts.gate_up_proj") and tensor.dim() == 3:
+                    prefix = name[: -len(".gate_up_proj")]
+                    num_experts, two_inter, _ = tensor.shape
+                    inter = two_inter // 2
+                    for i in range(num_experts):
+                        expert = tensor[i]
+                        yield (
+                            f"{prefix}.{i}.gate_proj.weight",
+                            expert[:inter].contiguous(),
+                        )
+                        yield (
+                            f"{prefix}.{i}.up_proj.weight",
+                            expert[inter:].contiguous(),
+                        )
+                    del tensor
+                elif name.endswith(".experts.down_proj") and tensor.dim() == 3:
+                    prefix = name[: -len(".down_proj")]
+                    num_experts = tensor.shape[0]
+                    for i in range(num_experts):
+                        yield (
+                            f"{prefix}.{i}.down_proj.weight",
+                            tensor[i].contiguous(),
+                        )
+                    del tensor
+                else:
+                    yield name, tensor
 
         trainer_args = IPCTrainerSendWeightsArgs(
             send_mode="ray",
@@ -241,6 +277,19 @@ class DataParallelInferenceEngine:
             ]
         )
 
+    def start_weight_update(self, is_checkpoint_format: bool = True):
+        ray.get(
+            [
+                actor.start_weight_update.remote(
+                    is_checkpoint_format=is_checkpoint_format
+                )
+                for actor in self.llm_actors
+            ]
+        )
+
+    def finish_weight_update(self):
+        ray.get([actor.finish_weight_update.remote() for actor in self.llm_actors])
+
     def sleep(self, level: int = 0):
         ray.get([actor.sleep.remote(level=level) for actor in self.llm_actors])
 
@@ -253,6 +302,15 @@ def main():
         runtime_env={
             "env_vars": {
                 "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+                # Workaround: this image has CUDA 12.8 system libs but torch
+                # 2.11+cu130 is installed via pip. vLLM's cumem allocator
+                # dlopens libnvrtc.so.13, which only lives in torch's
+                # pip-installed nvidia/cu13/lib dir — not on the default
+                # loader path. Remove once the system gets CUDA 13 installed.
+                "LD_LIBRARY_PATH": (
+                    "/home/ray/anaconda3/lib/python3.12/site-packages/nvidia/cu13/lib:"
+                    + os.environ.get("LD_LIBRARY_PATH", "")
+                ),
             }
         }
     )
@@ -331,7 +389,7 @@ def main():
     print("[transfer] Initializing IPC weight transfer...")
     ray.get(inference_engine.init_weight_transfer.remote())
 
-    # Two-phase sleep/wake pattern (same as SkyRL):
+    # Two-phase sleep/wake pattern:
     # 1. sleep(level=1) — offload weights to CPU, discard KV cache
     # 2. wake_up(tags=["weights"]) — bring weights back to GPU (KV cache still free)
     # 3. IPC weight transfer — overwrite weights, plenty of room without KV cache
@@ -342,6 +400,9 @@ def main():
     print("[sync] Waking weights (KV cache stays free)...")
     ray.get(inference_engine.wake_up.remote(tags=["weights"]))
 
+    print("[sync] Starting weight update...")
+    ray.get(inference_engine.start_weight_update.remote(is_checkpoint_format=True))
+
     print("[sync] Packed IPC transfer FSDP → vLLM...")
     ray.get(
         [
@@ -349,6 +410,8 @@ def main():
             for w in fsdp_workers
         ]
     )
+
+    ray.get(inference_engine.finish_weight_update.remote())
     print("[sync] Weight transfer complete.")
 
     print("[sync] Waking KV cache + scheduling...")

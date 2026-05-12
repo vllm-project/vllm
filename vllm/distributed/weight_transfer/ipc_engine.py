@@ -225,6 +225,8 @@ class IPCWeightTransferEngine(
 
                 args = ipc_handle[physical_gpu_id]
                 list_args = list(args)
+                # Index 6 of the args from reduce_tensor is the device_index.
+                # We need to overwrite it with the receiver's device index.
                 list_args[6] = device_index
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))

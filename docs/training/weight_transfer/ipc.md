@@ -38,7 +38,7 @@ The IPC backend requires no initialization on either side. The `init_transfer_en
 
 ## Sending Weights
 
-IPC supports three transport modes for delivering the handles:
+IPC supports two transport modes for delivering the handles:
 
 ### Ray Mode
 
@@ -94,10 +94,6 @@ response.raise_for_status()
 ```
 
 In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. The pickled payload contains only `rebuild_cuda_tensor` argument tuples (ints, bytes, strings) — no arbitrary callables — so no special environment flags are required.
-
-### Custom Callable Mode
-
-For custom transport mechanisms, pass a callable as `send_mode`. The callable receives an `IPCWeightTransferUpdateInfo` object and is responsible for delivering it to the inference engine:
 
 ```python
 def my_custom_sender(update_info: IPCWeightTransferUpdateInfo):

@@ -486,12 +486,6 @@ class TestPackedIpcProducer:
         )
 
         assert len(chunks) > 1
-        assert chunks[0].is_first is True
-        assert chunks[-1].is_last is True
-        for c in chunks[1:]:
-            assert c.is_first is False
-        for c in chunks[:-1]:
-            assert c.is_last is False
 
     def test_producer_ipc_handle_has_uuid(self):
         """Test that each chunk's ipc_handle is keyed by the given UUID."""
@@ -542,16 +536,21 @@ class TestPackedIpcProducer:
 # --- Integration Tests: IPC Producer-Consumer Roundtrip ---
 
 
-def _ipc_consumer_worker(queue, done_event, chunk_data_list, device_index):
-    """Worker function that runs packed_ipc_consumer in a child process.
+def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
+    """Worker that consumes chunks streamed one at a time from the parent.
 
     CUDA IPC requires the consumer to be in a separate process from the
-    producer. This function is the target of multiprocessing.Process.
+    producer. The producer reuses a single IPC buffer between chunks, so
+    the parent must wait for our ack (sent after we copy the chunk to
+    CPU) before advancing the producer.
     """
     try:
         torch.accelerator.set_device_index(device_index)
         all_results = []
-        for cd in chunk_data_list:
+        while True:
+            cd = cmd_q.get()
+            if cd is None:
+                break
             result = packed_ipc_consumer(
                 ipc_handle=cd["ipc_handle"],
                 names=cd["names"],
@@ -560,13 +559,17 @@ def _ipc_consumer_worker(queue, done_event, chunk_data_list, device_index):
                 tensor_sizes=cd["tensor_sizes"],
                 device_index=device_index,
             )
+            # .cpu() forces a GPU→CPU copy off the shared IPC buffer, so
+            # the producer is free to overwrite it once we ack.
             all_results.extend([(name, tensor.cpu()) for name, tensor in result])
-        queue.put(("ok", all_results))
+            del result
+            ack_q.put("ack")
+        result_q.put(("ok", all_results))
     except Exception as e:
-        queue.put(("error", str(e)))
+        result_q.put(("error", str(e)))
     # Keep the process alive until the parent has finished reading from
-    # the queue — torch serializes CPU tensors via fd sharing, which
-    # requires this process's resource-sharer server to be running.
+    # the result queue — torch serializes CPU tensors via fd sharing,
+    # which requires this process's resource-sharer server to be running.
     done_event.wait(timeout=60)
 
 
@@ -584,41 +587,59 @@ class TestPackedIpcRoundtrip:
         props = torch.cuda.get_device_properties(device_index)
         return str(props.uuid)
 
-    def _run_roundtrip(self, chunks, device_index, timeout=30):
-        """Produce IPC handles in this process, consume in a child."""
+    def _run_roundtrip(self, chunk_iter, device_index, timeout=30):
+        """Stream chunks through a child consumer one at a time.
+
+        ``packed_ipc_producer`` reuses a single IPC buffer for every
+        chunk, so the producer must not be advanced until the consumer
+        has finished reading the current chunk. We enforce that with an
+        ack queue: the consumer puts ``"ack"`` after it has copied the
+        chunk to CPU, and only then do we pull the next chunk from the
+        generator.
+
+        Returns ``(num_chunks, results)``.
+        """
         import multiprocessing as mp
 
-        chunk_data_list = [
-            {
-                "ipc_handle": c.ipc_handle,
-                "names": c.names,
-                "shapes": c.shapes,
-                "dtype_names": c.dtype_names,
-                "tensor_sizes": c.tensor_sizes,
-            }
-            for c in chunks
-        ]
-
         ctx = mp.get_context("spawn")
-        queue = ctx.Queue()
+        cmd_q = ctx.Queue()
+        ack_q = ctx.Queue()
+        result_q = ctx.Queue()
         done_event = ctx.Event()
         proc = ctx.Process(
             target=_ipc_consumer_worker,
-            args=(queue, done_event, chunk_data_list, device_index),
+            args=(cmd_q, ack_q, result_q, done_event, device_index),
         )
         proc.start()
-        status, payload = queue.get(timeout=timeout)
-        # Signal the child that we've finished reading so it can exit.
-        done_event.set()
-        proc.join(timeout=10)
-        if proc.is_alive():
-            proc.kill()
-            raise RuntimeError("Consumer process timed out")
+
+        num_chunks = 0
+        try:
+            for chunk in chunk_iter:
+                cmd_q.put(
+                    {
+                        "ipc_handle": chunk.ipc_handle,
+                        "names": chunk.names,
+                        "shapes": chunk.shapes,
+                        "dtype_names": chunk.dtype_names,
+                        "tensor_sizes": chunk.tensor_sizes,
+                    }
+                )
+                if ack_q.get(timeout=timeout) != "ack":
+                    raise RuntimeError("Consumer did not ack chunk")
+                num_chunks += 1
+            cmd_q.put(None)
+            status, payload = result_q.get(timeout=timeout)
+        finally:
+            done_event.set()
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.kill()
+
         if status == "error":
             raise RuntimeError(f"Consumer process failed: {payload}")
         # Reclaim IPC-shared memory now that the child has released it
         torch.cuda.ipc_collect()
-        return payload
+        return num_chunks, payload
 
     def test_roundtrip_basic(self):
         """Test basic IPC producer -> consumer roundtrip."""
@@ -629,18 +650,17 @@ class TestPackedIpcRoundtrip:
         gpu_uuid = self._get_gpu_uuid()
         device_index = torch.cuda.current_device()
 
-        chunks = list(
+        num_chunks, result = self._run_roundtrip(
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=gpu_uuid,
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
-            )
+            ),
+            device_index,
         )
 
-        assert len(chunks) == 1
-        result = self._run_roundtrip(chunks, device_index)
-
+        assert num_chunks == 1
         assert len(result) == 2
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(params, result):
             assert orig_name == res_name
@@ -656,16 +676,15 @@ class TestPackedIpcRoundtrip:
         gpu_uuid = self._get_gpu_uuid()
         device_index = torch.cuda.current_device()
 
-        chunks = list(
+        _, result = self._run_roundtrip(
             packed_ipc_producer(
                 iterator=iter(params_cuda),
                 gpu_uuid=gpu_uuid,
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
-            )
+            ),
+            device_index,
         )
-
-        result = self._run_roundtrip(chunks, device_index)
 
         assert len(result) == len(params_cuda)
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(
@@ -684,18 +703,17 @@ class TestPackedIpcRoundtrip:
         gpu_uuid = self._get_gpu_uuid()
         device_index = torch.cuda.current_device()
 
-        chunks = list(
+        num_chunks, result = self._run_roundtrip(
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=gpu_uuid,
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=50_000,
-            )
+            ),
+            device_index,
         )
 
-        assert len(chunks) > 1
-        result = self._run_roundtrip(chunks, device_index)
-
+        assert num_chunks > 1
         assert len(result) == len(params)
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(params, result):
             assert orig_name == res_name
@@ -713,16 +731,15 @@ class TestPackedIpcRoundtrip:
         for _, t in params:
             assert not t.is_contiguous()
 
-        chunks = list(
+        _, result = self._run_roundtrip(
             packed_ipc_producer(
                 iterator=iter(params),
                 gpu_uuid=gpu_uuid,
                 post_iter_func=lambda x: x[1],
                 buffer_size_bytes=10_000_000,
-            )
+            ),
+            device_index,
         )
-
-        result = self._run_roundtrip(chunks, device_index)
 
         for (orig_name, orig_tensor), (res_name, res_tensor) in zip(params, result):
             assert orig_name == res_name

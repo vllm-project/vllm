@@ -25,8 +25,11 @@ def unpack_tensor(
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a packed uint8 tensor into a list of named tensors.
 
-    The .contiguous().view() calls on split slices create independent copies,
-    so callers do not need to clone the results.
+    The returned tensors are **views** of ``packed_tensor`` (the
+    ``.contiguous()`` call is a no-op on already-contiguous row-slices).
+    If ``packed_tensor`` lives in storage that may be reused — e.g. a
+    reused CUDA IPC buffer — callers must clone the results before the
+    underlying storage is overwritten.
 
     Args:
         packed_tensor: The packed torch.uint8 tensor to unpack
@@ -287,8 +290,6 @@ class PackedIpcChunk:
     dtype_names: list[str]
     tensor_sizes: list[int]
     ipc_handle: dict[str, tuple]
-    is_first: bool
-    is_last: bool
 
 
 def packed_ipc_producer(
@@ -319,78 +320,52 @@ def packed_ipc_producer(
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
     _, ipc_args = reduce_tensor(ipc_buffer)
 
-    chunk_idx = 0
-    pending: tuple[str, torch.Tensor, torch.Tensor] | None = None
-    exhausted = False
+    names: list[str] = []
+    shapes: list[list[int]] = []
+    dtypes: list[torch.dtype] = []
+    tensor_sizes: list[int] = []
+    tensors: list[torch.Tensor] = []
+    total_bytes = 0
 
-    while not exhausted or pending is not None:
-        names: list[str] = []
-        shapes: list[list[int]] = []
-        dtypes: list[torch.dtype] = []
-        tensor_sizes: list[int] = []
-        tensors: list[torch.Tensor] = []
-        total_bytes = 0
-
-        if pending is not None:
-            p_name, p_orig, p_flat = pending
-            tensors.append(p_flat)
-            names.append(p_name)
-            shapes.append(list(p_orig.shape))
-            dtypes.append(p_orig.dtype)
-            tensor_sizes.append(p_flat.numel())
-            total_bytes += p_flat.numel()
-            pending = None
-
-        while not exhausted:
-            item = next(iterator, None)
-            if item is None:
-                exhausted = True
-                break
-
-            name, orig_tensor = item
-            flat = post_iter_func(item).contiguous().view(torch.uint8).view(-1)
-
-            if flat.numel() > buffer_size_bytes:
-                raise ValueError(
-                    f"Tensor '{name}' has size {flat.numel()} bytes, "
-                    f"which exceeds buffer_size_bytes={buffer_size_bytes}. "
-                    f"Increase buffer_size_bytes to at least {flat.numel()}."
-                )
-
-            if total_bytes + flat.numel() > buffer_size_bytes and tensors:
-                pending = (name, orig_tensor, flat)
-                break
-
-            tensors.append(flat)
-            names.append(name)
-            shapes.append(list(orig_tensor.shape))
-            dtypes.append(orig_tensor.dtype)
-            tensor_sizes.append(flat.numel())
-            total_bytes += flat.numel()
-
-        if not tensors:
-            break
-
+    def emit() -> PackedIpcChunk:
         packed = torch.cat(tensors, dim=0)
-        del tensors
         ipc_buffer[: packed.numel()].copy_(packed)
-        del packed
-
-        is_last = exhausted and pending is None
-        dtype_names = [str(d).split(".")[-1] for d in dtypes]
-
-        yield PackedIpcChunk(
+        return PackedIpcChunk(
             names=names,
             shapes=shapes,
-            dtype_names=dtype_names,
+            dtype_names=[str(d).split(".")[-1] for d in dtypes],
             tensor_sizes=tensor_sizes,
             ipc_handle={gpu_uuid: ipc_args},
-            is_first=chunk_idx == 0,
-            is_last=is_last,
         )
-        chunk_idx += 1
 
-    del ipc_buffer
+    for name, orig_tensor in iterator:
+        flat = (
+            post_iter_func((name, orig_tensor)).contiguous().view(torch.uint8).view(-1)
+        )
+
+        if flat.numel() > buffer_size_bytes:
+            raise ValueError(
+                f"Tensor '{name}' has size {flat.numel()} bytes, "
+                f"which exceeds buffer_size_bytes={buffer_size_bytes}. "
+                f"Increase buffer_size_bytes to at least {flat.numel()}."
+            )
+
+        if tensors and total_bytes + flat.numel() > buffer_size_bytes:
+            yield emit()
+            # Rebind to fresh lists so the yielded chunk keeps its data
+            # and the prior flat tensors become unreachable for GC.
+            names, shapes, dtypes, tensor_sizes, tensors = [], [], [], [], []
+            total_bytes = 0
+
+        tensors.append(flat)
+        names.append(name)
+        shapes.append(list(orig_tensor.shape))
+        dtypes.append(orig_tensor.dtype)
+        tensor_sizes.append(flat.numel())
+        total_bytes += flat.numel()
+
+    if tensors:
+        yield emit()
 
 
 def packed_ipc_consumer(
@@ -403,10 +378,17 @@ def packed_ipc_consumer(
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
-    Reconstructs the packed buffer via rebuild_cuda_tensor, then unpacks
-    into individual tensors. The .contiguous().view() calls in
-    unpack_tensor create independent copies, releasing the IPC
-    reference naturally.
+    Reconstructs the packed buffer via rebuild_cuda_tensor, unpacks
+    into individual tensors, and clones each into independent storage
+    before returning.
+
+    The clone is intentional: the producer reuses one IPC buffer across
+    chunks, so any tensor view that aliases the buffer would observe the
+    *next* chunk's bytes as soon as the producer's generator is resumed.
+    Callers that retain references past their own update_weights call
+    (notably vLLM's layerwise reload, which buffers ``bound_args`` for
+    replay in ``_layerwise_process``) would otherwise replay against
+    stale data and silently corrupt multi-chunk weight transfers.
 
     Args:
         ipc_handle: Mapping of GPU UUID to rebuild_cuda_tensor args tuple
@@ -436,4 +418,7 @@ def packed_ipc_consumer(
     packed = packed[:content_size]
 
     dtypes = [getattr(torch, dn) for dn in dtype_names]
-    return unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)
+    return [
+        (name, t.clone())
+        for name, t in unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)
+    ]
