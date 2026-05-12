@@ -99,7 +99,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
             shared_experts=layer.shared_experts,
         )
 
