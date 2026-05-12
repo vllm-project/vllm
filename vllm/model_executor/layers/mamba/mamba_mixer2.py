@@ -755,6 +755,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dim=0,
                 )
             )
+            if attn_metadata.block_idx_last_scheduled_token_prev_step is not None:
+                block_idx_last_scheduled_token_prev_step_d, _ = torch.split(
+                    attn_metadata.block_idx_last_scheduled_token_prev_step,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            else:
+                block_idx_last_scheduled_token_prev_step_d = None
             # Prefill-only variables:
             block_idx_first_scheduled_token_p = (
                 attn_metadata.block_idx_first_scheduled_token_p
@@ -766,6 +774,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             block_idx_first_scheduled_token_p = None
             block_idx_last_scheduled_token_d = None
             block_idx_last_computed_token_d = None
+            block_idx_last_scheduled_token_prev_step_d = None
             num_computed_tokens_p = None
 
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
@@ -945,18 +954,25 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert state_indices_tensor_d is not None
             if is_mamba_cache_all:
                 if self.num_spec > 0:
+                    assert block_idx_last_scheduled_token_prev_step_d is not None
                     offsets = torch.arange(
                         1 + self.num_spec,
                         device=block_idx_last_scheduled_token_d.device,
                         dtype=block_idx_last_scheduled_token_d.dtype,
                     )
-                    indices = block_idx_last_scheduled_token_d.unsqueeze(
+                    input_indices = (
+                        block_idx_last_scheduled_token_prev_step_d.unsqueeze(1)
+                        + offsets.unsqueeze(0)
+                    )
+                    output_indices = block_idx_last_scheduled_token_d.unsqueeze(
                         1
                     ) + offsets.unsqueeze(0)
                     state_indices_tensor_d_input = state_indices_tensor_d.gather(
-                        1, indices
+                        1, input_indices
                     )
-                    state_indices_tensor_d_output = state_indices_tensor_d_input
+                    state_indices_tensor_d_output = state_indices_tensor_d.gather(
+                        1, output_indices
+                    )
                 else:
                     state_indices_tensor_d_input = state_indices_tensor_d.gather(
                         1, block_idx_last_computed_token_d.unsqueeze(1)
