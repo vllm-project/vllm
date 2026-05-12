@@ -1,0 +1,43 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    - cron: '0 3 * * *'  # chaque nuit à 3h UTC
+  workflow_dispatch:      # déclenchement manuel possible
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Sync from upstream
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Save CI files before reset
+          cp -r .github/workflows /tmp/workflows-backup
+          cp docker/Dockerfile.zyphra /tmp/Dockerfile.zyphra
+          cp docker/patch_zaya_bnb.py /tmp/patch_zaya_bnb.py
+
+          git remote add upstream https://github.com/Zyphra/vllm.git
+          git fetch upstream zaya1
+          git reset --hard upstream/zaya1
+
+          # Restore CI files
+          cp -r /tmp/workflows-backup/. .github/workflows/
+          cp /tmp/Dockerfile.zyphra docker/Dockerfile.zyphra
+          cp /tmp/patch_zaya_bnb.py docker/patch_zaya_bnb.py
+
+          git add .github/workflows docker/Dockerfile.zyphra docker/patch_zaya_bnb.py
+          git diff --cached --quiet || git commit -m "chore: restore CI files after sync"
+          git push origin main --force

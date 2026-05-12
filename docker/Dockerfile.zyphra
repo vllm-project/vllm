@@ -1,0 +1,14 @@
+ARG VLLM_BASE_VERSION=v0.16.0
+FROM vllm/vllm-openai:${VLLM_BASE_VERSION}
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+
+COPY docker/patch_zaya_bnb.py /tmp/patch_zaya_bnb.py
+
+RUN git clone --depth 1 --branch zaya1 https://github.com/Zyphra/vllm.git /tmp/zyphra-vllm && \
+    python3 /tmp/patch_zaya_bnb.py /tmp/zyphra-vllm/vllm/model_executor/models/zaya.py && \
+    VLLM_PATH=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") && \
+    cp -r /tmp/zyphra-vllm/vllm/. "$VLLM_PATH/" && \
+    rm -rf /tmp/zyphra-vllm /tmp/patch_zaya_bnb.py
+
+ENTRYPOINT ["vllm", "serve"]
