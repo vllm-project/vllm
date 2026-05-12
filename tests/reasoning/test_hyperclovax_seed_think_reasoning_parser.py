@@ -30,10 +30,8 @@ def mock_tokenizer():
         "</think>": THINK_END_ID,
         "<|im_end|>": IM_END_ID,
     }
-    tokenizer.encode.side_effect = (
-        lambda text, add_special_tokens=True: [THINK_END_ID]
-        if text == "</think>"
-        else []
+    tokenizer.encode.side_effect = lambda text, add_special_tokens=True: (
+        [THINK_END_ID] if text == "</think>" else []
     )
     # `run_reasoning_extraction_streaming` in tests/reasoning/utils.py calls
     # `tokenizer.tokenize(delta)` to derive `token_delta`. The parser's
@@ -67,9 +65,7 @@ def test_reasoning_end_str_property(mock_tokenizer):
     "thinking,expected_no_reasoning_content",
     [(True, False), (False, True), (None, True)],
 )
-def test_thinking_flag_capture(
-    mock_tokenizer, thinking, expected_no_reasoning_content
-):
+def test_thinking_flag_capture(mock_tokenizer, thinking, expected_no_reasoning_content):
     """`thinking` from chat_template_kwargs flips no_reasoning_content."""
     kwargs = {}
     if thinking is not None:
@@ -121,13 +117,11 @@ class TestExtractReasoning:
         assert content is None
 
     def test_no_think_end_thinking_false_treats_all_as_content(self, mock_tokenizer):
-        """thinking=false: </think> is already in the prompt; model output is content."""
+        """thinking=false: </think> is in the prompt; output is content."""
         parser = HyperCLOVAXSeedThinkReasoningParser(
             mock_tokenizer, chat_template_kwargs={"thinking": False}
         )
-        reasoning, content = parser.extract_reasoning(
-            "direct answer", self._request()
-        )
+        reasoning, content = parser.extract_reasoning("direct answer", self._request())
         assert reasoning is None
         assert content == "direct answer"
 
@@ -203,9 +197,7 @@ class TestStreamingExtraction:
         parser = HyperCLOVAXSeedThinkReasoningParser(
             mock_tokenizer, chat_template_kwargs={"thinking": True}
         )
-        reasoning, content = run_reasoning_extraction(
-            parser, deltas, streaming=True
-        )
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
         assert reasoning == expected_reasoning
         assert content == expected_content
 

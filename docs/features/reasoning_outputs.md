@@ -21,6 +21,7 @@ vLLM currently supports the following reasoning models:
 | [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
+| [HyperCLOVAX-SEED-Think](https://huggingface.co/naver-hyperclovax/HyperCLOVAX-SEED-Think-32B) | `hyperclovax_seed_think` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
@@ -31,6 +32,7 @@ vLLM currently supports the following reasoning models:
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
+    HyperCLOVAX-SEED-Think reasoning is controlled via `thinking` in `chat_template_kwargs` (default `False`). With `thinking=True` the model emits `[reasoning]</think>\n\n[content]`; with `thinking=False` the chat_template embeds `</think>` in the prompt and the model output is content-only.
 
 ## Quickstart
 

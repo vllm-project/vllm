@@ -12,7 +12,6 @@ callback (which does not receive the request) knows which mode to apply.
 """
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
@@ -25,6 +24,7 @@ IM_END = "<|im_end|>"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _partial_prefix_len(text: str, target: str) -> int:
     """Length of the longest prefix of ``target`` matching the suffix of ``text``.
@@ -43,6 +43,7 @@ def _partial_prefix_len(text: str, target: str) -> int:
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
+
 
 class HyperCLOVAXSeedThinkReasoningParser(ReasoningParser):
     """Reasoning parser for the HyperCLOVAX-SEED-Think model.
@@ -87,7 +88,7 @@ class HyperCLOVAXSeedThinkReasoningParser(ReasoningParser):
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         # Authoritative signal: presence of </think> in the output.
         reasoning, sep, content = model_output.partition(THINK_END)
         if sep:
@@ -112,7 +113,7 @@ class HyperCLOVAXSeedThinkReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if not current_text:
             return None
 
@@ -167,7 +168,7 @@ class HyperCLOVAXSeedThinkReasoningParser(ReasoningParser):
         if n == 0 or len(input_ids) < n:
             return False
         return any(
-            input_ids[i:i + n] == self.think_end_tokens
+            input_ids[i : i + n] == self.think_end_tokens
             for i in range(len(input_ids) - n + 1)
         )
 
@@ -183,8 +184,6 @@ class HyperCLOVAXSeedThinkReasoningParser(ReasoningParser):
         # (no trailing content yet) returns an empty list.
         upper = len(input_ids) - n
         for i in range(upper):
-            if input_ids[i:i + n] == self.think_end_tokens:
-                return list(input_ids[i + n:])
+            if input_ids[i : i + n] == self.think_end_tokens:
+                return list(input_ids[i + n :])
         return []
-
-

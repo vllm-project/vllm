@@ -99,9 +99,9 @@ class TestExtractToolCallsXML:
         out = (
             "<tool_call>get_current_weather\n"
             "<arg_key>location</arg_key>\n"
-            "<arg_value>\"Seoul\"</arg_value>\n"
+            '<arg_value>"Seoul"</arg_value>\n'
             "<arg_key>unit</arg_key>\n"
-            "<arg_value>\"celsius\"</arg_value>\n"
+            '<arg_value>"celsius"</arg_value>\n'
             "</tool_call>"
         )
         r = tool_parser.extract_tool_calls(out, request=mock_request)
@@ -132,7 +132,7 @@ class TestExtractToolCallsXML:
         out = (
             "I'll check that for you.<tool_call>get_current_weather\n"
             "<arg_key>location</arg_key>\n"
-            "<arg_value>\"Seoul\"</arg_value>\n"
+            '<arg_value>"Seoul"</arg_value>\n'
             "</tool_call>"
         )
         r = tool_parser.extract_tool_calls(out, request=mock_request)
@@ -145,7 +145,7 @@ class TestExtractToolCallsXML:
             "thinking aloud</think>\n\nokay, calling:"
             "<tool_call>get_current_weather\n"
             "<arg_key>location</arg_key>\n"
-            "<arg_value>\"Seoul\"</arg_value>\n"
+            '<arg_value>"Seoul"</arg_value>\n'
             "</tool_call>"
         )
         r = tool_parser.extract_tool_calls(out, request=mock_request)
@@ -156,11 +156,11 @@ class TestExtractToolCallsXML:
         out = (
             "<tool_call>get_current_weather\n"
             "<arg_key>location</arg_key>\n"
-            "<arg_value>\"Seoul\"</arg_value>\n"
+            '<arg_value>"Seoul"</arg_value>\n'
             "</tool_call>\n"
             "<tool_call>get_current_weather\n"
             "<arg_key>location</arg_key>\n"
-            "<arg_value>\"Busan\"</arg_value>\n"
+            '<arg_value>"Busan"</arg_value>\n'
             "</tool_call>"
         )
         r = tool_parser.extract_tool_calls(out, request=mock_request)
@@ -169,9 +169,7 @@ class TestExtractToolCallsXML:
         assert json.loads(r.tool_calls[0].function.arguments)["location"] == "Seoul"
         assert json.loads(r.tool_calls[1].function.arguments)["location"] == "Busan"
 
-    def test_malformed_tool_call_falls_back_to_content(
-        self, tool_parser, mock_request
-    ):
+    def test_malformed_tool_call_falls_back_to_content(self, tool_parser, mock_request):
         """<tool_call> marker present but body has no parseable function name."""
         out = "<tool_call>\n</tool_call>"
         r = tool_parser.extract_tool_calls(out, request=mock_request)
@@ -191,9 +189,7 @@ class TestExtractToolCallsJSON:
         r = tool_parser.extract_tool_calls(out, request=mock_request)
         assert r.tools_called is True
         assert r.tool_calls[0].function.name == "get_current_weather"
-        assert json.loads(r.tool_calls[0].function.arguments) == {
-            "location": "Seoul"
-        }
+        assert json.loads(r.tool_calls[0].function.arguments) == {"location": "Seoul"}
         assert r.content is None
 
     def test_json_single_object_payload(self, tool_parser, mock_request):
@@ -202,18 +198,14 @@ class TestExtractToolCallsJSON:
         r = tool_parser.extract_tool_calls(out, request=mock_request)
         assert r.tools_called is True
         assert len(r.tool_calls) == 1
-        assert json.loads(r.tool_calls[0].function.arguments) == {
-            "location": "Busan"
-        }
+        assert json.loads(r.tool_calls[0].function.arguments) == {"location": "Busan"}
 
     def test_json_with_arguments_key(self, tool_parser, mock_request):
         """Accepts `arguments` as an alias for `parameters`."""
         out = '[{"name": "get_current_weather", "arguments": {"location": "Seoul"}}]'
         r = tool_parser.extract_tool_calls(out, request=mock_request)
         assert r.tools_called is True
-        assert json.loads(r.tool_calls[0].function.arguments) == {
-            "location": "Seoul"
-        }
+        assert json.loads(r.tool_calls[0].function.arguments) == {"location": "Seoul"}
 
     def test_json_after_think_end(self, tool_parser, mock_request):
         """JSON payload preceded by reasoning + </think>."""
@@ -298,7 +290,7 @@ class TestStreamingXML:
             "<tool_call>",
             "get_current_weather\n",
             "<arg_key>location</arg_key>\n",
-            "<arg_value>\"Seoul\"</arg_value>\n",
+            '<arg_value>"Seoul"</arg_value>\n',
             "</tool_call>",
         ]
         results = _simulate_streaming(tool_parser, deltas, mock_request)
@@ -311,7 +303,7 @@ class TestStreamingXML:
         deltas = [
             "Let me check.",
             "<tool_call>get_current_weather\n",
-            "<arg_key>location</arg_key>\n<arg_value>\"Seoul\"</arg_value>\n",
+            '<arg_key>location</arg_key>\n<arg_value>"Seoul"</arg_value>\n',
             "</tool_call>",
         ]
         results = _simulate_streaming(tool_parser, deltas, mock_request)
@@ -322,10 +314,10 @@ class TestStreamingXML:
     def test_multiple_tool_calls(self, tool_parser, mock_request):
         deltas = [
             "<tool_call>get_current_weather\n"
-            "<arg_key>location</arg_key>\n<arg_value>\"Seoul\"</arg_value>\n"
+            '<arg_key>location</arg_key>\n<arg_value>"Seoul"</arg_value>\n'
             "</tool_call>\n"
             "<tool_call>get_current_weather\n"
-            "<arg_key>location</arg_key>\n<arg_value>\"Busan\"</arg_value>\n"
+            '<arg_key>location</arg_key>\n<arg_value>"Busan"</arg_value>\n'
             "</tool_call>",
         ]
         results = _simulate_streaming(tool_parser, deltas, mock_request)
@@ -340,7 +332,7 @@ class TestStreamingXML:
         deltas = [
             "<tool_",
             "call>get_current_weather\n",
-            "<arg_key>location</arg_key>\n<arg_value>\"Seoul\"</arg_value>\n",
+            '<arg_key>location</arg_key>\n<arg_value>"Seoul"</arg_value>\n',
             "</tool_call>",
         ]
         results = _simulate_streaming(tool_parser, deltas, mock_request)

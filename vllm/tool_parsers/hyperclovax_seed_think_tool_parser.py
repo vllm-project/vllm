@@ -33,12 +33,15 @@ Streaming policy:
 import json
 import re
 from collections.abc import Sequence
-from typing import Union
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall, DeltaMessage, DeltaToolCall,
-    ExtractedToolCallInformation, FunctionCall, ToolCall,
+    DeltaFunctionCall,
+    DeltaMessage,
+    DeltaToolCall,
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
@@ -63,6 +66,7 @@ _ARG_PAIR_RE = re.compile(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _partial_prefix_len(text: str, target: str) -> int:
     """Length of the longest prefix of ``target`` matching the suffix of ``text``.
@@ -118,6 +122,7 @@ def _parse_tool_call_block(block: str) -> ToolCall | None:
 # Parser
 # ---------------------------------------------------------------------------
 
+
 class HyperCLOVAXSeedThinkToolParser(ToolParser):
     """Tool call parser for the HyperCLOVAX-SEED-Think model.
 
@@ -161,7 +166,8 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
         if TOOL_CALL_OPEN in model_output:
             try:
                 tool_calls = [
-                    tc for block in _TOOL_CALL_RE.findall(model_output)
+                    tc
+                    for block in _TOOL_CALL_RE.findall(model_output)
                     if (tc := _parse_tool_call_block(block)) is not None
                 ]
                 if not tool_calls:
@@ -244,7 +250,7 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         self.buffer_string += delta_text
 
         # vLLM's parse_delta only routes here after the reasoning phase is
@@ -256,7 +262,10 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
             idx = self.buffer_string.find(THINK_END)
             if idx != -1:
                 self.cursor = idx + len(THINK_END)
-                while self.cursor < len(self.buffer_string) and self.buffer_string[self.cursor] == "\n":
+                while (
+                    self.cursor < len(self.buffer_string)
+                    and self.buffer_string[self.cursor] == "\n"
+                ):
                     self.cursor += 1
                 self.reasoning_ended = True
             elif _partial_prefix_len(self.buffer_string, THINK_END) > 0:
@@ -273,7 +282,7 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
         # (``[{"name": ..., "parameters": {...}}]``). We only need to handle
         # this path here because, with ``supports_required_and_named=False``,
         # all tool_choice modes route through this parser.
-        unprocessed = self.buffer_string[self.cursor:].lstrip()
+        unprocessed = self.buffer_string[self.cursor :].lstrip()
         if not self.json_tool_emitted and unprocessed.startswith(("[", "{")):
             return self._emit_json_tool_calls()
 
@@ -283,20 +292,22 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
     # Internal
     # ------------------------------------------------------------------
 
-    def _emit_next(self) -> Union[DeltaMessage, None]:
-        """Drain processable content / tool_calls from the buffer into one DeltaMessage."""
+    def _emit_next(self) -> DeltaMessage | None:
+        """Drain processable content / tool_calls into one DeltaMessage."""
         content_parts: list[str] = []
         tool_call_deltas: list[DeltaToolCall] = []
 
         while self.cursor < len(self.buffer_string):
-            unprocessed = self.buffer_string[self.cursor:]
+            unprocessed = self.buffer_string[self.cursor :]
             open_idx = unprocessed.find(TOOL_CALL_OPEN)
 
             # Case A: no <tool_call> in remaining → stream as content.
             if open_idx == -1:
                 # Hold any tail that is a partial of <tool_call> or <|im_end|>
                 # to avoid leaking a split protocol token across delta boundaries.
-                partial_len = _partial_prefix_len_any(unprocessed, [TOOL_CALL_OPEN, IM_END])
+                partial_len = _partial_prefix_len_any(
+                    unprocessed, [TOOL_CALL_OPEN, IM_END]
+                )
                 safe_end = len(unprocessed) - partial_len
                 if safe_end <= 0:
                     break
@@ -322,7 +333,7 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
             if close_idx == -1:
                 break
 
-            block = unprocessed[len(TOOL_CALL_OPEN):close_idx]
+            block = unprocessed[len(TOOL_CALL_OPEN) : close_idx]
             self.cursor += close_idx + len(TOOL_CALL_CLOSE)
 
             tc = _parse_tool_call_block(block)
@@ -330,10 +341,12 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
                 continue
 
             self.current_tool_id += 1
-            self.prev_tool_call_arr.append({
-                "name": tc.function.name,
-                "arguments": tc.function.arguments,
-            })
+            self.prev_tool_call_arr.append(
+                {
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }
+            )
             self.streamed_args_for_tool.append(tc.function.arguments)
 
             tool_call_deltas.append(
@@ -360,14 +373,14 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
             kwargs["tool_calls"] = tool_call_deltas
         return DeltaMessage(**kwargs)
 
-    def _emit_json_tool_calls(self) -> Union[DeltaMessage, None]:
+    def _emit_json_tool_calls(self) -> DeltaMessage | None:
         """Emit tool_calls parsed from a JSON list payload.
 
         Called when the buffered output looks like a JSON object/array rather
         than the XML ``<tool_call>`` format. Waits for a fully parseable
         payload and then emits all tool_calls in one ``DeltaMessage``.
         """
-        payload = self.buffer_string[self.cursor:].lstrip()
+        payload = self.buffer_string[self.cursor :].lstrip()
         try:
             parsed = json.loads(payload)
         except ValueError:
@@ -388,8 +401,10 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
             args_obj = item.get("parameters")
             if args_obj is None:
                 args_obj = item.get("arguments", {})
-            args_str = args_obj if isinstance(args_obj, str) else json.dumps(
-                args_obj, ensure_ascii=False
+            args_str = (
+                args_obj
+                if isinstance(args_obj, str)
+                else json.dumps(args_obj, ensure_ascii=False)
             )
 
             self.current_tool_id += 1
@@ -402,7 +417,8 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
                     type="function",
                     id=f"hyperclovax_seed_think_tool_{self.current_tool_id}",
                     function=DeltaFunctionCall(
-                        name=name, arguments=args_str,
+                        name=name,
+                        arguments=args_str,
                     ).model_dump(exclude_none=True),
                 )
             )
@@ -413,5 +429,3 @@ class HyperCLOVAXSeedThinkToolParser(ToolParser):
         self.json_tool_emitted = True
         self.cursor = len(self.buffer_string)
         return DeltaMessage(tool_calls=tool_call_deltas)
-
-
