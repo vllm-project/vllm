@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     disable_inplace,
+    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -49,8 +50,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-
-from .utils import swiglu_limit_func
 
 
 def _fused_marlin_moe(
@@ -414,6 +413,7 @@ def batched_fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     inplace: bool = False,
+    clamp_limit: float | None = None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -536,6 +536,7 @@ def batched_fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
         is_k_full=is_k_full,
+        clamp_limit=clamp_limit,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -769,6 +770,7 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 sort_indices2=self.w2_g_idx_sort_indices,
                 is_k_full=self.is_k_full,
                 input_dtype=self.input_dtype,
+                clamp_limit=self.gemm1_clamp_limit,
             )
             return
 
@@ -971,4 +973,5 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
+            clamp_limit=self.gemm1_clamp_limit,
         )
