@@ -69,7 +69,7 @@ class DeviceConfig:
         from vllm.platforms import current_platform
 
         if (
-            current_platform.uses_cpu_device()
+            current_platform.uses_host_device_handling()
             and self.device_type == current_platform.device_type
         ):
             self.device = None

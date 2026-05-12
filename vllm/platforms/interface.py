@@ -172,7 +172,7 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
-    def uses_cpu_device(self) -> bool:
+    def uses_host_device_handling(self) -> bool:
         """Whether vLLM should leave DeviceConfig.device unset."""
         return self.is_tpu()
 
