@@ -7,6 +7,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 
 import os
 from typing import NoReturn
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -285,3 +286,61 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
     assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
     assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
     assert config.quant_method == "W4A16_NVFP4"
+
+
+@pytest.mark.parametrize(
+    "quant_method, expected_use_a16, act_key_is_none",
+    [
+        ("NVFP4", False, False),  # W4A4 default
+        ("W4A16_NVFP4", True, True),  # native W4A16 ckpt
+    ],
+)
+def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
+    quant_method, expected_use_a16, act_key_is_none
+):
+    """``ModelOptNvFp4FusedMoE``: when the ckpt's ``quant_method`` is
+    ``W4A16_NVFP4``, the MoE class must pass ``activation_key=None`` to
+    ``select_nvfp4_moe_backend``. That filters out every W4A4 backend
+    (their ``_supports_quant_scheme`` requires
+    ``(kNvfp4Static, kNvfp4Dynamic)`` exactly); Marlin survives because
+    it only checks ``weight_key``. A regression here would mean a W4A16
+    ckpt silently went to the cutlass W4A4 path.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4FusedMoE,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kNvfp4Dynamic,
+        kNvfp4Static,
+    )
+
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=16,
+    )
+
+    mock_select = MagicMock(return_value=(MagicMock(), MagicMock()))
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
+            mock_select,
+        ),
+        patch(
+            "vllm.model_executor.layers.quantization.modelopt."
+            "is_global_sf_supported_for_nvfp4_backend",
+            return_value=False,
+        ),
+    ):
+        moe = ModelOptNvFp4FusedMoE(config, MagicMock())
+
+    assert moe.use_a16 is expected_use_a16
+    _, kwargs = mock_select.call_args
+    assert kwargs["weight_key"] is kNvfp4Static
+    if act_key_is_none:
+        assert kwargs["activation_key"] is None
+    else:
+        assert kwargs["activation_key"] is kNvfp4Dynamic
