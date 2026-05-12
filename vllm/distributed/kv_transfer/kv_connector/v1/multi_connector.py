@@ -389,6 +389,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 # Call with empty blocks for other connectors.
                 c.update_state_after_alloc(request, empty_blocks, 0)
 
+    def on_new_request(self, request: "Request") -> None:
+        for c in self._connectors:
+            c.on_new_request(request)
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> MultiKVConnectorMetadata:

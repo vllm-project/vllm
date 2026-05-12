@@ -12,7 +12,7 @@ import torch
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     init_aiter_topK_meta_data,
 )
 
@@ -159,6 +159,25 @@ class ExpertMapManager:
     - Manage placement strategies (linear, round_robin)
     - Maintain routing tables for round-robin placement
     - Support dynamic reconfiguration of EP topology
+
+    When expert_map is required:
+    - Expert Parallelism (EP) is enabled, i.e., when ep_size > 1
+    - EP disabled (ep_size == 1): expert_map is None
+      * All experts are local to the current rank
+      * No mapping is needed
+    - EP enabled (ep_size > 1): expert_map is created
+      * Maps global expert IDs to local expert IDs
+      * Shape: (global_num_experts,)
+      * Contains the local expert index for experts on this rank, -1 for experts
+         on other ranks
+      * Used by kernels to handle distributed expert execution
+    - Kernel support varies:
+      * Supports expert_map: fused_moe, fused_marlin_moe, fused_humming_moe,
+        rocm_aiter_fused_moe, deep_gemm_moe, xpu_moe, gpt_oss_triton_kernels_moe
+      * Does not support: flashinfer_cutlass_moe, fused_batched_moe, most cutlass_moe
+        variants, trtllm_* kernels
+      * When kernel doesn't support expert_map: The modular kernel method sets
+        expert_map=None even if EP is enabled
     """
 
     def __init__(
@@ -194,7 +213,6 @@ class ExpertMapManager:
 
         if moe_parallel_config.use_ep:
             # Determine expert placement strategy before creating manager
-            # TODO move into EMM
             placement_strategy = determine_expert_placement_strategy(
                 expert_placement_strategy=placement_strategy,
                 moe_parallel_config=moe_parallel_config,
@@ -212,7 +230,7 @@ class ExpertMapManager:
         self._calculate_expert_maps()
 
         # Initialize routing tables if needed
-        self._ensure_routing_tables_initialized()
+        self._routing_tables = self._init_routing_tables()
 
         self._init_aiter_shared_experts_topK_buffer()
 
@@ -236,15 +254,6 @@ class ExpertMapManager:
                 self.global_num_experts,
                 self.get_compressed_map_string(),
             )
-
-    @property
-    def device(self) -> torch.device:
-        if self._expert_map is not None:
-            return self._expert_map.device
-        elif self._expert_mask is not None:
-            return self._expert_mask.device
-        else:
-            raise RuntimeError("no device available")
 
     def _init_aiter_shared_experts_topK_buffer(self):
         if self.num_fused_shared_experts > 0:
@@ -322,8 +331,6 @@ class ExpertMapManager:
         Returns (global_to_physical, physical_to_global, local_to_global)
         or None if not using round-robin or tables not needed.
         """
-        if not hasattr(self, "_routing_tables"):
-            return None
         return self._routing_tables
 
     def map_global_to_local(self, global_id: int) -> int:
@@ -375,9 +382,16 @@ class ExpertMapManager:
         self.moe_parallel_config = moe_parallel_config
         self.global_num_experts = global_num_experts
 
-        with self.device:
+        if self._expert_map is not None:
+            device = self._expert_map.device
+        elif self._expert_mask is not None:
+            device = self._expert_mask.device
+        else:
+            raise AssertionError("_expert_map or _expert_mask must be present.")
+
+        with device:
             self._calculate_expert_maps()
-            self._ensure_routing_tables_initialized()
+            self._routing_tables = self._init_routing_tables()
 
             # Reinitialize AITER buffer if needed and parameters provided
             self._init_aiter_shared_experts_topK_buffer()
@@ -425,16 +439,6 @@ class ExpertMapManager:
 
     def _calculate_expert_maps(self) -> None:
         """Calculate expert mappings based on placement strategy."""
-        if self.ep_size == 1:
-            # No EP, all experts are local
-            self._local_num_experts = (
-                self.global_num_experts + self.num_fused_shared_experts
-            )
-            self._expert_map = None
-            self._expert_mask = None
-            return
-
-        # Call determine_expert_map with current config
         (
             self._local_num_experts,
             self._expert_map,
@@ -450,28 +454,27 @@ class ExpertMapManager:
 
         self._local_num_experts += self.num_fused_shared_experts
 
-    def _ensure_routing_tables_initialized(self) -> None:
+    def _init_routing_tables(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """
         Ensure routing tables are initialized if needed for round-robin.
 
         This is a public method that can be called to explicitly initialize
         routing tables. It's safe to call multiple times (idempotent).
         """
-        # Only needed for round-robin with DeepEP-ll or NIXL EP backends
         if self._placement_strategy != "round_robin":
-            return
+            return None
 
         if not self.moe_parallel_config.needs_round_robin_routing_tables:
-            return
+            return None
 
         if self._expert_map is None:
-            return
+            return None
 
-        # Only initialize if not already initialized
-        if not hasattr(self, "_routing_tables"):
-            self._routing_tables = self._ensure_round_robin_expert_routing_tables()
+        return self._init_round_robin_expert_routing_tables()
 
-    def _ensure_round_robin_expert_routing_tables(
+    def _init_round_robin_expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build routing tables for round-robin placement."""
@@ -482,7 +485,6 @@ class ExpertMapManager:
         global_indices = torch.arange(
             self.global_num_experts,
             dtype=torch.long,
-            device=self.device,
         )
         owner = torch.remainder(global_indices, self.ep_size)
         local_index = torch.div(global_indices, self.ep_size, rounding_mode="floor")
@@ -495,7 +497,6 @@ class ExpertMapManager:
             remainder_tensor = torch.tensor(
                 remainder,
                 dtype=torch.long,
-                device=self.device,
             )
             physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
 
@@ -508,7 +509,6 @@ class ExpertMapManager:
             self.global_num_experts,
             self.ep_size,
             dtype=torch.long,
-            device=self.device,
         )
         if local_global.numel() != self._local_num_experts:
             local_global = local_global[: self._local_num_experts]

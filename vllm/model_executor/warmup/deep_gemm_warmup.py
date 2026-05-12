@@ -14,7 +14,7 @@ from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.linear import LinearBase

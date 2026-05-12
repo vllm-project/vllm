@@ -246,7 +246,7 @@ class BaseRouter(FusedMoERouter):
         """
         raise NotImplementedError
 
-    def select_experts(
+    def _select_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,

@@ -18,11 +18,11 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+    FlashInferExperts,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
     TrtLlmFp8ExpertsMonolithic,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
