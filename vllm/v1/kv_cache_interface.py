@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from enum import IntEnum
 from math import prod
 from typing import TYPE_CHECKING
@@ -86,6 +86,10 @@ class KVCacheSpec:
 
     # number of tokens in a block
     block_size: int
+    # True when this layer is an EAGLE/MTP draft attention layer. Used by
+    # get_kv_cache_groups() to set KVCacheGroupSpec.is_eagle_group without
+    # relying on model-specific positional heuristics.
+    is_eagle: bool = field(default=False, kw_only=True)
 
     @property
     def page_size_bytes(self) -> int:
@@ -380,6 +384,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            is_eagle=any(s.is_eagle for s in specs),
         )
 
 
@@ -525,6 +530,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            is_eagle=any(s.is_eagle for s in specs),
         )
 
 

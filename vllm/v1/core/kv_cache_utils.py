@@ -815,7 +815,9 @@ def check_enough_kv_cache_memory(
 
 
 def create_kv_cache_group_specs(
-    kv_cache_spec: dict[str, KVCacheSpec], grouped_layer_names: list[list[str]]
+    kv_cache_spec: dict[str, KVCacheSpec],
+    grouped_layer_names: list[list[str]],
+    eagle_layer_names: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Create KVCacheGroupSpec object for each kv cache group layer.
@@ -829,6 +831,9 @@ def create_kv_cache_group_specs(
             A list of kv cache groups, where each element is a list of layer
             names that belong to the same group and should share the same
             KVCacheSpec.
+        eagle_layer_names:
+            Set of layer names that are EAGLE/MTP draft attention layers.
+            Used to set is_eagle_group at construction time.
     Returns:
         A list of KVCacheGroupSpec objects, one for each group.
     """
@@ -838,8 +843,15 @@ def create_kv_cache_group_specs(
             kv_cache_spec[layer_name] for layer_name in layer_names_one_group
         ]
         merged_layer_spec = layer_specs[0].merge(layer_specs)
+        is_eagle_group = bool(
+            eagle_layer_names and eagle_layer_names & set(layer_names_one_group)
+        )
         kv_cache_groups.append(
-            KVCacheGroupSpec(layer_names_one_group, merged_layer_spec)
+            KVCacheGroupSpec(
+                layer_names_one_group,
+                merged_layer_spec,
+                is_eagle_group=is_eagle_group,
+            )
         )
     return kv_cache_groups
 
@@ -958,6 +970,7 @@ def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
 
 def _get_kv_cache_groups_uniform_spec(
     kv_cache_specs: dict[str, KVCacheSpec],
+    eagle_layer_names: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache configuration for a model with the same KV cache
@@ -965,16 +978,20 @@ def _get_kv_cache_groups_uniform_spec(
 
     Args:
         kv_cache_specs: The kv cache spec of each attention layer in the model
+        eagle_layer_names: Set of eagle draft layer names for annotation.
 
     Returns:
         The generated KVCacheGroupSpecs
     """
 
-    return create_kv_cache_group_specs(kv_cache_specs, [list(kv_cache_specs.keys())])
+    return create_kv_cache_group_specs(
+        kv_cache_specs, [list(kv_cache_specs.keys())], eagle_layer_names
+    )
 
 
 def _get_kv_cache_groups_uniform_type(
     spec: UniformTypeKVCacheSpecs,
+    eagle_layer_names: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache configuration for a model with one type of KV cache
@@ -982,12 +999,14 @@ def _get_kv_cache_groups_uniform_type(
 
     Args:
         spec: The UniformTypeKVCacheSpecs of the model
+        eagle_layer_names: Set of eagle draft layer names for annotation.
 
     Returns:
         The generated KVCacheGroupSpecs
     """
-
-    return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
+    layer_names = list(spec.kv_cache_specs.keys())
+    is_eagle_group = bool(eagle_layer_names and eagle_layer_names & set(layer_names))
+    return [KVCacheGroupSpec(layer_names, spec, is_eagle_group=is_eagle_group)]
 
 
 def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
@@ -1051,6 +1070,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
+    eagle_layer_names: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache groups for hybrid models with multiple
@@ -1168,7 +1188,7 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
+    return create_kv_cache_group_specs(kv_cache_spec, grouped_layers, eagle_layer_names)
 
 
 def _get_kv_cache_config_deepseek_v4(
@@ -1487,6 +1507,7 @@ def _approximate_gcd(values: Sequence[int], *, lower_bound: int | None = None) -
 
 def _get_kv_cache_groups_uniform_groups(
     grouped_specs: list[UniformTypeKVCacheSpecs],
+    eagle_layer_names: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generate the KV cache groups from the grouped specs.
@@ -1504,6 +1525,10 @@ def _get_kv_cache_groups_uniform_groups(
     full_mla_group = KVCacheGroupSpec(
         layer_names=list(full_mla_spec.kv_cache_specs.keys()),
         kv_cache_spec=full_mla_spec,
+        is_eagle_group=bool(
+            eagle_layer_names
+            and eagle_layer_names & set(full_mla_spec.kv_cache_specs.keys())
+        ),
     )
 
     # We define a layer tuple as a group of layers with different page sizes, and
@@ -1580,34 +1605,13 @@ def _get_kv_cache_groups_uniform_groups(
                 KVCacheGroupSpec(
                     layer_names=group_layer_names,
                     kv_cache_spec=sub_sm_spec,
+                    is_eagle_group=bool(
+                        eagle_layer_names and eagle_layer_names & set(group_layer_names)
+                    ),
                 )
             )
 
     return [full_mla_group, *swa_mla_groups]
-
-
-def _annotate_eagle_groups_deepseek_v4(
-    vllm_config: VllmConfig,
-    kv_cache_spec: dict[str, KVCacheSpec],
-    kv_cache_groups: list[KVCacheGroupSpec],
-) -> None:
-    spec_config = vllm_config.speculative_config
-    if spec_config is None or not spec_config.use_eagle():
-        return
-    # Detection uses the merged MLA spec's model_version.
-    if not any(
-        getattr(spec, "model_version", None) == "deepseek_v4"
-        for spec in kv_cache_spec.values()
-    ):
-        return
-    # DeepseekV4's MTP attention layer is always the last layer, and we flag whichever
-    # group contains it.
-    # FIXME(yifan): avoid/generalize this hacky check.
-    last_layer = next(reversed(kv_cache_spec))
-    for group in kv_cache_groups:
-        if last_layer in group.layer_names:
-            group.is_eagle_group = True
-            break
 
 
 def get_kv_cache_groups(
@@ -1631,34 +1635,51 @@ def get_kv_cache_groups(
         # attention free models.
         return []
 
+    # Collect layer names whose KVCacheSpec.is_eagle is True so that each
+    # KVCacheGroupSpec can be annotated with is_eagle_group at construction
+    # time instead of through a separate post-hoc pass.
+    spec_config = vllm_config.speculative_config
+    if spec_config is not None and spec_config.use_eagle():
+        eagle_layer_names = {n for n, s in kv_cache_spec.items() if s.is_eagle}
+    else:
+        eagle_layer_names = None
+
     if is_kv_cache_spec_uniform(kv_cache_spec):
         # KV cache of all layers are the same, which is true for
         # most models. Allocate the same amount of memory for
         # each layer.
-        return _get_kv_cache_groups_uniform_spec(kv_cache_spec)
+        kv_cache_groups = _get_kv_cache_groups_uniform_spec(
+            kv_cache_spec, eagle_layer_names
+        )
     elif uniform_spec := UniformTypeKVCacheSpecs.from_specs(kv_cache_spec):
         # All layers need the same number of token slots (e.g., all layers are
         # full attention, or all layers are sliding window attention with the
         # same window size). Put all layers into one group.
-        return _get_kv_cache_groups_uniform_type(uniform_spec)
+        kv_cache_groups = _get_kv_cache_groups_uniform_type(
+            uniform_spec, eagle_layer_names
+        )
     elif grouped_specs := group_and_unify_kv_cache_specs(kv_cache_spec):
         # DeepseekV4 case: All layers need the same number of token slots,
         # yet some layers are full attention while others are sliding window
         # attention in different sizes. Need to group layers into multiple
         # UniformTypeKVCacheSpecs.
-        kv_cache_groups = _get_kv_cache_groups_uniform_groups(grouped_specs)
-        _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
-        return kv_cache_groups
+        kv_cache_groups = _get_kv_cache_groups_uniform_groups(
+            grouped_specs, eagle_layer_names
+        )
+    else:
+        # As KVCacheManager can only allocate memory of one size, we need to unify
+        # the page size of the layers. For cases cannot be unified, this function
+        # will raise an error.
+        kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
+        # Model contains multiple attention types, but KV cache of all layers
+        # have the same physical memory per block per layer. Split the layers
+        # into groups with the same number of layers, and thus same total page
+        # size.
+        kv_cache_groups = _get_kv_cache_groups_uniform_page_size(
+            kv_cache_spec, eagle_layer_names
+        )
 
-    # As KVCacheManager can only allocate memory of one size, we need to unify
-    # the page size of the layers. For cases cannot be unified, this function
-    # will raise an error.
-    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
-    # Model contains multiple attention types, but KV cache of all layers
-    # have the same physical memory per block per layer. Split the layers
-    # into groups with the same number of layers, and thus same total page
-    # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    return kv_cache_groups
 
 
 def generate_scheduler_kv_cache_config(

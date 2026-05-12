@@ -957,8 +957,10 @@ class DeepseekV4Attention(nn.Module):
         # in the compress ratio list
         if layer_id < config.num_hidden_layers:
             self.compress_ratio = max(1, config.compress_ratios[layer_id])
+            self.is_eagle_layer = False
         else:
             self.compress_ratio = 1
+            self.is_eagle_layer = True
         self.eps = config.rms_norm_eps
         self.max_position_embeddings = config.max_position_embeddings
 
@@ -1081,6 +1083,7 @@ class DeepseekV4Attention(nn.Module):
             cache_config=vllm_config.cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            is_eagle=self.is_eagle_layer,
         )
 
     def forward(
