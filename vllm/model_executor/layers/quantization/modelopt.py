@@ -2215,12 +2215,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         quantized_layers: dict[str, dict[str, Any]],
         fp8_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
+        w4a16_nvfp4_config: ModelOptNvFp4Config,
     ) -> None:
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
+        self.w4a16_nvfp4_config = w4a16_nvfp4_config
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -2265,10 +2267,15 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 "'quantized_layers' mapping in the quantization config."
             )
 
-        # Determine group_size from the first NVFP4 entry if not provided.
+        # Determine group_size from the first NVFP4-family entry if not
+        # provided. Both NVFP4 (W4A4) and W4A16_NVFP4 share the same packing
+        # + group-size convention; either entry resolves the value.
         if group_size is None:
             for layer_info in quantized_layers.values():
-                if layer_info.get("quant_algo", "").upper() == "NVFP4":
+                if layer_info.get("quant_algo", "").upper() in (
+                    "NVFP4",
+                    "W4A16_NVFP4",
+                ):
                     group_size = layer_info.get("group_size", 16)
                     break
         if group_size is None:
@@ -2286,6 +2293,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             exclude_modules=[],
             group_size=group_size,
         )
+        # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
+        # ModelOptNvFp4Config.__init__ keys LinearMethodCls off quant_method,
+        # so this instance auto-selects ModelOptNvFp4W4A16LinearMethod. The
+        # MoE side reads quant_config.quant_method == "W4A16_NVFP4" to set
+        # use_a16 → Marlin backend in ModelOptNvFp4FusedMoE.__init__.
+        w4a16_nvfp4_config = ModelOptNvFp4Config(
+            quant_method="W4A16_NVFP4",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+        )
 
         return cls(
             kv_cache_quant_method=kv_cache_quant_method,
@@ -2293,6 +2312,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             quantized_layers=quantized_layers,
             fp8_config=fp8_config,
             nvfp4_config=nvfp4_config,
+            w4a16_nvfp4_config=w4a16_nvfp4_config,
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
@@ -2359,6 +2379,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptFp8LinearMethod(self.fp8_config)
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
@@ -2371,6 +2393,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "W4A16_NVFP4":
+                return ModelOptNvFp4FusedMoE(
+                    quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
                 )
             return None
