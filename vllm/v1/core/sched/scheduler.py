@@ -2370,18 +2370,14 @@ class Scheduler(SchedulerInterface):
                     self.failed_recving_kv_req_ids.add(req_id)
             else:
                 sync_failed_req_ids.add(req_id)
-                # TODO(ZhanqiuHu): Evicting all blocks is aggressive —
-                # it removes valid local-prefix blocks too.  Ideally we
-                # would only evict externally-loaded blocks if possible.
-                try:
-                    for group_ids in self.kv_cache_manager.get_block_ids(req_id):
-                        blocks_to_evict.update(group_ids)
-                except KeyError:
-                    pass
+                # TODO: Evicting all blocks is aggressive - it removes
+                # valid local-prefix blocks too.  Ideally we would only
+                # evict externally-loaded blocks.
+                for group_ids in self.kv_cache_manager.get_block_ids(req_id):
+                    blocks_to_evict.update(group_ids)
                 logger.warning(
                     "Sync-loaded request %s reported KV load failure. "
-                    "Evicting all blocks (aggressive). "
-                    "See: https://github.com/ZhanqiuHu/vllm-wip/issues/17",
+                    "Evicting all blocks (aggressive).",
                     req_id,
                 )
 
