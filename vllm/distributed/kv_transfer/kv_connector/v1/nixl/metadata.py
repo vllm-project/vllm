@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Metadata dataclasses and helpers for the NIXL connector."""
 
-import enum
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +35,7 @@ GET_META_MSG = b"get_meta_msg"
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
 #   5: Add split_k_and_v to NixlAgentMetadata
+#
 NIXL_CONNECTOR_VERSION: int = 5
 
 
@@ -71,66 +71,6 @@ class NixlHandshakePayload(KVConnectorHandshakeMetadata):
 
     compatibility_hash: str
     agent_metadata_bytes: bytes  # NixlAgentMetadata encoded
-
-
-class SplitKAndVMode(enum.Enum):
-    """How K and V cache regions are split between local and remote NIXL agents."""
-
-    HOMOGENEOUS = enum.auto()
-    LOCAL_JOINT_REMOTE_SPLIT = enum.auto()
-    LOCAL_SPLIT_REMOTE_JOINT = enum.auto()
-
-
-@dataclass
-class NixlSplitKAndVMetadata:
-    """How local and remote NIXL agents register K and V cache regions.
-
-    Enables heterogeneous disaggregated serving where local and remote
-    attention backends use different K/V splitting configurations. For
-    example, local TRITON_ATTN/FLASHINFER combines K and V into a single
-    tensor while remote FLASH_ATTN registers K and V separately.
-    """
-
-    mode: SplitKAndVMode
-
-    def __init__(
-        self,
-        local_split: bool,
-        remote_split: bool,
-        enable_permute_local_kv: bool = False,
-    ):
-        if local_split == remote_split:
-            self.mode = SplitKAndVMode.HOMOGENEOUS
-        elif remote_split:
-            self.mode = SplitKAndVMode.LOCAL_JOINT_REMOTE_SPLIT
-        else:
-            self.mode = SplitKAndVMode.LOCAL_SPLIT_REMOTE_JOINT
-
-        if self.enable_heterogeneous_split_k_and_v and not enable_permute_local_kv:
-            raise RuntimeError(
-                "Heterogeneous split_k_and_v requires "
-                "'enable_permute_local_kv'=True in --kv-transfer-config."
-            )
-
-    @property
-    def enable_heterogeneous_split_k_and_v(self) -> bool:
-        return self.mode != SplitKAndVMode.HOMOGENEOUS
-
-    @property
-    def local_joint_remote_split_k_and_v(self) -> bool:
-        return self.mode == SplitKAndVMode.LOCAL_JOINT_REMOTE_SPLIT
-
-    @property
-    def local_split_remote_joint_k_and_v(self) -> bool:
-        return self.mode == SplitKAndVMode.LOCAL_SPLIT_REMOTE_JOINT
-
-    def rescale_by_split_k_and_v_ratio(self, value: int) -> int:
-        """Rescale a local byte count to the remote's K/V region size."""
-        if self.local_joint_remote_split_k_and_v:
-            return value // 2
-        if self.local_split_remote_joint_k_and_v:
-            return value * 2
-        return value
 
 
 def compute_nixl_compatibility_hash(

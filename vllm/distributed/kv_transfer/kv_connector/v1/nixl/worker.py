@@ -35,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
-    NixlSplitKAndVMetadata,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -1000,23 +999,10 @@ class NixlConnectorWorker:
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
             attn_backend_name=self.backend_name,
-            split_k_and_v=self.transfer_topo.split_k_and_v,
-        )
-        logger.debug(
-            "Local agent metadata: engine_id=%s, split_k_and_v=%s, "
-            "num_regions=%s, block_lens=%s, kv_cache_layout=%s, "
-            "block_size=%s, num_blocks=%s, is_kv_layout_blocks_first=%s",
-            self.engine_id,
-            self.transfer_topo.split_k_and_v,
-            len(self.kv_caches_base_addr[self.engine_id][self.tp_rank]),
-            self.block_len_per_layer,
-            agent_metadata.kv_cache_layout,
-            self.block_size,
-            self.num_blocks,
-            self.transfer_topo.is_kv_layout_blocks_first,
             physical_blocks_per_logical_kv_block=(
                 self._physical_blocks_per_logical_kv_block
             ),
+            split_k_and_v=self.transfer_topo.split_k_and_v,
         )
         # Wrap metadata in payload with hash for defensive decoding
         assert self.compat_hash is not None
@@ -1155,6 +1141,7 @@ class NixlConnectorWorker:
     ) -> list[tuple[int, int, int]]:
         """Build remote FA descriptors for all layers."""
         assert self.transfer_topo is not None
+        engine_id = nixl_agent_meta.engine_id
         fa_group_idx = next(
             i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
         )
@@ -1162,9 +1149,13 @@ class NixlConnectorWorker:
         num_blocks = nixl_agent_meta.num_blocks
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            # Read our whole local region size from remote..
+            # Align remote layer index to local, accounting for heterogeneous
+            # K/V split configurations between attention backends.
+            local_layer_idx, add_v_descs, v_layer_idx = (
+                self.transfer_topo.align_remote_layer(engine_id, i)
+            )
             local_block_len = self.get_backend_aware_kv_block_len(
-                layer_idx=i, first_split=True, mamba_view=False
+                layer_idx=local_layer_idx, first_split=True, mamba_view=False
             )
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
@@ -1182,10 +1173,10 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            if self.transfer_topo.is_kv_layout_blocks_first:
+            if add_v_descs:
                 # With FlashInfer index V separately to allow head splitting.
                 second_split = self.get_backend_aware_kv_block_len(
-                    layer_idx=i, first_split=False, mamba_view=False
+                    layer_idx=v_layer_idx, first_split=False, mamba_view=False
                 )
                 second_split = second_split // num_attn_reads
                 for block_id in range(num_blocks):
@@ -1311,6 +1302,7 @@ class NixlConnectorWorker:
             remote_block_size=nixl_agent_meta.block_size,
             remote_block_len=nixl_agent_meta.block_lens[0],
             remote_physical_blocks_per_logical=physical_blocks_per_logical,
+            remote_split_k_and_v=nixl_agent_meta.split_k_and_v,
         )
         transfer_topo.register_remote_engine(engine_id, transfer_info)
         logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
@@ -1319,18 +1311,6 @@ class NixlConnectorWorker:
             transfer_topology=transfer_topo,
             remote_tp_size=remote_tp_size,
             group_spec_types=self._group_spec_types,
-        )
-
-        # Determine whether the remote agent splits K and V into separate
-        # NIXL regions. Older agents that predate the `split_k_and_v` field
-        # will decode it as the `False` default, which matches their joint
-        # K+V layout, so no explicit fallback is needed.
-        remote_split_k_and_v = nixl_agent_meta.split_k_and_v
-        split_k_and_v_meta = NixlSplitKAndVMetadata(
-            local_split=transfer_topo.split_k_and_v,
-            remote_split=remote_split_k_and_v,
-            enable_permute_local_kv=(
-                self.kv_transfer_config.enable_permute_local_kv),
         )
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
@@ -1353,8 +1333,7 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
             nixl_agent_meta.kv_caches_base_addr
         )
-        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size,
-                                               split_k_and_v_meta)
+        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
@@ -1367,7 +1346,7 @@ class NixlConnectorWorker:
             remote_tp_rank,
             tp_ratio,
             transfer_topo.split_k_and_v,
-            remote_split_k_and_v,
+            nixl_agent_meta.split_k_and_v,
         )
 
         plan = self.tp_mappings[engine_id]
@@ -1413,7 +1392,6 @@ class NixlConnectorWorker:
             remote_tp_rank,
             self.tp_rank,
         )
-
         if self._has_mamba:
             logger.debug(
                 "Registering remote Mamba blocks for engine %s rank %s",
@@ -1444,8 +1422,7 @@ class NixlConnectorWorker:
         return remote_agent_name
 
     def _validate_remote_agent_handshake(
-        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int,
-        split_k_and_v_meta: NixlSplitKAndVMetadata,
+        self, nixl_agent_meta: NixlAgentMetadata, remote_tp_size: int
     ):
         """
         Validate the remote agent handshake metadata ensuring the
@@ -1570,8 +1547,8 @@ class NixlConnectorWorker:
             # assumption only holds for pure-attention models.
             if not self._has_mamba:
                 rescaled_local_block_len = (
-                    split_k_and_v_meta.rescale_by_split_k_and_v_ratio(
-                        self.block_len_per_layer[0]
+                    self.transfer_topo.rescale_by_split_k_and_v_ratio(
+                        remote_engine_id, self.block_len_per_layer[0]
                     )
                 )
                 if tp_ratio > 0:
@@ -1602,8 +1579,8 @@ class NixlConnectorWorker:
         # TP workers that handhshake with same remote have same #blocks.
         assert self.dst_num_blocks[remote_engine_id] == nixl_agent_meta.num_blocks
         # Same number of regions/~layers.
-        expected_num_regions = split_k_and_v_meta.rescale_by_split_k_and_v_ratio(
-            len(nixl_agent_meta.kv_caches_base_addr)
+        expected_num_regions = self.transfer_topo.rescale_by_split_k_and_v_ratio(
+            remote_engine_id, len(nixl_agent_meta.kv_caches_base_addr)
         )
         assert expected_num_regions == len(self.block_len_per_layer)
 
