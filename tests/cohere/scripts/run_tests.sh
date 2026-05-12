@@ -424,9 +424,160 @@ run_speculative_decoding() {
     # originally we are in vllm-cohere/tests directory
     cd ../
 
+    local errors=0
+
+    # -----------------------------------------------------------------
+    # Helper functions for acceptance-length quality gates
+    # -----------------------------------------------------------------
+    extract_mean_acceptance_length() {
+        local log_file="$1"
+        awk -F'[:,]' '/mean acceptance length/ {print $2; exit}' "$log_file" | xargs
+    }
+
+    check_absolute_acceptance_length() {
+        local observed_al="$1"
+        local expected_al="$2"
+        local relative_tolerance="$3"
+        python3 -c "obs=float('$observed_al'); exp=float('$expected_al'); tol=float('$relative_tolerance'); print(obs * (1 + tol) >= exp and obs * (1 - tol) <= exp)"
+    }
+
+    check_relative_acceptance_length_delta() {
+        local al_off="$1"
+        local al_on="$2"
+        local relative_tolerance="$3"
+        python3 -c "off=float('$al_off'); on=float('$al_on'); tol=float('$relative_tolerance'); print(abs(on - off) / off <= tol if off != 0 else abs(on - off) <= tol)"
+    }
+
+    # -----------------------------------------------------------------
+    # C4 multimodal speculative decoding gates:
+    # 1. Absolute acceptance-length quality gate.
+    # 2. fp32-logits compatibility gate.
+    # -----------------------------------------------------------------
+    c4_absolute_relative_tolerance=0.1
+    c4_fp32_relative_tolerance=0.1
+    C4_TP=4
+    C4_TARGET_MODEL_DIR=${ENGINES_DIR}/c4-25a218t_fp8_eagle_l5
+    C4_DRAFT_MODEL_DIR=${ENGINES_DIR}/c4-25a218t_fp8_eagle_l5/eagle
+    C4_EXPECTED_AL=2.5
+    C4_LOG_OFF=${OUTPUT_DIR}/speculative_decoding_c4_mm_fp32_off.log
+    C4_LOG_ON=${OUTPUT_DIR}/speculative_decoding_c4_mm_fp32_on.log
+
+    run_c4_spec_decode_case() {
+        local fp32_mode="$1"
+        local log_file="$2"
+
+        VLLM_USE_V1=1 \
+        VLLM_USE_LOGITS_FP32_COMPUTATION="$fp32_mode" \
+        python3 examples/offline_inference/spec_decode.py \
+            --method eagle \
+            --model-dir "$C4_TARGET_MODEL_DIR" \
+            --eagle-dir "$C4_DRAFT_MODEL_DIR" \
+            --num_spec_tokens 3 \
+            --tp "$C4_TP" \
+            --num-prompts 12 \
+            --custom-mm-prompts \
+            &> "$log_file"
+        cat "$log_file"
+    }
+
+    echo "Running C4 multimodal speculative decoding absolute AL gate (VLLM_USE_LOGITS_FP32_COMPUTATION=0)"
+    run_c4_spec_decode_case 0 "$C4_LOG_OFF"
+    c4_mal_off=$(extract_mean_acceptance_length "$C4_LOG_OFF")
+    if [ -z "$c4_mal_off" ]; then
+        echo "C4 speculative decoding test failed: missing mean acceptance length in $C4_LOG_OFF."
+        exit 1
+    fi
+
+    c4_absolute_passed=$(check_absolute_acceptance_length "$c4_mal_off" "$C4_EXPECTED_AL" "$c4_absolute_relative_tolerance")
+    if [ "$c4_absolute_passed" != "True" ]; then
+        echo "C4 speculative decoding test failed. Expected acceptance length of $C4_EXPECTED_AL within relative tolerance $c4_absolute_relative_tolerance, got $c4_mal_off."
+        exit 1
+    fi
+    echo "C4 speculative decoding test passed (AL=$c4_mal_off, expected=$C4_EXPECTED_AL, tol=$c4_absolute_relative_tolerance)."
+
+    echo "Running C4 multimodal fp32 logits compatibility gate (VLLM_USE_LOGITS_FP32_COMPUTATION=1)"
+    run_c4_spec_decode_case 1 "$C4_LOG_ON"
+    c4_mal_on=$(extract_mean_acceptance_length "$C4_LOG_ON")
+    if [ -z "$c4_mal_on" ]; then
+        echo "C4 fp32 compatibility test failed: missing mean acceptance length in $C4_LOG_ON."
+        exit 1
+    fi
+
+    c4_compatible=$(check_relative_acceptance_length_delta "$c4_mal_off" "$c4_mal_on" "$c4_fp32_relative_tolerance")
+    if [ "$c4_compatible" != "True" ]; then
+        echo "C4 speculative decoding fp32-logits compatibility test failed (AL off=$c4_mal_off, on=$c4_mal_on, tol=$c4_fp32_relative_tolerance)."
+        exit 1
+    fi
+    echo "C4 speculative decoding fp32-logits compatibility test passed (AL off=$c4_mal_off, on=$c4_mal_on, tol=$c4_fp32_relative_tolerance)."
+
+    # -----------------------------------------------------------------
+    # C3 text speculative decoding gates:
+    # 1. Absolute acceptance-length quality gate.
+    # 2. fp32-logits compatibility gate.
+    # -----------------------------------------------------------------
+    c3_absolute_relative_tolerance=0.1
+    c3_fp32_relative_tolerance=0.1
+    C3_TP=2
+    C3_TARGET_MODEL_DIR=${ENGINES_DIR}/command-a_fp8
+    C3_DRAFT_MODEL_DIR=${ENGINES_DIR}/command-a_fp8_draft
+    C3_EXPECTED_AL=2.34
+    C3_LOG_OFF=${OUTPUT_DIR}/speculative_decoding_c3_fp32_off.log
+    C3_LOG_ON=${OUTPUT_DIR}/speculative_decoding_c3_fp32_on.log
+
+    run_c3_spec_decode_case() {
+        local fp32_mode="$1"
+        local log_file="$2"
+
+        VLLM_USE_V1=1 \
+        VLLM_USE_LOGITS_FP32_COMPUTATION="$fp32_mode" \
+        python3 examples/offline_inference/spec_decode.py \
+            --method eagle \
+            --model-dir "$C3_TARGET_MODEL_DIR" \
+            --eagle-dir "$C3_DRAFT_MODEL_DIR" \
+            --num_spec_tokens 3 \
+            --tp "$C3_TP" \
+            --dataset-name hf \
+            --dataset-path philschmid/mt-bench \
+            --num-prompts 80 \
+            &> "$log_file"
+        cat "$log_file"
+    }
+
+    echo "Running C3 speculative decoding absolute AL gate (VLLM_USE_LOGITS_FP32_COMPUTATION=0)"
+    run_c3_spec_decode_case 0 "$C3_LOG_OFF"
+    c3_mal_off=$(extract_mean_acceptance_length "$C3_LOG_OFF")
+    if [ -z "$c3_mal_off" ]; then
+        echo "C3 speculative decoding test failed: missing mean acceptance length in $C3_LOG_OFF."
+        exit 1
+    fi
+
+    c3_absolute_passed=$(check_absolute_acceptance_length "$c3_mal_off" "$C3_EXPECTED_AL" "$c3_absolute_relative_tolerance")
+    if [ "$c3_absolute_passed" != "True" ]; then
+        echo "C3 speculative decoding test failed. Expected acceptance length of $C3_EXPECTED_AL within relative tolerance $c3_absolute_relative_tolerance, got $c3_mal_off."
+        exit 1
+    fi
+    echo "C3 speculative decoding test passed (AL=$c3_mal_off, expected=$C3_EXPECTED_AL, tol=$c3_absolute_relative_tolerance)."
+
+    echo "Running C3 fp32 logits compatibility gate (VLLM_USE_LOGITS_FP32_COMPUTATION=1)"
+    run_c3_spec_decode_case 1 "$C3_LOG_ON"
+    c3_mal_on=$(extract_mean_acceptance_length "$C3_LOG_ON")
+    if [ -z "$c3_mal_on" ]; then
+        echo "C3 fp32 compatibility test failed: missing mean acceptance length in $C3_LOG_ON."
+        exit 1
+    fi
+
+    c3_compatible=$(check_relative_acceptance_length_delta "$c3_mal_off" "$c3_mal_on" "$c3_fp32_relative_tolerance")
+    if [ "$c3_compatible" != "True" ]; then
+        echo "Speculative decoding fp32-logits compatibility test failed (AL off=$c3_mal_off, on=$c3_mal_on, tol=$c3_fp32_relative_tolerance)."
+        exit 1
+    fi
+    echo "Speculative decoding fp32-logits compatibility test passed (AL off=$c3_mal_off, on=$c3_mal_on, tol=$c3_fp32_relative_tolerance)."
+
+    # -----------------------------------------------------------------
+    # Request cancellation sweeps (BLS model)
+    # -----------------------------------------------------------------
     BLS_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
     BLS_DRAFT_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_eagle_bf16
-    local errors=0
 
     cd tests/cohere
     export PYTHONPATH="${VLLM_WORKSPACE}:${PYTHONPATH}"
