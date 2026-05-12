@@ -354,7 +354,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
                 shared_experts=layer.shared_experts,
             )
 

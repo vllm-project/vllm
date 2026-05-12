@@ -58,7 +58,7 @@ try:
     )
     from humming.utils.weight import quantize_weight
 
-    from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
         BatchedHummingGroupedExperts,
         HummingGroupedExperts,
         HummingIndexedExperts,
@@ -182,7 +182,7 @@ def compressed_tensors_get_config(config: dict[str, Any], key: str):
 
 
 class HummingConfig(QuantizationConfig):
-    packed_modules_mapping = {}
+    packed_modules_mapping: dict[str, list[str]] = {}
 
     def __init__(self, full_config: dict[str, Any] | None = None):
         assert_humming_available()
