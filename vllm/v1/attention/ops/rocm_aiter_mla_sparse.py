@@ -1651,6 +1651,74 @@ def rocm_sparse_attn_prefill(
     output.copy_(output_chunk.to(output.dtype))
 
 
+def rocm_sparse_attn_decode(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor | None,
+    swa_k_cache: torch.Tensor,
+    swa_only: bool,
+    topk_indices: torch.Tensor | None,
+    topk_lens: torch.Tensor | None,
+    swa_indices: torch.Tensor,
+    swa_lens: torch.Tensor,
+    swa_ragged_indices: torch.Tensor | None,
+    swa_ragged_indptr: torch.Tensor | None,
+    topk_ragged_indices: torch.Tensor | None,
+    topk_ragged_indptr: torch.Tensor | None,
+    attn_sink: torch.Tensor | None,
+    scale: float,
+    head_dim: int,
+    nope_head_dim: int,
+    rope_head_dim: int,
+    output: torch.Tensor,
+) -> None:
+    assert swa_k_cache.dtype == torch.uint8, (
+        "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
+        f"got {swa_k_cache.dtype}"
+    )
+    _validate_dsv4_sparse_dims(
+        head_dim,
+        nope_head_dim,
+        rope_head_dim,
+        "rocm_sparse_attn_decode",
+    )
+
+    main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
+
+    extra_cache = None
+    extra_indices = None
+    if not swa_only:
+        assert kv_cache is not None
+        assert topk_indices is not None or (
+            topk_ragged_indices is not None and topk_ragged_indptr is not None
+        )
+        assert kv_cache.dtype == torch.uint8, (
+            "ROCm Triton sparse decode expects uint8 fp8_ds_mla extra cache, "
+            f"got {kv_cache.dtype}"
+        )
+        extra_cache = kv_cache
+        if topk_indices is not None:
+            extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+
+    attn_out = _rocm_sparse_attn_decode_triton(
+        q=q,
+        main_cache=swa_k_cache,
+        main_indices=main_indices,
+        scale=scale,
+        attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+        nope_head_dim=nope_head_dim,
+        rope_head_dim=rope_head_dim,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        main_lengths=swa_lens,
+        extra_lengths=topk_lens,
+        main_ragged_indices=swa_ragged_indices,
+        main_ragged_indptr=swa_ragged_indptr,
+        extra_ragged_indices=topk_ragged_indices,
+        extra_ragged_indptr=topk_ragged_indptr,
+    )
+    output.copy_(attn_out.to(output.dtype))
+
+
 def rocm_dequantize_blocked_k_cache(
     quant_k_cache: torch.Tensor,
     head_dim: int,
