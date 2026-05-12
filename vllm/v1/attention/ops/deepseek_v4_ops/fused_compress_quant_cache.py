@@ -145,17 +145,17 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     kv_block_idx = kv_slot_idx // kv_cache_block_size
     kv_pos_in_block = kv_slot_idx % kv_cache_block_size
 
+    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM  # 448
+    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2  # 32
+    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
+    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
+
     if STORE_FULL_CACHE:
         cache_row = (
             k_cache_ptr
             + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
             + kv_pos_in_block * KV_TOKEN_STRIDE
         )
-
-        NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-        HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-        NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-        NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
 
         pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
         even, odd = tl.split(pair_2d)
@@ -184,15 +184,14 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
         return
 
     cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
-    fp8_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
+    fp8_ptr = (cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE).to(
+        tl.pointer_type(tl.uint8)
+    )
     scale_ptr = (
         cache_block_ptr
         + kv_cache_block_size * TOKEN_STRIDE
         + kv_pos_in_block * SCALE_DIM
-    )
-
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM  # 448
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2  # 32
+    ).to(tl.pointer_type(tl.uint8))
 
     # FP8 UE8M0 quant: cast fp32 → bf16 → fp32 before quant to match reference.
     N_QUANT_BLOCKS: tl.constexpr = TRITON_BLOCK_SIZE // QUANT_BLOCK
@@ -229,9 +228,6 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     tl.store(scale_ptr + N_NOPE_BLOCKS, tl.zeros((), dtype=tl.uint8))
 
     # Register-based GPT-J RoPE in fp32.
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
     pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
     even, odd = tl.split(pair_2d)  # each [NUM_PAIRS] fp32
 
