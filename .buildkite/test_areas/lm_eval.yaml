@@ -40,13 +40,25 @@ steps:
 - label: LM Eval Small Models (B200)
   key: lm-eval-small-models-b200
   timeout_in_minutes: 120
-  device: b200
+  device: b200-k8s
   optional: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
+
+- label: LM Eval Large Models (B200, EP)
+  key: lm-eval-large-models-b200-ep
+  timeout_in_minutes: 120
+  device: b200-k8s
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell-ep.txt
 
 - label: LM Eval Qwen3.5 Models (B200)
   key: lm-eval-qwen3-5-models-b200
@@ -92,7 +104,7 @@ steps:
 
 - label: MoE Refactor Integration Test (B200 DP - TEMPORARY)
   key: moe-refactor-integration-test-b200-dp-temporary
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   commands:
@@ -127,7 +139,7 @@ steps:
 - label: GPQA Eval (GPT-OSS) (B200)
   key: gpqa-eval-gpt-oss-b200
   timeout_in_minutes: 120
-  device: b200
+  device: b200-k8s
   optional: true
   num_devices: 2
   source_file_dependencies:
