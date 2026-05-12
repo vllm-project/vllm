@@ -955,6 +955,9 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             raise ValueError("A scheme must be defined for each layer")
         return scheme.apply_weights(layer, x, bias=bias)
 
+    def quantize_input(self, layer: torch.nn.Module, x: torch.Tensor):
+        return layer.scheme.quantize_input(layer, x)
+
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
     """

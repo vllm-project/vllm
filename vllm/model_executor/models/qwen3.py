@@ -42,6 +42,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    rms_norm_input_quant,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
@@ -219,19 +222,23 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        hidden_states, residual = rms_norm_input_quant(
+            self.input_layernorm,
+            hidden_states,
+            residual,
+            self.self_attn.qkv_proj,
+        )
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = rms_norm_input_quant(
+            self.post_attention_layernorm,
+            hidden_states,
+            residual,
+            self.mlp.gate_up_proj,
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
