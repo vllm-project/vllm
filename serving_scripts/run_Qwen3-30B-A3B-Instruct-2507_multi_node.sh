@@ -193,7 +193,7 @@ mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
 # === Nsight Systems ===
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
-export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas,nccl}"
+export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
 
 # === NCCL logs ===
