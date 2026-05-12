@@ -1722,6 +1722,9 @@ def initialize_model_parallel(
     # If no EPLB group needed, _EPLB remains None
 
     # Per-layer parallel config resolver.
+    # DCP groups are consecutive chunks of the TP axis (see the reshape
+    # above), so this rank's attention TP rank is which DCP group it
+    # belongs to: tp_rank // dcp_size_for_attn.
     full_tp_size = tensor_model_parallel_size
     full_tp_rank = _TP.rank_in_group
     attn_tp_size = (
@@ -1737,7 +1740,8 @@ def initialize_model_parallel(
             f"tensor_model_parallel_size ({full_tp_size}) must be divisible "
             f"by tensor_parallel_size_attention ({attn_tp_size})"
         )
-    attn_tp_rank = full_tp_rank % attn_tp_size
+    dcp_size_for_attn = full_tp_size // attn_tp_size
+    attn_tp_rank = full_tp_rank // dcp_size_for_attn
     init_layer_parallel_resolver(
         full_tp_size=full_tp_size,
         full_tp_rank=full_tp_rank,
