@@ -53,10 +53,10 @@ def init_speech_to_text_state(
     supported_tasks: tuple["SupportedTask", ...],
 ):
     if "transcription" in supported_tasks:
-        from vllm.entrypoints.speech_to_text.transcription.serving import (
+        from .transcription.serving import (
             OpenAIServingTranscription,
         )
-        from vllm.entrypoints.speech_to_text.translation.serving import (
+        from .translation.serving import (
             OpenAIServingTranslation,
         )
 
