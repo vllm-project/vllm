@@ -1118,6 +1118,13 @@ if USE_PRECOMPILED_RUST_FRONTEND:
     for pkg, files in patch.items():
         package_data.setdefault(pkg, []).extend(files)
 
+# If the rust frontend binary is already present in the source tree (e.g.,
+# pre-built in a separate Docker build stage), ship it as-is.
+if PRECOMPILED_RUST_FRONTEND_PATH.exists():
+    vllm_files = package_data.setdefault("vllm", [])
+    if "vllm-rs" not in vllm_files:
+        vllm_files.append("vllm-rs")
+
 if _no_device():
     ext_modules = []
 
@@ -1129,7 +1136,7 @@ else:
         if USE_PRECOMPILED_EXTENSIONS
         else cmake_build_ext,
     }
-if USE_PRECOMPILED_RUST_FRONTEND:
+if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
     cmdclass["build_rust"] = precompiled_build_rust
 
 # Rust frontend binary, built via setuptools-rust and installed into the
