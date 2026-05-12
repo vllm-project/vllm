@@ -1157,13 +1157,14 @@ def test_spec_decode_logprobs(
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 
-def test_prompt_logprobs_with_chunking_and_preemption(monkeypatch, request):
+def test_prompt_logprobs_with_chunking_and_preemption():
     """Test that prompt logprobs are correctly returned when using
     both chunked prefill and preemption.
 
     This test ensures that the num_prompt_logprobs tracking persists
     across preemptions and prefill chunks.
     """
+
     # Create prompts that will trigger chunking and preemption
     prompts = [
         "The following numbers of the sequence "
