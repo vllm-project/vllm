@@ -211,6 +211,13 @@ class INCConfig(QuantizationConfig):
                     sub_names = [
                         layer_name.replace(fusion_key, sub_key) for sub_key in sub_keys
                     ]
+                    # Only trigger if at least one sub_name has an explicit entry
+                    # in extra_config. This prevents false matches when a shorter
+                    # fusion_key (e.g. "qkv") is a substring of a longer fused
+                    # layer name (e.g. "in_proj_qkvz") and none of the generated
+                    # sub_names actually exist in extra_config.
+                    if not any(name in self.extra_config for name in sub_names):
+                        continue
                     sub_configs = [get_config(name, quantized) for name in sub_names]
                     if len(set(sub_configs)) == 1:
                         return sub_configs[0]
