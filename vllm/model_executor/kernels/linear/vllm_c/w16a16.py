@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 
 import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
@@ -12,7 +14,11 @@ from vllm.utils.platform_utils import num_compute_units
 
 _SKINNY_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
-_CU_COUNT = num_compute_units()
+
+@lru_cache(maxsize=1)
+def _cu_count() -> int:
+    # Evaluated lazily so this module can be imported on non-ROCm platforms.
+    return num_compute_units()
 
 
 class LLMM1Kernel(w16a16.PredicateKernel):
@@ -115,7 +121,7 @@ class WvSplitKKernel(w16a16.PredicateKernel):
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
         x_view = x.reshape(-1, x.size(-1))
-        out = ops.wvSplitK(weight, x_view, _CU_COUNT, bias)
+        out = ops.wvSplitK(weight, x_view, _cu_count(), bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
 
 
@@ -137,7 +143,7 @@ class WvSplitKrcKernel(w16a16.PredicateKernel):
         grps_shr_b = min(N_p2 // 16, 4)
         cu_needed = rndup_cus * grps_shr_b
         fits = (N_p2 * m * ((k + 512 - 1) // 512)) <= 128 * 1024 * 12
-        return fits and cu_needed <= _CU_COUNT
+        return fits and cu_needed <= _cu_count()
 
     @classmethod
     def is_supported(
@@ -177,4 +183,4 @@ class WvSplitKrcKernel(w16a16.PredicateKernel):
         weight: torch.Tensor,
         bias: torch.Tensor | None,
     ) -> torch.Tensor:
-        return ops.wvSplitKrc(x, weight, _CU_COUNT, bias)
+        return ops.wvSplitKrc(x, weight, _cu_count(), bias)
