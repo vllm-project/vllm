@@ -20,6 +20,7 @@ class OpenVLAConfig(PretrainedConfig):
     def __init__(
         self,
         timm_model_ids: list[str] | None = None,
+        timm_override_act_layers: list[str | None] | None = None,
         image_sizes: list[int] | None = None,
         use_fused_vision_backbone: bool = True,
         image_token_index: int = 32000,
@@ -34,6 +35,7 @@ class OpenVLAConfig(PretrainedConfig):
             "vit_large_patch14_reg4_dinov2.lvd142m",
             "vit_so400m_patch14_siglip_224",
         ]
+        self.timm_override_act_layers = timm_override_act_layers or [None, None]
         self.image_sizes = image_sizes or [224, 224]
         self.use_fused_vision_backbone = use_fused_vision_backbone
         self.image_token_index = image_token_index

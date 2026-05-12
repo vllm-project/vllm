@@ -14,7 +14,11 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -38,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenVLAConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -72,11 +77,13 @@ class PrismaticVisionBackbone(nn.Module):
         *,
         image_sizes: Sequence[int],
         timm_model_ids: Sequence[str],
+        timm_override_act_layers: Sequence[str | None],
         use_fused_vision_backbone: bool,
     ) -> None:
         super().__init__()
         self.image_sizes = list(image_sizes)
         self.timm_model_ids = list(timm_model_ids)
+        self.timm_override_act_layers = list(timm_override_act_layers)
         self.use_fused_vision_backbone = use_fused_vision_backbone
         self.embed_dim = 2176 if use_fused_vision_backbone else 1024
         self.featurizer: nn.Module | None = None
@@ -98,6 +105,7 @@ class PrismaticVisionBackbone(nn.Module):
                 pretrained=False,
                 num_classes=0,
                 img_size=image_size,
+                act_layer=self.timm_override_act_layers[0],
             )
             if self.use_fused_vision_backbone:
                 self.fused_featurizer = timm.create_model(
@@ -105,13 +113,22 @@ class PrismaticVisionBackbone(nn.Module):
                     pretrained=False,
                     num_classes=0,
                     img_size=image_size,
+                    act_layer=self.timm_override_act_layers[1],
                 )
 
-        self.featurizer = self.featurizer.to(dtype=torch.get_default_dtype())
+        self.featurizer = self.featurizer.to(
+            device=current_platform.device_type,
+            dtype=torch.get_default_dtype(),
+        )
         if self.fused_featurizer is not None:
             self.fused_featurizer = self.fused_featurizer.to(
-                dtype=torch.get_default_dtype()
+                device=current_platform.device_type, dtype=torch.get_default_dtype()
             )
+
+    def get_input_dtype(self) -> torch.dtype:
+        if self.featurizer is None:
+            raise RuntimeError("OpenVLA vision backbone is not initialized.")
+        return self.featurizer.patch_embed.proj.weight.dtype
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         if self.featurizer is None:
@@ -173,7 +190,7 @@ class PrismaticProjector(nn.Module):
                 prefix=f"{prefix}.fc2",
             )
             self.act_fn2 = get_act_fn("gelu")
-            self.fc3 = RowParallelLinear(
+            self.fc3 = ReplicatedLinear(
                 text_dim,
                 text_dim,
                 bias=True,
@@ -431,6 +448,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             self.vision_backbone = PrismaticVisionBackbone(
                 image_sizes=config.image_sizes,
                 timm_model_ids=config.timm_model_ids,
+                timm_override_act_layers=config.timm_override_act_layers,
                 use_fused_vision_backbone=config.use_fused_vision_backbone,
             )
             self.projector = PrismaticProjector(
@@ -476,7 +494,9 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         image_input: OpenVLAImagePixelInputs,
     ) -> torch.Tensor:
-        pixel_values = image_input["data"]
+        pixel_values = image_input["data"].to(
+            dtype=self.vision_backbone.get_input_dtype()
+        )
         vision_features = self.vision_backbone(pixel_values)
         return self.projector(vision_features)
 
