@@ -168,3 +168,20 @@ def test_xpu_block_kernel_uses_triton_as_fallback(platform_mock):
         )
 
     assert isinstance(kernel, TritonFp8BlockScaledMMKernel)
+
+
+@patch("vllm.model_executor.kernels.linear.scaled_mm.xpu.current_platform")
+def test_xpu_block_kernel_is_supported_requires_fp8_gemm(platform_mock):
+    class OpsWithoutXpuC:
+        pass
+
+    platform_mock.is_xpu.return_value = True
+
+    with patch(
+        "vllm.model_executor.kernels.linear.scaled_mm.xpu.torch.ops",
+        new=OpsWithoutXpuC(),
+    ):
+        supported, reason = XPUFp8BlockScaledMMKernel.is_supported()
+
+    assert not supported
+    assert reason == "XPUFp8BlockScaledMM requires torch.ops._xpu_C.fp8_gemm"

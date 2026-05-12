@@ -92,6 +92,9 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
             return False, "XPUFp8BlockScaledMM only support on XPU"
+        if (not hasattr(torch.ops, "_xpu_C")
+                or not hasattr(torch.ops._xpu_C, "fp8_gemm")):
+            return False, "XPUFp8BlockScaledMM requires torch.ops._xpu_C.fp8_gemm"
         return True, None
 
     def apply_block_scaled_mm(
