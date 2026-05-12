@@ -93,10 +93,32 @@ _SUB_CONFIG = SettingsConfigDict(
 class BuildSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    target_device: str = "cuda"
-    main_cuda_version: str = "13.0"
-    max_jobs: str | None = Field(default=None, alias="MAX_JOBS")
-    nvcc_threads: str | None = Field(default=None, alias="NVCC_THREADS")
+    target_device: str = Field(
+        default="cuda",
+        description="Target device of vLLM, supporting [cuda (by default), rocm, cpu].",
+    )
+    main_cuda_version: str = Field(
+        default="13.0",
+        description=(
+            "Main CUDA version of vLLM. This follows PyTorch but can be overridden."
+        ),
+    )
+    max_jobs: str | None = Field(
+        default=None,
+        alias="MAX_JOBS",
+        description=(
+            "Maximum number of compilation jobs to run in parallel. "
+            "By default this is the number of CPUs."
+        ),
+    )
+    nvcc_threads: str | None = Field(
+        default=None,
+        alias="NVCC_THREADS",
+        description=(
+            "Number of threads to use for nvcc. By default this is 1. "
+            "If set, `MAX_JOBS` will be reduced to avoid oversubscribing the CPU."
+        ),
+    )
     use_precompiled: bool = Field(
         default=False,
         description=(
@@ -104,12 +126,30 @@ class BuildSettings(BaseSettings):
             "Implicitly enabled when VLLM_PRECOMPILED_WHEEL_LOCATION is set."
         ),
     )
-    skip_precompiled_version_suffix: bool = False
-    docker_build_context: bool = False
-    cmake_build_type: Literal["Debug", "Release", "RelWithDebInfo"] | None = Field(
-        default=None, alias="CMAKE_BUILD_TYPE"
+    skip_precompiled_version_suffix: bool = Field(
+        default=False,
+        description="If set, skip adding +precompiled suffix to version string.",
     )
-    verbose: bool = Field(default=False, alias="VERBOSE")
+    docker_build_context: bool = Field(
+        default=False,
+        description=(
+            "Used to mark that setup.py is running in a Docker build context, "
+            "in order to force the use of precompiled binaries."
+        ),
+    )
+    cmake_build_type: Literal["Debug", "Release", "RelWithDebInfo"] | None = Field(
+        default=None,
+        alias="CMAKE_BUILD_TYPE",
+        description=(
+            'CMake build type. If not set, defaults to "Debug" or "RelWithDebInfo". '
+            'Available options: "Debug", "Release", "RelWithDebInfo".'
+        ),
+    )
+    verbose: bool = Field(
+        default=False,
+        alias="VERBOSE",
+        description="If set, vllm will print verbose logs during installation.",
+    )
 
     @field_validator("target_device", mode="before")
     @classmethod
@@ -142,40 +182,168 @@ class PathSettings(BaseSettings):
     config_root: str = Field(
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_config_home(), "vllm")
-        )
+        ),
+        description=(
+            "Root directory for vLLM configuration files. Defaults to "
+            "`~/.config/vllm` unless `XDG_CONFIG_HOME` is set. Note that this not "
+            "only affects how vllm finds its configuration files during runtime, "
+            "but also affects how vllm installs its configuration files during "
+            "**installation**."
+        ),
     )
     cache_root: str = Field(
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_cache_home(), "vllm")
-        )
+        ),
+        description=(
+            "Root directory for vLLM cache files. Defaults to `~/.cache/vllm` "
+            "unless `XDG_CACHE_HOME` is set."
+        ),
     )
     assets_cache: str = Field(
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_cache_home(), "vllm", "assets")
-        )
+        ),
+        description="Path to the cache for storing downloaded assets.",
     )
     xla_cache_path: str = Field(
         default_factory=lambda: os.path.expanduser(
             os.path.join(_xdg_cache_home(), "vllm", "xla_cache")
-        )
+        ),
+        description=(
+            "Path to the XLA persistent cache directory. Only used for XLA "
+            "devices such as TPUs."
+        ),
     )
-    rpc_base_path: str = Field(default_factory=tempfile.gettempdir)
-    tuned_config_folder: str | None = None
-    model_redirect_path: str | None = None
-    lora_resolver_cache_dir: str | None = None
-    lora_resolver_hf_repo_list: str | None = None
-    cudart_so_path: str | None = None
-    nccl_so_path: str | None = None
-    nccl_include_path: str | None = None
-    ld_library_path: str | None = Field(default=None, alias="LD_LIBRARY_PATH")
-    cuda_home: str | None = Field(default=None, alias="CUDA_HOME")
-    cuda_compatibility_path: str | None = None
-    enable_cuda_compatibility: bool = False
-    logging_config_path: str | None = None
-    debug_dump_path: str | None = None
-    pattern_match_debug: str | None = None
-    gc_debug: str = ""
-    system_start_date: str | None = None
+    rpc_base_path: str = Field(
+        default_factory=tempfile.gettempdir,
+        description=(
+            "Path used for IPC when the frontend api server is running in "
+            "multi-processing mode to communicate with the backend engine process."
+        ),
+    )
+    tuned_config_folder: str | None = Field(
+        default=None,
+        description="Allows vllm to find tuned config under a customized folder.",
+    )
+    model_redirect_path: str | None = Field(
+        default=None,
+        description=(
+            "Use model_redirect to redirect the model name to a local folder. "
+            "`model_redirect` can be a json file mapping the model between "
+            'repo_id and local folder: {"meta-llama/Llama-3.2-1B": '
+            '"/tmp/Llama-3.2-1B"} or a space separated values table file: '
+            "meta-llama/Llama-3.2-1B /tmp/Llama-3.2-1B."
+        ),
+    )
+    lora_resolver_cache_dir: str | None = Field(
+        default=None,
+        description=(
+            "A local directory to look in for unrecognized LoRA adapters. Only "
+            "works if plugins are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING "
+            "is enabled."
+        ),
+    )
+    lora_resolver_hf_repo_list: str | None = Field(
+        default=None,
+        description=(
+            "A remote HF repo(s) containing one or more LoRA adapters, which may "
+            "be downloaded and leveraged as needed. Only works if plugins are "
+            "enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled. Values "
+            "should be comma separated."
+        ),
+    )
+    cudart_so_path: str | None = Field(
+        default=None,
+        description=(
+            "In some systems, find_loaded_library() may not work. So we allow "
+            "users to specify the path through the environment variable "
+            "VLLM_CUDART_SO_PATH."
+        ),
+    )
+    nccl_so_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to the NCCL library file. It is needed because nccl>=2.19 "
+            "brought by PyTorch contains a bug: "
+            "https://github.com/NVIDIA/nccl/issues/1234"
+        ),
+    )
+    nccl_include_path: str | None = Field(
+        default=None,
+        description="NCCL header path.",
+    )
+    ld_library_path: str | None = Field(
+        default=None,
+        alias="LD_LIBRARY_PATH",
+        description=(
+            "When `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the "
+            "NCCL library file in the locations specified by `LD_LIBRARY_PATH`."
+        ),
+    )
+    cuda_home: str | None = Field(
+        default=None,
+        alias="CUDA_HOME",
+        description=(
+            "Path to the cudatoolkit home directory, under which should be bin, "
+            "include, and lib directories."
+        ),
+    )
+    cuda_compatibility_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to the CUDA compatibility libraries when CUDA compatibility "
+            "is enabled."
+        ),
+    )
+    enable_cuda_compatibility: bool = Field(
+        default=False,
+        description=(
+            "Enable CUDA compatibility mode for datacenter GPUs with older "
+            "driver versions than the CUDA toolkit major version of vLLM."
+        ),
+    )
+    logging_config_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to a JSON file with custom logging configuration. Used when "
+            "VLLM_CONFIGURE_LOGGING is enabled."
+        ),
+    )
+    debug_dump_path: str | None = Field(
+        default=None,
+        description=(
+            "Dump fx graphs to the given directory. It will override "
+            "CompilationConfig.debug_dump_path if set."
+        ),
+    )
+    pattern_match_debug: str | None = Field(
+        default=None,
+        description=(
+            "Debug pattern matching inside custom passes. Should be set to the "
+            "fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3')."
+        ),
+    )
+    gc_debug: str = Field(
+        default="",
+        description=(
+            "GC debug config. "
+            "VLLM_GC_DEBUG=0: disable GC debugger. "
+            "VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times. "
+            "VLLM_GC_DEBUG='{\"top_objects\":5}': enable GC debugger with top 5 "
+            "collected objects."
+        ),
+    )
+    system_start_date: str | None = Field(
+        default=None,
+        description=(
+            "Pin the conversation start date injected into the Harmony system "
+            "message. When unset the current date is used, which introduces "
+            "non-determinism (different tokens -> different model behaviour at "
+            'temperature=0). Set to an ISO date string, e.g. "2023-09-12", for '
+            "reproducible inference or testing."
+        ),
+    )
 
     @field_validator(
         "config_root", "cache_root", "assets_cache", "xla_cache_path", mode="after"
@@ -188,32 +356,194 @@ class PathSettings(BaseSettings):
 class ServerSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    host_ip: str = ""
-    port: int | None = None
-    api_key: str | None = None
-    debug_log_api_server_response: bool = False
-    rpc_timeout: int = 10000
-    http_timeout_keep_alive: int = 5
-    max_n_sequences: int = 16384
-    engine_iteration_timeout_s: int = 60
-    engine_ready_timeout_s: int = 600
-    execute_model_timeout_seconds: int = 300
-    keep_alive_on_engine_death: bool = False
-    server_dev_mode: bool = False
-    allow_long_max_model_len: bool = False
-    enable_responses_api_store: bool = False
-    allow_chunked_local_attn_with_hybrid_kv_cache: bool = True
-    process_name_prefix: str = "VLLM"
-    loopback_ip: str = ""
-    skip_model_name_validation: bool = False
-    allow_insecure_serialization: bool = False
-    disable_log_logo: bool = False
-    tool_parse_regex_timeout_seconds: int = 1
-    tool_json_error_automatic_retry: bool = False
-    enforce_strict_tool_calling: bool = False
-    custom_scopes_for_profiling: bool = False
-    nvtx_scopes_for_profiling: bool = False
-    mq_max_chunk_bytes_mb: int = 16
+    host_ip: str = Field(
+        default="",
+        description=(
+            "Used in distributed environment to determine the IP address of the "
+            "current node, when the node has multiple network interfaces. If you "
+            "are using multi-node inference, you should set this differently on "
+            "each node."
+        ),
+    )
+    port: int | None = Field(
+        default=None,
+        description=(
+            "Used in distributed environment to manually set the communication "
+            "port. Note: if VLLM_PORT is set, and some code asks for multiple "
+            "ports, the VLLM_PORT will be used as the first port, and the rest "
+            "will be generated by incrementing the VLLM_PORT value."
+        ),
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="API key for vLLM API server.",
+    )
+    debug_log_api_server_response: bool = Field(
+        default=False,
+        description="Whether to log responses from API Server for debugging.",
+    )
+    rpc_timeout: int = Field(
+        default=10000,
+        description=(
+            "Time in ms for the zmq client to wait for a response from the "
+            "backend server for simple data operations."
+        ),
+    )
+    http_timeout_keep_alive: int = Field(
+        default=5,
+        description=(
+            "Timeout in seconds for keeping HTTP connections alive in API server."
+        ),
+    )
+    max_n_sequences: int = Field(
+        default=16384,
+        description=(
+            "Maximum allowed value for the `n` sampling parameter (number of "
+            "output sequences per request). Limits resource consumption to "
+            "prevent denial-of-service via excessively large fan-out. "
+            "Default: 16384."
+        ),
+    )
+    engine_iteration_timeout_s: int = Field(
+        default=60,
+        description="Timeout for each iteration in the engine.",
+    )
+    engine_ready_timeout_s: int = Field(
+        default=600,
+        description=(
+            "Timeout in seconds for waiting for engine cores to become ready "
+            "during startup. Default is 600 seconds (10 minutes)."
+        ),
+    )
+    execute_model_timeout_seconds: int = Field(
+        default=300,
+        description=(
+            "Timeout in seconds for execute_model RPC calls in multiprocessing "
+            "executor (only applies when TP > 1)."
+        ),
+    )
+    keep_alive_on_engine_death: bool = Field(
+        default=False,
+        description=(
+            "If set, the OpenAI API server will stay alive even after the "
+            "underlying AsyncLLMEngine errors and stops serving requests."
+        ),
+    )
+    server_dev_mode: bool = Field(
+        default=False,
+        description=(
+            "If set, vllm will run in development mode, which will enable some "
+            "additional endpoints for developing and debugging, e.g. "
+            "`/reset_prefix_cache`."
+        ),
+    )
+    allow_long_max_model_len: bool = Field(
+        default=False,
+        description=(
+            "If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows the "
+            "user to specify a max sequence length greater than the max length "
+            "derived from the model's config.json. To enable this, set "
+            "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1."
+        ),
+    )
+    enable_responses_api_store: bool = Field(
+        default=False,
+        description=(
+            'Enables support for the "store" option in the OpenAI Responses '
+            "API. When set to 1, vLLM's OpenAI server will retain the input "
+            "and output messages for those requests in memory. By default, "
+            'this is disabled (0), and the "store" option is ignored. '
+            "NOTE/WARNING: 1. Messages are kept in memory only (not persisted "
+            "to disk) and will be lost when the vLLM server shuts down. "
+            "2. Enabling this option will cause a memory leak, as stored "
+            "messages are never removed from memory until the server terminates."
+        ),
+    )
+    allow_chunked_local_attn_with_hybrid_kv_cache: bool = Field(
+        default=True,
+        description=(
+            "Allow chunked local attention with hybrid kv cache manager. "
+            "Currently using the Hybrid KV cache manager with chunked local "
+            "attention in the Llama4 models (the only models currently using "
+            "chunked local attn) causes a latency regression. For this reason, "
+            "we disable it by default. This flag is used to allow users to "
+            "enable it if they want to (to save on kv-cache memory usage and "
+            "enable longer contexts). "
+            "TODO(lucas): Remove this flag once latency regression is resolved."
+        ),
+    )
+    process_name_prefix: str = Field(
+        default="VLLM",
+        description=(
+            "Used to set the process name prefix for vLLM processes. This is "
+            'useful for debugging and monitoring purposes. The default value is "VLLM".'
+        ),
+    )
+    loopback_ip: str = Field(
+        default="",
+        description="Used to force set up loopback IP.",
+    )
+    skip_model_name_validation: bool = Field(
+        default=False,
+        description=(
+            "Skip model name validation in OpenAI API requests. When set to 1, "
+            "any model name will be accepted in the 'model' field of API "
+            "requests. This is useful for proxy/gateway scenarios where the "
+            "actual model is served but different names may be used in requests."
+        ),
+    )
+    allow_insecure_serialization: bool = Field(
+        default=False,
+        description=(
+            "If set, allow insecure serialization using pickle. This is useful "
+            "for environments where it is deemed safe to use the insecure "
+            "method and it is needed for some reason."
+        ),
+    )
+    disable_log_logo: bool = Field(
+        default=False,
+        description="Disable logging of vLLM logo at server startup time.",
+    )
+    tool_parse_regex_timeout_seconds: int = Field(
+        default=1,
+        description="Regex timeout for use by the vLLM tool parsing plugins.",
+    )
+    tool_json_error_automatic_retry: bool = Field(
+        default=False,
+        description=(
+            "Enable automatic retry when tool call JSON parsing fails. "
+            "If enabled, returns an error message to the model to retry. "
+            "If disabled (default), raises an exception and fails the request."
+        ),
+    )
+    enforce_strict_tool_calling: bool = Field(
+        default=False,
+        description=(
+            "When 1, the model structural tags will be used to enforce the "
+            "model output conforming to the model's tool-calling format and "
+            "schema. Default 0 (off)."
+        ),
+    )
+    custom_scopes_for_profiling: bool = Field(
+        default=False,
+        description=(
+            "Add optional custom scopes for profiling, disable to avoid overheads."
+        ),
+    )
+    nvtx_scopes_for_profiling: bool = Field(
+        default=False,
+        description=(
+            "Add optional nvtx scopes for profiling, disable to avoid overheads."
+        ),
+    )
+    mq_max_chunk_bytes_mb: int = Field(
+        default=16,
+        description=(
+            "Control the max chunk bytes (in MB) for the rpc message queue. "
+            "Object larger than this threshold will be broadcast to worker "
+            "processes via zmq."
+        ),
+    )
 
     @field_validator("port", mode="before")
     @classmethod
@@ -242,19 +572,88 @@ class ServerSettings(BaseSettings):
 class LoggingSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    configure_logging: bool = True
-    logging_level: str = "INFO"
-    logging_prefix: str = ""
-    logging_stream: str = "ext://sys.stdout"
-    logging_color: str = "auto"
-    no_color: bool = Field(default=False, alias="NO_COLOR")
-    log_stats_interval: float = 10.0
-    log_batchsize_interval: float = -1.0
-    trace_function: int = 0
-    ringbuffer_warning_interval: int = 60
-    debug_workspace: bool = False
-    debug_mfu_metrics: bool = False
-    log_model_inspection: bool = False
+    configure_logging: bool = Field(
+        default=True,
+        description=(
+            "Logging configuration. "
+            "If set to 0, vllm will not configure logging. "
+            "If set to 1, vllm will configure logging using the default "
+            "configuration or the configuration file specified by "
+            "VLLM_LOGGING_CONFIG_PATH."
+        ),
+    )
+    logging_level: str = Field(
+        default="INFO",
+        description="Used for configuring the default logging level.",
+    )
+    logging_prefix: str = Field(
+        default="",
+        description=(
+            "If set, VLLM_LOGGING_PREFIX will be prepended to all log messages."
+        ),
+    )
+    logging_stream: str = Field(
+        default="ext://sys.stdout",
+        description="Used for configuring the default logging stream.",
+    )
+    logging_color: str = Field(
+        default="auto",
+        description=(
+            'Controls colored logging output. Options: "auto" (default, colors '
+            'when terminal), "1" (always use colors), "0" (never use colors).'
+        ),
+    )
+    no_color: bool = Field(
+        default=False,
+        alias="NO_COLOR",
+        description="Standard unix flag for disabling ANSI color codes.",
+    )
+    log_stats_interval: float = Field(
+        default=10.0,
+        description=(
+            "If set, vllm will log stats at this interval in seconds. "
+            "If not set, vllm will log stats every 10 seconds."
+        ),
+    )
+    log_batchsize_interval: float = Field(
+        default=-1.0,
+        description=(
+            "If set to a positive value, vllm will log batch size statistics "
+            "at this interval in seconds. Negative values disable batch-size "
+            "logging."
+        ),
+    )
+    trace_function: int = Field(
+        default=0,
+        description=(
+            "Trace function calls. If set to 1, vllm will trace function "
+            "calls. Useful for debugging."
+        ),
+    )
+    ringbuffer_warning_interval: int = Field(
+        default=60,
+        description=(
+            "Interval in seconds to log a warning message when the ring buffer is full."
+        ),
+    )
+    debug_workspace: bool = Field(
+        default=False,
+        description=(
+            "Debug workspace allocations. Logging of workspace resize operations."
+        ),
+    )
+    debug_mfu_metrics: bool = Field(
+        default=False,
+        description="Debug logging for --enable-mfu-metrics.",
+    )
+    log_model_inspection: bool = Field(
+        default=False,
+        description=(
+            "Log model inspection after loading. If enabled, logs a "
+            "transformers-style hierarchical view of the model with "
+            "quantization methods and attention backends."
+        ),
+    )
 
     @field_validator("logging_level", mode="after")
     @classmethod
@@ -284,7 +683,10 @@ class LoggingSettings(BaseSettings):
 class DistributedSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    dp_rank: int = 0
+    dp_rank: int = Field(
+        default=0,
+        description="Rank of the process in the data parallel setting.",
+    )
     dp_rank_local: int = Field(
         default=-1,
         description=(
@@ -292,29 +694,165 @@ class DistributedSettings(BaseSettings):
             "variable is not explicitly set."
         ),
     )
-    dp_size: int = 1
-    dp_master_ip: str = "127.0.0.1"
-    dp_master_port: int = 0
-    randomize_dp_dummy_inputs: bool = False
-    ray_dp_pack_strategy: Literal["strict", "fill", "span"] = "strict"
-    ray_extra_env_var_prefixes_to_copy: str = ""
-    ray_extra_env_vars_to_copy: str = ""
-    ray_per_worker_gpus: float = 1.0
-    ray_bundle_indices: str = ""
-    use_ray_compiled_dag_channel_type: Literal["auto", "nccl", "shm"] = "auto"
-    use_ray_compiled_dag_overlap_comm: bool = False
-    use_ray_wrapped_pp_comm: bool = True
-    use_ray_v2_executor_backend: bool = True
-    worker_multiproc_method: Literal["spawn", "fork"] = "fork"
-    enable_v1_multiprocessing: bool = True
-    local_rank: int = Field(default=0, alias="LOCAL_RANK")
-    cuda_visible_devices: str | None = Field(default=None, alias="CUDA_VISIBLE_DEVICES")
-    disable_pynccl: bool = False
-    skip_p2p_check: bool = True
-    allreduce_use_symm_mem: bool = True
-    allreduce_use_flashinfer: bool = False
-    use_nccl_symm_mem: bool = False
-    msgpack_zero_copy_threshold: int = 256
+    dp_size: int = Field(
+        default=1,
+        description="World size of the data parallel setting.",
+    )
+    dp_master_ip: str = Field(
+        default="127.0.0.1",
+        description="IP address of the master node in the data parallel setting.",
+    )
+    dp_master_port: int = Field(
+        default=0,
+        description="Port of the master node in the data parallel setting.",
+    )
+    randomize_dp_dummy_inputs: bool = Field(
+        default=False,
+        description="Randomize inputs during dummy runs when using Data Parallel.",
+    )
+    ray_dp_pack_strategy: Literal["strict", "fill", "span"] = Field(
+        default="strict",
+        description=(
+            "Strategy to pack the data parallel ranks for Ray. Available "
+            'options: "fill" - for DP master node, allocate exactly '
+            "data-parallel-size-local DP ranks; for non-master nodes, allocate "
+            'as many DP ranks as can fit. "strict" - allocate exactly '
+            'data-parallel-size-local DP ranks to each picked node. "span" - '
+            "should be used only when a single DP rank requires multiple "
+            "nodes; allocate one DP rank over as many nodes as required for "
+            "set world_size. This environment variable is ignored if "
+            "data-parallel-backend is not Ray."
+        ),
+    )
+    ray_extra_env_var_prefixes_to_copy: str = Field(
+        default="",
+        description=(
+            "Comma-separated *additional* prefixes of env vars to copy from "
+            "the driver to Ray workers. These are merged with the built-in "
+            "defaults defined in `vllm.ray.ray_env` (VLLM_, etc.). "
+            'Example: "MYLIB_,OTHER_".'
+        ),
+    )
+    ray_extra_env_vars_to_copy: str = Field(
+        default="",
+        description=(
+            "Comma-separated *additional* individual env var names to copy "
+            "from the driver to Ray workers. Merged with the built-in "
+            "defaults defined in `vllm.ray.ray_env` (PYTHONHASHSEED). "
+            'Example: "MY_SECRET,MY_FLAG".'
+        ),
+    )
+    ray_per_worker_gpus: float = Field(
+        default=1.0,
+        description=(
+            "Number of GPUs per worker in Ray; if it is set to be a fraction, "
+            "it allows ray to schedule multiple actors on a single GPU, so "
+            "that users can colocate other actors on the same GPUs as vLLM."
+        ),
+    )
+    ray_bundle_indices: str = Field(
+        default="",
+        description=(
+            "Bundle indices for Ray; if set, it can control precisely which "
+            "indices are used for the Ray bundle, for every worker. Format: "
+            'comma-separated list of integers, e.g. "0,1,2,3".'
+        ),
+    )
+    use_ray_compiled_dag_channel_type: Literal["auto", "nccl", "shm"] = Field(
+        default="auto",
+        description=(
+            "If the env var is set, Ray Compiled Graph uses the specified "
+            "channel type to communicate between workers belonging to "
+            "different pipeline-parallel stages. Available options: "
+            '"auto" - use the default channel type; '
+            '"nccl" - use NCCL for communication; '
+            '"shm" - use shared memory and gRPC for communication.'
+        ),
+    )
+    use_ray_compiled_dag_overlap_comm: bool = Field(
+        default=False,
+        description=(
+            "If the env var is set, it enables GPU communication overlap "
+            "(experimental feature) in Ray's Compiled Graph."
+        ),
+    )
+    use_ray_wrapped_pp_comm: bool = Field(
+        default=True,
+        description=(
+            "If the env var is set, it uses a Ray Communicator wrapping "
+            "vLLM's pipeline parallelism communicator to interact with Ray's "
+            "Compiled Graph. Otherwise, it uses Ray's NCCL communicator."
+        ),
+    )
+    use_ray_v2_executor_backend: bool = Field(
+        default=True,
+        description=(
+            'When True and distributed_executor_backend="ray", use '
+            "RayExecutorV2 (MQ-based) instead of RayDistributedExecutor "
+            "(compiled-graph backend)."
+        ),
+    )
+    worker_multiproc_method: Literal["spawn", "fork"] = Field(
+        default="fork",
+        description=(
+            "Use dedicated multiprocess context for workers. Both spawn and fork work."
+        ),
+    )
+    enable_v1_multiprocessing: bool = Field(
+        default=True,
+        description="If set, enable multiprocessing in LLM for the V1 code path.",
+    )
+    local_rank: int = Field(
+        default=0,
+        alias="LOCAL_RANK",
+        description=(
+            "Local rank of the process in the distributed setting, used to "
+            "determine the GPU device id."
+        ),
+    )
+    cuda_visible_devices: str | None = Field(
+        default=None,
+        alias="CUDA_VISIBLE_DEVICES",
+        description="Used to control the visible devices in the distributed setting.",
+    )
+    disable_pynccl: bool = Field(
+        default=False,
+        description="Disable pynccl (using torch.distributed instead).",
+    )
+    skip_p2p_check: bool = Field(
+        default=True,
+        description=(
+            "We assume drivers can report p2p status correctly. If the "
+            "program hangs when using custom allreduce, potentially caused "
+            "by a bug in the driver (535 series), it might be helpful to "
+            "set VLLM_SKIP_P2P_CHECK=0 so that vLLM can verify if p2p is "
+            "actually working."
+        ),
+    )
+    allreduce_use_symm_mem: bool = Field(
+        default=True,
+        description="Whether to use pytorch symmetric memory for allreduce.",
+    )
+    allreduce_use_flashinfer: bool = Field(
+        default=False,
+        description="Whether to use FlashInfer allreduce.",
+    )
+    use_nccl_symm_mem: bool = Field(
+        default=False,
+        description="Flag to enable NCCL symmetric memory allocation and registration.",
+    )
+    msgpack_zero_copy_threshold: int = Field(
+        default=256,
+        description=(
+            "Control the threshold for msgspec to use 'zero copy' for "
+            "serialization/deserialization of tensors. Tensors below this "
+            "limit will be encoded into the msgpack buffer, and tensors "
+            "above will instead be sent via a separate message. While the "
+            "sending side still actually copies the tensor in all cases, on "
+            "the receiving side, tensors above this limit will actually be "
+            "zero-copy decoded."
+        ),
+    )
     use_spinloop_ext: bool = Field(
         default=False,
         description=(
@@ -334,18 +872,100 @@ class DistributedSettings(BaseSettings):
 class CompilationSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    use_aot_compile: bool = False
-    force_aot_load: bool = False
-    use_mega_aot_artifact: bool = False
-    use_bytecode_hook: bool = True
-    use_standalone_compile: bool = True
-    enable_pregrad_passes: bool = True
-    enable_inductor_max_autotune: bool = True
-    enable_inductor_coordinate_descent_tuning: bool = True
-    disable_compile_cache: bool = False
-    compile_cache_save_format: Literal["binary", "unpacked"] = "binary"
-    use_layername: bool = True
-    use_v2_model_runner: bool = False
+    use_aot_compile: bool = Field(
+        default=False,
+        description=(
+            "Feature flag to enable/disable AOT compilation. This will ensure "
+            "compilation is done in warmup phase and the compilation will be "
+            "reused in subsequent calls."
+        ),
+    )
+    force_aot_load: bool = Field(
+        default=False,
+        description=(
+            "Force vllm to always load AOT compiled models from disk. Failure "
+            "to load will result in a hard error when this is enabled. Will "
+            "be ignored when VLLM_USE_AOT_COMPILE is disabled."
+        ),
+    )
+    use_mega_aot_artifact: bool = Field(
+        default=False,
+        description=(
+            "Enable loading compiled models directly from cached standalone "
+            "compile artifacts without re-splitting graph modules. This "
+            "reduces overhead during model loading by using "
+            "reconstruct_serializable_fn_from_mega_artifact."
+        ),
+    )
+    use_bytecode_hook: bool = Field(
+        default=True,
+        description=(
+            "Feature flag to enable/disable bytecode in "
+            "TorchCompileWithNoGuardsWrapper."
+        ),
+    )
+    use_standalone_compile: bool = Field(
+        default=True,
+        description=(
+            "Feature flag to enable/disable Inductor standalone compile. In "
+            "torch <= 2.7 we ignore this flag; in torch >= 2.9 this is "
+            "enabled by default."
+        ),
+    )
+    enable_pregrad_passes: bool = Field(
+        default=True,
+        description=(
+            "Inductor's pre-grad passes don't do anything for vLLM. The "
+            "pre-grad passes get run even on cache-hit and negatively impact "
+            "vllm cold compile times by O(1s). Can remove this after the "
+            "following issue gets fixed. "
+            "TODO(luka): maybe_inplace requires this. "
+            "https://github.com/pytorch/pytorch/issues/174502"
+        ),
+    )
+    enable_inductor_max_autotune: bool = Field(
+        default=True,
+        description=(
+            "Enable max_autotune & coordinate_descent_tuning in inductor_config "
+            "to compile static shapes passed from compile_sizes in "
+            "compilation_config. If set to 1, enable max_autotune. By default, "
+            "this is enabled (1)."
+        ),
+    )
+    enable_inductor_coordinate_descent_tuning: bool = Field(
+        default=True,
+        description=(
+            "If set to 1, enable coordinate_descent_tuning. By default, this "
+            "is enabled (1)."
+        ),
+    )
+    disable_compile_cache: bool = Field(
+        default=False,
+        description="Disable the torch.compile cache.",
+    )
+    compile_cache_save_format: Literal["binary", "unpacked"] = Field(
+        default="binary",
+        description=(
+            "Format for saving torch.compile cache artifacts. "
+            '"binary" saves as a binary file (safe for multiple vllm serve '
+            "processes accessing the same torch compile cache). "
+            '"unpacked" saves as a directory structure (for '
+            "inspection/debugging). NOT multiprocess safe -- race conditions "
+            "may occur with multiple processes. Allows viewing and setting "
+            "breakpoints in Inductor's code output files."
+        ),
+    )
+    use_layername: bool = Field(
+        default=True,
+        description=(
+            'If set to "0", disable LayerName opaque type for layer_name '
+            "parameters in custom ops. Defaults to enabled on torch >= 2.11."
+        ),
+    )
+    use_v2_model_runner: bool = Field(
+        default=False,
+        description="Flag to enable v2 model runner.",
+    )
 
     @model_validator(mode="after")
     def _apply_aot_compile_defaults(self) -> "CompilationSettings":
@@ -378,19 +998,116 @@ class CompilationSettings(BaseSettings):
 class MediaSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    image_fetch_timeout: int = 5
-    video_fetch_timeout: int = 30
-    audio_fetch_timeout: int = 10
-    media_cache: str = ""
-    media_cache_max_size_mb: int = 5120
-    media_cache_ttl_hours: float = 24
-    media_fetch_max_retries: int = 3
-    media_url_allow_redirects: bool = True
-    media_loading_thread_count: int = 8
-    max_audio_clip_filesize_mb: int = 25
-    video_loader_backend: str = "opencv"
-    media_connector: str = "http"
-    mm_hasher_algorithm: Literal["blake3", "sha256", "sha512"] = "blake3"
+    image_fetch_timeout: int = Field(
+        default=5,
+        description=(
+            "Timeout for fetching images when serving multimodal models. "
+            "Default is 5 seconds."
+        ),
+    )
+    video_fetch_timeout: int = Field(
+        default=30,
+        description=(
+            "Timeout for fetching videos when serving multimodal models. "
+            "Default is 30 seconds."
+        ),
+    )
+    audio_fetch_timeout: int = Field(
+        default=10,
+        description=(
+            "Timeout for fetching audio when serving multimodal models. "
+            "Default is 10 seconds."
+        ),
+    )
+    media_cache: str = Field(
+        default="",
+        description=(
+            "Directory for caching media downloads (images, video, audio "
+            "fetched from URLs during inference). Empty string disables "
+            "caching."
+        ),
+    )
+    media_cache_max_size_mb: int = Field(
+        default=5120,
+        description=(
+            "Maximum cache size in MB. When exceeded, least-recently-used "
+            "entries are evicted. Default is 5120 (5 GB)."
+        ),
+    )
+    media_cache_ttl_hours: float = Field(
+        default=24,
+        description=(
+            "Time-to-live in hours for cached media files. Entries older "
+            "than this are evicted regardless of cache size. Default is "
+            "24 hours."
+        ),
+    )
+    media_fetch_max_retries: int = Field(
+        default=3,
+        description=(
+            "Maximum number of retries for fetching media (images, audio, "
+            "video) from URLs. Each retry quadruples the timeout. "
+            "Default is 3."
+        ),
+    )
+    media_url_allow_redirects: bool = Field(
+        default=True,
+        description=(
+            "Whether to allow HTTP redirects when fetching from media URLs. Defaults "
+            "to True."
+        ),
+    )
+    media_loading_thread_count: int = Field(
+        default=8,
+        description=(
+            "Max number of workers for the thread pool handling media bytes "
+            "loading. Set to 1 to disable parallel processing. Default is 8."
+        ),
+    )
+    max_audio_clip_filesize_mb: int = Field(
+        default=25,
+        description=(
+            "Maximum filesize in MB for a single audio file when processing "
+            "speech-to-text requests. Files larger than this will be "
+            "rejected. Default is 25 MB."
+        ),
+    )
+    video_loader_backend: str = Field(
+        default="opencv",
+        description=(
+            "Backend for Video IO -- selects the frame-sampling algorithm. "
+            '"opencv": uniform sampling. '
+            '"opencv_dynamic": duration-aware dynamic sampling. '
+            '"identity": returns raw video bytes for model processor to '
+            "handle. Custom backend implementations can be registered via "
+            '`@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and '
+            "imported at runtime. If a non-existing backend is used, an "
+            "AssertionError will be thrown."
+        ),
+    )
+    media_connector: str = Field(
+        default="http",
+        description=(
+            "Media connector implementation. "
+            '"http": Default connector that supports fetching media via '
+            "HTTP. Custom implementations can be registered via "
+            '`@MEDIA_CONNECTOR_REGISTRY.register("my_custom_media_connector")` '
+            "and imported at runtime. If a non-existing backend is used, an "
+            "AssertionError will be thrown."
+        ),
+    )
+    mm_hasher_algorithm: Literal["blake3", "sha256", "sha512"] = Field(
+        default="blake3",
+        description=(
+            "Hash algorithm for multimodal content hashing. "
+            '"blake3": Default, fast cryptographic hash (not FIPS 140-3 '
+            "compliant). "
+            '"sha256": FIPS 140-3 compliant, widely supported. '
+            '"sha512": FIPS 140-3 compliant, faster on 64-bit systems. '
+            "Use sha256 or sha512 for FIPS compliance in government/"
+            "enterprise deployments."
+        ),
+    )
     object_storage_shm_buffer_name: str | None = Field(
         default=None,
         description=(
@@ -399,7 +1116,13 @@ class MediaSettings(BaseSettings):
             "name and writes it back to the environment."
         ),
     )
-    assets_cache_model_clean: bool = False
+    assets_cache_model_clean: bool = Field(
+        default=False,
+        description=(
+            "If the env var is set, we will clean model file in this path "
+            "$VLLM_ASSETS_CACHE/model_streamer/$model_name."
+        ),
+    )
 
     @field_validator("mm_hasher_algorithm", mode="before")
     @classmethod
@@ -424,81 +1147,339 @@ class MediaSettings(BaseSettings):
 class CpuSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    cpu_kvcache_space: int | None = None
-    cpu_omp_threads_bind: str = "auto"
-    cpu_num_of_reserved_cpu: int | None = None
-    cpu_sgl_kernel: bool = False
-    cpu_attn_split_kv: bool = True
-    cpu_int4_w4a8: bool = True
-    zentorch_weight_prepack: bool = True
+    cpu_kvcache_space: int | None = Field(
+        default=None,
+        description=(
+            "(CPU backend only) CPU key-value cache space. Default is None "
+            "and will be set as 4 GB."
+        ),
+    )
+    cpu_omp_threads_bind: str = Field(
+        default="auto",
+        description=(
+            "(CPU backend only) CPU core ids bound by OpenMP threads, e.g., "
+            '"0-31", "0,1,2", "0-31,33". CPU cores of different ranks are '
+            "separated by '|'."
+        ),
+    )
+    cpu_num_of_reserved_cpu: int | None = Field(
+        default=None,
+        description=(
+            "(CPU backend only) CPU cores not used by OMP threads. Those CPU "
+            "cores will not be used by OMP threads of a rank."
+        ),
+    )
+    cpu_sgl_kernel: bool = Field(
+        default=False,
+        description=(
+            "(CPU backend only) Whether to use SGL kernels, optimized for small batch."
+        ),
+    )
+    cpu_attn_split_kv: bool = Field(
+        default=True,
+        description="(CPU backend only) Whether to enable attention split KV.",
+    )
+    cpu_int4_w4a8: bool = Field(
+        default=True,
+        description=(
+            "(CPU backend only) Whether to use SGLang INT4 W4A8 kernels for AWQ."
+        ),
+    )
+    zentorch_weight_prepack: bool = Field(
+        default=True,
+        description=(
+            "(Zen CPU backend) Eagerly prepack weights into ZenDNN blocked "
+            "layout at model load time. Eliminates per-inference layout "
+            "conversion overhead."
+        ),
+    )
 
 
 class RocmSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    rocm_sleep_mem_chunk_size: int = 256
-    rocm_use_aiter: bool = False
-    rocm_use_aiter_paged_attn: bool = False
-    rocm_use_aiter_linear: bool = True
-    rocm_use_aiter_moe: bool = True
-    rocm_use_aiter_rmsnorm: bool = True
-    rocm_use_aiter_mla: bool = True
-    rocm_use_aiter_mha: bool = True
-    rocm_use_aiter_fp4_asm_gemm: bool = False
-    rocm_use_aiter_triton_rope: bool = False
-    rocm_use_aiter_fp8bmm: bool = True
-    rocm_use_aiter_fp4bmm: bool = True
-    rocm_use_aiter_unified_attention: bool = False
-    rocm_use_aiter_fusion_shared_experts: bool = False
-    rocm_use_aiter_triton_gemm: bool = True
-    rocm_use_skinny_gemm: bool = True
-    rocm_fp8_padding: bool = True
-    rocm_moe_padding: bool = True
-    rocm_shuffle_kv_cache_layout: bool = False
-    rocm_quick_reduce_quantization: Literal["FP", "INT8", "INT6", "INT4", "NONE"] = (
-        "NONE"
+    rocm_sleep_mem_chunk_size: int = Field(
+        default=256,
+        description=(
+            "Flag to control the chunk size (in MB) for sleeping memory "
+            "allocations under ROCm."
+        ),
     )
-    rocm_quick_reduce_cast_bf16_to_fp16: bool = True
-    rocm_quick_reduce_max_size_bytes_mb: int | None = None
-    rocm_fp8_mfma_page_attn: bool = False
+    rocm_use_aiter: bool = Field(
+        default=False,
+        description=(
+            "Disable aiter ops unless specifically enabled. Acts as a parent "
+            "switch to enable the rest of the other operations."
+        ),
+    )
+    rocm_use_aiter_paged_attn: bool = Field(
+        default=False,
+        description="Whether to use aiter paged attention. By default is disabled.",
+    )
+    rocm_use_aiter_linear: bool = Field(
+        default=True,
+        description=(
+            "Use aiter linear op if aiter ops are enabled. The following "
+            "list of related ops -- scaled_mm (per-tensor / rowwise) -- use "
+            "aiter tuned gemms for unquantized gemms."
+        ),
+    )
+    rocm_use_aiter_moe: bool = Field(
+        default=True,
+        description="Whether to use aiter moe ops. By default is enabled.",
+    )
+    rocm_use_aiter_rmsnorm: bool = Field(
+        default=True,
+        description="Use aiter rms norm op if aiter ops are enabled.",
+    )
+    rocm_use_aiter_mla: bool = Field(
+        default=True,
+        description="Whether to use aiter mla ops. By default is enabled.",
+    )
+    rocm_use_aiter_mha: bool = Field(
+        default=True,
+        description="Whether to use aiter mha ops. By default is enabled.",
+    )
+    rocm_use_aiter_fp4_asm_gemm: bool = Field(
+        default=False,
+        description="Whether to use aiter fp4 gemm asm. By default is disabled.",
+    )
+    rocm_use_aiter_triton_rope: bool = Field(
+        default=False,
+        description="Whether to use aiter rope. By default is disabled.",
+    )
+    rocm_use_aiter_fp8bmm: bool = Field(
+        default=True,
+        description=(
+            "Whether to use aiter triton fp8 bmm kernel. By default is enabled."
+        ),
+    )
+    rocm_use_aiter_fp4bmm: bool = Field(
+        default=True,
+        description=(
+            "Whether to use aiter triton fp4 bmm kernel. By default is enabled."
+        ),
+    )
+    rocm_use_aiter_unified_attention: bool = Field(
+        default=False,
+        description="Use AITER triton unified attention for V1 attention.",
+    )
+    rocm_use_aiter_fusion_shared_experts: bool = Field(
+        default=False,
+        description=(
+            "Whether to use aiter fusion shared experts ops. By default is disabled."
+        ),
+    )
+    rocm_use_aiter_triton_gemm: bool = Field(
+        default=True,
+        description=(
+            "Whether to use aiter triton kernels for gemm ops. By default is enabled."
+        ),
+    )
+    rocm_use_skinny_gemm: bool = Field(
+        default=True,
+        description="Use rocm skinny gemms.",
+    )
+    rocm_fp8_padding: bool = Field(
+        default=True,
+        description="Pad the fp8 weights to 256 bytes for ROCm.",
+    )
+    rocm_moe_padding: bool = Field(
+        default=True,
+        description="Pad the weights for the moe kernel.",
+    )
+    rocm_shuffle_kv_cache_layout: bool = Field(
+        default=False,
+        description="Whether to use the shuffled kv cache layout.",
+    )
+    rocm_quick_reduce_quantization: Literal["FP", "INT8", "INT6", "INT4", "NONE"] = (
+        Field(
+            default="NONE",
+            description=(
+                "Custom quick allreduce kernel for MI3* cards. Choice of "
+                "quantization level: FP, INT8, INT6, INT4 or NONE. "
+                "Recommended for large models to get allreduce."
+            ),
+        )
+    )
+    rocm_quick_reduce_cast_bf16_to_fp16: bool = Field(
+        default=True,
+        description=(
+            "Custom quick allreduce kernel for MI3* cards. Due to the lack "
+            "of the bfloat16 asm instruction, bfloat16 kernels are slower "
+            "than fp16. If the environment variable is set to 1, the input "
+            "is converted to fp16."
+        ),
+    )
+    rocm_quick_reduce_max_size_bytes_mb: int | None = Field(
+        default=None,
+        description=(
+            "Custom quick allreduce kernel for MI3* cards. Controls the "
+            "maximum allowed number of data bytes (MB) for custom quick "
+            "allreduce communication. Default: 2048 MB. Data exceeding "
+            "this size will use either custom allreduce or RCCL "
+            "communication."
+        ),
+    )
+    rocm_fp8_mfma_page_attn: bool = Field(
+        default=False,
+        description="If set, use the fp8 mfma in rocm paged attention.",
+    )
 
 
 class TpuXpuSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    xla_check_recompilation: bool = False
-    xla_use_spmd: bool = False
-    tpu_bucket_padding_gap: int = 0
-    tpu_most_model_len: int | None = None
+    xla_check_recompilation: bool = Field(
+        default=False,
+        description="If set, assert on XLA recompilation after each execution step.",
+    )
+    xla_use_spmd: bool = Field(
+        default=False,
+        description="Enable SPMD mode for TPU backend.",
+    )
+    tpu_bucket_padding_gap: int = Field(
+        default=0,
+        description=(
+            "Gap between padding buckets for the forward pass. So we have 8, "
+            "we will run forward pass with [16, 24, 32, ...]."
+        ),
+    )
+    tpu_most_model_len: int | None = Field(
+        default=None,
+        description=(
+            "The 'most' model length to optimize for on TPU. If set, the TPU "
+            "backend pre-compiles graphs targeted at this length and falls "
+            "back gracefully for sequences that exceed it."
+        ),
+    )
     tpu_using_pathways: bool = Field(
         default_factory=_tpu_pathways_default,
         validation_alias=_TPU_PATHWAYS_SENTINEL,
+        description="Whether using Pathways.",
     )
-    xpu_enable_xpu_graph: bool = False
-    xpu_use_sampler_kernel: bool = True
-    sparse_indexer_max_logits_mb: int = 512
+    xpu_enable_xpu_graph: bool = Field(
+        default=False,
+        description="Whether enable XPU graph on Intel GPU.",
+    )
+    xpu_use_sampler_kernel: bool = Field(
+        default=True,
+        description="Whether use xpu specific sample kernel.",
+    )
+    sparse_indexer_max_logits_mb: int = Field(
+        default=512,
+        description=(
+            "Maximum size (in MB) for logits tensor in sparse MLA indexer "
+            "prefill chunks. Bounds the [M, N] float32 logits tensor to "
+            "prevent CUDA OOM. Default: 512 MB."
+        ),
+    )
 
 
 class FlashInferSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    use_flashinfer_sampler: bool = True
-    use_flashinfer_moe_fp16: bool = False
-    use_flashinfer_moe_fp8: bool = False
-    use_flashinfer_moe_fp4: bool = False
-    use_flashinfer_moe_int4: bool = False
-    use_flashinfer_moe_mxfp4_mxfp8: bool = False
-    use_flashinfer_moe_mxfp4_mxfp8_cutlass: bool = False
-    use_flashinfer_moe_mxfp4_bf16: bool = False
-    flashinfer_moe_backend: Literal["throughput", "latency", "masked_gemm"] = "latency"
-    flashinfer_allreduce_backend: Literal["auto", "trtllm", "mnnvl"] = "auto"
-    flashinfer_workspace_buffer_size: int = 394 * 1024 * 1024
-    flashinfer_allreduce_fusion_thresholds_mb: Annotated[dict, NoDecode] = Field(
-        default_factory=dict
+    use_flashinfer_sampler: bool = Field(
+        default=True,
+        description=(
+            "Whether to use the FlashInfer top-k / top-p sampler on CUDA. "
+            "Enabled by default when the hardware supports it -- set to 0 "
+            "to opt out explicitly, which forces the PyTorch-native "
+            "(Triton for bs>=8) path."
+        ),
     )
-    blockscale_fp8_gemm_flashinfer: bool = True
-    has_flashinfer_cubin: bool = False
-    max_tokens_per_expert_fp4_moe: int = 163840
+    use_flashinfer_moe_fp16: bool = Field(
+        default=False,
+        description="Allow use of FlashInfer BF16 MoE kernels for fused moe ops.",
+    )
+    use_flashinfer_moe_fp8: bool = Field(
+        default=False,
+        description="Allow use of FlashInfer FP8 MoE kernels for fused moe ops.",
+    )
+    use_flashinfer_moe_fp4: bool = Field(
+        default=False,
+        description="Allow use of FlashInfer NVFP4 MoE kernels for fused moe ops.",
+    )
+    use_flashinfer_moe_int4: bool = Field(
+        default=False,
+        description="Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.",
+    )
+    use_flashinfer_moe_mxfp4_mxfp8: bool = Field(
+        default=False,
+        description=(
+            "If set to 1, use the FlashInfer MXFP8 (activation) x MXFP4 "
+            "(weight) MoE backend."
+        ),
+    )
+    use_flashinfer_moe_mxfp4_mxfp8_cutlass: bool = Field(
+        default=False,
+        description=(
+            "If set to 1, use the FlashInfer CUTLASS backend for MXFP8 "
+            "(activation) x MXFP4 (weight) MoE. This is separate from the "
+            "TRTLLMGEN path controlled by VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8."
+        ),
+    )
+    use_flashinfer_moe_mxfp4_bf16: bool = Field(
+        default=False,
+        description=(
+            "If set to 1, use the FlashInfer BF16 (activation) x MXFP4 "
+            "(weight) MoE backend."
+        ),
+    )
+    flashinfer_moe_backend: Literal["throughput", "latency", "masked_gemm"] = Field(
+        default="latency",
+        description=(
+            "Flashinfer MoE backend for vLLM's fused Mixture-of-Experts "
+            "support. Both require compute capability 10.0 or above. "
+            'Available options: "throughput" -- [default] Uses CUTLASS '
+            "kernels optimized for high-throughput batch inference. "
+            '"latency" -- Uses TensorRT-LLM kernels optimized for low-'
+            "latency inference."
+        ),
+    )
+    flashinfer_allreduce_backend: Literal["auto", "trtllm", "mnnvl"] = Field(
+        default="auto",
+        description="Flashinfer fused allreduce backend.",
+    )
+    flashinfer_workspace_buffer_size: int = Field(
+        default=394 * 1024 * 1024,
+        description="Control the workspace buffer size for the FlashInfer backend.",
+    )
+    flashinfer_allreduce_fusion_thresholds_mb: Annotated[dict, NoDecode] = Field(
+        default_factory=dict,
+        description=(
+            "Specifies the thresholds of the communicated tensor sizes "
+            "under which vllm should use flashinfer fused allreduce. The "
+            "variable should be a JSON with the following format: "
+            "{ <world size>: <max size in mb> }. Unspecified world sizes "
+            "will fall back to { 2: 64, 4: 1, <everything else>: 0.5 }."
+        ),
+    )
+    blockscale_fp8_gemm_flashinfer: bool = Field(
+        default=True,
+        description=(
+            "Allow use of FlashInfer FP8 block-scale GEMM for linear "
+            "layers. This uses TensorRT-LLM kernels and requires SM90+ "
+            "(Hopper)."
+        ),
+    )
+    has_flashinfer_cubin: bool = Field(
+        default=False,
+        description=(
+            "If set, it means we pre-downloaded cubin files and flashinfer "
+            "will read the cubin files directly."
+        ),
+    )
+    max_tokens_per_expert_fp4_moe: int = Field(
+        default=163840,
+        description=(
+            "Control the maximum number of tokens per expert supported by "
+            "the NVFP4 MoE CUTLASS Kernel. This value is used to create a "
+            "buffer for the blockscale tensor of activations NVFP4 "
+            "Quantization. This is used to prevent the kernel from running "
+            "out of memory."
+        ),
+    )
 
     @field_validator("flashinfer_allreduce_fusion_thresholds_mb", mode="before")
     @classmethod
@@ -513,42 +1494,256 @@ class FlashInferSettings(BaseSettings):
 class QuantSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    marlin_use_atomic_add: bool = False
-    marlin_input_dtype: Literal["int8", "fp8"] | None = None
-    humming_online_quant_config: Annotated[dict[str, Any] | None, NoDecode] = None
-    humming_input_quant_config: Annotated[dict[str, Any] | None, NoDecode] = None
-    humming_use_f16_accum: bool | None = False
-    humming_moe_gemm_type: Literal["indexed", "grouped", "auto"] | None = None
-    mxfp4_use_marlin: bool | None = None
-    deepepll_nvfp4_dispatch: bool = False
-    use_deep_gemm: bool = True
-    moe_use_deep_gemm: bool = True
-    use_deep_gemm_e8m0: bool = True
-    use_deep_gemm_tma_aligned_scales: bool = True
-    deep_gemm_warmup: Literal["skip", "full", "relax"] = "relax"
-    use_fused_moe_grouped_topk: bool = True
-    deepep_buffer_size_mb: int = 1024
-    deepep_high_throughput_force_intra_node: bool = False
-    deepep_low_latency_use_mnnvl: bool = False
-    dbo_comm_sms: int = Field(default_factory=_default_dbo_comm_sms)
-    multi_stream_gemm_token_threshold: int = 1024
-    shared_experts_stream_token_threshold: int = 256
-    disable_shared_experts_stream: bool = False
-    moe_routing_simulation_strategy: str = ""
-    nvfp4_gemm_backend: str | None = None
-    use_nvfp4_ct_emulations: bool = False
-    q_scale_constant: int = Field(default=200, alias="Q_SCALE_CONSTANT")
-    k_scale_constant: int = Field(default=200, alias="K_SCALE_CONSTANT")
-    v_scale_constant: int = Field(default=100, alias="V_SCALE_CONSTANT")
-    kv_cache_layout: Literal["NHD", "HND"] | None = None
-    ssm_conv_state_layout: Literal["SD", "DS"] | None = None
-    mla_disable: bool = False
-    compute_nans_in_logits: bool = False
-    use_fbgemm: bool = False
-    use_oink_ops: bool = False
-    batch_invariant: bool = False
-    float32_matmul_precision: Literal["highest", "high", "medium"] = "highest"
-    use_triton_awq: bool = False
+    marlin_use_atomic_add: bool = Field(
+        default=False,
+        description="Whether to use atomicAdd reduce in gptq/awq marlin kernel.",
+    )
+    marlin_input_dtype: Literal["int8", "fp8"] | None = Field(
+        default=None,
+        description="The activation dtype for marlin kernel.",
+    )
+    humming_online_quant_config: Annotated[dict[str, Any] | None, NoDecode] = Field(
+        default=None,
+        description="The online quantization dtype for humming kernel.",
+    )
+    humming_input_quant_config: Annotated[dict[str, Any] | None, NoDecode] = Field(
+        default=None,
+        description="The activation dtype config for humming kernel.",
+    )
+    humming_use_f16_accum: bool | None = Field(
+        default=False,
+        description="Whether to use fp16 accumulator mma.",
+    )
+    humming_moe_gemm_type: Literal["indexed", "grouped", "auto"] | None = Field(
+        default=None,
+        description=(
+            "Whether to use indexed gemm for humming moe. If 1, force use "
+            "indexed gemm. If 0, force use grouped gemm. If None, choose "
+            "better gemm type automatically."
+        ),
+    )
+    mxfp4_use_marlin: bool | None = Field(
+        default=None,
+        description="Whether to use marlin kernel in mxfp4 quantization method.",
+    )
+    deepepll_nvfp4_dispatch: bool = Field(
+        default=False,
+        description=(
+            "Whether to use DeepEPLL kernels for NVFP4 quantization and "
+            "dispatch method. Only supported on Blackwell GPUs and with "
+            "https://github.com/deepseek-ai/DeepEP/pull/341."
+        ),
+    )
+    use_deep_gemm: bool = Field(
+        default=True,
+        description="Allow use of DeepGemm kernels for fused moe ops.",
+    )
+    moe_use_deep_gemm: bool = Field(
+        default=True,
+        description=(
+            "Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE)."
+        ),
+    )
+    use_deep_gemm_e8m0: bool = Field(
+        default=True,
+        description=(
+            "Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs."
+        ),
+    )
+    use_deep_gemm_tma_aligned_scales: bool = Field(
+        default=True,
+        description="Whether to create TMA-aligned scale tensor when DeepGEMM is used.",
+    )
+    deep_gemm_warmup: Literal["skip", "full", "relax"] = Field(
+        default="relax",
+        description=(
+            "DeepGemm JITs the kernels on-demand. The warmup attempts to "
+            "make DeepGemm JIT all the required kernels before model "
+            "execution so there is no JIT'ing in the hot-path. However, "
+            "this warmup increases the engine startup time by a couple of "
+            'minutes. Available options: "skip": skip warmup. "full": '
+            "warmup deepgemm by running all possible gemm shapes the "
+            'engine could encounter. "relax": select gemm shapes to run '
+            "based on some heuristics. The heuristic aims to have the same "
+            "effect as running all possible gemm shapes, but provides no "
+            "guarantees."
+        ),
+    )
+    use_fused_moe_grouped_topk: bool = Field(
+        default=True,
+        description="Whether to use fused grouped_topk used for MoE expert selection.",
+    )
+    deepep_buffer_size_mb: int = Field(
+        default=1024,
+        description="The size in MB of the buffers (NVL and RDMA) used by DeepEP.",
+    )
+    deepep_high_throughput_force_intra_node: bool = Field(
+        default=False,
+        description=(
+            "Force DeepEP to use intranode kernel for inter-node "
+            "communication in high throughput mode. This is useful to "
+            "achieve higher prefill throughput on systems that support "
+            "multi-node nvlink (e.g. GB200)."
+        ),
+    )
+    deepep_low_latency_use_mnnvl: bool = Field(
+        default=False,
+        description=(
+            "Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll "
+            "kernel; turn this on for better latency on GB200-like systems."
+        ),
+    )
+    dbo_comm_sms: int = Field(
+        default_factory=_default_dbo_comm_sms,
+        description=(
+            "The number of SMs/CUs to allocate for communication kernels "
+            "when running DBO; the rest will be allocated to compute. "
+            "Default: 20 on CUDA (SMs), 64 on ROCm (CUs)."
+        ),
+    )
+    multi_stream_gemm_token_threshold: int = Field(
+        default=1024,
+        description=(
+            "Token-count cutoff for multi-stream overlap of the attention "
+            "input GEMM with auxiliary GEMMs (e.g. fused_wqa_wkv overlapped "
+            "with indexer weights / kv-score projections in DeepSeek-V4). "
+            "At or below this many tokens the FP8 main GEMM has idle SMs "
+            "to share with the bf16 aux GEMMs and overlap is a 5-45% win; "
+            "above it the FP8 GEMM saturates the device and the "
+            "cross-stream sync becomes pure overhead. Set to 0 to disable "
+            "the multi-stream path entirely. See #PR 41526 for the "
+            "empirical result for the default value of 1024 tokens."
+        ),
+    )
+    shared_experts_stream_token_threshold: int = Field(
+        default=256,
+        description=(
+            "Limits when we run shared_experts in a separate stream. We "
+            "found out that for large batch sizes, the separate stream "
+            "execution is not beneficial (most likely because of the "
+            "input clone). "
+            "TODO(alexm-redhat): Tune to be more dynamic based on GPU type."
+        ),
+    )
+    disable_shared_experts_stream: bool = Field(
+        default=False,
+        description=(
+            "Disables parallel execution of shared_experts via separate cuda stream."
+        ),
+    )
+    moe_routing_simulation_strategy: str = Field(
+        default="",
+        description=(
+            "MoE routing strategy selector. See "
+            "`RoutingSimulator.get_available_strategies()` for available "
+            "strategies. Custom routing strategies can be registered by "
+            "RoutingSimulator.register_strategy(). Note: custom strategies "
+            "may not produce correct model outputs."
+        ),
+    )
+    nvfp4_gemm_backend: str | None = Field(
+        default=None,
+        description=(
+            'Supported options: "flashinfer-cudnn" -- use flashinfer cudnn '
+            'GEMM backend; "flashinfer-trtllm" -- use flashinfer trtllm '
+            'GEMM backend; "flashinfer-cutlass" -- use flashinfer cutlass '
+            'GEMM backend; "marlin" -- use marlin GEMM backend (for GPUs '
+            'without native FP4 support); "emulation" -- use BF16/FP16 '
+            "GEMM, dequantizing weights and running QDQ on activations "
+            "(only meant for research purposes to run on devices where "
+            "NVFP4 GEMM kernels are not available); <none> -- automatically "
+            "pick an available backend."
+        ),
+    )
+    use_nvfp4_ct_emulations: bool = Field(
+        default=False,
+        description=(
+            "Controls whether or not emulations are used for NVFP4 "
+            "generations on machines < 100 for compressed-tensors models."
+        ),
+    )
+    q_scale_constant: int = Field(
+        default=200,
+        alias="Q_SCALE_CONSTANT",
+        description=(
+            "Divisor for dynamic query scale factor calculation for FP8 KV Cache."
+        ),
+    )
+    k_scale_constant: int = Field(
+        default=200,
+        alias="K_SCALE_CONSTANT",
+        description=(
+            "Divisor for dynamic key scale factor calculation for FP8 KV Cache."
+        ),
+    )
+    v_scale_constant: int = Field(
+        default=100,
+        alias="V_SCALE_CONSTANT",
+        description=(
+            "Divisor for dynamic value scale factor calculation for FP8 KV Cache."
+        ),
+    )
+    kv_cache_layout: Literal["NHD", "HND"] | None = Field(
+        default=None,
+        description=(
+            "KV Cache layout used throughout vllm. Some common values are: "
+            "NHD, HND, where N=num_blocks, H=num_heads and D=head_size. "
+            "The default value will leave the layout choice to the "
+            "backend. Mind that backends may only implement and support a "
+            "subset of all possible layouts."
+        ),
+    )
+    ssm_conv_state_layout: Literal["SD", "DS"] | None = Field(
+        default=None,
+        description=(
+            "SSM conv state layout used for Mamba models. "
+            "SD: (state_len, dim) -- dim contiguous (default). "
+            "DS: (dim, state_len) -- TP-sharded dim on dim1, consistent "
+            "with SSM temporal state and HND KV cache layout."
+        ),
+    )
+    mla_disable: bool = Field(
+        default=False,
+        description="If set, vLLM will disable the MLA attention optimizations.",
+    )
+    compute_nans_in_logits: bool = Field(
+        default=False,
+        description=(
+            "Enable checking whether the generated logits contain NaNs, "
+            "indicating corrupted output. Useful for debugging low level "
+            "bugs or bad hardware but it may add compute overhead."
+        ),
+    )
+    use_fbgemm: bool = Field(
+        default=False,
+        description="Flag to enable FBGemm kernels on model execution.",
+    )
+    use_oink_ops: bool = Field(
+        default=False,
+        description=(
+            "Optional: enable external Oink custom ops (e.g., Blackwell "
+            "RMSNorm). Disabled by default."
+        ),
+    )
+    batch_invariant: bool = Field(
+        default=False,
+        description=(
+            "Enable batch-invariant mode: deterministic results regardless "
+            "of batch composition. Requires NVIDIA GPU with compute "
+            "capability >= 9.0."
+        ),
+    )
+    float32_matmul_precision: Literal["highest", "high", "medium"] = Field(
+        default="highest",
+        description=(
+            "Controls PyTorch float32 matmul precision mode within vLLM "
+            "workers. Valid options mirror torch.set_float32_matmul_precision."
+        ),
+    )
+    use_triton_awq: bool = Field(
+        default=False,
+        description="If set, vLLM will use Triton implementations of AWQ.",
+    )
 
     @field_validator("float32_matmul_precision", mode="before")
     @classmethod
@@ -602,34 +1797,155 @@ class QuantSettings(BaseSettings):
 class ConnectorSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    nixl_side_channel_host: str = "localhost"
-    nixl_side_channel_port: int = 5600
-    nixl_ep_max_num_ranks: int = 32
-    mooncake_bootstrap_port: int = 8998
-    mooncake_abort_request_timeout: int = 480
-    moriio_connector_read_mode: bool = False
-    moriio_qp_per_transfer: int = 1
-    moriio_post_batch_size: int = -1
-    moriio_num_workers: int = 1
-    kv_events_use_int_block_hashes: bool = True
-    disable_request_id_randomization: bool = False
-    elastic_ep_scale_up_launch: bool = False
-    elastic_ep_drain_requests: bool = False
-    use_simple_kv_offload: bool = False
-    weight_offloading_disable_pin_memory: bool = False
-    weight_offloading_disable_uva: bool = False
-    enable_cudagraph_gc: bool = False
-    memory_profiler_estimate_cudagraphs: bool = True
-    v1_output_proc_chunk_size: int = 128
-    v1_use_outlines_cache: bool = False
-    xgrammar_cache_mb: int = 512
+    nixl_side_channel_host: str = Field(
+        default="localhost",
+        description="IP address used for NIXL handshake between remote agents.",
+    )
+    nixl_side_channel_port: int = Field(
+        default=5600,
+        description="Port used for NIXL handshake between remote agents.",
+    )
+    nixl_ep_max_num_ranks: int = Field(
+        default=32,
+        description="NIXL EP max number of ranks.",
+    )
+    mooncake_bootstrap_port: int = Field(
+        default=8998,
+        description="Port used for Mooncake handshake between remote agents.",
+    )
+    mooncake_abort_request_timeout: int = Field(
+        default=480,
+        description=(
+            "Timeout (in seconds) for MooncakeConnector in PD disaggregated setup."
+        ),
+    )
+    moriio_connector_read_mode: bool = Field(
+        default=False,
+        description="Controls the read mode for the Mori-IO connector.",
+    )
+    moriio_qp_per_transfer: int = Field(
+        default=1,
+        description=(
+            "Controls the QP (Queue Pair) per transfer configuration for "
+            "the Mori-IO connector."
+        ),
+    )
+    moriio_post_batch_size: int = Field(
+        default=-1,
+        description=(
+            "Controls the post-processing batch size for the Mori-IO connector."
+        ),
+    )
+    moriio_num_workers: int = Field(
+        default=1,
+        description=(
+            "Controls the number of workers for Mori operations for the "
+            "Mori-IO connector."
+        ),
+    )
+    kv_events_use_int_block_hashes: bool = Field(
+        default=True,
+        description=(
+            "Represent block hashes in KV cache events as 64-bit integers "
+            "instead of raw bytes. Defaults to True for backward "
+            "compatibility."
+        ),
+    )
+    disable_request_id_randomization: bool = Field(
+        default=False,
+        description=(
+            "Temporary: skip adding random suffix to internal request IDs. "
+            "May be needed for KV connectors that match request IDs across "
+            "instances."
+        ),
+    )
+    elastic_ep_scale_up_launch: bool = Field(
+        default=False,
+        description=(
+            "Whether it is a scale up launch engine for elastic EP. Should "
+            "only be set by EngineCoreClient."
+        ),
+    )
+    elastic_ep_drain_requests: bool = Field(
+        default=False,
+        description=(
+            "Whether to wait for all requests to drain before sending the "
+            "scaling command in elastic EP."
+        ),
+    )
+    use_simple_kv_offload: bool = Field(
+        default=False,
+        description="Enable simple KV offload.",
+    )
+    weight_offloading_disable_pin_memory: bool = Field(
+        default=False,
+        description="Disable using pytorch's pin memory for CPU offloading.",
+    )
+    weight_offloading_disable_uva: bool = Field(
+        default=False,
+        description=(
+            "Disable using UVA (Unified Virtual Addressing) for CPU offloading."
+        ),
+    )
+    enable_cudagraph_gc: bool = Field(
+        default=False,
+        description=(
+            "Controls garbage collection during CUDA graph capture. If set "
+            "to 0 (default), enables GC freezing to speed up capture time. "
+            "If set to 1, allows GC to run during capture."
+        ),
+    )
+    memory_profiler_estimate_cudagraphs: bool = Field(
+        default=True,
+        description=(
+            "If set to 1, enable CUDA graph memory estimation during "
+            "memory profiling. This profiles CUDA graph memory usage to "
+            "provide more accurate KV cache memory allocation. Enabled by "
+            "default as of v0.21.0."
+        ),
+    )
+    v1_output_proc_chunk_size: int = Field(
+        default=128,
+        description=(
+            "Controls the maximum number of requests to handle in a single "
+            "asyncio task when processing per-token outputs in the V1 "
+            "AsyncLLM interface. It is applicable when handling a high "
+            "concurrency of streaming requests. Setting this too high can "
+            "result in a higher variance of inter-message latencies."
+        ),
+    )
+    v1_use_outlines_cache: bool = Field(
+        default=False,
+        description=(
+            "Whether to turn on the outlines cache for V1. This cache is "
+            "unbounded and on disk, so it's not safe to use in an "
+            "environment with potentially malicious users."
+        ),
+    )
+    xgrammar_cache_mb: int = Field(
+        default=512,
+        description=(
+            "Control the cache size used by the xgrammar compiler. The "
+            "default of 512 MB should be enough for roughly 1000 JSON "
+            "schemas. It can be changed with this variable if needed for "
+            "some reason."
+        ),
+    )
 
 
 class UsageSettings(BaseSettings):
     model_config = _SUB_CONFIG
 
-    usage_stats_server: str = "https://stats.vllm.ai"
-    no_usage_stats: bool = False
+    usage_stats_server: str = Field(
+        default="https://stats.vllm.ai",
+        description="URL of the server used for usage stats collection.",
+    )
+    no_usage_stats: bool = Field(
+        default=False,
+        description=(
+            "If set, disable sending usage statistics to the vLLM usage stats server."
+        ),
+    )
     do_not_track: bool = Field(
         default=False,
         validation_alias=AliasChoices("VLLM_DO_NOT_TRACK", "DO_NOT_TRACK"),
@@ -638,26 +1954,115 @@ class UsageSettings(BaseSettings):
             "DO_NOT_TRACK environment variable."
         ),
     )
-    usage_source: str = "production"
-    ci_use_s3: bool = False
-    test_force_fp8_marlin: bool = False
-    test_force_load_format: str = "dummy"
-    use_modelscope: bool = False
-    s3_access_key_id: str | None = Field(default=None, alias="S3_ACCESS_KEY_ID")
-    s3_secret_access_key: str | None = Field(default=None, alias="S3_SECRET_ACCESS_KEY")
-    s3_endpoint_url: str | None = Field(default=None, alias="S3_ENDPOINT_URL")
-    plugins: Annotated[list[str] | None, NoDecode] = None
-    disabled_kernels: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    allow_runtime_lora_updating: bool = False
-    gpt_oss_system_tool_mcp_labels: Annotated[set[str], NoDecode] = Field(
-        default_factory=set
+    usage_source: str = Field(
+        default="production",
+        description="Label identifying the deployment context reported in usage stats.",
     )
-    gpt_oss_harmony_system_instructions: bool = False
-    use_experimental_parser_context: bool = False
-    lora_disable_pdl: bool = False
-    lora_enable_dual_stream: bool = False
-    enable_fla_packed_recurrent_decode: bool = True
-    pp_layer_partition: str | None = None
+    ci_use_s3: bool = Field(
+        default=False,
+        description=(
+            "Whether to use S3 path for model loading in CI via RunAI Streamer."
+        ),
+    )
+    test_force_fp8_marlin: bool = Field(
+        default=False,
+        description=(
+            "If set, forces FP8 Marlin to be used for FP8 quantization "
+            "regardless of the hardware support for FP8 compute."
+        ),
+    )
+    test_force_load_format: str = Field(
+        default="dummy",
+        description=(
+            "Test-only: forces the model loader to use the given load "
+            'format (e.g. "dummy") regardless of the format detected from '
+            "the checkpoint."
+        ),
+    )
+    use_modelscope: bool = Field(
+        default=False,
+        description=(
+            "If true, will load models from ModelScope instead of Hugging "
+            "Face Hub. Note that the value is true or false, not numbers."
+        ),
+    )
+    s3_access_key_id: str | None = Field(
+        default=None,
+        alias="S3_ACCESS_KEY_ID",
+        description="S3 access key id, used for tensorizer to load model from S3.",
+    )
+    s3_secret_access_key: str | None = Field(
+        default=None,
+        alias="S3_SECRET_ACCESS_KEY",
+        description="S3 secret access key, used for tensorizer to load model from S3.",
+    )
+    s3_endpoint_url: str | None = Field(
+        default=None,
+        alias="S3_ENDPOINT_URL",
+        description="S3 endpoint URL, used for tensorizer to load model from S3.",
+    )
+    plugins: Annotated[list[str] | None, NoDecode] = Field(
+        default=None,
+        description=(
+            "A list of plugin names to load, separated by commas. If this "
+            "is not set, it means all plugins will be loaded. If this is "
+            "set to an empty string, no plugins will be loaded."
+        ),
+    )
+    disabled_kernels: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "List of quantization kernels that should be disabled, used "
+            "for testing and performance comparisons. Currently only "
+            "affects MPLinearKernel selection (kernels: MacheteLinearKernel, "
+            "MarlinLinearKernel, ExllamaLinearKernel)."
+        ),
+    )
+    allow_runtime_lora_updating: bool = Field(
+        default=False,
+        description="If set, allow loading or unloading lora adapters in runtime.",
+    )
+    gpt_oss_system_tool_mcp_labels: Annotated[set[str], NoDecode] = Field(
+        default_factory=set,
+        description=(
+            "Valid values are container, code_interpreter, web_search_preview. "
+            "Example: VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter. "
+            "If the server_label of your mcp tool is not in this list it will be "
+            "completely ignored."
+        ),
+    )
+    gpt_oss_harmony_system_instructions: bool = Field(
+        default=False,
+        description="Allows harmony instructions to be injected on system messages.",
+    )
+    use_experimental_parser_context: bool = Field(
+        default=False,
+        description=(
+            "Experimental: use this to enable MCP tool calling for non harmony models."
+        ),
+    )
+    lora_disable_pdl: bool = Field(
+        default=False,
+        description=(
+            "Disable PDL for LoRA, as enabling PDL with LoRA on SM100 "
+            "causes Triton compilation to fail."
+        ),
+    )
+    lora_enable_dual_stream: bool = Field(
+        default=False,
+        description="Whether to enable dual cuda streams for LoRA computation.",
+    )
+    enable_fla_packed_recurrent_decode: bool = Field(
+        default=True,
+        description=(
+            "Whether to enable FLA's packed recurrent decode path for "
+            "linear-attention models. Default: enabled."
+        ),
+    )
+    pp_layer_partition: str | None = Field(
+        default=None,
+        description="Pipeline stage partition strategy.",
+    )
 
     @field_validator("plugins", mode="before")
     @classmethod
