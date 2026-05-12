@@ -114,6 +114,7 @@ steps:
 - label: LM Eval TurboQuant KV Cache
   key: lm-eval-turboquant-kv-cache
   timeout_in_minutes: 75
+  device: h200_18gb
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/turboquant/
   - vllm/v1/attention/backends/turboquant_attn.py

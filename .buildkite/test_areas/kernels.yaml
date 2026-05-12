@@ -91,6 +91,7 @@ steps:
 
 - label: Kernels KDA Test
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - vllm/model_executor/layers/fla/ops/kda.py
   - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
