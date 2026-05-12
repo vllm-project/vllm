@@ -2445,9 +2445,7 @@ def test_priority_preemption_at_max_num_seqs():
     lo1_req = scheduler.requests["lo1"]
     lo2_req = scheduler.requests["lo2"]
     preempted = sum(
-        1
-        for r in (lo1_req, lo2_req)
-        if r.status == RequestStatus.PREEMPTED
+        1 for r in (lo1_req, lo2_req) if r.status == RequestStatus.PREEMPTED
     )
     assert preempted == 1, "Exactly one low-priority request should be preempted"
 
@@ -2503,6 +2501,205 @@ def test_priority_no_capacity_preemption_equal_priority():
     assert "eq1" not in {r.request_id for r in scheduler.running}
     assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
     assert scheduler.requests["lo2"].status == RequestStatus.RUNNING
+
+
+def test_priority_kv_preemption_from_waiting():
+    """High-priority waiting request preempts a low-priority running request
+    when KV-cache (not ``max_num_seqs``) is the bottleneck.
+
+    Block math
+    ----------
+    block_size = 16, num_blocks = 5 (1 null → 4 usable).
+    max_num_seqs = 3 (ample seq headroom).
+
+    Phase 1: lo1 (priority 5, 48 tokens) → 3 blocks.  1 free.
+             Decode → lo1 has 49 tokens (needs 4th block on next schedule).
+    Phase 2: hi1 (priority 0, 32 tokens = 2 blocks) arrives.
+             schedule():
+               - Phase 1 grows lo1 to 4 blocks (0 free).  No preemption.
+               - Phase 2 tries to admit hi1; allocate_slots returns None
+                 because no free blocks remain.  KV-cache preemption
+                 path frees lo1 and re-allocates → hi1 admitted.
+    """
+    block_size = 16
+    num_blocks = 5  # 1 null block → 4 usable
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=200,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    # --- Phase 1: low-priority request starts running ---
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=block_size * 3,  # exactly 3 blocks
+        req_ids=["lo1"],
+    )[0]
+    scheduler.add_request(lo1)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+
+    # Decode lo1 → 49 tokens, needs a 4th block on the next allocate.
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1"],
+        req_id_to_index={"lo1": 0},
+        sampled_token_ids=[[100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # --- Phase 2: high-priority request arrives with no KV headroom ---
+    hi1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[2.0],
+        num_tokens=block_size * 2,  # 2 blocks needed for prefill
+        req_ids=["hi1"],
+    )[0]
+    scheduler.add_request(hi1)
+
+    output = scheduler.schedule()
+
+    # hi1 must be admitted; lo1 must be the preemption victim.
+    running_ids = {r.request_id for r in scheduler.running}
+    assert "hi1" in running_ids, "hi1 should have been admitted via KV-cache preemption"
+    assert scheduler.requests["lo1"].status == RequestStatus.PREEMPTED, (
+        "Low-priority lo1 should have been preempted to free KV blocks"
+    )
+    # Seq headroom was never the bottleneck.
+    assert len(scheduler.running) <= 3
+
+
+def test_priority_combined_max_num_seqs_and_kv_preemption():
+    """Both ``max_num_seqs`` and KV-cache are bottlenecks at once.
+
+    The high-priority waiting request first triggers a ``max_num_seqs``
+    preemption (running queue drops below the seq cap); a single
+    preemption does not free enough KV blocks, so the KV-cache
+    preemption path in Phase 2 fires again to make room.
+
+    Block math
+    ----------
+    block_size = 16, num_blocks = 5 (1 null → 4 usable).
+    max_num_seqs = 2.
+
+    Setup: lo1 and lo2 (priority 5, 32 tokens = 2 blocks each) are admitted
+           on the first schedule().  4 blocks used, 0 free, running full.
+           ``update_from_output`` is not called, so on the next schedule()
+           Phase 1 has no decode work for lo1/lo2 (``num_new_tokens == 0``)
+           and skips them — no Phase 1 preemption.
+    Step:  hi1 (priority 0, 48 tokens = 3 blocks) arrives.
+             Phase 2 iter 1: running == 2 == max_num_seqs → max_num_seqs
+               path preempts lo2 (latest arrival among priority 5).  2 blocks
+               freed, ``continue``.
+             Phase 2 iter 2: running == 1 < 2 → normal path; allocate
+               returns None (need 3, have 2 free).  KV-cache path preempts
+               lo1, freeing 2 more blocks.  Re-allocate succeeds and hi1
+               is admitted.
+    """
+    block_size = 16
+    num_blocks = 5  # 1 null block → 4 usable
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[1.0, 2.0],
+        num_tokens=block_size * 2,  # 2 blocks each
+        req_ids=["lo1", "lo2"],
+    )
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    # Intentionally skip update_from_output so lo1/lo2 are not in decode
+    # mode on the next schedule().  This avoids Phase 1 KV preemption and
+    # forces both Phase 2 preemption paths to fire for hi1.
+
+    hi1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=block_size * 3,  # 3 blocks needed; > one victim's blocks
+        req_ids=["hi1"],
+    )[0]
+    scheduler.add_request(hi1)
+
+    scheduler.schedule()
+
+    running_ids = {r.request_id for r in scheduler.running}
+    assert "hi1" in running_ids, (
+        "hi1 should have been admitted via combined seq + KV preemption"
+    )
+    # Both low-priority requests must have been preempted: one for the
+    # seq slot, one for the remaining KV deficit.
+    assert scheduler.requests["lo1"].status == RequestStatus.PREEMPTED
+    assert scheduler.requests["lo2"].status == RequestStatus.PREEMPTED
+    assert len(scheduler.running) <= 2
+
+
+def test_priority_no_kv_preemption_for_equal_priority():
+    """Equal-priority waiting request must not displace a running request
+    even under KV-cache pressure."""
+    block_size = 16
+    num_blocks = 5  # same setup as the KV-preemption test
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=200,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=block_size * 3,
+        req_ids=["lo1"],
+    )[0]
+    scheduler.add_request(lo1)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1"],
+        req_id_to_index={"lo1": 0},
+        sampled_token_ids=[[100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Same priority as lo1 — must not trigger KV preemption.
+    eq1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[2.0],
+        num_tokens=block_size * 2,
+        req_ids=["eq1"],
+    )[0]
+    scheduler.add_request(eq1)
+
+    scheduler.schedule()
+
+    # eq1 must still be waiting; lo1 must keep running.
+    assert "eq1" not in {r.request_id for r in scheduler.running}
+    assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
 
 
 def test_priority_scheduling_fcfs_fallback():

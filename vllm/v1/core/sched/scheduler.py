@@ -579,6 +579,39 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        def _evict_running_for_waiting(victim: Request) -> None:
+            """Preempt a running request to free a seq slot and/or KV
+            blocks for a higher-priority waiting request, undoing any
+            scheduling state already accumulated for the victim in this
+            step.
+            """
+            nonlocal token_budget, encoder_compute_budget
+            self.running.remove(victim)
+            v_id = victim.request_id
+            if victim in scheduled_running_reqs:
+                scheduled_running_reqs.remove(victim)
+                token_budget += num_scheduled_tokens.pop(v_id)
+                req_to_new_blocks.pop(v_id)
+                scheduled_spec_decode_tokens.pop(v_id, None)
+                evicted_enc = scheduled_encoder_inputs.pop(v_id, None)
+                if evicted_enc:
+                    encoder_compute_budget += sum(
+                        victim.get_num_encoder_embeds(i) for i in evicted_enc
+                    )
+                if (
+                    self.lora_config
+                    and victim.lora_request
+                    and victim.lora_request.lora_int_id > 0
+                ):
+                    lora_id = victim.lora_request.lora_int_id
+                    if not any(
+                        r.lora_request and r.lora_request.lora_int_id == lora_id
+                        for r in scheduled_running_reqs
+                    ):
+                        scheduled_loras.discard(lora_id)
+            self._preempt_request(victim, scheduled_timestamp)
+            preempted_reqs.append(victim)
+
         # Next, schedule the WAITING requests.
         # NOTE: Phase 2 is intentionally skipped when Phase 1 caused any
         # preemption (preempted_reqs is non-empty).  Mixing memory-pressure
@@ -596,9 +629,7 @@ class Scheduler(SchedulerInterface):
                         # max_num_seqs (not memory) is the bottleneck.
                         # The outer while condition guarantees at least one
                         # queue is non-empty, so the result is never None.
-                        candidate_queue = (
-                            self._select_waiting_queue_for_scheduling()
-                        )
+                        candidate_queue = self._select_waiting_queue_for_scheduling()
                         assert candidate_queue is not None
                         top_waiting = candidate_queue.peek_request()
                         # Don't preempt for a request that cannot be
@@ -619,48 +650,7 @@ class Scheduler(SchedulerInterface):
                             ),
                         )
                         if top_waiting < lowest_running:
-                            self.running.remove(lowest_running)
-                            lp_req_id = lowest_running.request_id
-                            if lowest_running in scheduled_running_reqs:
-                                scheduled_running_reqs.remove(
-                                    lowest_running
-                                )
-                                token_budget += num_scheduled_tokens.pop(
-                                    lp_req_id
-                                )
-                                req_to_new_blocks.pop(lp_req_id)
-                                scheduled_spec_decode_tokens.pop(
-                                    lp_req_id, None
-                                )
-                                evicted_enc = scheduled_encoder_inputs.pop(
-                                    lp_req_id, None
-                                )
-                                if evicted_enc:
-                                    encoder_compute_budget += sum(
-                                        lowest_running
-                                        .get_num_encoder_embeds(i)
-                                        for i in evicted_enc
-                                    )
-                                if (
-                                    self.lora_config
-                                    and lowest_running.lora_request
-                                    and lowest_running.lora_request
-                                    .lora_int_id > 0
-                                ):
-                                    lora_id = (
-                                        lowest_running.lora_request.lora_int_id
-                                    )
-                                    if not any(
-                                        r.lora_request
-                                        and r.lora_request.lora_int_id
-                                        == lora_id
-                                        for r in scheduled_running_reqs
-                                    ):
-                                        scheduled_loras.discard(lora_id)
-                            self._preempt_request(
-                                lowest_running, scheduled_timestamp
-                            )
-                            preempted_reqs.append(lowest_running)
+                            _evict_running_for_waiting(lowest_running)
                             continue
                     break
 
@@ -892,6 +882,16 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
+                # Allocate KV blocks, retrying after preempting strictly
+                # lower-priority running requests under PRIORITY policy.
+                # Mirrors the Phase 1 preempt-one-and-retry loop at
+                # `scheduler.py:423-468` so admit-time KV pressure is
+                # handled symmetrically to in-flight KV pressure.
+                request_key = (
+                    request.priority,
+                    request.arrival_time,
+                    request.request_id,
+                )
                 reserved_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
@@ -900,19 +900,36 @@ class Scheduler(SchedulerInterface):
                     # avoid deadlock and predictable preemptions.
                     reserved_blocks = self._inflight_prefill_reserved_blocks()
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens,
-                    num_new_computed_tokens=num_new_local_computed_tokens,
-                    new_computed_blocks=new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    num_external_computed_tokens=num_external_computed_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    num_encoder_tokens=num_encoder_tokens,
-                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
-                    reserved_blocks=reserved_blocks,
-                    has_scheduled_reqs=bool(self.running),
-                )
+                while True:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
+                        full_sequence_must_fit=self.scheduler_reserve_full_isl,
+                        reserved_blocks=reserved_blocks,
+                        has_scheduled_reqs=bool(self.running),
+                    )
+                    if new_blocks is not None:
+                        break
+                    if self.policy != SchedulingPolicy.PRIORITY:
+                        break
+                    candidates = [
+                        r
+                        for r in self.running
+                        if request_key < (r.priority, r.arrival_time, r.request_id)
+                    ]
+                    if not candidates:
+                        break
+                    victim = max(
+                        candidates,
+                        key=lambda r: (r.priority, r.arrival_time, r.request_id),
+                    )
+                    _evict_running_for_waiting(victim)
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
