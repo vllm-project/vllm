@@ -5,6 +5,5 @@
 # Append a build artifact line to the Buildkite annotation.
 # Usage: annotate-build-artifact.sh <label> <value>
 set -e
-buildkite-agent annotate --append --style 'info' --context 'release-artifacts' \
-  "- **${1}**: \`${2}\`
-"
+echo "- **${1}**: \`${2}\`" | \
+  buildkite-agent annotate --append --style 'info' --context 'release-artifacts'
