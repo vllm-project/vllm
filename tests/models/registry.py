@@ -1098,6 +1098,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_6",
+        min_transformers_version="5.7.0",
+    ),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
@@ -1488,6 +1492,21 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Eagle3Qwen3vlForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-VL-8B-Instruct",
         speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
+    ),
+    # [PEagle]
+    "PEagleDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
+    "PeagleLlamaForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
     ),
     # [MTP]
     "DeepSeekMTPModel": _HfExamplesInfo(
