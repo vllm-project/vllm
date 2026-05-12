@@ -725,11 +725,6 @@ class Settings(BaseSettings):
     connector: ConnectorSettings = Field(default_factory=ConnectorSettings)
     usage: UsageSettings = Field(default_factory=UsageSettings)
 
-    # Cross-field defaults live on each sub-model's own model_validator so
-    # that reading one field doesn't trigger validation of unrelated env
-    # vars. See BuildSettings, DistributedSettings, CompilationSettings,
-    # and MediaSettings.
-
 
 # ----------------------------------------------------------------------------
 # Registry: env var name -> (sub_attr, field_name)
