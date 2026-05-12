@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     KVConnectorRole,
     MooncakeConnector,
     MooncakeConnectorMetadata,
+    MooncakeConnectorWorker,
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
@@ -832,3 +833,36 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.sender_loop = origin_sender_loop
         prefill_worker.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for partial-init cleanup (issue #42385)
+# ---------------------------------------------------------------------------
+
+
+def test_mooncake_worker_shutdown_partial_init_safe():
+    """shutdown() on a bare uninitialized instance must not raise."""
+    worker = object.__new__(MooncakeConnectorWorker)
+    # No __init__ called – none of the normal attributes exist.
+    worker.shutdown()  # should return silently
+
+
+def test_mooncake_worker_missing_engine_preserves_original_error(capsys):
+    """When TransferEngine is unavailable __init__ raises RuntimeError and
+    the subsequent __del__ must not produce an AttributeError."""
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
+        ".mooncake_connector.TransferEngine",
+        None,
+    ):
+        import gc
+
+        with pytest.raises(RuntimeError, match="Mooncake is not available"):
+            MooncakeConnectorWorker(
+                vllm_config=MagicMock(),
+                engine_id="test-engine",
+            )
+        gc.collect()  # trigger __del__ on any lingering instance
+
+    captured = capsys.readouterr()
+    assert "AttributeError" not in captured.err
