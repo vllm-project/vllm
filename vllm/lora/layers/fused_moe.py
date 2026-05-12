@@ -20,20 +20,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 )
 from vllm.platforms import current_platform
 
-from .utils import _get_lora_device
-
-# Process-wide singleton aux stream shared by every FusedMoEWithLoRA instance.
-# Mirrors the pattern in vllm/lora/layers/base_linear.py: one extra stream is
-# enough to overlap two compute streams; allocating one per layer would
-# under-utilise the SMs and inflate context-switch cost.
-_moe_lora_aux_cuda_stream: torch.cuda.Stream | None = None
-
-
-def _get_moe_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
-    global _moe_lora_aux_cuda_stream
-    if _moe_lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-        _moe_lora_aux_cuda_stream = torch.cuda.Stream()
-    return _moe_lora_aux_cuda_stream
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -101,7 +88,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             return
         if not current_platform.is_cuda_alike():
             return
-        self._lora_stream = _get_moe_lora_aux_cuda_stream()
+        self._lora_stream = _get_lora_aux_cuda_stream()
         # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
         # the same event objects; reuse-within-a-pair is fine because the
         # second pair starts only after intermediate_cache1.add_() has joined.
@@ -420,23 +407,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     @property
     def is_internal_router(self) -> bool:
         return self.base_layer.is_internal_router
-
-    # TEMP(unblock-end-to-end): Upstream introduced FusedMoE.runner (see
-    # vllm/model_executor/layers/fused_moe/runner/), which holds gates and
-    # other linear submodules that LoRA wants to wrap. The LoRA module
-    # walker (vllm/lora/model_manager.py::_create_lora_modules) iterates
-    # the model BEFORE wrapping, then calls
-    # nn.Module.get_submodule("...experts.runner.X") — which uses
-    # hasattr/getattr — to attach LoRA wrappers. Once "experts" has been
-    # replaced by FusedMoEWithLoRA, that lookup fails because runner is
-    # only on base_layer. Forwarding via @property is enough to satisfy
-    # get_submodule without registering runner as our own child module
-    # (which would double-count parameters / state_dict entries).
-    # TODO(remove once upstream LoRA walker handles wrapped modules
-    # natively).
-    @property
-    def runner(self):
-        return self.base_layer.runner
 
     @classmethod
     def can_replace_layer(

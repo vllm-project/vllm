@@ -7,8 +7,25 @@ from enum import Enum
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
+
+_lora_aux_cuda_stream: torch.cuda.Stream | None = None
+
+
+def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
+    # Gate stream creation on the dual-stream master switch so a stray call
+    # from a future code path cannot silently allocate a CUDA stream when the
+    # feature is turned off. MoE LoRA layers an additional VLLM_LORA_USE_ONE_SHOT_MOE
+    # gate at their call site.
+    if not envs.VLLM_LORA_ENABLE_DUAL_STREAM:
+        return None
+    global _lora_aux_cuda_stream
+    if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
+        _lora_aux_cuda_stream = torch.cuda.Stream()
+    return _lora_aux_cuda_stream
 
 
 class LoRAMappingType(Enum):

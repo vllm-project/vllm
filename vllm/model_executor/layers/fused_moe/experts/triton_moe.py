@@ -240,9 +240,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # the LoRA writes its delta into a fresh zero buffer (add_inputs=
         # False) and we sum it into intermediate_cache1 after both finish.
         #
-        # Note on torch.compile :
-        # The whole MoE forward is already wrapped in torch.ops.vllm.moe_forward`,
-        # so we don't need to wrap the following code as custom op
+
         sorted_token_ids_lora = None
         expert_ids_lora = None
         num_tokens_post_padded_lora = None
