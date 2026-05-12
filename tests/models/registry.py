@@ -1493,6 +1493,21 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3-VL-8B-Instruct",
         speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
     ),
+    # [PEagle]
+    "PEagleDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
+    "PeagleLlamaForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
     # [MTP]
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
