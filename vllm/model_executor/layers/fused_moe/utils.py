@@ -152,7 +152,6 @@ def _fp8_quantize(
             column_major_scales=True,
             tma_aligned_scales=True,
         )
-        A_scale = A_scale.contiguous()
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
