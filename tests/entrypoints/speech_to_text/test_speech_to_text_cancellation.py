@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from vllm.entrypoints.openai.speech_to_text.protocol import TranscriptionResponse
-from vllm.entrypoints.openai.speech_to_text.speech_to_text import OpenAISpeechToText
+from vllm.entrypoints.speech_to_text.base.serving import OpenAISpeechToText
+from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
 
 async def _never_finishes():
