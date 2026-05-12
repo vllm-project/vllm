@@ -294,6 +294,25 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # On MIG partitions, PyTorch's CUDACachingAllocator uses NVML
+            # internally when growing the memory pool. NVML access is
+            # restricted on MIG, causing an assertion failure. Pre-warm
+            # the pool by allocating most of the GPU memory upfront so
+            # later allocations (KV cache, CUDA graphs) reuse the pool.
+            if current_platform.is_mig():
+                free, total = torch.cuda.mem_get_info(self.device)
+                warmup_size = int(free * 0.9)
+                try:
+                    _warmup = torch.empty(
+                        warmup_size, dtype=torch.uint8, device=self.device)
+                    del _warmup
+                    torch.cuda.empty_cache()
+                    logger.info("MIG detected: pre-warmed allocator pool "
+                                "with %s GiB", format_gib(warmup_size))
+                except RuntimeError:
+                    logger.warning("MIG detected: allocator pool pre-warm "
+                                   "failed, NVML errors may occur")
+
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
             torch.accelerator.empty_cache()

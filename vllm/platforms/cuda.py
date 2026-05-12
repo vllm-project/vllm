@@ -167,6 +167,12 @@ class CudaPlatformBase(Platform):
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
 
+    @classmethod
+    def is_mig(cls) -> bool:
+        """Check if running on a MIG (Multi-Instance GPU) partition."""
+        nvidia_visible = os.environ.get("NVIDIA_VISIBLE_DEVICES", "")
+        return nvidia_visible.startswith("MIG-")
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.has_device_capability(80):

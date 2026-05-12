@@ -98,7 +98,16 @@ logger = init_logger(__name__)
 
 # see https://github.com/vllm-project/vllm/pull/15951
 # it avoids unintentional cuda initialization from torch.cuda.is_available()
-os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
+# On MIG partitions, NVML access is restricted and causes PyTorch's
+# CUDACachingAllocator to crash with an NVML assertion. Fall back to
+# CUDA runtime checks on MIG.
+_nvidia_visible = os.environ.get("NVIDIA_VISIBLE_DEVICES", "")
+if _nvidia_visible.startswith("MIG-"):
+    os.environ.setdefault("PYTORCH_NVML_BASED_CUDA_CHECK", "0")
+    os.environ.setdefault(
+        "PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+else:
+    os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 
 # see https://github.com/vllm-project/vllm/issues/10480 and
 # https://github.com/vllm-project/vllm/issues/10619.
