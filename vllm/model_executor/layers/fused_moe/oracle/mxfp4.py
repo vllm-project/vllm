@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -36,6 +36,10 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
 
 logger = init_logger(__name__)
 
@@ -124,7 +128,7 @@ def backend_to_kernel_cls(
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (  # noqa: E501
             FlashInferExperts,
         )
 
@@ -147,7 +151,7 @@ def backend_to_kernel_cls(
         return [UnfusedOAITritonExperts]
 
     elif backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.fused_humming_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
             BatchedHummingGroupedExperts,
             HummingGroupedExperts,
             HummingIndexedExperts,
@@ -160,21 +164,21 @@ def backend_to_kernel_cls(
         ]
 
     elif backend == Mxfp4MoeBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             MarlinExperts,
         )
 
         return [MarlinExperts]
 
     elif backend == Mxfp4MoeBackend.BATCHED_MARLIN:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
             BatchedMarlinExperts,
         )
 
         return [BatchedMarlinExperts]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             AiterExperts,
         )
 
@@ -301,28 +305,6 @@ def select_mxfp4_moe_backend(
     """
     # If activation_key is explicitly provided (e.g., W4A8), use it
     requested_activation_key = activation_key
-    device_capability = current_platform.get_device_capability()
-    triton_kernels_supported = (
-        has_triton_kernels()
-        and device_capability is not None
-        and (9, 0) <= device_capability < (11, 0)
-    )
-
-    # LoRA: separate experts backend path
-    if config.is_lora_enabled:
-        if not current_platform.is_cuda():
-            # ROCm: Triton mxfp4 LoRA hits GPU memory faults due to
-            # triton_kernels.tensor.Tensor / HIP read-only page issues
-            # during weight swizzle and LoRA forward. Needs work from
-            # the triton_kernels/aiter side.
-            raise NotImplementedError("Mxfp4 LoRA is currently only supported on CUDA.")
-        if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
-            logger.info_once("Using Triton backend for mxfp4 lora")
-            return Mxfp4MoeBackend.TRITON_UNFUSED, backend_to_kernel_cls(
-                Mxfp4MoeBackend.TRITON_UNFUSED
-            )[0]
-        logger.info_once("Using Marlin backend for mxfp4 lora")
-        return Mxfp4MoeBackend.MARLIN, backend_to_kernel_cls(Mxfp4MoeBackend.MARLIN)[0]
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -1501,8 +1483,7 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
-    layer: torch.nn.Module | None = None,
+    layer: "RoutedExperts | None" = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
@@ -1544,11 +1525,6 @@ def make_mxfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        shared_experts=(
-            shared_experts
-            if moe_config.moe_parallel_config.use_batched_activation_format
-            else None
-        ),
         inplace=(
             not moe_config.disable_inplace and mxfp4_backend not in TRTLLM_BACKENDS
         ),

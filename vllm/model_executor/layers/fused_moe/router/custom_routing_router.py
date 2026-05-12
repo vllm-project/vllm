@@ -16,17 +16,15 @@ class CustomRoutingRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         custom_routing_function: Callable,
+        eplb_state: EplbLayerState | None = None,
         renormalize: bool = True,
-        enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
         self.custom_routing_function = custom_routing_function
@@ -34,7 +32,7 @@ class CustomRoutingRouter(BaseRouter):
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
-        from vllm.model_executor.models.cohere_moe import token_choice_with_bias
+        from vllm.model_executor.models.cohere2_moe import token_choice_with_bias
         from vllm.model_executor.models.llama4 import Llama4MoE
 
         # NOTE: FLASHINFER_TRTLLM support the Llama4 router.

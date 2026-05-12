@@ -53,49 +53,67 @@ cuda_archs_loose_intersection(DEEPGEMM_ARCHS
 if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM CUDA architectures: ${DEEPGEMM_ARCHS}")
 
-  find_package(CUDAToolkit REQUIRED)
+  # Build _C once per interpreter in DEEPGEMM_PYTHON_INTERPRETERS (":"-
+  # separated paths) so the wheel imports cleanly on every supported Python.
+  # Unset → fall back to the build interpreter (editable / source builds).
+  # The compile is delegated to tools/build_deepgemm_C.py and always runs
+  # against the build interpreter's torch — target Pythons don't need torch.
+  # Note: empty-but-set env vars are still DEFINED in cmake; treat empty as
+  # unset so an empty interpreter list falls back to the build interpreter
+  # rather than silently skipping the per-Python build.
+  if(NOT "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}" STREQUAL "")
+    string(REPLACE ":" ";" _dg_pythons "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}")
+  else()
+    set(_dg_pythons "${Python_EXECUTABLE}")
+  endif()
+  message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
-  #
-  # Build the _C pybind11 extension from DeepGEMM's C++ source.
-  # This is a CXX-only module — CUDA kernels are JIT-compiled at runtime.
-  #
-  Python_add_library(_deep_gemm_C MODULE WITH_SOABI
-    "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp")
+  # Header set fed to add_custom_command's DEPENDS so a header-only edit
+  # (in upstream DeepGEMM or its vendored cutlass/fmt) re-triggers the
+  # rebuild. add_custom_command does no implicit header scanning, unlike
+  # add_library.
+  file(GLOB_RECURSE _dg_headers
+    "${deepgemm_SOURCE_DIR}/csrc/*.h"
+    "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.h"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.hpp"
+    "${deepgemm_SOURCE_DIR}/deep_gemm/include/*.cuh")
 
-  # The pybind11 module name must be _C to match DeepGEMM's Python imports.
-  set_target_properties(_deep_gemm_C PROPERTIES OUTPUT_NAME "_C")
-
-  target_compile_definitions(_deep_gemm_C PRIVATE
-    "-DTORCH_EXTENSION_NAME=_C")
-
-  target_include_directories(_deep_gemm_C PRIVATE
-    "${deepgemm_SOURCE_DIR}/csrc"
-    "${deepgemm_SOURCE_DIR}/deep_gemm/include"
-    "${deepgemm_SOURCE_DIR}/third-party/cutlass/include"
-    "${deepgemm_SOURCE_DIR}/third-party/cutlass/tools/util/include"
-    "${deepgemm_SOURCE_DIR}/third-party/fmt/include")
-
-  target_compile_options(_deep_gemm_C PRIVATE
-    $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>
-    $<$<COMPILE_LANGUAGE:CXX>:-O3>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-psabi>
-    $<$<COMPILE_LANGUAGE:CXX>:-Wno-deprecated-declarations>)
-
-  # torch_python is required because DeepGEMM uses pybind11 type casters
-  # for at::Tensor (via PYBIND11_MODULE), unlike vLLM's own extensions which
-  # use torch::Library custom ops.
-  find_library(TORCH_PYTHON_LIBRARY torch_python
-    PATHS "${TORCH_INSTALL_PREFIX}/lib"
-    REQUIRED)
-
-  target_link_libraries(_deep_gemm_C PRIVATE
-    torch ${TORCH_LIBRARIES} "${TORCH_PYTHON_LIBRARY}"
-    CUDA::cudart CUDA::nvrtc)
-
-  # Install the shared library into the vendored package directory
-  install(TARGETS _deep_gemm_C
-    LIBRARY DESTINATION vllm/third_party/deep_gemm
-    COMPONENT _deep_gemm_C)
+  set(_dg_markers)
+  set(_dg_seen_soabis)
+  foreach(_pybin IN LISTS _dg_pythons)
+    execute_process(
+      COMMAND "${_pybin}" -c
+        "import sysconfig; print(sysconfig.get_config_var('SOABI'))"
+      OUTPUT_VARIABLE _dg_soabi
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      COMMAND_ERROR_IS_FATAL ANY)
+    # Dedup so duplicate paths (or two paths resolving to the same CPython)
+    # don't register conflicting build rules.
+    if(_dg_soabi IN_LIST _dg_seen_soabis)
+      continue()
+    endif()
+    list(APPEND _dg_seen_soabis "${_dg_soabi}")
+    set(_dg_dir "${CMAKE_CURRENT_BINARY_DIR}/deepgemm_C_${_dg_soabi}")
+    set(_dg_marker "${_dg_dir}/.built")
+    add_custom_command(
+      OUTPUT "${_dg_marker}"
+      COMMAND "${Python_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
+              "${deepgemm_SOURCE_DIR}" "${_dg_dir}" "${_pybin}"
+      COMMAND "${CMAKE_COMMAND}" -E touch "${_dg_marker}"
+      DEPENDS "${CMAKE_SOURCE_DIR}/tools/build_deepgemm_C.py"
+              "${deepgemm_SOURCE_DIR}/csrc/python_api.cpp"
+              ${_dg_headers}
+      COMMENT "Building DeepGEMM _C for ${_pybin}"
+      VERBATIM)
+    list(APPEND _dg_markers "${_dg_marker}")
+    install(DIRECTORY "${_dg_dir}/"
+      DESTINATION vllm/third_party/deep_gemm
+      COMPONENT _deep_gemm_C
+      FILES_MATCHING PATTERN "_C.cpython-*.so")
+  endforeach()
+  add_custom_target(_deep_gemm_C ALL DEPENDS ${_dg_markers})
 
   #
   # Vendor DeepGEMM Python package files
