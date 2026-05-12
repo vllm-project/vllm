@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Build DeepGEMM's `_C` pybind11 extension for a target Python.
+"""Build DeepGEMM's `_C` pybind11 extension for <TARGET_PY>.
 
-Driven from `cmake/external_projects/deepgemm.cmake`. The driver is the
-build interpreter (which has torch); the *target* Python is only used for
-its header path and SOABI. This avoids needing torch installed in N venvs
-to produce N matching `.so` files.
+Driven from cmake/external_projects/deepgemm.cmake. The driver runs against
+the build interpreter's torch; <TARGET_PY> is only consulted for INCLUDEPY
+and SOABI, so target venvs don't need torch installed.
 
 Usage: python build_deepgemm_C.py <DEEPGEMM_SRC_DIR> <OUTPUT_DIR> <TARGET_PY>
 """
@@ -42,8 +41,7 @@ info = json.loads(
 cuda_home = cpp_extension.CUDA_HOME
 if cuda_home is None:
     sys.exit("CUDA_HOME not found; cannot build DeepGEMM _C")
-# CCCL lives outside the standard CUDAToolkit search, mirroring DeepGEMM's
-# own setup.py.
+# CCCL lives outside the standard CUDAToolkit search (mirrors DeepGEMM's setup.py).
 includes = [
     info["INCLUDEPY"],
     f"{cuda_home}/include",

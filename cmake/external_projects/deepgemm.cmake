@@ -53,14 +53,30 @@ cuda_archs_loose_intersection(DEEPGEMM_ARCHS
 if(DEEPGEMM_ARCHS)
   message(STATUS "DeepGEMM CUDA architectures: ${DEEPGEMM_ARCHS}")
 
-  # Build _C once per interpreter in DEEPGEMM_PYTHON_INTERPRETERS (":"-
-  # separated paths) so the wheel imports cleanly on every supported Python.
-  # Unset → fall back to the build interpreter (editable / source builds).
-  # The compile is delegated to tools/build_deepgemm_C.py and always runs
-  # against the build interpreter's torch — target Pythons don't need torch.
-  # Note: empty-but-set env vars are still DEFINED in cmake; treat empty as
-  # unset so an empty interpreter list falls back to the build interpreter
-  # rather than silently skipping the per-Python build.
+  #
+  # DeepGEMM integration notes
+  # --------------------------
+  # We vendor DeepGEMM into vllm/third_party/deep_gemm/ and bundle a
+  # `_C.cpython-X.Y-*.so` for every CPython in `requires-python`. The
+  # per-Python build is delegated to tools/build_deepgemm_C.py.
+  #
+  # Why per-Python: DeepGEMM's binding uses PYBIND11_MODULE, which links
+  # private CPython symbols — a single `_C.abi3.so` is not viable today
+  # (see #41476 / #41512 for the failed attempt).
+  #
+  # TODOs (tracked in vllm-project/vllm#42431):
+  #   - Replace DeepGEMM's pybind11 binding with a TORCH_LIBRARY + shim
+  #     binding (cf. vllm-flash-attention/csrc/common/pytorch_shim.h) to
+  #     collapse to one `_C.abi3.so`. Needs either an upstream change or
+  #     a maintained binding fork in vLLM.
+  #   - AOT-compile DeepGEMM's CUDA kernels instead of runtime JIT to drop
+  #     the vendored CUTLASS/CCCL headers and the CUDA-toolkit-at-runtime
+  #     requirement.
+  #
+
+  # DEEPGEMM_PYTHON_INTERPRETERS: ":"-separated target Python paths.
+  # Empty/unset → fall back to the build interpreter (editable installs).
+  # (Empty-but-set env vars test as DEFINED in cmake — treat as unset.)
   if(NOT "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}" STREQUAL "")
     string(REPLACE ":" ";" _dg_pythons "$ENV{DEEPGEMM_PYTHON_INTERPRETERS}")
   else()
@@ -68,10 +84,8 @@ if(DEEPGEMM_ARCHS)
   endif()
   message(STATUS "DeepGEMM _C will be built for: ${_dg_pythons}")
 
-  # Header set fed to add_custom_command's DEPENDS so a header-only edit
-  # (in upstream DeepGEMM or its vendored cutlass/fmt) re-triggers the
-  # rebuild. add_custom_command does no implicit header scanning, unlike
-  # add_library.
+  # add_custom_command does no implicit header scanning; glob explicitly so
+  # header-only edits in DeepGEMM/cutlass/fmt re-trigger the rebuild.
   file(GLOB_RECURSE _dg_headers
     "${deepgemm_SOURCE_DIR}/csrc/*.h"
     "${deepgemm_SOURCE_DIR}/csrc/*.hpp"
@@ -88,8 +102,7 @@ if(DEEPGEMM_ARCHS)
       OUTPUT_VARIABLE _dg_soabi
       OUTPUT_STRIP_TRAILING_WHITESPACE
       COMMAND_ERROR_IS_FATAL ANY)
-    # Dedup so duplicate paths (or two paths resolving to the same CPython)
-    # don't register conflicting build rules.
+    # Dedup interpreters that resolve to the same CPython.
     if(_dg_soabi IN_LIST _dg_seen_soabis)
       continue()
     endif()
