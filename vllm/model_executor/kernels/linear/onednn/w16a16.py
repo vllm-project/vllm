@@ -37,9 +37,7 @@ class Kernel(w16a16.Kernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        params = self._get_layer_params(layer)
-        assert params.processed_weight is not None
-        handler = ops.create_onednn_mm(params.processed_weight.t(), 32)
+        handler = ops.create_onednn_mm(layer.processed_weight.t(), 32)
         layer.extras = {"handler": handler}
 
     def apply_weights(
@@ -48,5 +46,4 @@ class Kernel(w16a16.Kernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        params = self._get_layer_params(layer)
-        return ops.onednn_mm(params.extra_kwargs["handler"], x, bias)
+        return ops.onednn_mm(layer.extras["handler"], x, bias)

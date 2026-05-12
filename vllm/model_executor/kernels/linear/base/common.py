@@ -6,7 +6,7 @@ import hashlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, ClassVar, Generic, TypeVar
+from typing import ClassVar, Generic, TypeVar
 
 import torch
 from torch.library import Library
@@ -64,9 +64,6 @@ class Kernel(ABC, Generic[ConfigT]):
     def can_implement(cls, config: ConfigT) -> tuple[bool, str | None]:
         return True, None
 
-    def _get_layer_params(self, layer: torch.nn.Module) -> Any:
-        raise NotImplementedError
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
@@ -74,12 +71,12 @@ class Kernel(ABC, Generic[ConfigT]):
     def apply_weights(self, *args, **kwargs) -> torch.Tensor:
         """Execute the kernel for the given layer and inputs.
 
-        This is the primary runtime entry point. Implementations must extract
-        the relevant parameters from ``layer`` via ``_get_layer_params`` and
-        delegate to ``type(self).apply``. Routing through ``type(self)``
-        rather than a direct call to ``apply`` is essential: it ensures that a
-        subclass override of ``apply`` is honoured without requiring any
-        corresponding override of ``apply_weights`` in the predicated subclass.
+        This is the primary runtime entry point. Implementations read
+        layer state directly (e.g. ``layer.processed_weight``) and delegate
+        to ``type(self).apply``. Routing through ``type(self)`` rather than
+        a direct call to ``apply`` is essential: it ensures that a subclass
+        override of ``apply`` is honoured without requiring any corresponding
+        override of ``apply_weights`` in the predicated subclass.
 
         Scheme-specific bases narrow the signature to the concrete arguments
         required by their calling convention.

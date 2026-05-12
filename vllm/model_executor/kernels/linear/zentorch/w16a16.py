@@ -32,9 +32,7 @@ class Kernel(w16a16.Kernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        params = self._get_layer_params(layer)
-        assert params.processed_weight is not None
-        processed = params.processed_weight.detach()
+        processed = layer.processed_weight.detach()
         is_prepacked = False
 
         if envs.VLLM_ZENTORCH_WEIGHT_PREPACK and hasattr(
@@ -43,7 +41,7 @@ class Kernel(w16a16.Kernel):
             processed = torch.ops.zentorch.zentorch_weight_prepack_for_linear(processed)
             is_prepacked = True
 
-        replace_parameter(layer, w16a16.Params.PROCESSED_WEIGHT, processed)
+        replace_parameter(layer, "processed_weight", processed)
         layer.extras = {"is_prepacked": is_prepacked}
 
     def apply_weights(
@@ -52,10 +50,9 @@ class Kernel(w16a16.Kernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        params = self._get_layer_params(layer)
         return torch.ops.zentorch.zentorch_linear_unary(
             x,
-            params.processed_weight,
+            layer.processed_weight,
             bias,
-            is_weight_prepacked=params.extra_kwargs["is_prepacked"],
+            is_weight_prepacked=layer.extras["is_prepacked"],
         )

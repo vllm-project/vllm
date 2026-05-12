@@ -386,8 +386,7 @@ class Kernel(BaseKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        params = self._get_layer_params(layer)
-        w = params.processed_weight.t()
+        w = layer.processed_weight.t()
         if x.ndim == 2 and w.ndim == 2:
             output = _matmul_persistent(x, w)
         elif w.ndim == 2:

@@ -3,12 +3,10 @@
 # NOTE: do NOT add `from __future__ import annotations` to this file.
 # w16a16_dispatch_fn relies on PEP-3107 runtime annotations for infer_schema.
 
-from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from typing_extensions import Self
 
 import vllm.model_executor.kernels.linear.base.common as common
 
@@ -23,26 +21,6 @@ class Config(common.Config):
     weight_contiguous: bool = False
 
 
-@dataclass
-class Params:
-    weight: torch.Tensor
-    processed_weight: torch.Tensor | None
-    # kernel-specific state that doesn't fit the standard fields (e.g. opaque handles)
-    extra_kwargs: dict[str, Any] = field(default_factory=dict)
-
-    WEIGHT: ClassVar[str] = "weight"
-    PROCESSED_WEIGHT: ClassVar[str] = "processed_weight"
-    EXTRA_KWARGS: ClassVar[str] = "extras"
-
-    @classmethod
-    def from_layer(cls, layer: torch.nn.Module) -> Self:
-        return cls(
-            weight=getattr(layer, cls.WEIGHT),
-            processed_weight=getattr(layer, cls.PROCESSED_WEIGHT, None),
-            extra_kwargs=getattr(layer, cls.EXTRA_KWARGS, {}),
-        )
-
-
 class Kernel(common.Kernel[Config]):
     @classmethod
     def is_supported(
@@ -54,15 +32,12 @@ class Kernel(common.Kernel[Config]):
     def can_implement(cls, config: Config) -> tuple[bool, str | None]:
         return True, None
 
-    def _get_layer_params(self, layer: torch.nn.Module) -> Params:
-        return Params.from_layer(layer)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         from vllm.model_executor.utils import replace_parameter
 
-        setattr(layer, Params.PROCESSED_WEIGHT, layer.weight)
+        layer.processed_weight = layer.weight
         if self.config.clear_weight_after_processing:
-            replace_parameter(layer, Params.WEIGHT, torch.empty(0))
+            replace_parameter(layer, "weight", torch.empty(0))
 
     def apply_weights(
         self,

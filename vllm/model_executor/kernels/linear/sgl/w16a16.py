@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from vllm import envs
 import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
+from vllm import envs
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
@@ -15,7 +15,8 @@ _SUPPORTED_DTYPES = (torch.bfloat16, torch.int8)
 class Kernel(w16a16.Kernel):
     @classmethod
     def is_supported(
-        cls, compute_capability: int | None = None,
+        cls,
+        compute_capability: int | None = None,
     ) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
             return False, "CPU platform not available"
@@ -31,7 +32,10 @@ class Kernel(w16a16.Kernel):
             return False, "weight is meta"
         n, k = config.weight_shape
         if config.weight_dtype not in _SUPPORTED_DTYPES:
-            return False, f"dtype {config.weight_dtype} not supported, expected bf16 or int8"
+            return (
+                False,
+                f"dtype {config.weight_dtype} not supported, expected bf16 or int8",
+            )
         if k % 32 != 0:
             return False, f"K={k} must be divisible by 32"
         if n % 16 != 0:
@@ -40,11 +44,10 @@ class Kernel(w16a16.Kernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        params = self._get_layer_params(layer)
-        processed = torch.ops._C.convert_weight_packed(params.processed_weight)
+        processed = torch.ops._C.convert_weight_packed(layer.processed_weight)
         if layer.bias is not None:
             replace_parameter(layer, "bias", layer.bias.to(torch.float32))
-        replace_parameter(layer, w16a16.Params.PROCESSED_WEIGHT, processed)
+        replace_parameter(layer, "processed_weight", processed)
 
     @staticmethod
     def apply(
