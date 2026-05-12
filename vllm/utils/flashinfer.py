@@ -845,6 +845,7 @@ if has_flashinfer():
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
 
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
