@@ -17,6 +17,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
     kNvfp4Static,
+    kNvfp4StaticGroupScale,
+    kStaticTensorScale,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
@@ -78,8 +80,13 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             )
         self._activation_str = self._ACTIVATION_MAP[activation]
 
+        self.activation_precision = (
+            "fp4" if quant_config.a1_gscale is not None else "bf16"
+        )
+
         # Lazily created on first apply() call.
-        self._wrapper: Any | None = None
+        self._wrapper: object | None = None
+        # Populated in process_weights_after_loading.
         self.w1_sf_mma: torch.Tensor | None = None
         self.w2_sf_mma: torch.Tensor | None = None
 
@@ -115,26 +122,27 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         if self.a2_gscale is not None:
             self.a2_gscale.fill_(1.0)
 
-        # Precompute MMA-layout views of the weight scale factors once here
-        # rather than recomputing on every forward pass.
-        assert self.w1_scale is not None
-        num_experts_w1, m1, k1_sf = self.w1_scale.shape
-        k1 = k1_sf * 16
+        # Precompute MMA-layout views of the (now-rewritten) weight scale
+        # factors once here rather than recomputing on every forward pass.
+        # Converts swizzled 3D scale factors [E, M, K_sf] to the 6D MMA
+        # layout expected by the SM12x kernel's _get_weight_views().
+        assert self.w1_scale is not None and self.w2_scale is not None
+        sf_vec_size = 16
+        E_w1, M_w1, K_sf_w1 = self.w1_scale.shape
         self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
+            self.w1_scale.reshape(E_w1 * M_w1, K_sf_w1),
+            m=M_w1,
+            k=K_sf_w1 * sf_vec_size,
+            num_groups=E_w1,
+            sf_vec_size=sf_vec_size,
         )
-
-        assert self.w2_scale is not None
-        num_experts_w2, m2, k2_sf = self.w2_scale.shape
-        k2 = k2_sf * 16
+        E_w2, M_w2, K_sf_w2 = self.w2_scale.shape
         self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
+            self.w2_scale.reshape(E_w2 * M_w2, K_sf_w2),
+            m=M_w2,
+            k=K_sf_w2 * sf_vec_size,
+            num_groups=E_w2,
+            sf_vec_size=sf_vec_size,
         )
 
     @staticmethod
@@ -159,7 +167,21 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
+        # Original W4A4 NVFP4 (modelopt format).
+        if (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic):
+            return True
+        
+        # W4A16 NVFP4 compressed-tensors `nvfp4-pack-quantized`
+        if (
+            weight_key is not None
+            and weight_key.dtype == torch.uint8
+            and weight_key.scale == kNvfp4StaticGroupScale
+            and weight_key.scale2 == kStaticTensorScale
+            and weight_key.symmetric
+            and activation_key is None
+        ):
+            return True
+        return False
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -216,6 +238,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=self.max_num_tokens,
             num_local_experts=self.num_local_experts,
             activation=self._activation_str,
+            activation_precision=self.activation_precision,
         )
 
     def apply(

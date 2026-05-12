@@ -61,7 +61,7 @@ def _reorder_gate_up_to_up_gate(
 
     The B12x kernel expects weights in [up (w3), gate (w1)] order while the
     BF16 reference uses [gate (w1), up (w3)].  This replicates the reordering
-    done at model-load time by ``prepare_nvfp4_moe_layer_for_fi_or_cutlass``.
+    done at model-load time by the FP4 layer-prep helper.
     """
     n = w.shape[1] // 2
     return (
