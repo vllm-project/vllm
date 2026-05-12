@@ -37,7 +37,10 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9
+
+    # AMD RDNA doesn't have MFMA but WMMA
+    WMMA_TILE = 16
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -45,9 +48,6 @@ FP8_DTYPE = current_platform.fp8_dtype()
 # Set to 0 to disable automatic cache clearing
 _CACHE_CLEAR_INTERVAL_ENV = "VLLM_MOE_TUNE_CACHE_CLEAR_INTERVAL"
 TRITON_CACHE_CLEAR_INTERVAL = int(os.environ.get(_CACHE_CLEAR_INTERVAL_ENV, "50"))
-
-# RDNA doesn't have MFMA but WMMA
-WMMA_TILE = 16
 
 
 def clear_triton_cache():
@@ -514,7 +514,7 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
 
         # RDNA (gfx11/gfx12): reject configs that exceed 256 VGPRs per wave.
         # WMMA is 16x16, and 8 VGPRs are needed for fp32 accumulator
-        if not on_gfx9():
+        if on_gfx1x():
             accum_vgprs = (
                 (BLOCK_SIZE_M // WMMA_TILE)
                 * (BLOCK_SIZE_N // WMMA_TILE)
