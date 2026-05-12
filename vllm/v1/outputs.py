@@ -202,6 +202,8 @@ class KVConnectorOutput:
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
+    # IDs of requests whose KV load failed (request-level error signal).
+    failed_recv_request_ids: set[str] = field(default_factory=set)
     # Configuration describing how many finished sending/receiving
     # notifications should be expected for each request. This allows
     # handshake-based connectors like Nixl to update the KVOutputAggregator.
@@ -216,6 +218,7 @@ class KVConnectorOutput:
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids
+            and not self.failed_recv_request_ids
             and not self.kv_connector_worker_meta
         )
 

@@ -392,6 +392,29 @@ class KVConnectorBase_V1(ABC):
         """
         return set()
 
+    def get_request_ids_with_load_errors(self) -> set[str]:
+        """
+        Get the set of request IDs whose KV load failed.
+
+        This is the request-level counterpart of
+        get_block_ids_with_load_errors(). Connectors that report errors at
+        request granularity should override this method instead of (or in
+        addition to) the block-level one.
+
+        Returns:
+            Set of request IDs that encountered load errors.
+            Empty set if no load errors occurred.
+
+        Notes:
+            - Applies to both sync- and async-loading requests.
+            - Async loading: failed request IDs may be reported in any
+              forward pass up to and including the pass where the request
+              ID is returned by get_finished().
+            - Sync loading: failed request IDs should be reported in the
+              forward pass in which they are detected.
+        """
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process
