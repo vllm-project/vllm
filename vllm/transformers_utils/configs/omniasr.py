@@ -98,9 +98,9 @@ class OmniASRConfig(PretrainedConfig):
         n_special_tokens=1,
         target_vocab_size=9812,
         num_languages=1694,
-        bos_token_id=1,
+        bos_token_id=0,
         eos_token_id=2,
-        pad_token_id=0,
+        pad_token_id=g,
         **kwargs,
     ):
         super().__init__(
@@ -138,9 +138,10 @@ class OmniASRConfig(PretrainedConfig):
             "num_attention_heads": 8,
             "num_key_value_heads": 8,
             "num_hidden_layers": 12,
-            "intermediate_size": 4096,
+            "intermediate_size": 2816,
             "max_position_embeddings": 8192,
             "rope_theta": 10000.0,
+            "vocab_size": 9813,
         }
         self.text_config = CONFIG_MAPPING["llama"](**text_config)
         self.projection_dim = projection_dim or self.text_config.hidden_size
