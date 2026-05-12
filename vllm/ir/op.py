@@ -4,8 +4,7 @@ import contextlib
 import inspect
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar, Literal, overload
-from typing import Any, ClassVar, Protocol, overload
+from typing import Any, ClassVar, Literal, Protocol, overload
 
 import torch
 from torch.library import Library, infer_schema
@@ -276,7 +275,9 @@ class IrOp:
         )
 
         def _register_impl(f: Callable):
-            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace, compiled)
+            impl = IrOpImpl(
+                self, provider, f, supported, supports_args, inplace, compiled
+            )
             self.impls[provider] = impl
 
             if self.get_priority():

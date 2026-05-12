@@ -61,3 +61,12 @@ def fused_add_rms_norm(
     assert variance_size is None
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
+
+
+@ir.ops.silu_and_mul_with_clamp.register_impl("vllm_c", supported=CUDA_ALIKE)
+def silu_and_mul_with_clamp(x: Tensor, swiglu_limit: float) -> Tensor:
+    d = x.shape[-1] // 2
+    output_shape = x.shape[:-1] + (d,)
+    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    torch.ops._C.silu_and_mul_with_clamp(out, x, swiglu_limit)
+    return out
