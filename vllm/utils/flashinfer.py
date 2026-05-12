@@ -100,7 +100,7 @@ def _lazy_import_wrapper(
 
     # Expose an explicit hook so tests can reset the cached backend
     # resolution without introspecting the closure.
-    wrapper.cache_clear = _get_impl.cache_clear
+    wrapper.cache_clear = _get_impl.cache_clear  # type: ignore[attr-defined]
     return wrapper
 
 
