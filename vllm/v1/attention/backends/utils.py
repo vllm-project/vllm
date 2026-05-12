@@ -898,9 +898,13 @@ def get_empty_req_mask(
     seq_lens: torch.Tensor,
     query_start_loc: torch.Tensor,
     num_tokens: int | None = None,
-) -> torch.Tensor:
+) -> torch.Tensor | None:
     """Calculate empty request mask by expanding request-level seq lens
-    to token-level and checking for zero-length (empty) sequences."""
+    to token-level and checking for zero-length (empty) sequences.
+    Returns None if no seq_lens are zero, avoiding unnecessary masking."""
+    if seq_lens.min() > 0:
+        return None
+
     if num_tokens is None:
         num_tokens = query_start_loc[-1].item()
 
