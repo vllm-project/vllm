@@ -331,7 +331,7 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         image = self._to_rgb_image(image)
         image = image.resize(
             (_OPENVLA_IMAGE_SIZE, _OPENVLA_IMAGE_SIZE),
-            Image.Resampling.BILINEAR,
+            Image.Resampling.BICUBIC,
         )
 
         raw = np.asarray(image, dtype=np.float32) / 255.0
