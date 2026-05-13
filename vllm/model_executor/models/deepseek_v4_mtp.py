@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -40,7 +41,6 @@ from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
-    hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
 from .utils import maybe_prefix
@@ -118,6 +118,8 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
+
+        self.hc_head_op = HCHeadOp()
 
     def forward(
         self,
@@ -230,7 +232,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         hidden_states = hidden_states.view(
             -1, mtp_layer.hc_mult, mtp_layer.config.hidden_size
         )
-        hidden_states = hc_head(
+        hidden_states = self.hc_head_op(
             hidden_states,
             mtp_layer.hc_head_fn,
             mtp_layer.hc_head_scale,
