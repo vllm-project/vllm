@@ -263,17 +263,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
 
-    def fused_qk_norm_rope_kvcache_supported(self):
-        # Opt in even though the parent RocmAttentionImpl returns False:
-        # this backend uses the AITER triton unified attention kernel for
-        # decode (rather than the custom HIP ASM paged attention kernel),
-        # so it does not require the interleaved V-cache read path that
-        # is being added separately for ROCM_ATTN.  The inherited
-        # do_qk_norm_rope_kvcache_update body writes K/V in standard
-        # layout (use_shuffle_layout=False unless globally enabled), which
-        # matches what this backend reads.
-        return rocm_aiter_ops.is_enabled()
-
     def set_fused_kv_cache_layout(self):
         # No-op: this backend uses AITER flash/unified attention for decode,
         # not the C++ HIP ASM paged attention kernel, so it does not need

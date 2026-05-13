@@ -304,6 +304,8 @@ class RocmAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
+        self._use_interleaved_v_cache = False
+
         self._cached_k_scale_val: float | None = None
         self._cached_k_scale_cpu: torch.Tensor | None = None
         self._cached_v_scale_val: float | None = None
@@ -452,6 +454,7 @@ class RocmAttentionImpl(AttentionImpl):
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
+            use_interleaved_v_cache=self._use_interleaved_v_cache,
             causal=attn_metadata.causal,
         )
 
@@ -506,23 +509,16 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # Gated off for ROCM_ATTN itself in this PR.  ROCM_ATTN engages
-        # the fused QK-norm + RoPE + KV-cache kernel only when the V-cache
-        # is also written in interleaved layout, which requires kernel
-        # changes to the custom HIP paged-attention decode kernel that are
-        # split out into a follow-up PR.  The do_qk_norm_rope_kvcache_update
-        # body below is shipped here so RocmAiterUnifiedAttentionImpl
-        # (which uses the AITER triton unified attention kernel for decode
-        # and therefore does NOT need an interleaved V layout) can inherit
-        # it and opt in via its own supported() override.
-        return False
+        return rocm_aiter_ops.is_enabled()
 
     def set_fused_kv_cache_layout(self):
-        # No-op until ROCM_ATTN itself opts in to the fused path
-        # (see the follow-up PR that adds USE_INTERLEAVED_V_CACHE in
-        # csrc/rocm/attention.cu and the matching INTERLEAVED_V_KX path
-        # in prefix_prefill).
-        pass
+        # Engage the interleaved V-cache read path.  The AITER fused write
+        # emits V in interleaved layout when use_shuffle_layout=True; the
+        # custom HIP paged-attention decode kernel and the Triton prefix
+        # prefill kernel must read from the same layout (see the
+        # USE_INTERLEAVED_V_CACHE template in csrc/rocm/attention.cu and
+        # the INTERLEAVED_V_KX path in vllm/v1/attention/ops/prefix_prefill.py).
+        self._use_interleaved_v_cache = True
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -550,7 +546,10 @@ class RocmAttentionImpl(AttentionImpl):
         num_heads_k = self.num_kv_heads
         num_heads_v = self.num_kv_heads
         head_dim = self.head_size
-        use_shuffle_layout = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        use_shuffle_layout = (
+            self._use_interleaved_v_cache
+            or rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
         block_size = key_cache.shape[1]
         x = 16 // key_cache.element_size()
 

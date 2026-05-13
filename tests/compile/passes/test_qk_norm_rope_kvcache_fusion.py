@@ -236,6 +236,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
     "attn_backend",
     [
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
@@ -476,7 +477,7 @@ def test_qk_norm_rope_kvcache_pattern_match_smoke(
 
         model = QKNormRoPEKVCacheTestModel(
             vllm_config=vllm_config,
-            attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            attn_backend=AttentionBackendEnum.ROCM_ATTN,
             num_heads=64,
             num_kv_heads=8,
             head_size=64,
