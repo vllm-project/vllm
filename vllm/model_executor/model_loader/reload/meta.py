@@ -66,8 +66,7 @@ def _is_non_persistent_parameter_alias_buffer(
 
     buffer_storage_ptr = _tensor_storage_ptr(buffer)
     return (
-        buffer_storage_ptr is not None
-        and buffer_storage_ptr in parameter_storage_ptrs
+        buffer_storage_ptr is not None and buffer_storage_ptr in parameter_storage_ptrs
     )
 
 
