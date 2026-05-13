@@ -1016,7 +1016,14 @@ class Worker(WorkerBase):
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            # set_current_vllm_config is required because the layerwise
+            # reload path may instantiate CustomOps / kernels (e.g.
+            # FlashInfer CUTLASS MoE) whose __init__ reads
+            # get_current_vllm_config().
+            with (
+                set_current_vllm_config(self.vllm_config),
+                torch.device(self.device),
+            ):
                 initialize_layerwise_reload(model)
 
         # Store state so update_weights/finish_weight_update can check
@@ -1046,7 +1053,14 @@ class Worker(WorkerBase):
 
         model = self.model_runner.model
 
-        with torch.device(self.device):
+        # set_current_vllm_config is required because model.load_weights may
+        # run per-layer postprocessing (process_weights_after_loading) that
+        # instantiates kernels reading get_current_vllm_config() — e.g.
+        # FlashInfer CUTLASS MoE for unquantized MoE models.
+        with (
+            set_current_vllm_config(self.vllm_config),
+            torch.device(self.device),
+        ):
             if self._is_checkpoint_format:
                 self.weight_transfer_engine.receive_weights(
                     typed_update_info,
@@ -1092,7 +1106,10 @@ class Worker(WorkerBase):
             )
 
             model = self.model_runner.model
-            with torch.device(self.device):
+            with (
+                set_current_vllm_config(self.vllm_config),
+                torch.device(self.device),
+            ):
                 finalize_layerwise_reload(model, self.model_config)
 
         # Reset state
