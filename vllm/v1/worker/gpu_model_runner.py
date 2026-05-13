@@ -2182,7 +2182,10 @@ class GPUModelRunner(
             max_seq_len=max_seq_len,
             block_table_tensor=block_table_gid_0,
             slot_mapping=slot_mapping_gid_0,
-            causal=True,
+            causal=not getattr(
+                self.vllm_config.attention_config,
+                'use_non_causal', False,
+            ),
             is_prefilling=is_prefilling,
             positions=self.positions[:num_tokens_padded],
         )

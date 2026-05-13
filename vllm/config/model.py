@@ -1701,6 +1701,15 @@ class ModelConfig:
 
     @property
     def is_chunked_prefill_supported(self) -> bool:
+        # Non-causal (bidirectional) models cannot use chunked prefill:
+        # chunks fill KV cache incrementally, preventing earlier tokens
+        # from attending to later chunks within the same block.
+        if getattr(self, '_use_non_causal', False):
+            logger.debug(
+                "Non-causal models do not support chunked prefill."
+            )
+            return False
+
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:
@@ -1747,6 +1756,15 @@ class ModelConfig:
 
     @property
     def is_prefix_caching_supported(self) -> bool:
+        # Non-causal (bidirectional) models cannot use prefix caching:
+        # cached KV from prior requests was computed with different context,
+        # breaking bidirectional attention within blocks.
+        if getattr(self, '_use_non_causal', False):
+            logger.debug(
+                "Non-causal models do not support prefix caching."
+            )
+            return False
+
         attn_type = self.attn_type
 
         if pooler_config := self.pooler_config:

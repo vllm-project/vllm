@@ -724,6 +724,13 @@ class VllmConfig:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
+            # Propagate non-causal flag from attention config to model config
+            # so is_chunked_prefill_supported / is_prefix_caching_supported
+            # can check it during default arg resolution.
+            if (self.attention_config is not None
+                    and getattr(self.attention_config, 'use_non_causal', False)):
+                self.model_config._use_non_causal = True
+
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
         if self.lora_config is not None:
