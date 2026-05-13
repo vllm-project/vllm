@@ -170,6 +170,16 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # Snapshot of Request *object identity* per in-flight SchedulerOutput.
+        # Keyed by id(scheduler_output). Used in update_from_output to detect
+        # runtime request id reuse: if a request is cancelled and a new one is
+        # submitted with the same id between schedule() and drain(),
+        # self.requests[req_id] resolves to the new request. Comparing identity
+        # against the snapshot lets us drop stale outputs instead of corrupting
+        # the new request's accounting (e.g. num_output_placeholders underflow
+        # in async scheduling).
+        self._inflight_request_snapshots: dict[int, dict[str, Request]] = {}
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -938,8 +948,14 @@ class Scheduler(SchedulerInterface):
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        # Capture request *identity* at schedule time so update_from_output can
+        # tell whether self.requests[req_id] still refers to the same Request
+        # that was scheduled (vs. a new request that reused the id after a
+        # cancel + resubmit).
+        request_snapshot: dict[str, Request] = {}
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            request_snapshot[req_id] = request
             request.num_computed_tokens += num_scheduled_token
             request.is_prefill_chunk = request.num_computed_tokens < (
                 request.num_tokens + request.num_output_placeholders
@@ -947,6 +963,7 @@ class Scheduler(SchedulerInterface):
             scheduler_output.has_structured_output_requests |= (
                 request.use_structured_output and not request.is_prefill_chunk
             )
+        self._inflight_request_snapshots[id(scheduler_output)] = request_snapshot
 
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
@@ -1281,6 +1298,14 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
+        # Pop the per-batch identity snapshot recorded in _update_after_schedule.
+        # Always pop (even when None) so id() reuse cannot resurrect a stale
+        # entry on a future scheduler_output that happens to land at the same
+        # memory address.
+        request_snapshot = self._inflight_request_snapshots.pop(
+            id(scheduler_output), None
+        )
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1300,6 +1325,18 @@ class Scheduler(SchedulerInterface):
                 # cache transfer in KV connector), the aborted request will not
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
+                continue
+            # Detect runtime request id reuse: if the request scheduled in this
+            # batch was cancelled and a new request reusing the same id was
+            # added before this drain, self.requests[req_id] now points to a
+            # different Request object that never participated in this batch.
+            # Applying the stale output to the new request would corrupt its
+            # accounting (in async scheduling this triggers
+            # `assert request.num_output_placeholders >= 0`).
+            if (
+                request_snapshot is not None
+                and request_snapshot.get(req_id) is not request
+            ):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]

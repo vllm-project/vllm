@@ -285,6 +285,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.recompute_kv_load_failures = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
+    scheduler._inflight_request_snapshots = {}
 
     def free_request(req, delay_free_blocks=False):
         scheduler.finished_req_ids.add(req.request_id)
@@ -319,3 +320,47 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert request.status == RequestStatus.FINISHED_ERROR
     assert request.request_id not in scheduler.requests
     assert not scheduler.running
+
+
+def test_async_runtime_id_reuse_after_cancel_no_underflow():
+    """Reuse of a runtime request id between schedule() and update_from_output()
+    must not underflow num_output_placeholders on the new request.
+
+    Sequence:
+      1. add request_a with id "late_req2", schedule it (queues an async batch).
+      2. cancel request_a (removes it from scheduler.requests).
+      3. add request_b reusing the same id "late_req2".
+      4. drain the *old* scheduler_output for request_a.
+
+    Without the identity check, step 4 looks up self.requests["late_req2"],
+    finds request_b, and decrements its num_output_placeholders (which is 0)
+    by len(new_token_ids), tripping `assert num_output_placeholders >= 0`.
+    """
+    scheduler = create_scheduler(async_scheduling=True)
+
+    request_a = create_requests(num_requests=1, req_ids=["late_req2"])[0]
+    scheduler.add_request(request_a)
+    sched_output_a = scheduler.schedule()
+    assert sched_output_a.num_scheduled_tokens.get("late_req2", 0) > 0
+    placeholders_at_schedule = request_a.num_output_placeholders
+    assert placeholders_at_schedule >= 1
+
+    # Cancel request_a before its output has been drained.
+    scheduler.finish_requests("late_req2", RequestStatus.FINISHED_ABORTED)
+    assert "late_req2" not in scheduler.requests
+
+    # New request reusing the same runtime request id.
+    request_b = create_requests(num_requests=1, req_ids=["late_req2"])[0]
+    scheduler.add_request(request_b)
+    assert scheduler.requests["late_req2"] is request_b
+    assert request_b.num_output_placeholders == 0
+    assert request_b.num_output_tokens == 0
+
+    # Drain the OLD batch. Stale output must not touch request_b.
+    model_runner_output = _make_model_runner_output(sched_output_a)
+    scheduler.update_from_output(sched_output_a, model_runner_output)
+
+    assert request_b.num_output_placeholders == 0
+    assert request_b.num_output_tokens == 0
+    assert request_b.status != RequestStatus.FINISHED_ABORTED
+
