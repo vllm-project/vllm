@@ -12,6 +12,8 @@
 #SBATCH --error=results/%x-%j.err
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
 #SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --account=engs-glass
+#SBATCH --qos=priority
 
 set -euo pipefail
 
@@ -196,7 +198,7 @@ export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
 export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-1}"
-export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-1}"
+export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
 # === NCCL logs ===
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
@@ -435,13 +437,21 @@ for node in nodes:
         f"resources={node.get('Resources')}"
     )
 PY
-
 echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
+VLLM_TRACE_FLAGS=()
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
-  echo "Profiling vLLM server with Nsight Systems"
-  echo "Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
+  VLLM_TRACE_FLAGS+=(
+    --ray-workers-use-nsight
+    --enable-layerwise-nvtx-tracing
+    --enable-logging-iteration-details
+  )
+fi
+
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
+  echo "Profiling vLLM server and Ray workers with Nsight Systems"
+  echo "API-server Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
 
   nsys profile \
     --force-overwrite=true \
@@ -458,6 +468,7 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
       --pipeline-parallel-size "${PP}" \
       --max-model-len "${MAX_MODEL_LEN}" \
       --enforce-eager \
+      "${VLLM_TRACE_FLAGS[@]}" \
       --disable-custom-all-reduce &
 else
   python -m vllm.entrypoints.openai.api_server \
@@ -505,5 +516,33 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   SERVER_STEP_PID=""
 fi
 
+echo "Copying Ray worker Nsight reports..."
+mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
+
+copy_ray_nsight_from_node() {
+  local NODE="$1"
+  srun \
+    --nodelist "${NODE}" \
+    --nodes=1 \
+    --ntasks=1 \
+    --ntasks-per-node=1 \
+    --cpus-per-task=1 \
+    bash -lc "
+      mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
+      if [ -d /tmp/ray/session_latest/logs/nsight ]; then
+        cp -v /tmp/ray/session_latest/logs/nsight/*.nsys-rep \
+          '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}/' 2>/dev/null || true
+      else
+        echo 'No /tmp/ray/session_latest/logs/nsight on ${NODE}'
+      fi
+    " || true
+}
+
+copy_ray_nsight_from_node "${HEAD_NODE}"
+
+for WORKER in ${WORKER_NODES}; do
+  copy_ray_nsight_from_node "${WORKER}"
+done
+
 echo "Trace files:"
-find "${TRACE_RUN_DIR}" -maxdepth 3 -type f -printf "%p %s bytes\n" 2>/dev/null || true
+find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
