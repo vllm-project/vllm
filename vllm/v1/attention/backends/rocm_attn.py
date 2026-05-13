@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
+import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -302,6 +303,11 @@ class RocmAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
+        self._cached_k_scale_val: float | None = None
+        self._cached_k_scale_cpu: torch.Tensor | None = None
+        self._cached_v_scale_val: float | None = None
+        self._cached_v_scale_cpu: torch.Tensor | None = None
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -494,6 +500,98 @@ class RocmAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+
+    def fused_qk_norm_rope_kvcache_supported(self):
+        # Gated off for ROCM_ATTN itself in this PR.  ROCM_ATTN engages
+        # the fused QK-norm + RoPE + KV-cache kernel only when the V-cache
+        # is also written in interleaved layout, which requires kernel
+        # changes to the custom HIP paged-attention decode kernel that are
+        # split out into a follow-up PR.  The do_qk_norm_rope_kvcache_update
+        # body below is shipped here so RocmAiterUnifiedAttentionImpl
+        # (which uses the AITER triton unified attention kernel for decode
+        # and therefore does NOT need an interleaved V layout) can inherit
+        # it and opt in via its own supported() override.
+        return False
+
+    def set_fused_kv_cache_layout(self):
+        # No-op until ROCM_ATTN itself opts in to the fused path
+        # (see the follow-up PR that adds USE_INTERLEAVED_V_CACHE in
+        # csrc/rocm/attention.cu and the matching INTERLEAVED_V_KX path
+        # in prefix_prefill).
+        pass
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+
+        num_heads_q = self.num_heads
+        num_heads_k = self.num_kv_heads
+        num_heads_v = self.num_kv_heads
+        head_dim = self.head_size
+        use_shuffle_layout = rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        block_size = key_cache.shape[1]
+        x = 16 // key_cache.element_size()
+
+        # Use CPU scalar tensors for scales so the C++ kernel's .item()
+        # call doesn't trigger a device-to-host sync during CUDA graph capture.
+        k_scale_val = layer._k_scale_float
+        v_scale_val = layer._v_scale_float
+        if self._cached_k_scale_val is None or (
+            self._cached_k_scale_val != k_scale_val
+            and not (math.isnan(self._cached_k_scale_val) and math.isnan(k_scale_val))
+        ):
+            self._cached_k_scale_cpu = torch.tensor(k_scale_val, dtype=torch.float32)
+            self._cached_k_scale_val = k_scale_val
+        if self._cached_v_scale_val is None or (
+            self._cached_v_scale_val != v_scale_val
+            and not (math.isnan(self._cached_v_scale_val) and math.isnan(v_scale_val))
+        ):
+            self._cached_v_scale_cpu = torch.tensor(v_scale_val, dtype=torch.float32)
+            self._cached_v_scale_val = v_scale_val
+
+        rocm_aiter_ops.hip_qk_norm_rope_and_cache(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=num_heads_q,
+            num_heads_k=num_heads_k,
+            num_heads_v=num_heads_v,
+            head_dim=head_dim,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=self._cached_k_scale_cpu,
+            v_scale=self._cached_v_scale_cpu,
+            k_out=k_out,
+            v_out=None,
+            return_kv=True,
+            use_shuffle_layout=use_shuffle_layout,
+            block_size=block_size,
+            x=x,
+        )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
