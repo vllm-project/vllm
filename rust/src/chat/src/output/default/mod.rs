@@ -35,7 +35,6 @@ trait_set! {
 /// then optionally layers reasoning parsing and tool-call parsing before
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
-    intermediate: bool,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
     tool_parser: Option<Box<dyn ToolParser>>,
 }
@@ -73,7 +72,6 @@ impl DefaultChatOutputProcessor {
         )?;
 
         Ok(Self {
-            intermediate: request.intermediate,
             reasoning_parser,
             tool_parser,
         })
@@ -86,7 +84,6 @@ impl DefaultChatOutputProcessor {
     /// content is treated as opaque text.
     pub fn plain_text_only() -> Self {
         Self {
-            intermediate: false,
             reasoning_parser: None,
             tool_parser: None,
         }
@@ -165,7 +162,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 3. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let reasoning = reasoning_event_stream(decoded, self.reasoning_parser);
-        let tool = tool_event_stream(reasoning, self.intermediate, self.tool_parser);
+        let tool = tool_event_stream(reasoning, self.tool_parser);
         let structured = structured_chat_event_stream(tool);
 
         Ok(structured.boxed())

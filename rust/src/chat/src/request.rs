@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use vllm_text::SamplingParams;
@@ -332,22 +331,6 @@ pub struct ChatTool {
     pub description: Option<String>,
     pub parameters: Value,
     pub strict: Option<bool>,
-}
-
-impl ChatTool {
-    /// Used internally for template rendering and passed to `tool-parser`
-    /// crate.
-    pub(crate) fn to_openai_tool(&self) -> OpenAiTool {
-        OpenAiTool {
-            tool_type: "function".to_string(),
-            function: OpenAiFunction {
-                name: self.name.clone(),
-                description: self.description.clone(),
-                parameters: self.parameters.clone(),
-                strict: self.strict,
-            },
-        }
-    }
 }
 
 /// Tool-choice semantics supported by `vllm-chat`.

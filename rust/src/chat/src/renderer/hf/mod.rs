@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use openai_protocol::common::Tool as OpenAiTool;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
@@ -218,8 +217,19 @@ struct TemplateToolFunction {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(transparent)]
-pub(super) struct TemplateTool(OpenAiTool);
+pub(super) struct TemplateTool {
+    #[serde(rename = "type")]
+    tool_type: &'static str,
+    function: TemplateToolDefinition,
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolDefinition {
+    name: String,
+    description: Option<String>,
+    parameters: Value,
+    strict: Option<bool>,
+}
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
 fn to_template_messages(
@@ -334,7 +344,18 @@ fn to_template_content(
 }
 
 fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
-    tools.iter().map(|tool| TemplateTool(tool.to_openai_tool())).collect()
+    tools
+        .iter()
+        .map(|tool| TemplateTool {
+            tool_type: "function",
+            function: TemplateToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+                strict: tool.strict,
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]

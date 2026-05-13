@@ -69,7 +69,7 @@ fn factory_creates_registered_parser_for_model() {
 }
 
 #[test]
-fn factory_new_resolves_external_default_patterns() {
+fn factory_new_resolves_default_patterns() {
     let factory = ToolParserFactory::new();
 
     assert_eq!(
@@ -86,7 +86,7 @@ fn factory_new_resolves_external_default_patterns() {
     );
     assert_eq!(
         factory.resolve_name_for_model("meta-llama-4-maverick"),
-        Some(names::LLAMA4_PYTHONIC)
+        Some(names::LLAMA4_JSON)
     );
     assert_eq!(
         factory.resolve_name_for_model("meta-llama-3.2-3b-instruct"),
@@ -131,10 +131,6 @@ fn factory_new_resolves_external_default_patterns() {
     assert_eq!(
         factory.resolve_name_for_model("glm-4.7"),
         Some(names::GLM47)
-    );
-    assert_eq!(
-        factory.resolve_name_for_model("command-r-plus"),
-        Some(names::COHERE)
     );
     assert_eq!(
         factory.resolve_name_for_model("google/gemma-4-27b-it"),

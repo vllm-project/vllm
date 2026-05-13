@@ -2,7 +2,7 @@
 //!
 //! This stage runs after reasoning separation and before final block assembly.
 //! It only inspects normal assistant text, leaves reasoning deltas untouched,
-//! and translates incremental `tool-parser` output into internal tool-call
+//! and translates incremental tool parsing output into internal tool-call
 //! events while preserving plain-text fallback behavior.
 
 use asynk_strim_attr::{TryYielder, try_stream};
@@ -182,124 +182,11 @@ fn push_text_delta(events: &mut Vec<AssistantEvent>, kind: AssistantBlockKind, d
     events.push(AssistantEvent::TextDelta { kind, delta });
 }
 
-/// Tool parsing when `intermediate=false` (`FinalOnly` mode).
-///
-/// We keep this separate because some adaptor-backed parsers may not correctly
-/// handle the full text passed to incremental `push` interface, but override
-/// `parse_complete()` with a dedicated one-shot implementation to ensure
-/// correctness.
-#[try_stream]
-async fn final_only_tool_event_stream(
-    stream: impl ContentEventStream,
-    mut parser: Box<dyn ToolParser>,
-    mut y: TryYielder<AssistantEvent, Error>,
-) -> Result<()> {
-    pin_mut!(stream);
-
-    let mut final_text = String::new();
-
-    while let Some(event) = stream.next().await.transpose()? {
-        match event {
-            ContentEvent::Start {
-                prompt_token_ids,
-                prompt_logprobs,
-            } => {
-                y.yield_ok(AssistantEvent::Start {
-                    prompt_token_ids,
-                    prompt_logprobs,
-                })
-                .await;
-            }
-            ContentEvent::TextDelta { kind, delta } => {
-                if kind == AssistantBlockKind::Text {
-                    final_text.push_str(&delta);
-                } else {
-                    y.yield_ok(AssistantEvent::TextDelta { kind, delta }).await;
-                }
-            }
-            ContentEvent::LogprobsDelta {
-                logprobs,
-                token_ids,
-            } => {
-                y.yield_ok(AssistantEvent::LogprobsDelta {
-                    logprobs,
-                    token_ids,
-                })
-                .await;
-            }
-            ContentEvent::Done {
-                prompt_token_count,
-                output_token_count,
-                finish_reason,
-                kv_transfer_params,
-            } => {
-                match parser.parse_complete(&final_text) {
-                    Ok(ToolParseResult { normal_text, calls }) => {
-                        if !normal_text.is_empty() {
-                            y.yield_ok(AssistantEvent::TextDelta {
-                                kind: AssistantBlockKind::Text,
-                                delta: normal_text,
-                            })
-                            .await;
-                        }
-                        // `parse_complete` currently returns one complete delta
-                        // per tool call, so we can surface each one as a start
-                        // plus its complete arguments payload.
-                        for tool_call in calls {
-                            let Some(name) = tool_call.name else {
-                                return Err(Error::ToolCallStreamInvariant {
-                                    message: format!(
-                                        "final-only tool parse produced tool index {} without a function name",
-                                        tool_call.tool_index
-                                    ),
-                                });
-                            };
-                            y.yield_ok(AssistantEvent::ToolCallStart {
-                                id: generate_tool_call_id(),
-                                name,
-                            })
-                            .await;
-                            if !tool_call.arguments.is_empty() {
-                                y.yield_ok(AssistantEvent::ToolCallArgumentsDelta {
-                                    delta: tool_call.arguments,
-                                })
-                                .await;
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        warn!(
-                            error = %error.as_report(),
-                            "tool parser full-output parse failed; falling back to plain text"
-                        );
-                        y.yield_ok(AssistantEvent::TextDelta {
-                            kind: AssistantBlockKind::Text,
-                            delta: final_text,
-                        })
-                        .await;
-                    }
-                }
-
-                y.yield_ok(AssistantEvent::Done {
-                    prompt_token_count,
-                    output_token_count,
-                    finish_reason,
-                    kv_transfer_params,
-                })
-                .await;
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Wrap one semantic assistant stream into the internal tool-aware assistant
 /// stream.
 #[try_stream]
 pub(crate) async fn tool_event_stream(
     stream: impl ContentEventStream,
-    intermediate: bool,
     parser: Option<Box<dyn ToolParser>>,
     mut y: TryYielder<AssistantEvent, Error>,
 ) -> Result<()> {
@@ -311,16 +198,6 @@ pub(crate) async fn tool_event_stream(
         }
         return Ok(());
     };
-
-    // `FinalOnly` needs one-shot parsing over the final text.
-    if !intermediate {
-        let final_stream = final_only_tool_event_stream(stream, parser);
-        pin_mut!(final_stream);
-        while let Some(event) = final_stream.next().await.transpose()? {
-            y.yield_ok(event).await;
-        }
-        return Ok(());
-    }
 
     pin_mut!(stream);
     let mut state = ToolState::new(parser);
@@ -387,7 +264,9 @@ mod tests {
     use crate::error::Error;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::output::structured::structured_chat_event_stream;
-    use crate::parser::tool::{Result, ToolParseResult, ToolParser};
+    use crate::parser::tool::{
+        Result, ToolParseResult, ToolParser, ToolParserError, parsing_failed,
+    };
     use crate::request::ChatTool;
     use crate::stream::ChatEventStream;
 
@@ -411,9 +290,7 @@ mod tests {
         fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(
-                    tool_parser::errors::ParserError::ParsingFailed("boom".to_string()).into(),
-                );
+                return Err(parsing_failed!("boom"));
             }
 
             Ok(ToolParseResult::default())
@@ -437,10 +314,6 @@ mod tests {
 
         fn finish(&mut self) -> Result<ToolParseResult> {
             Ok(std::mem::take(&mut self.finish_result))
-        }
-
-        fn parse_complete(&mut self, _output: &str) -> Result<ToolParseResult> {
-            Ok(self.finish_result.clone())
         }
     }
 
@@ -467,13 +340,10 @@ mod tests {
             }),
         ]);
 
-        let collected = tool_event_stream(
-            events,
-            true,
-            Some(Box::new(FailingParser { fail_next: true })),
-        )
-        .collect::<Vec<_>>()
-        .await;
+        let collected =
+            tool_event_stream(events, Some(Box::new(FailingParser { fail_next: true })))
+                .collect::<Vec<_>>()
+                .await;
 
         let events = collected
             .into_iter()
@@ -518,7 +388,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_stream_preserves_logprobs_delta_in_final_only_mode() {
+    async fn tool_stream_preserves_logprobs_delta() {
         let events = stream::iter(vec![
             Ok(ContentEvent::Start {
                 prompt_token_ids: vec![1].into(),
@@ -544,16 +414,12 @@ mod tests {
                 kv_transfer_params: None,
             }),
         ]);
-        let events = tool_event_stream(
-            events,
-            false,
-            Some(Box::new(FailingParser { fail_next: false })),
-        )
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .collect::<crate::Result<Vec<_>>>()
-        .unwrap();
+        let events = tool_event_stream(events, Some(Box::new(FailingParser { fail_next: false })))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
 
         assert_eq!(
             events,
@@ -619,7 +485,7 @@ mod tests {
             finish_result: ToolParseResult::default(),
         };
 
-        let err = tool_event_stream(events, true, Some(Box::new(parser)))
+        let err = tool_event_stream(events, Some(Box::new(parser)))
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -672,7 +538,7 @@ mod tests {
             finish_result: ToolParseResult::default(),
         };
 
-        let err = tool_event_stream(events, true, Some(Box::new(parser)))
+        let err = tool_event_stream(events, Some(Box::new(parser)))
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -687,7 +553,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_only_tool_stream_emits_start_and_args_for_multiple_calls() {
+    async fn tool_stream_emits_start_and_args_for_terminal_text() {
         let events = stream::iter(vec![
             Ok(ContentEvent::Start {
                 prompt_token_ids: vec![1].into(),
@@ -706,8 +572,7 @@ mod tests {
         ]);
 
         let parser = ScriptedParser {
-            push_results: Vec::new(),
-            finish_result: ToolParseResult {
+            push_results: vec![ToolParseResult {
                 normal_text: String::new(),
                 calls: vec![
                     crate::parser::tool::ToolCallDelta {
@@ -721,10 +586,11 @@ mod tests {
                         arguments: r#"{"b":2}"#.to_string(),
                     },
                 ],
-            },
+            }],
+            finish_result: ToolParseResult::default(),
         };
 
-        let events = tool_event_stream(events, false, Some(Box::new(parser)))
+        let events = tool_event_stream(events, Some(Box::new(parser)))
             .collect::<Vec<_>>()
             .await
             .into_iter()
