@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from typing import Any
 
 import torch
@@ -29,6 +30,12 @@ STAGES = [
     "fused_features",
     "projected_features",
 ]
+
+
+def vllm_prompt(prompt: str) -> str:
+    if prompt.startswith("<image>"):
+        return prompt
+    return f"<image>\n{prompt}"
 
 
 def tensor_stats(tensor: torch.Tensor) -> dict[str, Any]:
@@ -77,7 +84,17 @@ def weight_digests(model: torch.nn.Module) -> dict[str, dict[str, Any]]:
 
 
 def normalized_weight_name(name: str) -> str:
-    return name.replace(".scale_factor", ".gamma")
+    return (
+        name.replace(
+            "vision_backbone.dinov2_featurizer.",
+            "vision_backbone.featurizer.",
+        )
+        .replace(
+            "vision_backbone.siglip_featurizer.",
+            "vision_backbone.fused_featurizer.",
+        )
+        .replace(".scale_factor", ".gamma")
+    )
 
 
 def compact_trace(tensor: torch.Tensor) -> torch.Tensor:
@@ -95,8 +112,8 @@ def vision_block_trace(model: torch.nn.Module, pixel_values: torch.Tensor) -> di
     siglip_pixels = pixel_values[:, 3:]
 
     for prefix, tower, pixels in (
-        ("dino", model.vision_backbone.featurizer, dino_pixels),
-        ("siglip", model.vision_backbone.fused_featurizer, siglip_pixels),
+        ("dino", model.vision_backbone.dinov2_featurizer, dino_pixels),
+        ("siglip", model.vision_backbone.siglip_featurizer, siglip_pixels),
     ):
         traces[f"{prefix}_patch_embed"] = compact_trace(tower.patch_embed(pixels))
         for block_idx in range(len(tower.blocks)):
@@ -108,19 +125,23 @@ def vision_block_trace(model: torch.nn.Module, pixel_values: torch.Tensor) -> di
 
 def collect_trace(model: torch.nn.Module, image_path: str) -> dict[str, torch.Tensor]:
     processor = OpenVLAMultiModalProcessor.__new__(OpenVLAMultiModalProcessor)
+    processor.info = SimpleNamespace(
+        get_hf_config=lambda: SimpleNamespace(image_sizes=[224])
+    )
     image = Image.open(image_path).convert("RGB")
     pixel_values = processor._preprocess_image(image).unsqueeze(0).to("cuda:0")
-    pixel_values = pixel_values.to(dtype=model.vision_backbone.get_input_dtype())
+    input_dtype = model.vision_backbone.dinov2_featurizer.patch_embed.proj.weight.dtype
+    pixel_values = pixel_values.to(dtype=input_dtype)
 
     dino_pixels = pixel_values[:, :3]
     siglip_pixels = pixel_values[:, 3:]
     backbone = model.vision_backbone
     with torch.inference_mode():
-        dino_features = backbone.featurizer.get_intermediate_layers(
-            dino_pixels, n={len(backbone.featurizer.blocks) - 2}
+        dino_features = backbone.dinov2_featurizer.get_intermediate_layers(
+            dino_pixels, n={len(backbone.dinov2_featurizer.blocks) - 2}
         )[0]
-        siglip_features = backbone.fused_featurizer.get_intermediate_layers(
-            siglip_pixels, n={len(backbone.fused_featurizer.blocks) - 2}
+        siglip_features = backbone.siglip_featurizer.get_intermediate_layers(
+            siglip_pixels, n={len(backbone.siglip_featurizer.blocks) - 2}
         )[0]
         fused_features = torch.cat([dino_features, siglip_features], dim=-1)
         projected_features = model.projector(fused_features)
@@ -328,7 +349,12 @@ def main() -> None:
                 case["case_id"]: model.projector(
                     hf["tensors"][case["case_id"]]["fused_features"]
                     .to("cuda:0")
-                    .to(dtype=model.vision_backbone.get_input_dtype())
+                    .to(
+                        dtype=(
+                            model.vision_backbone.dinov2_featurizer
+                            .patch_embed.proj.weight.dtype
+                        )
+                    )
                 )
                 .detach()
                 .cpu()
@@ -350,9 +376,10 @@ def main() -> None:
 
     outputs = []
     for case in cases:
+        prompt = vllm_prompt(case["prompt"])
         result = llm.generate(
             {
-                "prompt": case["prompt"],
+                "prompt": prompt,
                 "multi_modal_data": {
                     "image": Image.open(case["image_path"]).convert("RGB")
                 },
@@ -364,7 +391,8 @@ def main() -> None:
                 "case_id": case["case_id"],
                 "episode_index": case["episode_index"],
                 "frame_index": case["frame_index"],
-                "prompt": case["prompt"],
+                "prompt": prompt,
+                "hf_prompt": case["prompt"],
                 "image_path": case["image_path"],
                 "instruction": case["instruction"],
                 "generated_token_ids": list(result[0].outputs[0].token_ids),

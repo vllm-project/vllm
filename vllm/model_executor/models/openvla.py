@@ -37,8 +37,7 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    PromptIndexTargets,
-    PromptInsertion,
+    PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
@@ -51,9 +50,21 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
+# openvla/openvla-7b uses 224x224 images with ViT patch size 14, yielding a
+# 16x16 image-token grid.
 _OPENVLA_IMAGE_SIZE = 224
 _OPENVLA_PATCH_SIZE = 14
-_OPENVLA_NUM_IMAGE_TOKENS = (_OPENVLA_IMAGE_SIZE // _OPENVLA_PATCH_SIZE) ** 2
+_OPENVLA_TIMM_MODEL_IDS = (
+    "vit_large_patch14_reg4_dinov2.lvd142m",
+    "vit_so400m_patch14_siglip_224",
+)
+_OPENVLA_TIMM_OVERRIDE_ACT_LAYERS = (None, None)
+_OPENVLA_IMAGE_SIZES = (_OPENVLA_IMAGE_SIZE, _OPENVLA_IMAGE_SIZE)
+_OPENVLA_IMAGE_PLACEHOLDER = "<image>"
+
+
+def _get_num_image_tokens(image_size: int) -> int:
+    return (image_size // _OPENVLA_PATCH_SIZE) ** 2
 
 
 class OpenVLAImagePixelInputs(TensorSchema):
@@ -81,80 +92,106 @@ class PrismaticVisionBackbone(nn.Module):
         use_fused_vision_backbone: bool,
     ) -> None:
         super().__init__()
-        self.image_sizes = list(image_sizes)
-        self.timm_model_ids = list(timm_model_ids)
-        self.timm_override_act_layers = list(timm_override_act_layers)
+        if not use_fused_vision_backbone:
+            raise ValueError(
+                "OpenVLA currently supports only the fused DINOv2 + SigLIP "
+                "vision backbone."
+            )
+        if tuple(image_sizes) != _OPENVLA_IMAGE_SIZES:
+            raise ValueError(
+                "OpenVLA currently supports only 224x224 image inputs, "
+                f"got image_sizes={list(image_sizes)}."
+            )
+        if tuple(timm_model_ids) != _OPENVLA_TIMM_MODEL_IDS:
+            raise ValueError(
+                "OpenVLA currently supports only the dinosiglip-vit-so-224px "
+                "vision backbone, got "
+                f"timm_model_ids={list(timm_model_ids)}."
+            )
+        if tuple(timm_override_act_layers) != _OPENVLA_TIMM_OVERRIDE_ACT_LAYERS:
+            raise ValueError(
+                "OpenVLA currently supports only the default timm activation "
+                "layers, got "
+                f"timm_override_act_layers={list(timm_override_act_layers)}."
+            )
+
+        self.image_size = image_sizes[0]
+        self.timm_model_ids = timm_model_ids
+        self.timm_override_act_layers = timm_override_act_layers
         self.use_fused_vision_backbone = use_fused_vision_backbone
+
         self.embed_dim = 2176 if use_fused_vision_backbone else 1024
-        self.featurizer: nn.Module | None = None
-        self.fused_featurizer: nn.Module | None = None
+        self.dinov2_featurizer: nn.Module | None = None
+        self.siglip_featurizer: nn.Module | None = None
 
     def init_timm_models(self) -> None:
-        if self.featurizer is not None:
+        if self.dinov2_featurizer is not None:
             return
 
         try:
             import timm
         except ImportError as e:
-            raise ImportError("Please install timm to use OpenVLA.") from e
+            raise ImportError(
+                "Please install timm to use OpenVLA. OpenVLA verification "
+                "used timm==0.9.10."
+            ) from e
 
-        image_size = self.image_sizes[0]
         with set_default_torch_dtype(torch.float16):
-            self.featurizer = timm.create_model(
+            self.dinov2_featurizer = timm.create_model(
                 self.timm_model_ids[0],
                 pretrained=False,
                 num_classes=0,
-                img_size=image_size,
+                img_size=self.image_size,
                 act_layer=self.timm_override_act_layers[0],
             )
+
             if self.use_fused_vision_backbone:
-                self.fused_featurizer = timm.create_model(
+                self.siglip_featurizer = timm.create_model(
                     self.timm_model_ids[1],
                     pretrained=False,
                     num_classes=0,
-                    img_size=image_size,
+                    img_size=self.image_size,
                     act_layer=self.timm_override_act_layers[1],
                 )
 
-        self.featurizer = self.featurizer.to(
+        self.dinov2_featurizer = self.dinov2_featurizer.to(
             device=current_platform.device_type,
             dtype=torch.get_default_dtype(),
         )
-        if self.fused_featurizer is not None:
-            self.fused_featurizer = self.fused_featurizer.to(
-                device=current_platform.device_type, dtype=torch.get_default_dtype()
+        if self.siglip_featurizer is not None:
+            self.siglip_featurizer = self.siglip_featurizer.to(
+                device=current_platform.device_type,
+                dtype=torch.get_default_dtype(),
             )
 
-    def get_input_dtype(self) -> torch.dtype:
-        if self.featurizer is None:
-            raise RuntimeError("OpenVLA vision backbone is not initialized.")
-        return self.featurizer.patch_embed.proj.weight.dtype
-
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        if self.featurizer is None:
+        if self.dinov2_featurizer is None:
             raise RuntimeError("OpenVLA vision backbone is not initialized.")
-        if pixel_values.shape[1] != 6:
+
+        if self.use_fused_vision_backbone and pixel_values.shape[1] != 6:
             raise ValueError(
-                "OpenVLA expects 6-channel image inputs, "
+                "OpenVLA fused DINOv2 + SigLIP backbone expects 6-channel "
+                "image inputs: 3 DINOv2-normalized channels followed by 3 "
+                "SigLIP-normalized channels, "
                 f"got {pixel_values.shape[1]} channels."
             )
 
         dinov2_pixels = pixel_values[:, :3]
-        siglip_pixels = pixel_values[:, 3:]
 
-        n_blocks = len(self.featurizer.blocks)
-        features = self.featurizer.get_intermediate_layers(
-            dinov2_pixels, n={n_blocks - 2}
+        num_dinov2_blocks = len(self.dinov2_featurizer.blocks)
+        dinov2_features = self.dinov2_featurizer.get_intermediate_layers(
+            dinov2_pixels, n={num_dinov2_blocks - 2}
         )[0]
 
-        if self.fused_featurizer is not None:
-            n_fused_blocks = len(self.fused_featurizer.blocks)
-            fused_features = self.fused_featurizer.get_intermediate_layers(
-                siglip_pixels, n={n_fused_blocks - 2}
+        if self.siglip_featurizer is not None:
+            siglip_pixels = pixel_values[:, 3:]
+            num_siglip_blocks = len(self.siglip_featurizer.blocks)
+            siglip_features = self.siglip_featurizer.get_intermediate_layers(
+                siglip_pixels, n={num_siglip_blocks - 2}
             )[0]
-            features = torch.cat([features, fused_features], dim=-1)
+            return torch.cat([dinov2_features, siglip_features], dim=-1)
 
-        return features
+        return dinov2_features
 
 
 class PrismaticProjector(nn.Module):
@@ -239,22 +276,25 @@ class OpenVLAProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
-        return _OPENVLA_NUM_IMAGE_TOKENS
+        image_size = self.get_hf_config().image_sizes[0]
+        return _get_num_image_tokens(image_size)
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(width=_OPENVLA_IMAGE_SIZE, height=_OPENVLA_IMAGE_SIZE)
+        image_size = self.get_hf_config().image_sizes[0]
+        return ImageSize(width=image_size, height=image_size)
 
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int] | None:
-        return {"image": _OPENVLA_NUM_IMAGE_TOKENS}
+        image_size = self.get_hf_config().image_sizes[0]
+        return {"image": _get_num_image_tokens(image_size)}
 
 
 class OpenVLADummyInputsBuilder(BaseDummyInputsBuilder[OpenVLAProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return ""
+        return _OPENVLA_IMAGE_PLACEHOLDER * mm_counts.get("image", 0)
 
     def get_dummy_mm_data(
         self,
@@ -264,11 +304,12 @@ class OpenVLADummyInputsBuilder(BaseDummyInputsBuilder[OpenVLAProcessingInfo]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_overrides = mm_options.get("image")
+        image_size = self.info.get_image_size_with_most_features()
 
         return {
             "image": self._get_dummy_images(
-                width=_OPENVLA_IMAGE_SIZE,
-                height=_OPENVLA_IMAGE_SIZE,
+                width=image_size.width,
+                height=image_size.height,
                 num_images=num_images,
                 overrides=image_overrides,
             )
@@ -329,8 +370,9 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
 
     def _preprocess_image(self, image: object) -> torch.Tensor:
         image = self._to_rgb_image(image)
+        image_size = self.info.get_hf_config().image_sizes[0]
         image = image.resize(
-            (_OPENVLA_IMAGE_SIZE, _OPENVLA_IMAGE_SIZE),
+            (image_size, image_size),
             Image.Resampling.BICUBIC,
         )
 
@@ -385,10 +427,7 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        tokenizer = self.info.get_tokenizer()
-        bos_token_id = tokenizer.bos_token_id
-
-        def get_insertion(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
@@ -408,12 +447,10 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
             )
 
         return [
-            PromptInsertion(
+            PromptReplacement(
                 modality="image",
-                target=PromptIndexTargets.prefix(
-                    [bos_token_id] if bos_token_id is not None else []
-                ),
-                insertion=get_insertion,
+                target=_OPENVLA_IMAGE_PLACEHOLDER,
+                replacement=get_replacement,
             )
         ]
 
@@ -431,7 +468,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
-            return None
+            return _OPENVLA_IMAGE_PLACEHOLDER
         raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -442,7 +479,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = vllm_config.model_config.multimodal_config
         self.image_token_id = config.image_token_index
         self.n_action_bins = config.n_action_bins
-        self.num_patches = _OPENVLA_NUM_IMAGE_TOKENS
+        self.num_patches = _get_num_image_tokens(config.image_sizes[0])
 
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_backbone = PrismaticVisionBackbone(
@@ -485,8 +522,8 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
             type="pixel_values",
             data=pixel_values,
             resolve_bindings={
-                "h": _OPENVLA_IMAGE_SIZE,
-                "w": _OPENVLA_IMAGE_SIZE,
+                "h": self.config.image_sizes[0],
+                "w": self.config.image_sizes[0],
             },
         )
 
@@ -494,8 +531,11 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         image_input: OpenVLAImagePixelInputs,
     ) -> torch.Tensor:
+        if self.vision_backbone.dinov2_featurizer is None:
+            raise RuntimeError("OpenVLA vision backbone is not initialized.")
+
         pixel_values = image_input["data"].to(
-            dtype=self.vision_backbone.get_input_dtype()
+            dtype=self.vision_backbone.dinov2_featurizer.patch_embed.proj.weight.dtype
         )
         vision_features = self.vision_backbone(pixel_values)
         return self.projector(vision_features)
@@ -544,13 +584,26 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         self.vision_backbone.init_timm_models()
 
-        def maybe_rename_layerscale(
+        def maybe_rename_vision_weights(
             weights: Iterable[tuple[str, torch.Tensor]],
         ) -> Iterable[tuple[str, torch.Tensor]]:
             for name, weight in weights:
+                if name.startswith("vision_backbone.featurizer."):
+                    name = name.replace(
+                        "vision_backbone.featurizer.",
+                        "vision_backbone.dinov2_featurizer.",
+                        1,
+                    )
+                elif name.startswith("vision_backbone.fused_featurizer."):
+                    name = name.replace(
+                        "vision_backbone.fused_featurizer.",
+                        "vision_backbone.siglip_featurizer.",
+                        1,
+                    )
+                # HF uses .scale_factor, timm uses .gamma
                 if ".ls1.scale_factor" in name or ".ls2.scale_factor" in name:
                     name = name.replace(".scale_factor", ".gamma")
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(maybe_rename_layerscale(weights))
+        return loader.load_weights(maybe_rename_vision_weights(weights))
