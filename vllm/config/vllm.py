@@ -1316,6 +1316,11 @@ class VllmConfig:
                     "the `reasoning_start_str` and `reasoning_end_str`."
                 )
 
+        # Handle the KV connector configs before evaluating HMA rules so that
+        # features like KV offloading (which populate kv_transfer_config
+        # automatically) are accounted for in the SupportsHMA check below.
+        self._post_init_kv_transfer_config()
+
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it
@@ -1352,7 +1357,10 @@ class VllmConfig:
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
             # Default to disable HMA, but only if the user didn't express a preference.
-            if self.kv_transfer_config is not None:
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.kv_connector is not None
+            ):
                 # Only auto-disable HMA when the configured connector does not
                 # advertise SupportsHMA. HMA-capable connectors (e.g.
                 # NixlConnector) should keep HMA on so hybrid models like
@@ -1365,16 +1373,10 @@ class VllmConfig:
                     supports_hma,
                 )
 
-                try:
-                    connector_cls = KVConnectorFactory.get_connector_class(
-                        self.kv_transfer_config
-                    )
-                    connector_supports_hma = supports_hma(connector_cls)
-                except Exception:
-                    # If the connector class can't be resolved at config-time
-                    # (e.g. external module not yet importable), fall back to
-                    # the conservative default of disabling HMA.
-                    connector_supports_hma = False
+                connector_cls = KVConnectorFactory.get_connector_class(
+                    self.kv_transfer_config
+                )
+                connector_supports_hma = supports_hma(connector_cls)
 
                 if not connector_supports_hma:
                     need_disable_hybrid_kv_cache_manager = True
@@ -1431,8 +1433,6 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
-        # Handle the KV connector configs
-        self._post_init_kv_transfer_config()
         self._verify_kv_transfer_compat()
 
         # Log the custom passes that are enabled
