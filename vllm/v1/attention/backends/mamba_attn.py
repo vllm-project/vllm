@@ -26,19 +26,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
-def _compute_block_idx_last_scheduled_prev_step(
-    num_computed_tokens: torch.Tensor,
-    prev_last_scheduled_idx: torch.Tensor,
-    mamba_block_size: int,
-) -> torch.Tensor:
-    fallback = torch.clamp((num_computed_tokens - 1) // mamba_block_size, min=0)
-    return torch.where(
-        prev_last_scheduled_idx >= 0,
-        prev_last_scheduled_idx,
-        fallback,
-    )
-
-
 @dataclass
 class BaseMambaAttentionMetadata:
     num_prefills: int
@@ -438,12 +425,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 common_attn_metadata, mamba_block_size
             )
             if self.use_spec_decode and prev_last_scheduled_idx is not None:
-                block_idx_last_scheduled_token_prev_step = (
-                    _compute_block_idx_last_scheduled_prev_step(
-                        num_computed_tokens,
-                        prev_last_scheduled_idx,
-                        mamba_block_size,
-                    )
+                fallback = torch.clamp(
+                    (num_computed_tokens - 1) // mamba_block_size, min=0
+                )
+                block_idx_last_scheduled_token_prev_step = torch.where(
+                    prev_last_scheduled_idx >= 0,
+                    prev_last_scheduled_idx,
+                    fallback,
                 )
         else:
             state_indices_tensor = mamba_get_block_table_tensor(

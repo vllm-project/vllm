@@ -20,7 +20,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
-    _compute_block_idx_last_scheduled_prev_step,
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
@@ -417,64 +416,3 @@ def test_block_idx_prev_step_cudagraph_capture_uses_persistent_buffer():
 
     # Tail values past num_decodes: zero-filled padding for cudagraph capture.
     assert torch.all(out.block_idx_last_scheduled_token_prev_step[num_decodes:] == 0)
-
-
-def test_prev_step_anchor_first_decode_after_prefill():
-    """First decode step after prefill: the previous step (prefill) stored
-    its terminal mamba state at block (num_computed - 1) // block_size.
-    The worker-side tracker has no entry for these requests, so we pass
-    -1 to indicate the fallback path."""
-    block_size = 16
-    num_computed = torch.tensor([100, 16, 64, 1], dtype=torch.int64)
-    prev_last_scheduled = torch.full((4,), -1, dtype=torch.int64)
-
-    result = _compute_block_idx_last_scheduled_prev_step(
-        num_computed, prev_last_scheduled, block_size
-    )
-
-    expected = torch.tensor([6, 0, 3, 0], dtype=torch.int64)
-    torch.testing.assert_close(result, expected)
-
-
-def test_prev_step_anchor_subsequent_decode_uses_tracker():
-    """For decode steps with a prior decode step, the worker-side tracker
-    holds the previous step's last_scheduled block index. The function must
-    use that value verbatim — even when last_computed (= (num_computed - 1)
-    // block_size) would give a different answer, which is exactly what
-    happens after partial draft acceptance straddles a block boundary."""
-    block_size = 16
-    # num_computed[N] = 16 means the last committed token is at position 15
-    # (block 0). Naive last_computed would be 0. But the tracker says the
-    # previous step ended with last_scheduled = 1 (because step N-1 had
-    # scheduled tokens up to position 17, in block 1; some drafts were
-    # rejected so only 2 tokens committed, leaving the committed tail in
-    # block 0). The tracker's value (1) is what we need.
-    num_computed = torch.tensor([16], dtype=torch.int64)
-    prev_last_scheduled = torch.tensor([1], dtype=torch.int64)
-
-    result = _compute_block_idx_last_scheduled_prev_step(
-        num_computed, prev_last_scheduled, block_size
-    )
-
-    expected = torch.tensor([1], dtype=torch.int64)
-    torch.testing.assert_close(result, expected)
-
-
-def test_prev_step_anchor_mixed_batch():
-    """Mixed batch: some requests are first-decode (tracker -1), others are
-    subsequent decode (tracker has a value). Each path resolves
-    independently."""
-    block_size = 16
-    num_computed = torch.tensor([16, 100, 16, 64], dtype=torch.int64)
-    # req 0: subsequent decode, tracker says block 1 (boundary-crossing case)
-    # req 1: first decode after prefill, fallback to last_computed = 6
-    # req 2: subsequent decode, tracker says block 0 (no boundary involvement)
-    # req 3: first decode, fallback to last_computed = 3
-    prev_last_scheduled = torch.tensor([1, -1, 0, -1], dtype=torch.int64)
-
-    result = _compute_block_idx_last_scheduled_prev_step(
-        num_computed, prev_last_scheduled, block_size
-    )
-
-    expected = torch.tensor([1, 6, 0, 3], dtype=torch.int64)
-    torch.testing.assert_close(result, expected)
