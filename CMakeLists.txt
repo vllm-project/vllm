@@ -13,8 +13,12 @@ cmake_minimum_required(VERSION 3.26)
 # cmake --install . --component _C
 project(vllm_extensions LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_HIP_STANDARD 20)
+set(CMAKE_HIP_STANDARD_REQUIRED ON)
 
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
@@ -104,6 +108,24 @@ elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
 else()
   set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.7;8.9;9.0")
 endif()
+
+#
+# spinloop extension (pure CXX; must stay above the non-CUDA device branch so
+# CPU builds define the target before the early return)
+#
+set(VLLM_SPINLOOP_EXT_SRC "csrc/spinloop.cpp")
+set(SPINLOOP_COMPILE_FLAGS "")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
+endif()
+define_extension_target(
+  spinloop
+  DESTINATION vllm
+  LANGUAGE CXX
+  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
+  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
+  USE_SABI 3.11
+  WITH_SOABI)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.

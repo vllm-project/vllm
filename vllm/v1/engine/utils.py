@@ -27,6 +27,7 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -154,15 +155,16 @@ class CoreEngineProcManager:
 
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                # Adjust device control in DP for platforms that cannot rely
+                # on torch.accelerator.set_device_index(), and for Ray launchers.
                 device_control_context: contextlib.AbstractContextManager[None] = (
                     contextlib.nullcontext()
                 )
+                needs_device_env_isolation = not (
+                    current_platform.is_cuda_alike() or current_platform.is_xpu()
+                )
                 if is_dp and (
-                    not current_platform.is_cuda_alike()
-                    or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
                 ):
                     device_control_context = set_device_control_env_var(
                         vllm_config, local_dp_rank
@@ -308,6 +310,18 @@ def get_device_indices(
     return value
 
 
+def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
+    # Ray actor names (RayExecutorV2) and KV-connector engine_ids must
+    # be unique across sibling DP engines or registration collides.
+    # Use the global DP rank, not a node-local rank, since sibling DP
+    # engines can span multiple nodes.
+    dp_vllm_config.instance_id = f"{dp_vllm_config.instance_id}_dp{dp_rank}"
+    if dp_vllm_config.kv_transfer_config is not None:
+        dp_vllm_config.kv_transfer_config.engine_id = (
+            f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
+        )
+
+
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -344,7 +358,10 @@ class CoreEngineActorManager:
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        env_vars_list = get_env_vars_to_copy(destination=actor_class.__name__)
+        env_vars_list = get_env_vars_to_copy(
+            destination=actor_class.__name__,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+        )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
@@ -404,19 +421,9 @@ class CoreEngineActorManager:
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
             if dp_size > 1:
-                # Append the DP rank to instance_id so that per-engine
-                # identifiers (e.g. Ray actor names in RayExecutorV2) are
-                # unique across DP replicas.
-                dp_vllm_config.instance_id = f"{dp_vllm_config.instance_id}_dp{index}"
+                _apply_dp_identity_suffix(dp_vllm_config, index)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
-
-            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
-                # that the kv_transfer_config is unique for each DP rank.
-                dp_vllm_config.kv_transfer_config.engine_id = (
-                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{local_index}"
-                )
 
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
@@ -789,6 +796,8 @@ class CoreEngineActorManager:
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
+            if new_data_parallel_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, rank)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
 
