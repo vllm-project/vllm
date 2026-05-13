@@ -627,7 +627,7 @@ def _make_scheduler_with_lookup(
     return scheduler
 
 
-_EMPTY_REQ_CTX = ReqContext()
+_EMPTY_REQ_CTX = ReqContext(req_id="")
 
 
 class TestMaximalPrefixLookup:
