@@ -95,6 +95,8 @@ def eager_break_during_capture(fn: F) -> F:
         capture = BreakableCUDAGraphCapture.current()
         if capture is None:
             return fn(*args, **kwargs)
+        if not capture._capturing:
+            return fn(*args, **kwargs)
         if is_forward_context_available():
             mode = get_forward_context().cudagraph_runtime_mode
             if mode == CUDAGraphMode.FULL:
