@@ -38,7 +38,8 @@ SUPPORTED_GROUP_SIZES = [32, 64, 128]
 MAX_SKINNY_BATCH_SIZE = 5
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 
-# AIESW-32176: shapes routed to the CK WMMA b_scale GEMM op (gfx1151 only).
+# AIESW-32176: shapes routed to the CK WMMA b_scale GEMM op (gfx1151 only),
+# now dispatched through aiter.ops.gemm_w4a16 instead of an in-tree _rocm_C op.
 # Each entry is keyed by (N, K, group_size, dtype) and maps to (min_M, KPerBlock).
 # Dispatch fires when M >= min_M for this layer — the kernel handles any M >= 1,
 # but min_M sets a lower bound below which fixed launch overhead (~0.4 ms) dominates
@@ -79,29 +80,39 @@ def _lookup_ck_target(
     return _CK_W4A16_TARGET_SHAPES.get((N, K, group_size, dtype))
 
 
-def _has_ck_w4a16_op() -> bool:
-    """True iff vllm was built with VLLM_CK_INCLUDE_DIR (i.e. the CK op is
-    registered in _rocm_C). Imported lazily so non-ROCm builds don't pay."""
+def _has_aiter_w4a16_op() -> bool:
+    """True iff aiter is importable AND exposes ops.gemm_w4a16. Used to gate
+    the CK W4A16 dispatch — we soft-import so non-aiter builds (or builds where
+    the op hasn't been added yet) fall back to Triton transparently. Mirrors
+    the find_spec("aiter") pattern in vllm/_aiter_ops.py.
+
+    AIESW-32176: this replaces the prior _has_ck_w4a16_op() / _has_ck_w4a16_zp_op()
+    pair which probed torch.ops._rocm_C for an in-tree CK kernel. The single
+    aiter op handles both symmetric and asymmetric (per-group zero point) routes
+    via its optional scaled_zp argument."""
+    from importlib.util import find_spec
+
+    if find_spec("aiter") is None:
+        return False
     try:
-        return hasattr(torch.ops._rocm_C, "ck_w4a16_b_scale_gemm")
-    except (AttributeError, RuntimeError):
+        import aiter
+
+        return hasattr(aiter, "ops") and hasattr(aiter.ops, "gemm_w4a16")
+    except Exception:
         return False
 
 
-def _has_ck_w4a16_zp_op() -> bool:
-    """True iff the asymmetric (with-zero-points) CK op is registered.
-    AIESW-32176 Phase 5b — separate from _has_ck_w4a16_op so older builds
-    of _rocm_C that only have the symmetric op still work."""
-    try:
-        return hasattr(torch.ops._rocm_C, "ck_w4a16_b_scale_zp_gemm")
-    except (AttributeError, RuntimeError):
-        return False
+# Cached at import time so the find_spec lookup isn't repeated in the hot path
+# and so torch.compile can treat the resulting branch as a Python constant.
+# vllm/_aiter_ops.py uses the same pattern for IS_AITER_FOUND.
+_HAS_AITER_W4A16_OP = _has_aiter_w4a16_op()
 
 
 def _ck_disabled() -> bool:
-    """Set VLLM_DISABLE_CK_W4A16=1 to bypass the CK dispatch and stay on Triton.
-    Used for A/B benchmarking the CK kernel against the Triton baseline without
-    rebuilding."""
+    """Set VLLM_DISABLE_CK_W4A16=1 to bypass the CK (aiter) dispatch and stay
+    on Triton. Used for A/B benchmarking the CK kernel against the Triton
+    baseline without rebuilding. Name kept (not VLLM_DISABLE_AITER_W4A16) to
+    match existing benchmark scripts and JIRA notes."""
     import os
 
     return os.environ.get("VLLM_DISABLE_CK_W4A16", "0").strip().lower() in (
@@ -491,9 +502,12 @@ def _hybrid_w4a16_apply_impl(
         with ctx:
             return ops.wvSplitK_int4_g(w_q, x_2d, w_s, cu_count, group_size, w_zp, bias)
 
-    # AIESW-32176: CK W4A16 b_scale path (sym or asym). Conditional is inside
-    # the custom op so it's opaque to dynamo and the runtime M check is a plain
-    # Python int compare against the per-layer min-M threshold.
+    # AIESW-32176: CK W4A16 b_scale path (sym or asym), now dispatched through
+    # aiter.ops.gemm_w4a16 — a single op covers both routes via its optional
+    # scaled_zp argument and the activation dtype of the caller-allocated
+    # output. Conditional is inside the custom op so it's opaque to dynamo and
+    # the runtime M check is a plain Python int compare against the per-layer
+    # min-M threshold. aiter convention is caller-allocates output.
     if w_q_ck is not None and ck_min_m > 0 and ck_min_m <= M:
         ctx = (
             nullcontext()
@@ -501,26 +515,38 @@ def _hybrid_w4a16_apply_impl(
             else torch.profiler.record_function(f"ck_w4a16 {M}x{N}x{K}")
         )
         with ctx:
+            output: torch.Tensor | None = None
             if w_zp is None:
-                output = torch.ops._rocm_C.ck_w4a16_b_scale_gemm(
+                # Symmetric (uint4b8 / GPTQ): no zero points.
+                import aiter  # soft-imported, gated by _HAS_AITER_W4A16_OP
+
+                output = torch.empty((M, N), dtype=x_2d.dtype, device=x_2d.device)
+                aiter.ops.gemm_w4a16(
                     x_2d,
                     w_q_ck,
                     w_s,
+                    output,
                     group_size,
+                    scaled_zp=None,
                 )
             elif w_scaled_zp_ck is not None:
-                output = torch.ops._rocm_C.ck_w4a16_b_scale_zp_gemm(
+                # Asymmetric (AWQ): scaled_zp = (zp - 8) * scale precomputed at
+                # load time and passed through. aiter dispatches the asymmetric
+                # CK kernel internally based on scaled_zp being non-None.
+                import aiter
+
+                output = torch.empty((M, N), dtype=x_2d.dtype, device=x_2d.device)
+                aiter.ops.gemm_w4a16(
                     x_2d,
                     w_q_ck,
                     w_s,
-                    w_scaled_zp_ck,
+                    output,
                     group_size,
+                    scaled_zp=w_scaled_zp_ck,
                 )
-            else:
-                # Asymmetric layer with zp present but scaled_zp not precomputed
-                # — fall through to Triton (shouldn't happen if load-time path
-                # is wired, but defensive).
-                output = None
+            # else: asymmetric layer with zp present but scaled_zp not
+            # precomputed — fall through to Triton (shouldn't happen if the
+            # load-time path is wired, but defensive).
             if output is not None:
                 if bias is not None:
                     output.add_(bias)
@@ -689,16 +715,14 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         # AIESW-32176: precompute CK b_scale layout if this layer's (N, K, group,
         # dtype) matches a registered CK target shape on gfx1151. Done once at
         # load time with regular Python ints (not SymInts), so the lookup is safe
-        # outside the dynamo trace. The CK kernel is symmetric-only; skip if zp.
-        if _has_ck_w4a16_op() and not _ck_disabled():
+        # outside the dynamo trace. aiter.ops.gemm_w4a16 covers both symmetric
+        # and asymmetric (per-group zero-point) paths via the same single op,
+        # so a single availability check (cached at module import) suffices.
+        if _HAS_AITER_W4A16_OP and not _ck_disabled():
             N = w_q_skinny_i32.shape[0]
             K = w_q_skinny_i32.shape[1] * 8
             target = _lookup_ck_target(N, K, c.group_size, c.act_type)
-            # Symmetric: just need _hybrid_w_q_ck. Asymmetric: also need
-            # _hybrid_w_scaled_zp_ck = (zp - 8) * scale [N, K/G] precomputed
-            # once, AND the asymmetric CK op must be present in this build.
-            asym_ok = (not c.zero_points) or _has_ck_w4a16_zp_op()
-            if target is not None and asym_ok:
+            if target is not None:
                 min_M, kperblock = target
                 w_q_ck = _repack_vllm_to_ck_b_scale(w_q_skinny_i32, kperblock)
                 layer.register_parameter(
