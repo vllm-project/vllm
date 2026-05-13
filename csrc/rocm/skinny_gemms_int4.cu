@@ -808,21 +808,32 @@ static int mindiv_int4(int N, int div1, int div2) {
 //   wptr, aptr, sptr, zpptr, biasptr, cptr, grid, stream, max_lds_len
 // Required type: fptype
 
-#define WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP)      \
-  {                                                                         \
-    dim3 block(_THRDS, 16);                                                 \
-    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, 16);                \
-    if (K_in * N_in <= max_lds_len && M_in % _YTILE == 0)                   \
-      wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, \
-                            _HAS_ZP><<<grid, block, 0, stream>>>(           \
-          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount);                                              \
-    else                                                                    \
-      wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, 16, 16, _UNRL, _N, _GS,     \
-                        _HAS_ZP><<<grid, block, 0, stream>>>(               \
-          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr, \
-          __wvPrGrp, CuCount);                                              \
+// Like WVSPLITK_INT4G_LAUNCH but the caller picks WvPrGrp and A_CHUNK.
+// The original macro hard-coded both to 16.  Lets a tuned dispatch
+// branch supply sweep-derived (W, AC) without losing template-instance
+// sharing with the default path.  Reproduce sweeps via
+// benchmarks/kernels/sweep_int4g_kernel.py (already exposes all 4 axes
+// through wvSplitK_int4g_sweep).
+#define WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,    \
+                                   _HAS_ZP)                                    \
+  {                                                                            \
+    dim3 block(_THRDS, _W);                                                    \
+    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, _W);                   \
+    if (K_in * N_in <= max_lds_len && M_in % _YTILE == 0)                      \
+      wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,   \
+                            _HAS_ZP><<<grid, block, 0, stream>>>(              \
+          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,    \
+          __wvPrGrp, CuCount);                                                 \
+    else                                                                       \
+      wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,       \
+                        _HAS_ZP><<<grid, block, 0, stream>>>(                  \
+          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,    \
+          __wvPrGrp, CuCount);                                                 \
   }
+
+// Backwards-compatible wrapper: existing call sites get WvPrGrp=16, AC=16.
+#define WVSPLITK_INT4G_LAUNCH(_THRDS, _YTILE, _UNRL, _N, _GS, _HAS_ZP) \
+  WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, 16, 16, _UNRL, _N, _GS, _HAS_ZP)
 
 #define WVSPLITK_INT4G(_YTILE, _UNRL, _N, _GS, _HAS_ZP)        \
   if (is_gfx1x_int4())                                         \
@@ -837,6 +848,19 @@ static int mindiv_int4(int N, int div1, int div2) {
     WVSPLITK_INT4G(_YTILE, _UNRL, _N, 64, _HAS_ZP)   \
   else                                               \
     WVSPLITK_INT4G(_YTILE, _UNRL, _N, 128, _HAS_ZP)
+
+// Like WVSPLIT_INT4G_GS but the caller also picks WvPrGrp and A_CHUNK.
+// Mirrors WVSPLIT_INT4G_GS's 3-way group_size demux so a tuned dispatch
+// branch can supply its (YT, UN, W, AC) tuple in one line without
+// re-implementing the group_size switch.  gfx11 only (THRDS=32 hard-
+// coded -- other arches fall through the default WVSPLIT_INT4G_GS path).
+#define WVSPLITK_INT4G_GS_W_AC(_YTILE, _UNRL, _W, _AC, _N, _HAS_ZP)         \
+  if (group_size == 32)                                                     \
+    WVSPLITK_INT4G_LAUNCH_W_AC(32, _YTILE, _W, _AC, _UNRL, _N, 32, _HAS_ZP) \
+  else if (group_size == 64)                                                \
+    WVSPLITK_INT4G_LAUNCH_W_AC(32, _YTILE, _W, _AC, _UNRL, _N, 64, _HAS_ZP) \
+  else                                                                      \
+    WVSPLITK_INT4G_LAUNCH_W_AC(32, _YTILE, _W, _AC, _UNRL, _N, 128, _HAS_ZP)
 
 #define WVSPLIT_INT4G_TILE(_sYT, __N, _HAS_ZP)                        \
   {                                                                   \
@@ -855,6 +879,17 @@ static int mindiv_int4(int N, int div1, int div2) {
       WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                            \
     else if (__N >= 2)                                                \
       WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                            \
+    else if (is_gfx1x_int4() && __N == 1 && K_in == 4096)             \
+      /* Tuned for gfx1151 (Qwen3.5 W4A16 decode: GDN out_proj at      \
+         M=2048, K=4096, N=1).  AC=32 doubles per-thread global load   \
+         granularity; the K=4096 row has enough work to amortize the   \
+         wider load.  W stays at 16 (vs 32 in the bf16 K=2048 branch)  \
+         because int4 dequant inflates VGPR pressure -- AC=32 + W=32   \
+         spills.  Lifts kernel ~70% -> ~84% of LPDDR5X peak post-      \
+         overhead.  K<=2048 already at ~87% by default and untouched.  \
+         Verify per shape with                                         \
+         benchmarks/kernels/sweep_int4g_kernel.py. */                  \
+      WVSPLITK_INT4G_GS_W_AC(1, 4, 16, 32, __N, _HAS_ZP)               \
     else /* N=1: YTILE=2 beats YTILE=1 across all CuCount values */   \
       WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                            \
   }

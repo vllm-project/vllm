@@ -52,6 +52,10 @@ SHAPES = [
     (11008, 4096, "LLaMA2-7B up/gate"),
     (22016, 4096, "LLaMA2-7B gate_up"),
     (4096, 11008, "LLaMA2-7B down"),
+    # Qwen3.5-35B-A3B (vocab=248320, hidden=2048, GDN out_proj = [hidden, V=4096]).
+    # M=2048,K=4096 is the shape the gfx11 dispatcher routes through the tuned
+    # (W=16, AC=32, YT=1, UN=4) branch added by this PR.
+    (2048, 4096, "Qwen3.5-35B-A3B GDN out_proj"),
 ]
 
 YTILES = [1, 2, 4]
