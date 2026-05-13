@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -30,13 +31,9 @@ def extract_from_kv_cache(
     slot_mapping: torch.Tensor,
     num_tokens: int,
 ) -> torch.Tensor:
-    """Extract data from KV cache
-    Assume the shape of the kv_cache is (num_pages, page_size, num_heads, head_size)
-    """
-
-    padded_kv = kv_cache.flatten(0, 1)[slot_mapping]
-    # shape: [len(slot_mapping), num_heads, head_size]
-    return padded_kv[:num_tokens]  # shape: [num_tokens, num_heads, head_size]
+    """Extract data from KV cache."""
+    block_size = kv_cache.shape[1]
+    return kv_cache[slot_mapping // block_size, slot_mapping % block_size][:num_tokens]
 
 
 @dataclass
@@ -47,8 +44,6 @@ class ReqMeta:
     filename: str
     # Request tokens
     token_ids: torch.Tensor
-    # Slot mappings, should have the same length as token_ids
-    slot_mapping: torch.Tensor
     # Whether this request is a new request or partially computed already
     new_req: bool
 
@@ -57,24 +52,12 @@ class ReqMeta:
         req_id: str,
         filename: str,
         token_ids: list[int],
-        block_ids: list[int],
-        block_size: int,
         new_req: bool,
     ) -> "ReqMeta":
-        token_ids_tensor = torch.tensor(token_ids)
-        block_ids_tensor = torch.tensor(block_ids)
-        num_blocks = block_ids_tensor.shape[0]
-        block_offsets = torch.arange(0, block_size)
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids_tensor.reshape((num_blocks, 1)) * block_size
-        )
-        slot_mapping = slot_mapping.flatten()
         return ReqMeta(
             req_id=req_id,
             filename=filename,
-            token_ids=token_ids_tensor,
-            slot_mapping=slot_mapping,
+            token_ids=torch.tensor(token_ids),
             new_req=new_req,
         )
 
@@ -88,18 +71,12 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
         req_id: str,
         filename: str,
         token_ids: list[int],
-        block_ids: list[int],
-        block_size: int,
         new_req: bool = True,
     ) -> None:
-        self.requests.append(
-            ReqMeta.make_meta(
-                req_id, filename, token_ids, block_ids, block_size, new_req
-            )
-        )
+        self.requests.append(ReqMeta.make_meta(req_id, filename, token_ids, new_req))
 
 
-class ExampleHiddenStatesConnector(KVConnectorBase_V1):
+class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     """
     Simple debug implementation of a HiddenStatesConnector.
 
@@ -206,9 +183,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         assert isinstance(connector_metadata, ExampleHiddenStatesConnectorMetadata)
 
         os.makedirs(self._storage_path, exist_ok=True)
+
+        slot_mapping = attn_metadata.slot_mapping
+        offset = 0
         for request in connector_metadata.requests:
+            num_tokens = request.token_ids.shape[0]
+            req_slot_mapping = slot_mapping[offset : offset + num_tokens]
+            offset += num_tokens
+
             hidden_states = extract_from_kv_cache(
-                kv_layer, request.slot_mapping, request.token_ids.shape[0]
+                kv_layer, req_slot_mapping, num_tokens
             )
             tensors = {
                 "hidden_states": hidden_states.detach().cpu(),
@@ -269,8 +253,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 new_req.req_id,
                 filename=filename,
                 token_ids=token_ids,
-                block_ids=new_req.block_ids[0],
-                block_size=self._block_size,
             )
             self._request_filenames[new_req.req_id] = filename
             self._active_requests[new_req.req_id] = new_req
@@ -298,8 +280,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 req_id=req_id,
                 filename=filename,
                 token_ids=cached_req.prompt_token_ids or [],
-                block_ids=req_block_ids,
-                block_size=self._block_size,
                 new_req=False,
             )
 
@@ -330,6 +310,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         _ = self._req_blocks.pop(req_id, None)
 
         return False, {"hidden_states_path": req_filename}
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return self.request_finished(request, block_ids[0])
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

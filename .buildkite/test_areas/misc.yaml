@@ -129,6 +129,19 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
+- label: Extract Hidden States Integration
+  key: extract-hidden-states-integration
+  timeout_in_minutes: 20
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/extract_hidden_states.py
+    - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/transformers_utils/configs/extract_hidden_states.py
+    - tests/v1/kv_connector/extract_hidden_states_integration
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+
 - label: Regression
   key: regression
   timeout_in_minutes: 20
