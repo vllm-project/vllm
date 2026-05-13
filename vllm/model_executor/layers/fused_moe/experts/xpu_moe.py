@@ -62,7 +62,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -70,6 +70,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.RELU2_NO_MUL,
         ]
 
     @staticmethod
