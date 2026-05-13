@@ -6,7 +6,7 @@ Run `pytest tests/quantization/test_modelopt.py`.
 """
 
 import os
-from typing import NoReturn
+from typing import Any, NoReturn
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -375,7 +375,7 @@ def test_modelopt_mixed_precision_dispatches_w4a16_layer(
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
 
-    hf_quant_config = {
+    hf_quant_config: dict[str, Any] = {
         "quantization": {
             "quant_algo": "MIXED_PRECISION",
             "kv_cache_quant_algo": None,
@@ -406,7 +406,7 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     """
     from vllm.model_executor.layers.quantization import modelopt as m
 
-    hf_quant_config = {
+    hf_quant_config: dict[str, Any] = {
         "quantization": {
             "quant_algo": "MIXED_PRECISION",
             "kv_cache_quant_algo": None,
@@ -423,7 +423,4 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     assert config.nvfp4_config.quant_method == "NVFP4"
     assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
-    assert (
-        config.w4a16_nvfp4_config.LinearMethodCls
-        is m.ModelOptNvFp4W4A16LinearMethod
-    )
+    assert config.w4a16_nvfp4_config.LinearMethodCls is m.ModelOptNvFp4W4A16LinearMethod
