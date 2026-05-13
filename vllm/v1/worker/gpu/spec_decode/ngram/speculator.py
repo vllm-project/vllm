@@ -46,34 +46,45 @@ class _NgramKernel(nn.Module):
         valid_mask: torch.Tensor,  # [B]   bool (row eligible for n-gram lookup)
         last_sampled: torch.Tensor,  # [B]   int64 (fallback for -1 positions)
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """For each row, find the longest n-gram suffix match in its context
+        and propose the next k tokens. Fully vectorized; no data-dependent
+        control flow so the kernel stays torch.compile / CUDA-graph friendly.
+        """
         B, L = token_ids.shape
         device = token_ids.device
 
+        # Phase 1: For each n in [min_n, max_n], find the right-most position
+        # of the length-n suffix inside each row (excluding the suffix itself).
+        # first_match_pos[b, i] = match position for n=min_n+i, or -1.
         first_match_pos = torch.full(
             (B, self.num_sizes), -1, dtype=torch.long, device=device
         )
         batch_idx = torch.arange(B, device=device)
 
         for i, n in enumerate(range(self.min_n, self.max_n + 1)):
+            # Sliding length-n windows; needle = length-n suffix of each row.
             windows = token_ids.unfold(1, n, 1)
             num_windows = windows.shape[1]
-
             suffix_start = (seq_lens.long() - n).clamp(min=0)
             offsets = torch.arange(n, device=device)
             suffix_idx = suffix_start.unsqueeze(1) + offsets
             suffix = torch.gather(token_ids, 1, suffix_idx)
-
             matches = (windows == suffix.unsqueeze(1)).all(dim=-1)
 
+            # Mask out windows that overlap (or live past) the suffix.
             max_valid_pos = seq_lens.long() - n - 1
             window_pos = torch.arange(num_windows, device=device)
             matches = matches & (window_pos.unsqueeze(0) <= max_valid_pos.unsqueeze(1))
 
+            # Right-most match via argmax on (pos if match else -1); re-check
+            # the chosen index to distinguish a real match from the fallback.
             matched_indices = torch.where(matches, window_pos.unsqueeze(0), -1)
             idx = matched_indices.argmax(dim=1)
             has_match = matches[batch_idx, idx]
             first_match_pos[:, i] = torch.where(has_match, idx, -1)
 
+        # Phase 2: Pick the largest n that produced a match (right-most True
+        # along the n-axis).
         best_i = (first_match_pos >= 0).int().flip(dims=[1]).argmax(dim=1)
         best_i = self.num_sizes - 1 - best_i
         best_pos = first_match_pos[batch_idx, best_i]
@@ -83,6 +94,8 @@ class _NgramKernel(nn.Module):
         best_n = ngram_lens_table[best_i]
         has_any = best_pos >= 0
 
+        # Phase 3: Gather the next k tokens after the match. No-match rows
+        # use draft_start=0 to keep indices in-bounds; they're masked below.
         draft_start = torch.where(
             has_any,
             best_pos + best_n,
@@ -92,15 +105,18 @@ class _NgramKernel(nn.Module):
         draft_idx = (draft_start.unsqueeze(1) + k_range).clamp_(0, L - 1)
         drafts = torch.gather(token_ids, 1, draft_idx).to(torch.int64)
 
+        # Phase 4: A slot j is valid iff the row has a match, valid_mask is
+        # True, and j < seq_len - draft_start (so we don't read past context).
+        # num_valid = length of the leading run of True values per row.
         tokens_available = (seq_lens.long() - draft_start).clamp_(min=0)
         valid_positions = k_range.unsqueeze(0) < tokens_available.unsqueeze(1)
         row_valid = has_any & valid_mask
         leading_valid_mask = valid_positions & row_valid.unsqueeze(1)
-
         cum_valid = leading_valid_mask.int().cumsum(dim=1)
         positions = torch.arange(1, self.k + 1, device=device)
         num_valid = (cum_valid == positions.unsqueeze(0)).int().sum(dim=1)
 
+        # Phase 5: Replace invalid slots with last_sampled.
         safe_drafts = torch.where(
             leading_valid_mask,
             drafts,
