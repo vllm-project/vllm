@@ -1243,9 +1243,9 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
         weight_scale_2  fp32      per-tensor global scale = amax / (6.0 * 448.0)
 
     No activation quantization. Marlin expects the global scale in the same
-    form ModelOpt stores (amax/2688), so we rename weight_scale_2 ->
-    weight_global_scale **without reciprocation** -- the CT W4A16 path
-    reciprocates only because CT stores the inverse on disk.
+    form ModelOpt stores (amax/2688). We still apply a reciprocal round trip
+    before renaming weight_scale_2 -> weight_global_scale so this path matches
+    CT W4A16's fp32 decode exactly.
 
     We also register a placeholder input_scale parameter so that W4A4-shaped
     checkpoints (which contain *_proj.input_scale tensors) can be loaded
@@ -1358,12 +1358,14 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
                 "Consider a checkpoint with a shared global scale."
             )
 
-        # Rename weight_scale_2 -> weight_global_scale. NO reciprocation:
-        # ModelOpt already stores amax/2688, which is exactly what Marlin
-        # consumes via nvfp4_marlin_process_global_scale (called inside the
-        # Marlin adapter's process_weights_after_loading).
+        # Match the CT W4A16 path, which stores this scale inverted on disk
+        # and decodes it as 1 / weight_global_scale before Marlin consumes it.
+        # The round trip keeps ModelOpt and CT bit-identical after fp32
+        # reciprocal rounding.
+        weight_scale_2 = layer.weight_scale_2.to(torch.float32)
         layer.weight_global_scale = Parameter(
-            layer.weight_scale_2.max().to(torch.float32), requires_grad=False
+            1.0 / (1.0 / weight_scale_2).max(),
+            requires_grad=False,
         )
         del layer.weight_scale_2
 
@@ -1554,6 +1556,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "Accuracy may be affected."
             )
         w13_weight_scale_2 = layer.w13_weight_scale_2[:, 0].contiguous()
+        w2_weight_scale_2 = layer.w2_weight_scale_2
+        if self.use_a16:
+            # Match CT's W4A16 reciprocal decode exactly; see the linear path.
+            w13_weight_scale_2 = 1.0 / (1.0 / w13_weight_scale_2.to(torch.float32))
+            w2_weight_scale_2 = 1.0 / (1.0 / w2_weight_scale_2.to(torch.float32))
 
         (
             w13,
@@ -1573,7 +1580,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
-            w2_scale_2=layer.w2_weight_scale_2,
+            w2_scale_2=w2_weight_scale_2,
             a2_scale=layer.w2_input_scale,
             is_act_and_mul=self.moe.is_act_and_mul,
         )
