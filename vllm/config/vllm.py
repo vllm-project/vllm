@@ -182,6 +182,46 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+_QK_NORM_MODEL_TYPES = frozenset(
+    {
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_next",
+    }
+)
+
+
+def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
+    """Enable fused QK-norm + RoPE + KV cache update for models with
+    QK-norm on ROCm with AITER.
+
+    Both ``+rotary_embedding`` and ``use_inductor_graph_partition`` are
+    auto-enabled by ``CompilationConfig.__post_init__`` when this flag is
+    True (the callable runs during optimization-level default
+    application, before ``__post_init__`` can set the dependent flags),
+    so we must not gate this on either of them here -- doing so creates
+    a chicken-and-egg dead-zone where the dependent flags can never get
+    set because the callable never returns True."""
+    from vllm._aiter_ops import (
+        check_aiter_fused_qk_norm_rope_cache,
+        rocm_aiter_ops,
+    )
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    if not check_aiter_fused_qk_norm_rope_cache():
+        return False
+    if cfg.model_config is None:
+        return False
+    hf_config = cfg.model_config.hf_text_config
+    has_qk_norm = getattr(hf_config, "qk_norm", False)
+    model_type = getattr(hf_config, "model_type", "")
+    return has_qk_norm or model_type in _QK_NORM_MODEL_TYPES
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
 
@@ -212,6 +252,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
             "fuse_rope_kvcache_cat_mla": False,
+            "fuse_qk_norm_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -233,6 +274,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
             "fuse_rope_kvcache_cat_mla": False,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -254,6 +296,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -275,6 +318,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -1193,6 +1237,16 @@ class VllmConfig:
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
+        if pass_config.fuse_qk_norm_rope_kvcache:
+            if "+rotary_embedding" not in self.compilation_config.custom_ops:
+                self.compilation_config.custom_ops.append("+rotary_embedding")
+            if not self.compilation_config.use_inductor_graph_partition:
+                self.compilation_config.use_inductor_graph_partition = True
+                logger.info(
+                    "Enabling use_inductor_graph_partition for "
+                    "fuse_qk_norm_rope_kvcache (requires "
+                    "unified_kv_cache_update in compiled graph)."
+                )
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
         if pass_config.enable_sp:
@@ -1885,6 +1939,21 @@ class VllmConfig:
                     logger.debug(
                         "Max num batched tokens below rope+kvcache fusion threshold, "
                         "rope+kvcache fusion enabled for num_tokens <= %d.",
+                        compile_range_end,
+                    )
+
+        if compilation_config.pass_config.fuse_qk_norm_rope_kvcache:
+            max_token_num = (
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            )
+            if max_token_num is not None:
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_endpoints.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below qk_norm+rope+kvcache fusion "
+                        "threshold, qk_norm+rope+kvcache fusion enabled for "
+                        "num_tokens <= %d.",
                         compile_range_end,
                     )
 
