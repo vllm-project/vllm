@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     xpu_mxfp4_quantize as quant_mxfp4,
@@ -13,7 +12,7 @@ from vllm.platforms import current_platform
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 
-class XPUMxfp4LinearKernel(MxFp4LinearKernel):
+class XPUMxFp4LinearKernel(MxFp4LinearKernel):
     """MXFP4 W4A4 GEMM on XPU."""
 
     @classmethod
@@ -29,11 +28,8 @@ class XPUMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = layer.weight_packed.view(torch.float4_e2m1fn_x2)
-        weight = weight.t()
-        # Rename CT checkpoint names to standardized names
-        layer.weight = Parameter(weight.data, requires_grad=False)
-        del layer.weight_packed
+        weight = layer.weight.view(torch.float4_e2m1fn_x2)
+        replace_parameter(layer, "weight", weight.data.t())
 
         weight_scale = layer.weight_scale.view(torch.float8_e8m0fnu)
         weight_scale = weight_scale.t().contiguous()
