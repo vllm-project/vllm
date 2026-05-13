@@ -3,9 +3,9 @@
 from abc import ABC, abstractmethod
 
 import tokenizers
-import tokenizers.decoders
 from packaging import version
 from tokenizers import Tokenizer
+from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
@@ -25,6 +25,41 @@ USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0
 
 # Error string from https://github.com/huggingface/tokenizers/blob/909fdde2a4ffedd9295206f705eb612be2a91b12/tokenizers/src/tokenizer/mod.rs#L1042
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
+
+
+# When ``tokenizer_mode=fastokens`` is active, ``fastokens.patch_transformers()``
+# replaces ``tokenizers.decoders.DecodeStream`` with a fastokens shim and wraps
+# the HuggingFace tokenizer in a ``_TokenizerShim`` that is not a
+# ``tokenizers.Tokenizer``. The fastokens decoder is strict about unknown token
+# IDs (it raises) while HF returns an empty string, which can crash streaming
+# generation on models whose embedding matrix exceeds ``tokenizer.json``'s
+# declared vocab (see https://github.com/crusoecloud/fastokens/issues/30).
+#
+# Mirror dynamo's encode-only approach: keep streaming detokenization on HF's
+# ``DecodeStream`` regardless of which encode backend is in use. Two pieces:
+# (1) use the locally-bound ``DecodeStream`` import above so fastokens'
+#     module-level patch does not reach this hot path;
+# (2) when the tokenizer is a fastokens shim, rebuild a real
+#     ``tokenizers.Tokenizer`` from the shim's JSON state for HF's
+#     ``DecodeStream.step`` to consume.
+_shim_to_hf_tokenizer: dict[int, Tokenizer] = {}
+
+
+def _to_hf_tokenizer(tokenizer_inner: object) -> Tokenizer:
+    """Return a ``tokenizers.Tokenizer`` for HF's ``DecodeStream``.
+
+    Most code paths already pass a real ``Tokenizer``; this helper exists for
+    the fastokens path where ``tokenizer._tokenizer`` is a ``_TokenizerShim``.
+    """
+    if type(tokenizer_inner).__name__ != "_TokenizerShim":
+        return tokenizer_inner  # type: ignore[return-value]
+    cached = _shim_to_hf_tokenizer.get(id(tokenizer_inner))
+    if cached is not None:
+        return cached
+    json_str = getattr(tokenizer_inner, "_json", None) or tokenizer_inner.to_str()
+    real_tok = Tokenizer.from_str(json_str)
+    _shim_to_hf_tokenizer[id(tokenizer_inner)] = real_tok
+    return real_tok
 
 
 class IncrementalDetokenizer:
@@ -174,13 +209,13 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.request_id = request.request_id
         self.skip_special_tokens = sampling_params.skip_special_tokens
 
-        self.tokenizer: Tokenizer = tokenizer._tokenizer
+        self.tokenizer: Tokenizer = _to_hf_tokenizer(tokenizer._tokenizer)
 
         # Use native prefill to prime the decode stream with prompt tokens.
-        # Look up DecodeStream on the module so backend patches (e.g. the
-        # fastokens shim that replaces ``tokenizers.decoders.DecodeStream``)
-        # are honored regardless of import order.
-        self.stream = tokenizers.decoders.DecodeStream(
+        # Use the locally-bound ``DecodeStream`` (HF's original) so fastokens'
+        # module-level patch of ``tokenizers.decoders.DecodeStream`` does not
+        # reach this hot path. See the comment block above ``_to_hf_tokenizer``.
+        self.stream = DecodeStream(
             ids=request.prompt_token_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
@@ -240,9 +275,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 " for request %s, resetting decode stream.",
                 self.request_id,
             )
-            self.stream = tokenizers.decoders.DecodeStream(
-                skip_special_tokens=self.skip_special_tokens
-            )
+            self.stream = DecodeStream(skip_special_tokens=self.skip_special_tokens)
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 
