@@ -46,6 +46,7 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 
 @dataclass
 class ReqContext:
+    req_id: str
     kv_transfer_params: dict[str, Any] | None = None
 
 
