@@ -213,7 +213,7 @@ class Sampler:
         )
 
         if use_flashinfer:
-            sampled = flashinfer_sample(processed_logits.contiguous(), top_k, top_p)
+            sampled = flashinfer_sample(processed_logits, top_k, top_p)
         else:
             sampled = gumbel_sample(
                 processed_logits,
