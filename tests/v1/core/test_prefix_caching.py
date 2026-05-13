@@ -2107,6 +2107,83 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
     assert block_stored_event.block_size == block_size
 
 
+def test_lora_block_hashes_include_adapter_path():
+    block_size = 16
+    prompt_token_ids = list(range(block_size * 2))
+
+    first_req = make_request(
+        "lora_req_1",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        lora_request=LoRARequest(
+            lora_name="shared_name",
+            lora_int_id=1,
+            lora_path="/path/to/adapter-a",
+        ),
+    )
+    second_req = make_request(
+        "lora_req_2",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        lora_request=LoRARequest(
+            lora_name="shared_name",
+            lora_int_id=1,
+            lora_path="/path/to/adapter-b",
+            load_inplace=True,
+        ),
+    )
+
+    assert first_req.block_hashes != second_req.block_hashes
+
+
+def test_lora_block_hashes_include_cache_key():
+    block_size = 16
+    prompt_token_ids = list(range(block_size * 2))
+
+    first_req = make_request(
+        "lora_req_1",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        lora_request=LoRARequest(
+            lora_name="shared_name",
+            lora_int_id=1,
+            lora_path="/path/to/adapter",
+            lora_cache_key="load-1",
+        ),
+    )
+    second_req = make_request(
+        "lora_req_2",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        lora_request=LoRARequest(
+            lora_name="shared_name",
+            lora_int_id=1,
+            lora_path="/path/to/adapter",
+            load_inplace=True,
+            lora_cache_key="load-2",
+        ),
+    )
+    same_req = make_request(
+        "lora_req_3",
+        prompt_token_ids,
+        block_size,
+        sha256,
+        lora_request=LoRARequest(
+            lora_name="shared_name",
+            lora_int_id=1,
+            lora_path="/path/to/adapter",
+            lora_cache_key="load-1",
+        ),
+    )
+
+    assert first_req.block_hashes != second_req.block_hashes
+    assert first_req.block_hashes == same_req.block_hashes
+
+
 @pytest.mark.parametrize("group_id", [0, 1, 2])
 def test_block_stored_event_group_idx(group_id: int):
     """Test BlockStored events emitted by cache_full_blocks carry the correct

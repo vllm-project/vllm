@@ -102,6 +102,7 @@ class OpenAIServingModels:
         self.static_lora_modules = lora_modules
         self.lora_requests: dict[str, LoRARequest] = {}
         self.lora_id_counter = AtomicCounter(0)
+        self.lora_cache_key_counter = AtomicCounter(0)
 
         self.lora_resolvers: list[LoRAResolver] = []
         for lora_resolver_name in LoRAResolverRegistry.get_supported_resolvers():
@@ -180,6 +181,7 @@ class OpenAIServingModels:
                 lora_path=lora_path,
                 load_inplace=request.load_inplace,
                 is_3d_lora_weight=request.is_3d_lora_weight,
+                lora_cache_key=str(self.lora_cache_key_counter.inc(1)),
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name

@@ -98,6 +98,29 @@ async def test_load_lora_adapter_duplicate():
 
 
 @pytest.mark.asyncio
+async def test_load_lora_adapter_inplace_reload_updates_cache_key():
+    serving_models = await _async_serving_models_init()
+    request = LoadLoRAAdapterRequest(
+        lora_name="adapter1", lora_path="/path/to/adapter1"
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    first_lora = serving_models.lora_requests["adapter1"]
+
+    request = LoadLoRAAdapterRequest(
+        lora_name="adapter1",
+        lora_path="/path/to/adapter2",
+        load_inplace=True,
+    )
+    response = await serving_models.load_lora_adapter(request)
+    assert response == LORA_LOADING_SUCCESS_MESSAGE.format(lora_name="adapter1")
+    second_lora = serving_models.lora_requests["adapter1"]
+
+    assert second_lora.lora_int_id == first_lora.lora_int_id
+    assert second_lora.lora_cache_key != first_lora.lora_cache_key
+
+
+@pytest.mark.asyncio
 async def test_unload_lora_adapter_success():
     serving_models = await _async_serving_models_init()
     request = LoadLoRAAdapterRequest(

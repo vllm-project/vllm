@@ -607,7 +607,17 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == ("test_lora_adapter",)
+    assert extra_keys == ("test_lora_adapter", 1, "/path/to/lora")
+
+    request.lora_request = LoRARequest(
+        lora_name="test_lora_adapter",
+        lora_int_id=1,
+        lora_path="/path/to/lora",
+        lora_cache_key="load-1",
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == ("test_lora_adapter", 1, "load-1")
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
