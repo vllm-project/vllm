@@ -703,8 +703,8 @@ class Scheduler(SchedulerInterface):
                 # head-of-line wedge where a WAITING request promoted from
                 # WAITING_FOR_REMOTE_KVS sits in front of a recv-done peer
                 # whose blocks would unblock it. Bounded to avoid pathological
-                # loops; in practice 0-1 retries.
-                MAX_LATERAL_PREEMPT_RETRIES = 16
+                # loops; in practice 1-2 pre-emption is enough.
+                MAX_LATERAL_PREEMPTS = 8
                 lateral_attempts = 0
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
@@ -720,7 +720,7 @@ class Scheduler(SchedulerInterface):
                     )
                     if new_blocks is not None:
                         break
-                    if lateral_attempts >= MAX_LATERAL_PREEMPT_RETRIES:
+                    if lateral_attempts >= MAX_LATERAL_PREEMPTS:
                         break
                     victim_pair = self._find_lateral_preempt_victim(
                         request, step_skipped_waiting
