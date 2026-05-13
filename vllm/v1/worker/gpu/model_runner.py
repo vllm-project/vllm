@@ -683,6 +683,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_cache.free_encoder_cache(mm_hash)
 
+    def update_pp_decode_requests(self):
+        # For non-last PP ranks, update decode requests with sampler output from
+        # the prior step in which they were scheduled (pp_size steps ago).
+        if self.pp_handler is not None:
+            outputs = self.pp_handler.get_prev_step_sampled_outputs()
+            if outputs is not None:
+                self.postprocess_sampled(**outputs.received_tensors)
+
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
             assert new_req_data.prompt_token_ids is not None
@@ -731,13 +739,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.sampler.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
-        # For non-last PP ranks, update decode requests with sampler output from
-        # the prior step in which they were scheduled (pp_size steps ago).
-        if self.pp_handler is not None:
-            outputs = self.pp_handler.get_prev_step_sampled_outputs()
-            if outputs is not None:
-                self.postprocess_sampled(**outputs.received_tensors)
-
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
@@ -1021,6 +1022,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
+            self.update_pp_decode_requests()
             self.finish_requests(scheduler_output)
             self.free_states(scheduler_output)
             self.add_requests(scheduler_output)
