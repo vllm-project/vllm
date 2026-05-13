@@ -59,8 +59,6 @@ class CachedRequestState:
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
 
-    mamba_last_scheduled_idx: int = -1
-
     # for pooling models
     pooling_params: PoolingParams | None = None
     pooling_states: PoolingStates | None = None
