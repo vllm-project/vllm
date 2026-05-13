@@ -83,11 +83,7 @@ def extract_harmony_streaming_delta(
     # This counts completed tool calls in messages
     base_index = 0
     for msg in harmony_parser.messages:
-        if (
-            (msg.channel == "commentary" or msg.channel == "analysis")
-            and msg.recipient
-            and is_function_recipient(msg.recipient)
-        ):
+        if msg.recipient and is_function_recipient(msg.recipient):
             base_index += 1
 
     # If there's an ongoing tool call from previous chunk,
@@ -105,11 +101,7 @@ def extract_harmony_streaming_delta(
         if group.channel == "final":
             combined_content += group.text
             content_encountered = True
-        elif (
-            (group.channel == "commentary" or group.channel == "analysis")
-            and group.recipient
-            and is_function_recipient(group.recipient)
-        ):
+        elif group.recipient and is_function_recipient(group.recipient):
             opened_new_call = False
             if prev_recipient != group.recipient:
                 # New tool call - emit the opening message

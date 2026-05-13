@@ -100,6 +100,17 @@ class TestIsFunctionRecipient:
     def test_empty_recipients_rejected(self, recipient):
         assert is_function_recipient(recipient) is False
 
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "<|start|>",
+            "<|end|>",
+            "<|channel|>",
+        ],
+    )
+    def test_harmony_tokens_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
 
 class TestIsFunctionRecipientWithAllowedNames:
     """Tests for is_function_recipient with allowed_function_tool_names."""

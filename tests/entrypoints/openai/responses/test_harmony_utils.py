@@ -246,7 +246,8 @@ class TestHarmonyToResponseOutput:
         message = message.with_channel("commentary")
         message = message.with_recipient("custom_tool")
 
-        output_items = harmony_to_response_output(message)
+        fn_names = frozenset({"other_tool"})
+        output_items = harmony_to_response_output(message, fn_names)
 
         assert len(output_items) == 1
         assert isinstance(output_items[0], McpCall)
@@ -393,13 +394,72 @@ class TestParserStateWithFunctionToolNames:
         assert items[0].name == "unknown_tool"
 
 
+class TestToolCallsOnNonStandardChannels:
+    """Tests verifying tool calls are detected regardless of channel."""
+
+    def test_function_call_on_comment_channel(self):
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"query": "weather"}')
+        message = message.with_channel("comment")
+        message = message.with_recipient("functions.get_weather")
+
+        output_items = harmony_to_response_output(message)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].type == "function_call"
+        assert output_items[0].name == "get_weather"
+
+    def test_bare_function_on_comment_channel(self):
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"query": "weather"}')
+        message = message.with_channel("comment")
+        message = message.with_recipient("get_weather")
+
+        fn_names = frozenset({"get_weather"})
+        output_items = harmony_to_response_output(message, fn_names)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].name == "get_weather"
+
+    def test_parser_state_comment_channel_function(self):
+        from unittest.mock import Mock
+
+        parser = Mock()
+        parser.current_content = '{"arg": "value"}'
+        parser.current_role = Role.ASSISTANT
+        parser.current_channel = "comment"
+        parser.current_recipient = "functions.get_weather"
+
+        items = parser_state_to_response_output(parser)
+
+        assert len(items) == 1
+        assert isinstance(items[0], ResponseFunctionToolCall)
+        assert items[0].name == "get_weather"
+
+    def test_parser_state_comment_channel_mcp(self):
+        from unittest.mock import Mock
+
+        parser = Mock()
+        parser.current_content = '{"arg": "value"}'
+        parser.current_role = Role.ASSISTANT
+        parser.current_channel = "comment"
+        parser.current_recipient = "mcp.server.tool"
+
+        fn_names: frozenset[str] = frozenset()
+        items = parser_state_to_response_output(parser, fn_names)
+
+        assert len(items) == 1
+        assert isinstance(items[0], McpCall)
+
+
 def test_parse_mcp_call_basic() -> None:
     """Test that MCP calls are parsed with correct type and server_label."""
     message = Message.from_role_and_content(Role.ASSISTANT, '{"path": "/tmp"}')
     message = message.with_recipient("filesystem")
     message = message.with_channel("commentary")
 
-    output_items = harmony_to_response_output(message)
+    fn_names: frozenset[str] = frozenset()
+    output_items = harmony_to_response_output(message, fn_names)
 
     assert len(output_items) == 1
     assert isinstance(output_items[0], McpCall)
@@ -416,7 +476,8 @@ def test_parse_mcp_call_dotted_recipient() -> None:
     message = message.with_recipient("repo_browser.list")
     message = message.with_channel("commentary")
 
-    output_items = harmony_to_response_output(message)
+    fn_names: frozenset[str] = frozenset()
+    output_items = harmony_to_response_output(message, fn_names)
 
     assert len(output_items) == 1
     assert isinstance(output_items[0], McpCall)
@@ -478,7 +539,8 @@ def test_parser_state_to_response_output_commentary_channel() -> None:
     parser_mcp.current_channel = "commentary"
     parser_mcp.current_recipient = "filesystem"
 
-    mcp_items = parser_state_to_response_output(parser_mcp)
+    fn_names: frozenset[str] = frozenset()
+    mcp_items = parser_state_to_response_output(parser_mcp, fn_names)
 
     assert len(mcp_items) == 1
     assert isinstance(mcp_items[0], McpCall)
@@ -545,7 +607,8 @@ def test_parser_state_to_response_output_analysis_channel() -> None:
     parser_mcp.current_channel = "analysis"
     parser_mcp.current_recipient = "database"
 
-    mcp_items = parser_state_to_response_output(parser_mcp)
+    fn_names: frozenset[str] = frozenset()
+    mcp_items = parser_state_to_response_output(parser_mcp, fn_names)
 
     assert len(mcp_items) == 1
     assert isinstance(mcp_items[0], McpCall)

@@ -54,14 +54,12 @@ class OpenAIToolParser(ToolParser):
 
         if len(parser.messages) > 0:
             for msg in parser.messages:
+                if msg.author.role != "assistant":
+                    continue
                 if len(msg.content) < 1:
                     continue
                 msg_text = msg.content[0].text
-                if (
-                    (msg.channel == "commentary" or msg.channel == "analysis")
-                    and msg.recipient
-                    and is_function_recipient(msg.recipient)
-                ):
+                if msg.recipient and is_function_recipient(msg.recipient):
                     # If no content-type is given assume JSON, as that's the
                     # most common case with gpt-oss models.
                     if not msg.content_type or "json" in msg.content_type:

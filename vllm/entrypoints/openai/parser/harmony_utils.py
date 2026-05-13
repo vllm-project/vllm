@@ -42,6 +42,8 @@ def is_function_recipient(
     """
     if not recipient:
         return False
+    if recipient.startswith("<|"):
+        return False
     if recipient.startswith("functions."):
         return len(recipient) > len("functions.")
     if recipient == "assistant":

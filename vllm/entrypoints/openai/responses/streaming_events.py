@@ -579,10 +579,7 @@ def emit_content_delta_events(
         return emit_text_delta_events(delta, state)
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
-    # built-in tools will be triggered on the analysis channel
-    # However, occasionally built-in tools will
-    # still be output to commentary.
-    elif channel in ("commentary", "analysis") and recipient is not None:
+    elif recipient is not None:
         fn_names = ctx.function_tool_names
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)

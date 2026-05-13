@@ -435,9 +435,7 @@ def harmony_to_response_output(
             output_items.append(_parse_browser_tool_call(message, recipient))
 
         # Function calls (with or without "functions." prefix)
-        elif message.channel in ("commentary", "analysis") and is_function_recipient(
-            recipient, function_tool_names
-        ):
+        elif is_function_recipient(recipient, function_tool_names):
             output_items.extend(_parse_function_call(message, recipient))
 
         # Built-in MCP tools (python, browser, container)
@@ -472,7 +470,7 @@ def parser_state_to_response_output(
     if current_recipient is not None and current_recipient.startswith("browser."):
         return []
 
-    if current_recipient and parser.current_channel in ("commentary", "analysis"):
+    if current_recipient:
         if is_function_recipient(current_recipient, function_tool_names):
             rid = random_uuid()
             return [
