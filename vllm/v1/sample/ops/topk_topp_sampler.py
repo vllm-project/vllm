@@ -19,14 +19,18 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+_FLASHINFER_MIN_VERSION = "0.2.3"
+
+
 def flashinfer_sampler_supported(logprobs_mode: LogprobsMode) -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
     Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
     is 0, when ``logprobs_mode`` requires the post-top-k/top-p logits/logprobs
-    (which FlashInfer doesn't expose), when the platform isn't CUDA, or when the
-    GPU's compute capability is unsupported. Raises ``RuntimeError`` if the
-    user explicitly opted in via the env var on unsupported hardware.
+    (which FlashInfer doesn't expose), when the platform isn't CUDA, when the
+    GPU's compute capability is unsupported, or when the installed flashinfer
+    is missing or too old. Raises ``RuntimeError`` if the user explicitly opted
+    in via the env var but FlashInfer is unavailable.
     """
     if logprobs_mode in ("processed_logits", "processed_logprobs"):
         return False
@@ -42,18 +46,37 @@ def flashinfer_sampler_supported(logprobs_mode: LogprobsMode) -> bool:
 
     capability = current_platform.get_device_capability()
     assert capability is not None
-    if FlashInferBackend.supports_compute_capability(capability):
+    unsupported_reason: str | None = None
+    if not FlashInferBackend.supports_compute_capability(capability):
+        unsupported_reason = (
+            f"unsupported compute capability {capability.as_version_str()}"
+        )
+    else:
+        try:
+            import flashinfer
+
+            if version.parse(flashinfer.__version__) < version.parse(
+                _FLASHINFER_MIN_VERSION
+            ):
+                unsupported_reason = (
+                    f"flashinfer {flashinfer.__version__} is too old "
+                    f"(>={_FLASHINFER_MIN_VERSION} required)"
+                )
+        except ImportError:
+            unsupported_reason = "flashinfer is not installed"
+
+    if unsupported_reason is None:
         logger.info_once("Using FlashInfer for top-p & top-k sampling.", scope="global")
         return True
     if envs.is_set("VLLM_USE_FLASHINFER_SAMPLER"):
         raise RuntimeError(
-            "FlashInfer does not support compute capability "
-            f"{capability.as_version_str()}, unset VLLM_USE_FLASHINFER_SAMPLER=1."
+            f"FlashInfer top-p/top-k sampling unavailable: {unsupported_reason}. "
+            "Unset VLLM_USE_FLASHINFER_SAMPLER=1."
         )
     logger.warning_once(
-        "FlashInfer top-p/top-k sampling not supported on compute capability "
-        "%s; falling back. Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence.",
-        capability.as_version_str(),
+        "FlashInfer top-p/top-k sampling unavailable: %s; falling back. "
+        "Set VLLM_USE_FLASHINFER_SAMPLER=0 to silence.",
+        unsupported_reason,
     )
     return False
 
@@ -430,11 +453,6 @@ def flashinfer_sample(
     statistically equivalent.
     """
     import flashinfer
-
-    if version.parse(flashinfer.__version__) < version.parse("0.2.3"):
-        raise ImportError(
-            "FlashInfer version >= 0.2.3 required for top-k and top-p sampling. "
-        )
 
     assert not (k is None and p is None)
     if k is None:
