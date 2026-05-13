@@ -185,21 +185,37 @@ class FlashInferSSUBackend(MambaSSUBackend):
 
 
 class CPUSSUBackend(MambaSSUBackend):
-    """Pure-PyTorch CPU SSU backend.
+    """CPU SSU backend using the compiled C++ VSX/scalar kernel.
 
-    Used on CPU-only platforms (PowerPC, x86 without CUDA, etc.) where
-    Triton JIT is unavailable or unstable.  Delegates to the pure-PyTorch
-    reference implementation in cpu_fallbacks.py which is numerically
-    equivalent to the Triton path.
+    On CPU-only platforms (PowerPC, x86 without CUDA) this dispatches to
+    the vectorized C++ kernel registered as ``torch.ops._C.selective_state_update_cpu``.
+    That kernel uses vec_op SIMD intrinsics (VSX on ppc64le, AVX2 on x86,
+    scalar fallback elsewhere) and is parallelised with OpenMP across heads.
+
+    Falls back to the pure-PyTorch implementation only if the C++ op is
+    unavailable (e.g. a CPU-less build).
     """
 
     def __init__(self, mamba_config: MambaConfig):
         super().__init__(mamba_config)
-        from vllm.model_executor.layers.mamba.ops.cpu_fallbacks import (
-            _selective_state_update_cpu,
-        )
+        try:
+            from vllm import _custom_ops as ops
 
-        self._kernel = _selective_state_update_cpu
+            # Verify the op is actually registered (CPU build required)
+            _ = ops.selective_state_update_cpu
+            self._use_cpp = True
+            self._cpp_kernel = ops.selective_state_update_cpu
+            logger.info("CPUSSUBackend: using compiled C++ selective_state_update kernel.")
+        except (ImportError, AttributeError):
+            from vllm.model_executor.layers.mamba.ops.cpu_fallbacks import (
+                _selective_state_update_cpu,
+            )
+            self._use_cpp = False
+            self._py_kernel = _selective_state_update_cpu
+            logger.warning(
+                "CPUSSUBackend: C++ selective_state_update op not available, "
+                "falling back to pure-PyTorch (slow). Rebuild with CPU extensions."
+            )
 
     @property
     def name(self) -> str:
@@ -225,24 +241,46 @@ class CPUSSUBackend(MambaSSUBackend):
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
     ) -> None:
-        self._kernel(
-            state,
-            x,
-            dt,
-            A,
-            B,
-            C,
-            D=D,
-            z=z,
-            dt_bias=dt_bias,
-            dt_softplus=dt_softplus,
-            state_batch_indices=state_batch_indices,
-            dst_state_batch_indices=dst_state_batch_indices,
-            null_block_id=null_block_id,
-            out=out,
-            num_accepted_tokens=num_accepted_tokens,
-            cu_seqlens=cu_seqlens,
-        )
+        if self._use_cpp:
+            # C++ kernel: state shape expected as (nstates, nheads, dim, dstate)
+            # The kernel writes in-place into `out` and updates `state`.
+            self._cpp_kernel(
+                state,
+                x,
+                dt,
+                A,
+                B,
+                C,
+                D,
+                z,
+                dt_bias,
+                dt_softplus,
+                state_batch_indices,
+                dst_state_batch_indices,
+                null_block_id,
+                out,
+                num_accepted_tokens,
+                cu_seqlens,
+            )
+        else:
+            self._py_kernel(
+                state,
+                x,
+                dt,
+                A,
+                B,
+                C,
+                D=D,
+                z=z,
+                dt_bias=dt_bias,
+                dt_softplus=dt_softplus,
+                state_batch_indices=state_batch_indices,
+                dst_state_batch_indices=dst_state_batch_indices,
+                null_block_id=null_block_id,
+                out=out,
+                num_accepted_tokens=num_accepted_tokens,
+                cu_seqlens=cu_seqlens,
+            )
 
 
 _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {

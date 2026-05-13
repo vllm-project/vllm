@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
-#include <iostream>
 #include <algorithm>
 
 namespace mamba_cpu {
@@ -25,7 +24,7 @@ inline void causal_conv1d_update_kernel(
     float* __restrict__ out_ptr, const int32_t* __restrict__ cache_idxs,
     int32_t pad_slot_id, int64_t batch, int64_t dim, int64_t seqlen,
     int64_t width, int64_t state_len, bool do_silu) {
-    
+
 #pragma omp parallel for
   for (int64_t b = 0; b < batch; ++b) {
     int64_t cache_idx = (cache_idxs != nullptr) ? cache_idxs[b] : b;
@@ -42,7 +41,7 @@ inline void causal_conv1d_update_kernel(
 
         const float* w = weight_ptr + d * width;
         float acc = (bias_ptr != nullptr) ? bias_ptr[d] : 0.0f;
-        
+
         for (int64_t k = 0; k < state_len; ++k) {
           acc += w[k] * sd[k];
         }
@@ -56,8 +55,8 @@ inline void causal_conv1d_update_kernel(
         }
 
         if (do_silu) {
-            float sigmoid = (acc >= 0) ? 
-                1.0f / (1.0f + std::exp(-acc)) : 
+            float sigmoid = (acc >= 0) ?
+                1.0f / (1.0f + std::exp(-acc)) :
                 std::exp(acc) / (1.0f + std::exp(acc));
             acc *= sigmoid;
         }
@@ -69,27 +68,48 @@ inline void causal_conv1d_update_kernel(
 
 // ---------------------------------------------------------------------------
 // selective_state_update
+//
+// Template parameters:
+//   state_t  - dtype of ssm_state cache (typically BFloat16)
+//   input_t  - dtype of x, B, C (typically BFloat16)
+//   out_t    - dtype of output tensor (typically BFloat16)
+//              Write directly — no float32 intermediate buffer needed.
+//
+// A, D, dt_bias are accepted as const float* (they are always float32
+// model parameters in Mamba2).  This eliminates the per-call float32→BF16
+// conversion and the .contiguous() materialisation of the broadcast-expand.
+//
+// dt is accepted as a (N, nheads) scalar-per-head tensor, not as the
+// (N, nheads, head_dim) expansion, so no .contiguous() copy is needed.
 // ---------------------------------------------------------------------------
-template <typename state_t, typename input_t>
+template <typename state_t, typename input_t, typename out_t = float>
 inline void selective_state_update_kernel(
     state_t* __restrict__ state_ptr,
     int64_t stride_state_n, int64_t stride_state_h, int64_t stride_state_d,
-    const input_t* __restrict__ x_ptr, const input_t* __restrict__ dt_ptr,
-    int64_t stride_xdt_n, int64_t stride_xdt_h,
-    const input_t* __restrict__ A_ptr, int64_t stride_A_h,
+    const input_t* __restrict__ x_ptr,
+    int64_t stride_x_n, int64_t stride_x_h,
+    // dt: (N, nheads) — scalar per head, NOT expanded to head_dim
+    const float* __restrict__ dt_ptr,
+    int64_t stride_dt_n,
+    // A: (nheads,) float32 — scalar per head
+    const float* __restrict__ A_ptr,
     const input_t* __restrict__ B_ptr, const input_t* __restrict__ C_ptr,
     int64_t stride_BC_n, int64_t stride_BC_g,
-    const input_t* __restrict__ D_ptr, int64_t stride_D_h,
+    // D: (nheads,) float32 — scalar per head (nullptr if not used)
+    const float* __restrict__ D_ptr,
+    // z: same shape as x (optional)
     const input_t* __restrict__ z_ptr,
-    const input_t* __restrict__ dt_bias_ptr, int64_t stride_dtbias_h,
-    float* __restrict__ out_ptr, int64_t stride_out_n, int64_t stride_out_h,
+    // dt_bias: (nheads,) float32 — scalar per head (nullptr if not used)
+    const float* __restrict__ dt_bias_ptr,
+    out_t* __restrict__ out_ptr,
+    int64_t stride_out_n, int64_t stride_out_h,
     const int32_t* __restrict__ state_batch_indices,
     const int32_t* __restrict__ dst_state_batch_indices, int32_t null_block_id,
     const int32_t* __restrict__ num_accepted_tokens,
     const int32_t* __restrict__ cu_seqlens,
     int64_t N, int64_t nheads, int64_t ngroups, int64_t dim, int64_t dstate,
     bool dt_softplus) {
-  
+
   using state_vec_t = vec_op::vec_t<state_t>;
   using input_vec_t = vec_op::vec_t<input_t>;
   constexpr int VEC_ELEM_NUM = 8;
@@ -106,84 +126,96 @@ inline void selective_state_update_kernel(
       seq_len = 1;
     }
 
-    int64_t state_read_idx = (state_batch_indices != nullptr) ? 
+    int64_t state_read_idx = (state_batch_indices != nullptr) ?
         state_batch_indices[seq_idx] : seq_idx;
     if (state_read_idx == null_block_id) continue;
 
-    int64_t state_write_idx = (num_accepted_tokens == nullptr) ? 
-        ((dst_state_batch_indices != nullptr) ? dst_state_batch_indices[seq_idx] : state_read_idx) : -1;
+    int64_t state_write_idx = (num_accepted_tokens == nullptr) ?
+        ((dst_state_batch_indices != nullptr) ?
+             dst_state_batch_indices[seq_idx] : state_read_idx) : -1;
 
     state_t* s = state_ptr + state_read_idx * stride_state_n;
 
     for (int64_t t = 0; t < seq_len; ++t) {
       int64_t token_idx = bos + t;
-      const input_t* x_tok = x_ptr + token_idx * stride_xdt_n;
-      const input_t* dt_tok = dt_ptr + token_idx * stride_xdt_n;
+      const input_t* x_tok = x_ptr + token_idx * stride_x_n;
+      // dt: (N, nheads) — one float per head per token
+      const float* dt_tok = dt_ptr + token_idx * stride_dt_n;
       const input_t* B_tok = B_ptr + token_idx * stride_BC_n;
       const input_t* C_tok = C_ptr + token_idx * stride_BC_n;
-      float* out_tok = out_ptr + token_idx * stride_out_n;
+      out_t* out_tok = out_ptr + token_idx * stride_out_n;
 
 #pragma omp parallel for
       for (int64_t h = 0; h < nheads; ++h) {
         int64_t g = h / nheads_per_group;
-        const input_t* x_h = x_tok + h * stride_xdt_h;
-        const input_t* dt_h = dt_tok + h * stride_xdt_h;
+        const input_t* x_h = x_tok + h * stride_x_h;
         const input_t* B_g = B_tok + g * stride_BC_g;
         const input_t* C_g = C_tok + g * stride_BC_g;
-        const input_t* A_h = A_ptr + h * stride_A_h;
-        const input_t* dt_bias_h = (dt_bias_ptr != nullptr) ? dt_bias_ptr + h * stride_dtbias_h : nullptr;
-        const input_t* D_h = (D_ptr != nullptr) ? D_ptr + h * stride_D_h : nullptr;
-        const input_t* z_h = (z_ptr != nullptr) ? z_ptr + token_idx * stride_xdt_n + h * stride_xdt_h : nullptr;
-        float* out_h = out_tok + h * stride_out_h;
+        out_t* out_h = out_tok + h * stride_out_h;
         state_t* s_h = s + h * stride_state_h;
+
+        // Read scalars-per-head (A, dt, dt_bias, D) — no per-dim indexing
+        float dt_val = dt_tok[h];
+        if (dt_bias_ptr != nullptr) dt_val += dt_bias_ptr[h];
+        if (dt_softplus) {
+          dt_val = (dt_val <= 20.0f) ? std::log1p(std::exp(dt_val)) : dt_val;
+        }
+        const float A_val = A_ptr[h];   // scalar: same for all dim, dstate
+        const float D_val = (D_ptr != nullptr) ? D_ptr[h] : 0.0f;
+
+        const input_t* z_h = (z_ptr != nullptr) ?
+            z_ptr + token_idx * stride_x_n + h * stride_x_h : nullptr;
+
+        vec_op::FP32Vec8 dt_vec(dt_val);
+        // dA = exp(A * dt): A and dt are SCALARS per head, so compute once
+        // and broadcast.  This saves 7 redundant std::exp() calls that
+        // FP32Vec8::exp() would otherwise make on the broadcast vector.
+        const float dA_scalar = std::exp(A_val * dt_val);
+        vec_op::FP32Vec8 dA(dA_scalar);  // broadcast
 
         for (int64_t d = 0; d < dim; ++d) {
           float x_val = static_cast<float>(x_h[d]);
-          float dt_val = static_cast<float>(dt_h[d]);
-          if (dt_bias_h != nullptr) dt_val += static_cast<float>(dt_bias_h[d]);
-          if (dt_softplus) {
-            dt_val = (dt_val <= 20.0f) ? std::log1p(std::exp(dt_val)) : dt_val;
-          }
 
           vec_op::FP32Vec8 out_vec(0.0f);
           state_t* s_hd = s_h + d * stride_state_d;
-          const input_t* A_hd = A_h + d * dstate;
-          
+          const input_t* B_g_base = B_g;
+          const input_t* C_g_base = C_g;
+
           vec_op::FP32Vec8 x_vec(x_val);
-          vec_op::FP32Vec8 dt_vec(dt_val);
+          // dBx = B * x * dt — same dA for all dstate (A is scalar)
+          // s_new = s * dA + B * x * dt
 
           int64_t n = 0;
           for (; n <= dstate - VEC_ELEM_NUM; n += VEC_ELEM_NUM) {
-            vec_op::FP32Vec8 A_v((input_vec_t(A_hd + n)));
-            vec_op::FP32Vec8 B_v((input_vec_t(B_g + n)));
-            vec_op::FP32Vec8 C_v((input_vec_t(C_g + n)));
-            
+            vec_op::FP32Vec8 B_v((input_vec_t(B_g_base + n)));
+            vec_op::FP32Vec8 C_v((input_vec_t(C_g_base + n)));
             vec_op::FP32Vec8 s_v((state_vec_t(s_hd + n)));
-            
-            vec_op::FP32Vec8 dA = (A_v * dt_vec).exp();
+
             vec_op::FP32Vec8 dBx = B_v * x_vec * dt_vec;
             vec_op::FP32Vec8 s_new = s_v * dA + dBx;
-            
+
             state_vec_t(s_new).save(s_hd + n);
             out_vec = out_vec + s_new * C_v;
           }
-          
+
           float out_val = out_vec.reduce_sum();
           for (; n < dstate; ++n) {
-            float dA = std::exp(static_cast<float>(A_hd[n]) * dt_val);
+            // Reuse dA_scalar computed once per head — no exp() re-call
             float dBx = static_cast<float>(B_g[n]) * x_val * dt_val;
-            float s_new = static_cast<float>(s_hd[n]) * dA + dBx;
+            float s_new = static_cast<float>(s_hd[n]) * dA_scalar + dBx;
             s_hd[n] = static_cast<state_t>(s_new);
             out_val += s_new * static_cast<float>(C_g[n]);
           }
 
-          if (D_h != nullptr) out_val += x_val * static_cast<float>(D_h[d]);
+          if (D_ptr != nullptr) out_val += x_val * D_val;
           if (z_h != nullptr) {
             float z_val = static_cast<float>(z_h[d]);
-            float sigmoid = (z_val >= 0) ? 1.0f / (1.0f + std::exp(-z_val)) : std::exp(z_val) / (1.0f + std::exp(z_val));
+            float sigmoid = (z_val >= 0) ?
+                1.0f / (1.0f + std::exp(-z_val)) :
+                std::exp(z_val) / (1.0f + std::exp(z_val));
             out_val *= z_val * sigmoid;
           }
-          out_h[d] = out_val;
+          out_h[d] = static_cast<out_t>(out_val);
         }
       }
 
@@ -196,7 +228,8 @@ inline void selective_state_update_kernel(
       }
     }
 
-    if (num_accepted_tokens == nullptr && state_write_idx != null_block_id && state_write_idx != state_read_idx) {
+    if (num_accepted_tokens == nullptr && state_write_idx != null_block_id &&
+        state_write_idx != state_read_idx) {
       state_t* dst_s = state_ptr + state_write_idx * stride_state_n;
       std::memmove(dst_s, s, nheads * stride_state_h * sizeof(state_t));
     }
@@ -204,3 +237,4 @@ inline void selective_state_update_kernel(
 }
 
 } // namespace mamba_cpu
+
