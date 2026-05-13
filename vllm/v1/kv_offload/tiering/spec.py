@@ -26,8 +26,7 @@ Example configuration:
         {
             "type": "example",
             # Tier-specific parameters (for ExampleSecondaryTier):
-            "max_blocks": 10000,
-            "simulate_async": False
+            "max_blocks": 10000
         }
     ]
 }

@@ -128,41 +128,6 @@ class TestExampleSecondaryTier:
         assert blocks[0] in tier.blocks
         assert blocks[2] in tier.blocks
 
-    def test_async_simulation(self):
-        """Test simulated async behavior."""
-        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
-        tier = ExampleSecondaryTier(
-            vllm_config=_MOCK_VLLM_CONFIG,
-            primary_kv_view=mock_view,
-            max_blocks=10,
-            simulate_async=True,
-        )
-
-        blocks = to_keys(range(2))
-
-        # Submit store job
-        tier.submit_store(
-            JobMetadata(
-                job_id=1,
-                keys=blocks,
-                block_ids=np.array([0, 1], dtype=np.int64),
-                is_promotion=False,
-                req_context=_CTX,
-            )
-        )
-
-        # Blocks should not yet be stored (pending async completion)
-        assert tier.get_num_blocks() == 0
-
-        # First get_finished() should complete the job
-        completed = list(tier.get_finished())
-        assert len(completed) == 1
-        assert completed[0].job_id == 1
-        assert completed[0].success is True
-
-        # Blocks should now be stored
-        assert tier.get_num_blocks() == 2
-
 
 class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
@@ -406,13 +371,11 @@ class TestTieringOffloadingManager:
             vllm_config=_MOCK_VLLM_CONFIG,
             primary_kv_view=mock_view,
             max_blocks=5,
-            simulate_async=False,
         )
         large_tier = ExampleSecondaryTier(
             vllm_config=_MOCK_VLLM_CONFIG,
             primary_kv_view=mock_view,
             max_blocks=10,
-            simulate_async=False,
         )
 
         # Create a fresh primary tier for this test
