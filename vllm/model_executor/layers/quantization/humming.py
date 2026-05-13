@@ -7,15 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
-from humming.dtypes import DataType
-from humming.layer import HummingMethod
-from humming.schema import (
-    BaseInputSchema,
-    BaseWeightSchema,
-    HummingInputSchema,
-    HummingWeightSchema,
-)
-from humming.utils.weight import quantize_weight
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import (
@@ -58,8 +49,27 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+
+if current_platform.is_cuda():
+    from humming.dtypes import DataType
+    from humming.layer import HummingMethod
+    from humming.schema import (
+        BaseInputSchema,
+        BaseWeightSchema,
+        HummingInputSchema,
+        HummingWeightSchema,
+    )
+    from humming.utils.weight import quantize_weight
 
 if TYPE_CHECKING:
+    from humming.schema import (
+        BaseInputSchema,
+        BaseWeightSchema,
+        HummingInputSchema,
+        HummingWeightSchema,
+    )
+
     from vllm.model_executor.models.utils import WeightsMapper
 
 
