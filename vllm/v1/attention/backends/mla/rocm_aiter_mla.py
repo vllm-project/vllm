@@ -882,13 +882,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
-        # FP8 MLA prefill: Q, K, V → mla_prefill_ps_asm_fwd + mla_reduce_v1
+        # FP8 MLA prefill: Q, K, V → mla_prefill_ps_asm_fwd + mla_reduce_v1.
+        # _mla_fp8_prefill_attn returns [total_q, num_heads, v_head_dim],
+        # which already matches v.shape[-1] (both come from self.v_head_dim),
+        # so no v_head_dim trimming is needed here.
         output_prefill = self._mla_fp8_prefill_attn(q, k, v, attn_metadata)
-
-        # Handle v_head_dim padding if present.
-        if self._pad_v:
-            output_prefill = output_prefill[..., : v.shape[-1]]
-
         output.copy_(output_prefill.flatten(start_dim=-2))
 
     def forward_mqa(
