@@ -561,8 +561,9 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             quant_config.use_mxfp4_w4a16
             or quant_config.use_nvfp4_w4a16
             or quant_config.use_int4_w4a16
+            or quant_config.use_int8_w8a16
             or quant_config.use_fp8_w8a16
-        ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
+        ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16, or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
         self.w2_g_idx = w2_g_idx
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
@@ -635,6 +636,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             return scalar_types.uint4b8.id
         elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
             return scalar_types.float4_e2m1f.id
+        elif self.quant_config.use_int8_w8a16:
+            return scalar_types.uint8b128.id
         elif (
             self.quant_config.use_fp8_w8a16
             and current_platform.fp8_dtype() == torch.float8_e4m3fn
