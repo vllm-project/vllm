@@ -347,7 +347,22 @@ class DelegatingParser(Parser):
     ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
             return None, model_output
-        return self._reasoning_parser.extract_reasoning(model_output, request)
+        reasoning, content = self._reasoning_parser.extract_reasoning(
+            model_output, request
+        )
+        # Some models (e.g. GLM-5.1 with glm45 reasoning parser) may skip
+        # the end-think token when transitioning from reasoning to a tool
+        # call.  In that case the reasoning parser returns all output as
+        # reasoning and content=None.  Detect tool-call start tokens in the
+        # output and split there so the tool parser can extract the call.
+        if content is None and self._tool_parser is not None and reasoning:
+            tc_start = getattr(
+                self._tool_parser, "tool_call_start_token", None
+            )
+            if tc_start and tc_start in reasoning:
+                r, _, c = reasoning.partition(tc_start)
+                return r or None, c or None
+        return reasoning, content
 
     def extract_response_outputs(
         self,
@@ -670,6 +685,12 @@ class DelegatingParser(Parser):
         delta_message: DeltaMessage | None = None
 
         # Reasoning extraction
+        tool_call_start_detected = (
+            self._tool_parser is not None
+            and hasattr(self._tool_parser, "tool_call_start_token_id")
+            and self._tool_parser.tool_call_start_token_id is not None
+            and self._tool_parser.tool_call_start_token_id in current_token_ids
+        )
         if self._in_reasoning_phase(state):
             delta_message = self.extract_reasoning_streaming(
                 previous_text=state.previous_text,
@@ -679,15 +700,40 @@ class DelegatingParser(Parser):
                 current_token_ids=current_token_ids,
                 delta_token_ids=delta_token_ids,
             )
-            # Hand off remaining content to tool parser
-            if self._tool_parser and self.is_reasoning_end(delta_token_ids):
+            # Hand off remaining content to tool parser when reasoning ends.
+            # This can happen either via the end-think token, or when
+            # tool-call start tokens appear in the output — some models
+            # (e.g. GLM-5.1) skip the end-think token before a tool call.
+            if self._tool_parser and (
+                self.is_reasoning_end(delta_token_ids) or tool_call_start_detected
+            ):
                 state.reasoning_ended = True
-                current_token_ids = self.extract_content_ids(delta_token_ids)
-                if delta_message and delta_message.content:
-                    current_text = delta_message.content
-                    delta_message.content = None
+                if tool_call_start_detected and not self.is_reasoning_end(delta_token_ids):
+                    # Model skipped the end-think token before tool call.
+                    # Trim reasoning to only the part before the tool-call
+                    # start token, and route the rest to the tool parser.
+                    tc_start_str = self._tool_parser.tool_call_start_token
+                    text_idx = current_text.find(tc_start_str)
+                    if text_idx != -1 and delta_message and delta_message.reasoning:
+                        # The reasoning text includes content up to the
+                        # tool-call start; trim it.
+                        reasoning_text = delta_message.reasoning
+                        tc_in_reasoning = reasoning_text.find(tc_start_str)
+                        if tc_in_reasoning != -1:
+                            delta_message = DeltaMessage(
+                                reasoning=reasoning_text[:tc_in_reasoning] or None,
+                            )
+                    tc_start_id = self._tool_parser.tool_call_start_token_id
+                    tc_idx_in_delta = delta_token_ids.index(tc_start_id)
+                    current_token_ids = delta_token_ids[tc_idx_in_delta:]
+                    current_text = current_text[text_idx:] if text_idx != -1 else ""
                 else:
-                    current_text = ""
+                    current_token_ids = self.extract_content_ids(delta_token_ids)
+                    if delta_message and delta_message.content:
+                        current_text = delta_message.content
+                        delta_message.content = None
+                    else:
+                        current_text = ""
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
