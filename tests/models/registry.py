@@ -1197,6 +1197,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "OpenVLAForActionPrediction": _HfExamplesInfo(
         "openvla/openvla-7b",
         trust_remote_code=True,
+        max_transformers_version="4.40",
+        transformers_version_reason={
+            "hf": (
+                "OpenVLA remote code expects Transformers 4.40.1 and "
+                "tokenizers 0.19.1, and is not compatible with current "
+                "Transformers remote-code APIs."
+            )
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
