@@ -4,13 +4,19 @@
 Abstract interfaces and data types for the secondary tiering layer.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 # Type alias for job IDs used in async transfer tracking
 JobId = int
@@ -49,7 +55,8 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished() polls for completion.
     """
 
-    def __init__(self, primary_kv_view: memoryview) -> None:
+    def __init__(self, vllm_config: VllmConfig, primary_kv_view: memoryview) -> None:
+        self._vllm_config = vllm_config
         self._primary_kv_view: memoryview = primary_kv_view
 
     @abstractmethod

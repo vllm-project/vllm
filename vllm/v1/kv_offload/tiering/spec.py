@@ -123,7 +123,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             secondary_tiers = []
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
-                    tier = create_secondary_tier(tier_config, primary_kv_view)
+                    tier = create_secondary_tier(
+                        tier_config, primary_kv_view, self.vllm_config
+                    )
                     secondary_tiers.append(tier)
                     logger.info(
                         "Created secondary tier #%d (%s)",

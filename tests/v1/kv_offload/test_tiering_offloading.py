@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 )
 
 _CTX = ReqContext()
+_MOCK_VLLM_CONFIG = MagicMock()
 
 
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
@@ -60,7 +61,9 @@ class TestExampleSecondaryTier:
     def test_basic_store_and_lookup(self):
         """Test basic store and lookup operations."""
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
-        tier = ExampleSecondaryTier(primary_kv_view=mock_view, max_blocks=10)
+        tier = ExampleSecondaryTier(
+            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view, max_blocks=10
+        )
 
         # Initially empty
         blocks = to_keys(range(3))
@@ -80,7 +83,9 @@ class TestExampleSecondaryTier:
     def test_lru_eviction(self):
         """Test LRU eviction policy."""
         mock_view = memoryview(torch.zeros((4, 16), dtype=torch.int8).numpy())
-        tier = ExampleSecondaryTier(primary_kv_view=mock_view, max_blocks=3)
+        tier = ExampleSecondaryTier(
+            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view, max_blocks=3
+        )
 
         # Fill tier to capacity
         blocks = to_keys(range(3))
@@ -118,7 +123,10 @@ class TestExampleSecondaryTier:
         """Test simulated async behavior."""
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTier(
-            primary_kv_view=mock_view, max_blocks=10, simulate_async=True
+            vllm_config=_MOCK_VLLM_CONFIG,
+            primary_kv_view=mock_view,
+            max_blocks=10,
+            simulate_async=True,
         )
 
         blocks = to_keys(range(2))
@@ -158,10 +166,10 @@ class TestTieringOffloadingManager:
 
         # Create secondary tiers with the primary view
         self.secondary_tier1 = ExampleSecondaryTier(
-            primary_kv_view=mock_view, max_blocks=10
+            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view, max_blocks=10
         )
         self.secondary_tier2 = ExampleSecondaryTier(
-            primary_kv_view=mock_view, max_blocks=10
+            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view, max_blocks=10
         )
 
         # Create tiered manager
@@ -381,10 +389,16 @@ class TestTieringOffloadingManager:
 
         # Create tier with small capacity
         small_tier = ExampleSecondaryTier(
-            primary_kv_view=mock_view, max_blocks=5, simulate_async=False
+            vllm_config=_MOCK_VLLM_CONFIG,
+            primary_kv_view=mock_view,
+            max_blocks=5,
+            simulate_async=False,
         )
         large_tier = ExampleSecondaryTier(
-            primary_kv_view=mock_view, max_blocks=10, simulate_async=False
+            vllm_config=_MOCK_VLLM_CONFIG,
+            primary_kv_view=mock_view,
+            max_blocks=10,
+            simulate_async=False,
         )
 
         # Create a fresh primary tier for this test

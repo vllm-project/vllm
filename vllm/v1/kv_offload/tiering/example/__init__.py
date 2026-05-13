@@ -9,9 +9,12 @@ completion. It's useful for testing the TieringOffloadingManager without
 requiring actual storage or network backends.
 """
 
+from __future__ import annotations
+
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
@@ -20,6 +23,9 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
 )
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclass
@@ -43,6 +49,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         primary_kv_view: memoryview,
         max_blocks: int = 1000,
         simulate_async: bool = False,
@@ -51,12 +58,13 @@ class ExampleSecondaryTier(SecondaryTierManager):
         Initialize the example secondary tier.
 
         Args:
+            vllm_config: Global vLLM configuration.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             max_blocks: Maximum number of blocks this tier can store
             simulate_async: If True, jobs complete on next get_finished() call.
                           If False, jobs complete immediately.
         """
-        super().__init__(primary_kv_view)
+        super().__init__(vllm_config, primary_kv_view)
         self.max_blocks = max_blocks
         self.simulate_async = simulate_async
 
