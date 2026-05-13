@@ -26,6 +26,7 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
+import itertools
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -63,12 +64,12 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    LinearBase,
+    WEIGHT_LOADER_V2_SUPPORTED,
     ColumnParallelLinear,
+    LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
-    WEIGHT_LOADER_V2_SUPPORTED,
     adjust_bitsandbytes_4bit_shard,
     adjust_block_scale_shard,
     adjust_marlin_shard,
@@ -310,14 +311,20 @@ class WeightPaddingMergedColumnParallelLinear(MergedColumnParallelLinear):
                     "Shard id with multiple indices is not supported "
                     "for BNB quantization with TP yet."
                 )
+            shard_ids = (
+                loaded_shard_id
+                if isinstance(loaded_shard_id, tuple)
+                else range(len(output_sizes))
+            )
             shard_offsets: list[tuple[int, int, int]] = []
-            for i, output_size in enumerate(output_sizes):
-                shard_offsets.append((i, current_shard_offset, output_size))
+            for i, shard_id in enumerate(shard_ids):
+                output_size = output_sizes[i]
+                shard_offsets.append((shard_id, current_shard_offset, output_size))
                 current_shard_offset += output_size
             packed_dim = getattr(param, "packed_dim", None)
             for shard_id, shard_offset, shard_size in shard_offsets:
                 if packed_dim == output_dim:
-                    packed_factor = getattr(param, "packed_factor")
+                    packed_factor = param.packed_factor
                     shard_size = shard_size // packed_factor
                     shard_offset = shard_offset // packed_factor
                     shard_size, shard_offset = adjust_marlin_shard(
@@ -325,9 +332,7 @@ class WeightPaddingMergedColumnParallelLinear(MergedColumnParallelLinear):
                     )
 
                 if use_bitsandbytes_4bit:
-                    index = list(
-                        itertools.accumulate([0] + self.loaded_output_sizes)
-                    )
+                    index = list(itertools.accumulate([0] + self.loaded_output_sizes))
                     orig_offsets = {
                         str(i): (index[i], size)
                         for i, size in enumerate(self.loaded_output_sizes)
@@ -367,7 +372,7 @@ class WeightPaddingMergedColumnParallelLinear(MergedColumnParallelLinear):
 
             packed_dim = getattr(param, "packed_dim", None)
             if packed_dim == output_dim:
-                packed_factor = getattr(param, "packed_factor")
+                packed_factor = param.packed_factor
                 shard_size = shard_size // packed_factor
                 shard_offset = shard_offset // packed_factor
                 loaded_shard_size = loaded_shard_size // packed_factor
@@ -384,9 +389,7 @@ class WeightPaddingMergedColumnParallelLinear(MergedColumnParallelLinear):
             is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
             if use_bitsandbytes_4bit:
-                index = list(
-                    itertools.accumulate([0] + self.loaded_output_sizes)
-                )
+                index = list(itertools.accumulate([0] + self.loaded_output_sizes))
                 orig_offsets = {
                     str(i): (index[i], size)
                     for i, size in enumerate(self.loaded_output_sizes)
@@ -424,12 +427,14 @@ class WeightPaddingMergedColumnParallelLinear(MergedColumnParallelLinear):
         param: BasevLLMParameter,
         loaded_weight: torch.Tensor,
         output_sizes: list[int] | None = None,
+        shard_ids: tuple[int, ...] | range | None = None,
     ):
         current_shard_offset = 0
         shard_offsets: list[tuple[int, int, int]] = []
         output_sizes = output_sizes or self.loaded_output_sizes
-        for i, output_size in enumerate(output_sizes):
-            shard_offsets.append((i, current_shard_offset, output_size))
+        shard_ids = shard_ids or range(len(output_sizes))
+        for shard_id, output_size in zip(shard_ids, output_sizes):
+            shard_offsets.append((shard_id, current_shard_offset, output_size))
             current_shard_offset += output_size
 
         for shard_id, shard_offset, shard_size in shard_offsets:
@@ -481,7 +486,10 @@ class WeightPaddingMergedColumnParallelLinear(MergedColumnParallelLinear):
                     for size in (output_sizes or self.loaded_output_sizes)
                 ]
             self._load_fused_module_from_checkpoint(
-                param, loaded_weight, output_sizes=output_sizes
+                param,
+                loaded_weight,
+                output_sizes=output_sizes,
+                shard_ids=loaded_shard_id,
             )
             return
 
