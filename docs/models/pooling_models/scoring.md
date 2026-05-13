@@ -20,7 +20,7 @@ The score models is designed to compute similarity scores between two input prom
     - `LLM.score`
 - Online APIs:
     - [Score API](scoring.md#score-api) (`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
@@ -357,7 +357,7 @@ Full example:
 - [examples/pooling/score/vision_score_api_online.py](../../../examples/pooling/score/vision_score_api_online.py)
 - [examples/pooling/score/vision_rerank_api_online.py](../../../examples/pooling/score/vision_rerank_api_online.py)
 
-### Rerank API
+### Cohere Rerank API
 
 `/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's rerank API interface](https://jina.ai/reranker/) and
 [Cohere's rerank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
