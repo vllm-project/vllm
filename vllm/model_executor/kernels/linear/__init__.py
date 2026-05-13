@@ -59,8 +59,8 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUwNa16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp4 import (
-    Mxfp4LinearKernel,
-    Mxfp4LinearLayerConfig,
+    MxFp4LinearKernel,
+    MxFp4LinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
     FlashInferMxFp4LinearKernel,
@@ -803,46 +803,10 @@ def register_linear_kernel(
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
 
 
-def init_mxfp4_linear_kernel() -> Mxfp4LinearKernel:
-    """Select and instantiate the best MXFP4 linear kernel for the
-    current platform."""
-    config = Mxfp4LinearLayerConfig()
-
-    platform = current_platform._enum
-    possible = _POSSIBLE_MXFP4_KERNELS.get(platform, [])
-
-    failure_reasons = []
-    for kernel_cls in possible:
-        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel_cls.__name__} disabled by environment variable"
-            )
-            continue
-
-        is_supported, reason = kernel_cls.is_supported()
-        if not is_supported:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        can_implement, reason = kernel_cls.can_implement(config)
-        if not can_implement:
-            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
-            continue
-
-        logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
-        return kernel_cls(config)
-
-    raise ValueError(
-        "Failed to find a kernel that can implement the "
-        "MXFP4 linear layer. Reasons: \n" + "\n".join(failure_reasons)
-    )
-
-
 __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "init_nvfp4_linear_kernel",
-    "init_mxfp4_linear_kernel",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
     "init_wfp8_a16_linear_kernel",
@@ -868,8 +832,6 @@ __all__ = [
     "TritonInt8ScaledMMLinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
-    "Mxfp4LinearKernel",
-    "Mxfp4LinearLayerConfig",
     "AllSparkLinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",

@@ -659,9 +659,6 @@ class CompressedTensorsConfig(QuantizationConfig):
             ):
                 return CompressedTensorsW4A4Fp4()
 
-            if self._is_mxfp4(weight_quant) and self._is_mxfp4(input_quant):
-                return CompressedTensorsW4A4MxFp4()
-
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
                     CompressedTensorsW8A8Fp8.get_min_capability(), error=False
