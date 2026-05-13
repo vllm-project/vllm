@@ -83,6 +83,7 @@ def _tq_decode_stage1(
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    SLIDING_WINDOW: tl.constexpr = 0,  # 0 = full attention, >0 = window size
 ):
     bid = tl.program_id(0)  # batch index
     hid = tl.program_id(1)  # q_head index
@@ -93,9 +94,16 @@ def _tq_decode_stage1(
     # Sequence length for this batch
     seq_len = tl.load(Seq_lens_ptr + bid)
 
-    # KV split range
-    split_len = tl.cdiv(seq_len, NUM_KV_SPLITS)
-    split_start = split_len * sid
+    # Sliding window: only attend to the last SLIDING_WINDOW tokens
+    if SLIDING_WINDOW > 0:
+        effective_start = tl.maximum(0, seq_len - SLIDING_WINDOW)
+    else:
+        effective_start = 0
+    effective_len = seq_len - effective_start
+
+    # KV split range (over the effective window only)
+    split_len = tl.cdiv(effective_len, NUM_KV_SPLITS)
+    split_start = effective_start + split_len * sid
     split_end = tl.minimum(split_start + split_len, seq_len)
 
     if split_start >= split_end:
@@ -503,6 +511,7 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -550,6 +559,7 @@ def triton_turboquant_decode_attention(
     # Stage 1: split-KV tiled attention scoring + value accumulation
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
     BLOCK_KV = 4
+    _sliding_window = sliding_window if sliding_window is not None else 0
     grid = (B, Hq, NUM_KV_SPLITS)
     _tq_decode_stage1[grid](
         q_rot,
@@ -583,6 +593,7 @@ def triton_turboquant_decode_attention(
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
+        SLIDING_WINDOW=_sliding_window,
         num_warps=1,
         num_stages=1,
     )
