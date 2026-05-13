@@ -99,12 +99,8 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
     def shutdown(self) -> None:
         super().shutdown()
-        if self._kv_memoryview is not None:
-            self._kv_memoryview.release()
-            self._kv_memoryview = None
-        if self._mmap_region is not None:
-            self._mmap_region.cleanup()
-            self._mmap_region = None
+        self._kv_memoryview.release()
+        self._mmap_region.cleanup()
 
 
 class TieringOffloadingManager(OffloadingManager):
