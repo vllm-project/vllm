@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from dataclasses import dataclass
 from typing import ClassVar, Final
 
@@ -9,6 +10,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -25,6 +27,28 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+logger = init_logger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _fp8_mla_prefill_supported() -> bool:
+    """Auto-detect FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
+
+    Requires gfx950 plus an AITER build that exports both kernels.  When
+    either is missing we silently fall back to ``flash_attn_varlen_func``.
+    """
+    try:
+        from vllm.platforms.rocm import on_gfx950
+    except Exception:  # noqa: BLE001
+        return False
+    if not on_gfx950():
+        return False
+    try:
+        from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -90,6 +114,10 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     reduce_indptr: torch.Tensor | None = None
     reduce_final_map: torch.Tensor | None = None
     reduce_partial_map: torch.Tensor | None = None
+
+
+# Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
+_FP8_PREFILL_TILE_Q = 256
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
@@ -193,6 +221,22 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        # Pre-allocate FP8 MLA prefill PS metadata buffers.  This path is
+        # auto-enabled on gfx950 when AITER provides the required kernels;
+        # otherwise we silently fall back to flash_attn_varlen_func.
+        self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
+        if self._fp8_prefill_enabled:
+            # The PS metadata describes how to partition work for a single
+            # prefill batch.  The max Q-length per request in any batch is
+            # bounded by max_num_batched_tokens (chunked prefill), which is
+            # typically much smaller than max_model_len.  Using the tighter
+            # bound reduces the pre-allocated work_info buffer by ~20×.
+            max_prefill_qlen = min(
+                vllm_config.model_config.max_model_len,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+            )
+            self._init_fp8_prefill_ps_buffers(max_num_reqs, max_prefill_qlen, device)
+
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
@@ -201,6 +245,141 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.qo_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
             )
+
+    def _init_fp8_prefill_ps_buffers(
+        self,
+        max_num_reqs: int,
+        max_prefill_qlen: int,
+        device: torch.device,
+    ) -> None:
+        """Pre-allocate persistent buffers for FP8 MLA prefill PS metadata.
+
+        Uses ``get_ps_metadata_info_v1`` with max values so the buffers are
+        large enough for any batch.  ``get_ps_metadata_v1`` fills them
+        per-batch in ``build()``.
+
+        Args:
+            max_num_reqs: Maximum number of concurrent requests.
+            max_prefill_qlen: Maximum Q-length for a single request in one
+                prefill batch.  Should be ``min(max_model_len,
+                max_num_batched_tokens)`` — the chunked-prefill scheduler
+                never emits more than ``max_num_batched_tokens`` new tokens
+                per batch.
+            device: Target device for the buffers.
+        """
+        from aiter import get_ps_metadata_info_v1
+
+        # After kv_b_proj decompression, K has num_heads heads (same as Q).
+        # So gqa_ratio=1 and num_head_k=num_heads for the PS kernel.
+        num_head_k = self.num_heads
+        gqa_ratio = 1
+        qlen_granularity = _FP8_PREFILL_TILE_Q // max(gqa_ratio, 1)
+
+        (
+            (work_metadata_size, work_metadata_dtype),
+            (work_indptr_size, work_indptr_dtype),
+            (work_info_size, work_info_dtype),
+            (reduce_indptr_size, reduce_indptr_dtype),
+            (reduce_final_map_size, reduce_final_map_dtype),
+            (reduce_partial_map_size, reduce_partial_map_dtype),
+        ) = get_ps_metadata_info_v1(
+            batch_size=max_num_reqs,
+            num_head_k=num_head_k,
+            max_qlen=max_prefill_qlen,
+            qlen_granularity=qlen_granularity,
+        )
+
+        self.fp8_ps_work_metadata = torch.empty(
+            work_metadata_size, dtype=work_metadata_dtype, device=device
+        )
+        self.fp8_ps_work_indptr = torch.empty(
+            work_indptr_size, dtype=work_indptr_dtype, device=device
+        )
+        self.fp8_ps_work_info = torch.empty(
+            *work_info_size, dtype=work_info_dtype, device=device
+        )
+        self.fp8_ps_reduce_indptr = torch.empty(
+            reduce_indptr_size, dtype=reduce_indptr_dtype, device=device
+        )
+        self.fp8_ps_reduce_final_map = torch.empty(
+            *reduce_final_map_size, dtype=reduce_final_map_dtype, device=device
+        )
+        self.fp8_ps_reduce_partial_map = torch.empty(
+            reduce_partial_map_size,
+            dtype=reduce_partial_map_dtype,
+            device=device,
+        )
+
+        logger.info(
+            "FP8 MLA prefill PS buffers allocated "
+            "(max_batch=%d, max_qlen=%d, num_head_k=%d)",
+            max_num_reqs,
+            max_prefill_qlen,
+            num_head_k,
+        )
+
+    def _build_fp8_prefill_ps_metadata(
+        self,
+        metadata: AiterMLAMetadata,
+    ) -> None:
+        """Build per-batch FP8 MLA prefill PS metadata and attach to *metadata*.
+
+        Called from ``build()`` when prefill tokens are present and
+        FP8 MLA prefill is enabled (auto-detected via
+        ``_fp8_mla_prefill_supported()``).
+        """
+        from aiter import get_ps_metadata_v1
+
+        prefill = metadata.prefill
+        qo_indptr = prefill.query_start_loc
+        kv_indptr = qo_indptr  # new tokens: KV length == Q length
+
+        # get_ps_metadata_v1 reads CPU tensors.
+        qo_indptr_cpu = qo_indptr.to("cpu", dtype=torch.int32)
+        kv_indptr_cpu = qo_indptr_cpu.clone()
+        seq_lens_cpu = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(torch.int32)
+
+        gqa_ratio = 1
+        num_head_k = self.num_heads
+        qhead_granularity = max(gqa_ratio, 1)
+        qlen_granularity = _FP8_PREFILL_TILE_Q // qhead_granularity
+        kvlen_granularity = 128
+        block_size = 1  # non-paged: each "page" is one token
+
+        get_ps_metadata_v1(
+            qo_indptr_cpu,
+            kv_indptr_cpu,
+            seq_lens_cpu,
+            gqa_ratio,
+            num_head_k,
+            self.fp8_ps_work_metadata,
+            self.fp8_ps_work_indptr,
+            self.fp8_ps_work_info,
+            self.fp8_ps_reduce_indptr,
+            self.fp8_ps_reduce_final_map,
+            self.fp8_ps_reduce_partial_map,
+            qhead_granularity=qhead_granularity,
+            qlen_granularity=qlen_granularity,
+            kvlen_granularity=kvlen_granularity,
+            block_size=block_size,
+            is_causal=True,
+        )
+
+        total_prefill_tokens = qo_indptr_cpu[-1].item()
+        kv_indices = torch.arange(
+            total_prefill_tokens, device=qo_indptr.device, dtype=torch.int32
+        )
+
+        # Attach PS metadata to the metadata object so forward_mha can read it.
+        metadata.fp8_prefill_qo_indptr = qo_indptr
+        metadata.fp8_prefill_kv_indptr = kv_indptr
+        metadata.fp8_prefill_kv_indices = kv_indices
+        metadata.fp8_prefill_work_indptr = self.fp8_ps_work_indptr
+        metadata.fp8_prefill_work_info_set = self.fp8_ps_work_info
+        metadata.fp8_prefill_reduce_indptr = self.fp8_ps_reduce_indptr
+        metadata.fp8_prefill_reduce_final_map = self.fp8_ps_reduce_final_map
+        metadata.fp8_prefill_reduce_partial_map = self.fp8_ps_reduce_partial_map
+        metadata.fp8_prefill_max_q_len = prefill.max_query_len
 
     def _build_decode(
         self,
@@ -335,6 +514,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             attn_metadata.reduce_indptr = self._mla_reduce_indptr
             attn_metadata.reduce_final_map = self._mla_reduce_final_map
             attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
+        if self._fp8_prefill_enabled and attn_metadata.prefill is not None:
+            self._build_fp8_prefill_ps_metadata(attn_metadata)
         return attn_metadata
 
 
@@ -479,6 +660,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
+        # FP8 MLA prefill kernel imports (lazy, only when enabled).
+        # Auto-enabled on gfx950 when AITER ships the kernels.
+        self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
+        if self._fp8_prefill_enabled:
+            from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
+
+            self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
+            self._mla_reduce_v1 = mla_reduce_v1
+
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
@@ -492,6 +682,153 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
 
         return output
+
+    def _mla_fp8_prefill_attn(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_metadata: AiterMLAMetadata,
+    ) -> torch.Tensor:
+        """Run FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
+
+        Q, K, V are already decompressed (post-kv_b_proj), so K and V have
+        ``num_heads`` heads (same as Q) and gqa_ratio=1.
+        """
+        from vllm.platforms import current_platform
+
+        fp8_dtype = current_platform.fp8_dtype()
+        total_q = q.shape[0]
+        nhead = self.num_heads
+        v_head_dim = self.v_head_dim
+        tile_q = _FP8_PREFILL_TILE_Q
+        out_dtype = q.dtype if q.dtype != fp8_dtype else torch.bfloat16
+
+        # Cast to FP8 if not already.
+        if q.dtype != fp8_dtype:
+            q = q.to(fp8_dtype)
+        if k.dtype != fp8_dtype:
+            k = k.to(fp8_dtype)
+        if v.dtype != fp8_dtype:
+            v = v.to(fp8_dtype)
+
+        one_scale = torch.ones((), dtype=torch.float32, device=q.device)
+
+        # The actual number of active partial tiles for this batch is stored
+        # in reduce_indptr[-1].  Using fp8_prefill_reduce_partial_map.size(0)
+        # instead would allocate the *maximum* pre-allocated size, which can
+        # be tens of GiB for large max_model_len values.
+        num_partial_tiles = int(attn_metadata.fp8_prefill_reduce_indptr[-1].item())
+
+        # Intermediate buffers for the two-phase PS kernel.
+        logits = torch.empty(
+            (num_partial_tiles * tile_q, nhead, v_head_dim),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        attn_lse = torch.empty(
+            (num_partial_tiles * tile_q, nhead),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        final_lse = torch.empty(
+            (total_q, nhead),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        output = torch.empty(
+            (total_q, nhead, v_head_dim),
+            dtype=out_dtype,
+            device=q.device,
+        )
+
+        # Phase 1: persistent-scheduling assembly prefill kernel.
+        self._mla_prefill_ps_asm_fwd(
+            q,
+            k,
+            v,
+            attn_metadata.fp8_prefill_qo_indptr,
+            attn_metadata.fp8_prefill_kv_indptr,
+            attn_metadata.fp8_prefill_kv_indices,
+            attn_metadata.fp8_prefill_work_indptr,
+            attn_metadata.fp8_prefill_work_info_set,
+            attn_metadata.fp8_prefill_max_q_len,
+            self.scale,
+            True,  # is_causal
+            logits,
+            attn_lse,
+            output,
+            one_scale,
+            one_scale,
+            one_scale,
+        )
+
+        # Phase 2: reduction across KV splits.
+        self._mla_reduce_v1(
+            logits,
+            attn_lse,
+            attn_metadata.fp8_prefill_reduce_indptr,
+            attn_metadata.fp8_prefill_reduce_final_map,
+            attn_metadata.fp8_prefill_reduce_partial_map,
+            tile_q,
+            output,
+            final_lse,
+        )
+
+        return output
+
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: AiterMLAMetadata,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Dispatch prefill to the FP8 ASM kernel when available.
+
+        Falls back to the parent (``flash_attn_varlen_func``) when FP8
+        MLA prefill is disabled, PS metadata is missing, or chunked
+        context requires two-pass merge.
+        """
+        if not self._fp8_prefill_enabled or not hasattr(
+            attn_metadata, "fp8_prefill_qo_indptr"
+        ):
+            return super().forward_mha(
+                q,
+                kv_c_normed,
+                k_pe,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                k_scale,
+                output,
+            )
+
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
+        has_context = prefill_metadata.chunked_context is not None
+
+        if has_context:
+            return super().forward_mha(
+                q,
+                kv_c_normed,
+                k_pe,
+                kv_c_and_k_pe_cache,
+                attn_metadata,
+                k_scale,
+                output,
+            )
+
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+
+        output_prefill = self._mla_fp8_prefill_attn(q, k, v, attn_metadata)
+        output.copy_(output_prefill.flatten(start_dim=-2))
 
     def forward_mqa(
         self,
