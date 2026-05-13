@@ -68,6 +68,9 @@ from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.xpu import (
+    XPUMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
@@ -290,6 +293,9 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp4LinearKernel,
     ],
 }
 
