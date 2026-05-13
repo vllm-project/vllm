@@ -66,7 +66,7 @@ def _is_non_persistent_parameter_alias_buffer(
     except RuntimeError:
         return False
 
-    for param in layer._parameters.values():
+    for param in layer.parameters(recurse=True):
         if param is None:
             continue
         try:
