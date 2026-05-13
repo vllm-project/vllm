@@ -34,6 +34,14 @@ _CTX = ReqContext(req_id="test")
 _MOCK_VLLM_CONFIG = MagicMock()
 
 
+def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
+    """Create a mock SharedOffloadRegion for testing."""
+    mock = MagicMock()
+    view = memoryview(torch.zeros((num_blocks, row_bytes), dtype=torch.int8).numpy())
+    mock.create_kv_memoryview.return_value = view
+    return mock
+
+
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
 
@@ -162,9 +170,12 @@ class TestTieringOffloadingManager:
     @pytest.fixture
     def manager_setup(self):
         # Create primary tier (CPU-based)
-        self.primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
+        mock_region = _mock_mmap_region(5)
+        self.primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
 
-        mock_view = memoryview(torch.zeros((5, 16), dtype=torch.int8).numpy())
+        mock_view = mock_region.create_kv_memoryview()
 
         # Create secondary tiers with the primary view
         self.secondary_tier1 = ExampleSecondaryTier(
@@ -387,7 +398,8 @@ class TestTieringOffloadingManager:
 
     def test_multiple_secondary_tiers_independent_eviction(self):
         """Test that secondary tiers manage their own evictions."""
-        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        mock_region = _mock_mmap_region(10)
+        mock_view = mock_region.create_kv_memoryview()
 
         # Create tier with small capacity
         small_tier = ExampleSecondaryTier(
@@ -404,7 +416,9 @@ class TestTieringOffloadingManager:
         )
 
         # Create a fresh primary tier for this test
-        primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=10)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=10, mmap_region=mock_region
+        )
 
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
@@ -528,7 +542,9 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
     def test_works_without_secondary_tiers(self):
         """Test that manager works with empty secondary_tiers list."""
-        primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=_mock_mmap_region(5)
+        )
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(

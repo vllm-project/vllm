@@ -68,9 +68,9 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     def __init__(
         self,
         num_blocks: int,
+        mmap_region: SharedOffloadRegion,
         cache_policy: str = "lru",
         enable_events: bool = False,
-        mmap_region: SharedOffloadRegion | None = None,
     ):
         super().__init__(
             num_blocks=num_blocks,
@@ -86,9 +86,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.prepare_write = self.prepare_store
         self.complete_write = self.complete_store
 
-        self._kv_memoryview: memoryview | None = None
-        if mmap_region is not None:
-            self._kv_memoryview = mmap_region.create_kv_memoryview()
+        self._kv_memoryview = mmap_region.create_kv_memoryview()
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -97,9 +95,6 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         SharedOffloadRegion mmap.  Secondary tiers address block *b* as
         ``view[b]``.
         """
-        assert self._kv_memoryview is not None, (
-            "mmap_region must be provided to CPUPrimaryTierOffloadingManager"
-        )
         return self._kv_memoryview
 
     def shutdown(self) -> None:
