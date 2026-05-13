@@ -5,6 +5,7 @@ steps:
 - label: Language Models Tests (Standard)
   key: language-models-tests-standard
   timeout_in_minutes: 25
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/language
