@@ -79,6 +79,7 @@ steps:
     - tests/v1/core
     - tests/v1/executor
     - tests/v1/kv_offload
+    - tests/v1/simple_kv_offload
     - tests/v1/worker
     - tests/v1/kv_connector/unit
     - tests/v1/metrics
@@ -90,6 +91,7 @@ steps:
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/simple_kv_offload
     - pytest -v -s v1/worker
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
@@ -212,6 +214,7 @@ steps:
   depends_on: ~
   optional: true
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -283,6 +286,7 @@ steps:
   - tests/tokenizers_
   - tests/reasoning
   - tests/tool_parsers
+  - tests/parser
   - tests/transformers_utils
   - tests/config
   device: cpu-small
@@ -297,8 +301,23 @@ steps:
   - pytest -v -s tokenizers_
   - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
   - pytest -v -s tool_parsers
+  - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
+
+- label: Batch Invariance (A100)
+  key: batch-invariance-a100
+  timeout_in_minutes: 30
+  device: a100
+  source_file_dependencies:
+    - vllm/v1/attention
+    - vllm/model_executor/layers
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
 
 - label: Batch Invariance (H100)
   key: batch-invariance-h100
