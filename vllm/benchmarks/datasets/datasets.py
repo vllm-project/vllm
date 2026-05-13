@@ -77,7 +77,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str] | list[dict]
+    prompt: str | list[int] | list[str] | list[dict]
     prompt_len: int
     expected_output_len: int | None
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
@@ -570,6 +570,7 @@ class RandomDataset(BenchmarkDataset):
         max_loras: int | None = None,
         lora_path: str | None = None,
         lora_assignment: str = "random",
+        prompt_as_token_ids: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         resolved_input_rr, _ = _resolve_range_ratios(range_ratio)
@@ -607,7 +608,12 @@ class RandomDataset(BenchmarkDataset):
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
 
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
+        prefix_token_ids = self.get_prefix(
+            tokenizer,
+            allowed_tokens,
+            prefix_len,
+            skip_round_trip=prompt_as_token_ids,
+        )
 
         requests = []
         token_mismatch_total = 0
@@ -621,6 +627,7 @@ class RandomDataset(BenchmarkDataset):
                 offset=int(offsets[i]),
                 index=i,
                 allowed_tokens=allowed_tokens,
+                prompt_as_token_ids=prompt_as_token_ids,
             )
             token_mismatch_total += token_mismatch
             lora_req = self.get_lora_request(
@@ -672,9 +679,17 @@ class RandomDataset(BenchmarkDataset):
         tokenizer: TokenizerLike,
         allowed_tokens: np.ndarray,
         prefix_len: int,
+        skip_round_trip: bool = False,
     ) -> list[int]:
         """
         Get the prefix for the dataset.
+
+        When ``skip_round_trip`` is True the raw sampled token IDs are
+        returned as-is. The caller is expected to send those IDs to the
+        server verbatim (e.g. via the OpenAI Completions integer-prompt
+        form) so that the bench-side decode -> encode round-trip, which
+        can silently shift the token count when the bench-side and
+        server-side tokenizers disagree, is bypassed.
         """
         if prefix_len <= 0:
             return []
@@ -682,6 +697,8 @@ class RandomDataset(BenchmarkDataset):
         prefix_tokens = allowed_tokens[
             self._rng.integers(0, len(allowed_tokens), size=prefix_len)
         ].tolist()
+        if skip_round_trip:
+            return prefix_tokens
         _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len(
             tokenizer=tokenizer,
             token_sequence=prefix_tokens,
@@ -711,18 +728,32 @@ class RandomDataset(BenchmarkDataset):
         offset: int,
         index: int,
         allowed_tokens: np.ndarray,
-    ) -> tuple[str, int, int]:
+        prompt_as_token_ids: bool = False,
+    ) -> tuple[str | list[int], int, int]:
         """
-        Returns (prompt, total_input_len).
+        Returns (prompt, total_input_len, token_mismatch).
 
-        NOTE: After decoding the prompt we have to encode and decode it again.
-        This is done because in some cases N consecutive tokens
-        give a string tokenized into != N number of tokens.
+        ``prompt`` is normally a decoded string. When ``prompt_as_token_ids``
+        is True the constructed token sequence is returned directly as a
+        ``list[int]`` and the decode -> encode round-trip is skipped, so
+        ``total_input_len`` is exactly ``prefix_len + input_len`` and
+        ``token_mismatch`` is always 0. The caller is expected to forward
+        the IDs to the server verbatim (e.g. via the OpenAI Completions
+        integer-prompt form).
+
+        NOTE: With the round-trip enabled (the default), after decoding the
+        prompt we have to encode and decode it again. This is done because
+        in some cases N consecutive tokens give a string tokenized into
+        != N number of tokens.
         For example for GPT2Tokenizer:
         [6880, 6881] -> ['Ġcalls', 'here'] ->
         [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
         To avoid uncontrolled change of the prompt length,
         the encoded sequence is truncated before being decoded again.
+        This works when the bench-side and server-side tokenizers agree;
+        when they don't, the server-side prompt length silently drifts.
+        Set ``prompt_as_token_ids=True`` to bypass the round-trip and get
+        a deterministic server-side prompt length.
         """
         # Build the inner sequence by sampling
         # sequentially from the allowed tokens
@@ -731,8 +762,11 @@ class RandomDataset(BenchmarkDataset):
         ].tolist()
         token_sequence = prefix_token_ids + inner_seq
 
-        # Decode, then re-encode and truncate to preserve token count invariants
         total_input_len = prefix_len + int(input_len)
+        if prompt_as_token_ids:
+            return token_sequence, total_input_len, 0
+
+        # Decode, then re-encode and truncate to preserve token count invariants
         prompt, adjusted_token_sequence, token_mismatch = (
             gen_prompt_decode_to_target_len(
                 tokenizer=tokenizer,
@@ -1699,6 +1733,24 @@ def add_random_dataset_base_args(
         help=("Batch size for random sampling. Only used for embeddings benchmark."),
     )
     parser_or_group.add_argument(
+        "--random-prompt-as-token-ids",
+        action="store_true",
+        default=False,
+        help=(
+            "Send the random prompt to the server as a list of token IDs "
+            "(prompt_token_ids) rather than as decoded text. The server "
+            "will use the IDs verbatim, so 'Total input tokens' will "
+            "exactly equal --random-input-len (+ --random-prefix-len). "
+            "This bypasses the decode-then-re-encode round-trip the bench "
+            "otherwise uses to preserve token-count invariants, which can "
+            "silently inflate the actual server-side prompt length when "
+            "the bench-side and server-side tokenizers disagree (e.g. "
+            "across transformers versions for the same model). Only valid "
+            "for /v1/completions (chat templates cannot apply to an "
+            "integer prompt)."
+        ),
+    )
+    parser_or_group.add_argument(
         "--no-reranker",
         action="store_true",
         help=(
@@ -2089,6 +2141,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
+                prompt_as_token_ids=getattr(args, "random_prompt_as_token_ids", False),
             ),
             "random-mm": lambda: RandomMultiModalDataset(
                 random_seed=args.seed,
