@@ -261,10 +261,11 @@ def test_multi_example_connector_consistency():
         )
 
     events = get_connector_events()
-    # First event is set_xfer_handshake_metadata from initialization, then
-    # on_new_request when the request is enqueued, then
-    # get_num_new_matched_tokens and update_state_after_alloc from generate().
-    assert events["storage1-SCHEDULER"][:5] == [
+    # First event is bind_gpu_block_pool from initialization, then
+    # set_xfer_handshake_metadata, then on_new_request when the request is enqueued,
+    # then get_num_new_matched_tokens and update_state_after_alloc from generate().
+    assert events["storage1-SCHEDULER"][:6] == [
+        "bind_gpu_block_pool",
         "set_xfer_handshake_metadata",
         "on_new_request",
         "get_num_new_matched_tokens 0",
@@ -283,7 +284,8 @@ def test_multi_example_connector_consistency():
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:5] == [
+    assert events["storage2-SCHEDULER"][:6] == [
+        "bind_gpu_block_pool",
         "set_xfer_handshake_metadata",
         "on_new_request",
         "get_num_new_matched_tokens 0",
