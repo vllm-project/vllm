@@ -259,6 +259,17 @@ def convert_bin_to_safetensor_file(
             raise RuntimeError(f"The output tensors do not match for key {k}")
 
 
+def _maybe_inject_engine_overrides(
+    config: dict[str, Any], model_config: "ModelConfig"
+) -> dict[str, Any]:
+    """Inject engine-level quantization overrides into the parsed
+    quant-config dict so they're visible to quant_cls.from_config."""
+    override_act_dtype = getattr(model_config, "override_activation_dtype", "auto")
+    if override_act_dtype != "auto":
+        config["__override_activation_dtype__"] = override_act_dtype
+    return config
+
+
 # TODO(woosuk): Move this to other place.
 def get_quant_config(
     model_config: ModelConfig, load_config: LoadConfig
@@ -317,7 +328,9 @@ def get_quant_config(
         ):
             pass  # fall through to file-based loading below
         else:
-            return quant_cls.from_config(hf_quant_config)
+            return quant_cls.from_config(
+                _maybe_inject_engine_overrides(hf_quant_config, model_config)
+            )
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
@@ -427,7 +440,9 @@ def get_quant_config(
             config["adapter_name_or_path"] = model_config.model
         elif model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
-                return quant_cls.from_config(config)
+                return quant_cls.from_config(
+                    _maybe_inject_engine_overrides(config, model_config)
+                )
             else:
                 raise ValueError(
                     f"Unsupported quantization config"

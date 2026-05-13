@@ -210,6 +210,13 @@ class ModelConfig:
     """Arguments for online quantization.
     Auto-created when `quantization` equals to one of the string values of
     the `OnlineQuantScheme` enum."""
+    override_activation_dtype: Literal["auto", "bfloat16", "float16"] = "auto"
+    """Engine-level override for the activation dtype the quantization
+    config would otherwise pick. Mirrors ``override_attention_dtype``.
+    ``"auto"`` is the default (behavior unchanged). ``"bfloat16"`` /
+    ``"float16"`` are currently honored by ModelOpt NVFP4: a W4A4 NVFP4
+    ckpt is routed through the W4A16 LinearMethod and Marlin MoE backend
+    regardless of the on-disk ``quant_algo``. """
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
     enforce_eager: bool = False
