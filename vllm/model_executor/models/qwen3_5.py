@@ -140,6 +140,7 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
                 config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
             )
         else:

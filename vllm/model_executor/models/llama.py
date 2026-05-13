@@ -33,6 +33,7 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.config.utils import replace
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
@@ -134,11 +135,9 @@ class LlamaAttention(nn.Module):
         bias_o_proj: bool = False,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-        if quant_config is None:
-            quant_config = vllm_config.quant_config if vllm_config is not None else None
+        quant_config = vllm_config.quant_config if vllm_config is not None else None
         layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -264,6 +263,8 @@ class LlamaDecoderLayer(nn.Module):
         model_config = vllm_config.model_config
         config = config or model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
+        if quant_config is not vllm_config.quant_config:
+            vllm_config = replace(vllm_config, quant_config=quant_config)
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -299,7 +300,6 @@ class LlamaDecoderLayer(nn.Module):
             bias_o_proj=bias_o_proj,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
-            quant_config=quant_config,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
