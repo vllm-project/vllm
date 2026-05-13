@@ -134,20 +134,6 @@ void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor& input,
                               torch::stable::Tensor& input_global_scale);
 
-void mxfp4_experts_quant(
-    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& input_offset_by_experts,
-    torch::stable::Tensor const& output_scale_offset_by_experts,
-    int64_t n_experts);
-
-void silu_and_mul_mxfp4_experts_quant(
-    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& input_offset_by_experts,
-    torch::stable::Tensor const& output_scale_offset_by_experts,
-    int64_t n_experts);
-
 void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& a,
                             const torch::stable::Tensor& b,
@@ -157,4 +143,26 @@ void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& expert_offsets,
                             const torch::stable::Tensor& sf_offsets);
 
+// AWQ ops
+torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
+                               torch::stable::Tensor _kernel,
+                               torch::stable::Tensor _scaling_factors,
+                               torch::stable::Tensor _zeros,
+                               int64_t split_k_iters);
+
+torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
+                                     torch::stable::Tensor _scaling_factors,
+                                     torch::stable::Tensor _zeros,
+                                     int64_t split_k_iters, int64_t thx,
+                                     int64_t thy);
+
+// DSV3 fused A GEMM: conditionally compiled so declaration and impl
+// registration are in the source file (dsv3_fused_a_gemm.cu)
+
+// AllSpark ops: declarations are in the source files
+// (allspark_repack.cu and allspark_qgemm_w8a16.cu)
+
 #endif
+
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
+                                         bool inplace);

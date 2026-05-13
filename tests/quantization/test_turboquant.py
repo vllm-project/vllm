@@ -18,9 +18,6 @@ from vllm.model_executor.layers.quantization.turboquant.config import (
     TQ_PRESETS,
     TurboQuantConfig,
 )
-from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-    generate_wht_signs,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
@@ -185,20 +182,98 @@ class TestTurboQuantConfig:
 
     # ---- Boundary skip layers ----
 
+    @staticmethod
+    def _dense_model_config(num_layers):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            is_hybrid=False,
+            hf_text_config=SimpleNamespace(num_hidden_layers=num_layers),
+        )
+
     def test_boundary_skip_layers_basic(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(32)
+        mc = self._dense_model_config(32)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
         assert layers == ["0", "1", "30", "31"]
 
     def test_boundary_skip_layers_zero(self):
-        assert TurboQuantConfig.get_boundary_skip_layers(32, 0) == []
+        mc = self._dense_model_config(32)
+        assert TurboQuantConfig.get_boundary_skip_layers(mc, 0) == []
 
     def test_boundary_skip_layers_small_model(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(4)
+        mc = self._dense_model_config(4)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
         assert layers == ["0", "1", "2", "3"]
 
     def test_boundary_skip_layers_cap_at_half(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(8, 10)
+        mc = self._dense_model_config(8)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc, 10)
         assert len(layers) == 8
+
+
+class TestHybridAttentionIndices:
+    """Regression tests for boundary protection on hybrid models.
+
+    Hybrid models (attention + Mamba / linear-attention) identify KV-carrying
+    layers via layer_types / layers_block_type / attn_type_list. The helper
+    must return the *global* layer indices of the full-attention layers so
+    that kv_cache_dtype_skip_layers matches what extract_layer_index(prefix)
+    reports on the Attention layers at runtime.
+    """
+
+    @staticmethod
+    def _fake_model_config(text_cfg=None, hf_cfg=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            hf_text_config=text_cfg if text_cfg is not None else SimpleNamespace(),
+            hf_config=hf_cfg if hf_cfg is not None else SimpleNamespace(),
+        )
+
+    def test_layer_types_full_attention(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        cfg = type("C", (), {})()
+        cfg.layer_types = [
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+            "linear_attention",
+            "full_attention",
+            "full_attention",
+        ]
+        mc = self._fake_model_config(text_cfg=cfg)
+        assert _get_full_attention_layer_indices(mc) == [2, 4, 5]
+
+    def test_layers_block_type_jamba(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        cfg = type("C", (), {})()
+        cfg.layers_block_type = ["mamba", "attention", "mamba", "attention"]
+        mc = self._fake_model_config(text_cfg=cfg)
+        assert _get_full_attention_layer_indices(mc) == [1, 3]
+
+    def test_attn_type_list_minimax(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        hf = type("C", (), {})()
+        hf.attn_type_list = [0, 1, 0, 1, 1]
+        mc = self._fake_model_config(hf_cfg=hf)
+        assert _get_full_attention_layer_indices(mc) == [1, 3, 4]
+
+    def test_no_hybrid_hints_returns_empty(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        mc = self._fake_model_config()
+        assert _get_full_attention_layer_indices(mc) == []
 
 
 # ============================================================================
@@ -355,7 +430,10 @@ def generate_rotation_matrix(d: int, seed: int, device: str = "cpu") -> torch.Te
     gen = torch.Generator(device="cpu")
     gen.manual_seed(seed)
     G = torch.randn(d, d, generator=gen, device="cpu", dtype=torch.float32)
-    Q, R = torch.linalg.qr(G)
+    # torch.linalg.qr on CPU requires LAPACK, which some torch wheels
+    # (ROCm) ship without. Run QR on accelerator instead
+    qr_device = "cuda" if torch.cuda.is_available() else "cpu"
+    Q, R = torch.linalg.qr(G.to(qr_device))
     diag_sign = torch.sign(torch.diag(R))
     diag_sign[diag_sign == 0] = 1.0
     Q = Q * diag_sign.unsqueeze(0)
@@ -393,7 +471,7 @@ class TestRotationMatrix:
 
 
 # ============================================================================
-# WHT rotation tests (serving path: generate_wht_signs + _build_hadamard)
+# Hadamard rotation tests (serving path: _build_hadamard)
 # ============================================================================
 
 
@@ -406,49 +484,25 @@ def _build_hadamard(d: int, device: str = "cpu") -> torch.Tensor:
 
 
 @pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
-class TestWHTRotation:
-    """Tests for the WHT rotation actually used in serving."""
+class TestHadamardRotation:
+    """Tests for the Hadamard rotation used in serving."""
 
     @pytest.mark.parametrize("dim", [64, 128, 256])
-    def test_wht_orthonormal(self, dim):
-        """signs * H must be orthonormal: (signs*H) @ (signs*H)^T = I."""
-        signs = generate_wht_signs(dim, seed=42, device=DEVICE_TYPE)
+    def test_hadamard_orthonormal(self, dim):
+        """H must be orthonormal: H @ H^T = I."""
         H = _build_hadamard(dim, DEVICE_TYPE)
-        PiT = (signs.unsqueeze(1) * H).contiguous()
-        eye = PiT @ PiT.T
+        eye = H @ H.T
         assert torch.allclose(eye, torch.eye(dim, device=DEVICE_TYPE), atol=1e-5), (
-            f"WHT rotation not orthonormal for dim={dim}"
+            f"Hadamard not orthonormal for dim={dim}"
         )
 
     @pytest.mark.parametrize("dim", [64, 128, 256])
-    def test_wht_self_inverse(self, dim):
-        """PiT should be self-inverse: PiT @ PiT = I (up to sign flip)."""
-        signs = generate_wht_signs(dim, seed=42, device=DEVICE_TYPE)
+    def test_hadamard_symmetric(self, dim):
+        """Sylvester Hadamard must be symmetric: H = H^T."""
         H = _build_hadamard(dim, DEVICE_TYPE)
-        PiT = (signs.unsqueeze(1) * H).contiguous()
-        Pi = PiT.T.contiguous()
-        # Pi @ PiT should be identity (rotation then inverse)
-        result = Pi @ PiT
-        assert torch.allclose(result, torch.eye(dim, device=DEVICE_TYPE), atol=1e-5), (
-            f"WHT rotation not self-inverse for dim={dim}"
+        assert torch.allclose(H, H.T, atol=1e-6), (
+            f"Hadamard not symmetric for dim={dim}"
         )
-
-    def test_wht_signs_deterministic(self):
-        """Same seed must produce identical signs."""
-        s1 = generate_wht_signs(128, seed=42)
-        s2 = generate_wht_signs(128, seed=42)
-        assert torch.equal(s1, s2)
-
-    def test_wht_signs_different_seeds(self):
-        """Different seeds must produce different signs."""
-        s1 = generate_wht_signs(128, seed=42)
-        s2 = generate_wht_signs(128, seed=99)
-        assert not torch.equal(s1, s2)
-
-    def test_wht_signs_are_pm1(self):
-        """All sign values must be exactly +1 or -1."""
-        signs = generate_wht_signs(128, seed=42)
-        assert torch.all(signs.abs() == 1.0)
 
 
 # ============================================================================
@@ -491,11 +545,10 @@ class TestStoreDecodeRoundTrip:
 
         device = torch.device(DEVICE_TYPE)
 
-        # Generate rotation
-        signs = generate_wht_signs(D, seed=42, device=device)
+        # Pure Hadamard rotation (symmetric: H = H^T, so Pi = PiT = H)
         H = _build_hadamard(D, DEVICE_TYPE)
-        PiT = (signs.unsqueeze(1) * H).contiguous().float()
-        Pi = PiT.T.contiguous()
+        PiT = H
+        Pi = H
 
         # Generate centroids
         centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)

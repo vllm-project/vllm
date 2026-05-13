@@ -126,7 +126,9 @@ __launch_bounds__(TPB) __global__
     {
         const int idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
-        const float softmax_val = expf(val - float_max) * normalizing_factor;
+        float softmax_val = expf(val - float_max) * normalizing_factor;
+        // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
+        if (isnan(softmax_val) || isinf(softmax_val)) softmax_val = 0.f;
         output[idx] = softmax_val;
     }
 }
@@ -147,7 +149,9 @@ __launch_bounds__(TPB) __global__
     {
         const int idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
-        const float sigmoid_val = 1.0f / (1.0f + __expf(-val));
+        float sigmoid_val = 1.0f / (1.0f + __expf(-val));
+        // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
+        if (isnan(sigmoid_val) || isinf(sigmoid_val)) sigmoid_val = 0.f;
         output[idx] = sigmoid_val;
     }
 }
@@ -439,6 +443,19 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
       for (int ii = 0; ii < VPT; ++ii)
       {
         row_chunk[ii] = 1.0f / (1.0f + __expf(-row_chunk[ii]));
+      }
+    }
+
+    // Fix: clamp NaN/Inf values to 0 to prevent duplicate expert IDs.
+    // NaN gating (from degenerate hidden states in CUDA graph padding) causes
+    // softmax to produce all-NaN, which makes the argmax loop always pick
+    // expert 0 for every top-k slot, producing duplicate expert IDs that
+    // crash FlashInfer's three-step MoE sort.
+    // With 0s, the argmax uses index tie-breaking to pick [0,1,2,...,k-1].
+#pragma unroll
+    for (int ii = 0; ii < VPT; ++ii) {
+      if (isnan(row_chunk[ii]) || isinf(row_chunk[ii])) {
+        row_chunk[ii] = 0.f;
       }
     }
 
