@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.lora_context import MoELoRAContext
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 
 
 class LoRAExpertsMixin:
