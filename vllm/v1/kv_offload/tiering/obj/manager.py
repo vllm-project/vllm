@@ -21,8 +21,8 @@ from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
 logger = init_logger(__name__)
 
-WRITE = "WRITE"
-READ = "READ"
+NIXL_WRITE = "WRITE"
+NIXL_READ = "READ"
 NIXL_PROC = "PROC"
 NIXL_DONE = "DONE"
 
@@ -116,7 +116,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             return False
 
         xfer_handle = self._agent.initialize_xfer(
-            op, xfer_desc, files_desc.trim(), "ObjNixlEngine"
+            op, xfer_desc, files_desc.trim(), "ObjAgent"
         )
         if not xfer_handle:
             logger.warning("initialize_xfer failed for job %d", job_id)
@@ -138,37 +138,47 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
-        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, WRITE)
+        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE)
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._get_obj_key(k) for k in job_metadata.keys)
-        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, READ)
+        self._submit_transfer(job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ)
 
     def get_finished(self) -> Iterable[JobResult]:
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
         results: list[JobResult] = []
         for job_id, entry in list(self._transfers.items()):
+            state = ""
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
             except Exception as exc:
                 logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
             if state == NIXL_PROC:
                 continue
-            del self._transfers[job_id]
-            self._agent.deregister_memory(entry.files_desc)
-            self._agent.release_xfer_handle(entry.xfer_handle)
-            if state == NIXL_DONE:
+            elif state == NIXL_DONE:
+                success = True
+            else:
+                success = False
                 logger.warning("transfer failed job=%d state=%s", job_id, state)
-            results.append(JobResult(job_id=job_id))
+            del self._transfers[job_id]
+            self._agent.release_xfer_handle(entry.xfer_handle)
+            self._agent.deregister_memory(entry.files_desc)
+            results.append(JobResult(job_id=job_id, success=success))
         return results
 
     def shutdown(self) -> None:
-        for entry in self._transfers.values():
-            self._agent.release_xfer_handle(entry.xfer_handle)
-            self._agent.deregister_memory(entry.files_desc)
+        for job_id, entry in self._transfers.items():
+            try:
+                self._agent.release_xfer_handle(entry.xfer_handle)
+                self._agent.deregister_memory(entry.files_desc)
+            except Exception as exc:
+                logger.warning("cleanup failed for job %d: %s", job_id, exc)
         self._transfers.clear()
         if self._primary_reg is not None:
-            self._agent.deregister_memory(self._primary_reg)
+            try:
+                self._agent.deregister_memory(self._primary_reg)
+            except Exception as exc:
+                logger.warning("failed to deregister primary buffer: %s", exc)
             self._primary_reg = None
         self._primary_tensor = None
 
