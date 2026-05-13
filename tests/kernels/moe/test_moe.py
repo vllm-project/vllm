@@ -1501,6 +1501,105 @@ def test_batched_fused_marlin_moe(
     torch.testing.assert_close(marlin_output, ref_marlin_output, atol=1e-3, rtol=0)
 
 
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+def test_batched_fused_marlin_moe_awq_int8_activation_metadata():
+    set_random_seed(0)
+
+    m, n, k, e, topk = 32, 128, 128, 8, 2
+    max_tokens_per_batch = m * topk
+    dtype = torch.float16
+    quant_dtype = scalar_types.uint4
+    group_size = 32
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 20
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 20
+
+    w1_data = MarlinMoEWeightData.make(
+        w=w1,
+        quant_type=quant_dtype,
+        group_size=group_size,
+        input_type=scalar_types.int8,
+    )
+    w2_data = MarlinMoEWeightData.make(
+        w=w2,
+        quant_type=quant_dtype,
+        group_size=group_size,
+        input_type=scalar_types.int8,
+    )
+
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+
+    topk_ids_cpu = topk_ids.cpu()
+    topk_weights_cpu = topk_weights.cpu()
+    expert_num_tokens_cpu = torch.zeros((e,), dtype=torch.int32, device="cpu")
+    for topk_id in torch.flatten(topk_ids_cpu):
+        expert_num_tokens_cpu[topk_id] += 1
+
+    batched_hidden_states_cpu = torch.empty(
+        (e, max_tokens_per_batch, k), dtype=dtype, device="cpu"
+    )
+    counter_cpu = torch.zeros_like(expert_num_tokens_cpu)
+    for token_idx, token in enumerate(a.cpu()):
+        for topk_id in topk_ids_cpu[token_idx]:
+            pos_in_batch = counter_cpu[topk_id]
+            batched_hidden_states_cpu[topk_id, pos_in_batch] = token
+            counter_cpu[topk_id] += 1
+    assert torch.allclose(counter_cpu, expert_num_tokens_cpu)
+    batched_hidden_states = batched_hidden_states_cpu.cuda()
+
+    kwargs = {
+        "w1": w1_data.qweight,
+        "w2": w2_data.qweight,
+        "bias1": None,
+        "bias2": None,
+        "w1_scale": w1_data.scales,
+        "w2_scale": w2_data.scales,
+        "global_num_experts": e,
+        "expert_map": None,
+        "input_global_scale1": w1_data.a_scales_factor,
+        "input_global_scale2": w2_data.a_scales_factor,
+        "w1_zeros": w1_data.zeros,
+        "w2_zeros": w2_data.zeros,
+        "quant_type_id": quant_dtype.id,
+        "input_dtype": torch.int8,
+        "is_k_full": True,
+    }
+
+    ref_marlin_output = fused_marlin_moe(
+        hidden_states=a,
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        **kwargs,
+    )
+
+    batched_outputs = batched_fused_marlin_moe(
+        hidden_states=batched_hidden_states,
+        expert_num_tokens=expert_num_tokens_cpu.cuda(),
+        **kwargs,
+    )
+
+    batched_outputs_cpu = batched_outputs.cpu()
+    marlin_output_cpu = torch.zeros_like(a.cpu())
+    counter_cpu.zero_()
+    for token_idx in range(m):
+        token_output = None
+        for topk_id, topk_weight in zip(
+            topk_ids_cpu[token_idx], topk_weights_cpu[token_idx]
+        ):
+            pos_in_batch = counter_cpu[topk_id]
+            output = batched_outputs_cpu[topk_id, pos_in_batch] * topk_weight
+            token_output = output if token_output is None else token_output + output
+            counter_cpu[topk_id] += 1
+        assert token_output is not None
+        marlin_output_cpu[token_idx] = token_output
+
+    torch.testing.assert_close(
+        marlin_output_cpu.cuda(), ref_marlin_output, atol=4e-2, rtol=0
+    )
+
+
 @pytest.mark.parametrize("m,n,k", [(32, 1024, 1024)])
 @pytest.mark.parametrize("e,topk", [(8, 2)])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
