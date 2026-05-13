@@ -1636,13 +1636,12 @@ class EngineArgs:
         `speculative_config`.
         """
         spec_aliases = {
-            "--spec-method": ("method", self.spec_method),
-            "--spec-model": ("model", self.spec_model),
-            "--spec-tokens": ("num_speculative_tokens", self.spec_tokens),
-        }
-        spec_aliases = {
             flag: (key, value)
-            for flag, (key, value) in spec_aliases.items()
+            for flag, key, value in (
+                ("--spec-method", "method", self.spec_method),
+                ("--spec-model", "model", self.spec_model),
+                ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+            )
             if value is not None
         }
 
@@ -1652,10 +1651,11 @@ class EngineArgs:
             self.speculative_config = {}
 
         for flag, (key, value) in spec_aliases.items():
-            if key in self.speculative_config:
+            existing = self.speculative_config.get(key, value)
+            if existing != value:
                 raise ValueError(
-                    f"Conflicting speculative config: {flag} and "
-                    f"--speculative-config both set '{key}'."
+                    f"Conflicting speculative config: {flag}={value!r} and "
+                    f"--speculative-config['{key}']={existing!r}."
                 )
             self.speculative_config[key] = value
 
