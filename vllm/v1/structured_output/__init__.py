@@ -359,8 +359,7 @@ class StructuredOutputManager:
             # decoding with structural-tag constraints; other paths keep prior
             # streaming gating without this shortcut.
             if (
-                structured_req.reasoning_ended
-                and self.vllm_config.speculative_config is not None
+                self.vllm_config.speculative_config is not None
                 and structured_req.structured_output_key[0]
                 == StructuredOutputOptions.STRUCTURAL_TAG
             ):
