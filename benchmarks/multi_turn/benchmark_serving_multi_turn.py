@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from http import HTTPStatus
 from statistics import mean
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import aiohttp  # type: ignore
 import numpy as np  # type: ignore
@@ -34,6 +34,7 @@ from transformers import AutoTokenizer  # type: ignore
 
 NUM_TOKENS_FROM_DATASET = 0
 TERM_SIGNAL = None
+RequestBody = dict[str, Any]
 
 
 class ConversationSampling(str, Enum):
@@ -65,6 +66,7 @@ class RequestArgs(NamedTuple):
     limit_min_tokens: int  # Use negative value for no limit
     limit_max_tokens: int  # Use negative value for no limit
     timeout_sec: int
+    extra_request_body: RequestBody
 
 
 class BenchmarkArgs(NamedTuple):
@@ -208,18 +210,53 @@ def nanosec_to_sec(value: float) -> float:
     return value / 1000000000.0
 
 
-async def send_request(
-    session: aiohttp.ClientSession,
+def merge_request_body(base: RequestBody, extra: RequestBody) -> RequestBody:
+    for key, value in extra.items():
+        if isinstance(base.get(key), dict) and isinstance(value, dict):
+            merge_request_body(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def parse_extra_request_body(extra_request_body: str | None) -> RequestBody:
+    if extra_request_body is None:
+        return {}
+
+    try:
+        parsed = json.loads(extra_request_body)
+    except json.JSONDecodeError as err:
+        raise ValueError(f"Invalid --extra-request-body JSON: {err}") from err
+
+    if not isinstance(parsed, dict):
+        raise ValueError("--extra-request-body must be a JSON object")
+
+    return parsed
+
+
+def get_extra_request_body(args: argparse.Namespace) -> RequestBody:
+    extra_request_body: RequestBody = {}
+    if args.disable_thinking:
+        extra_request_body = {
+            "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning_effort": "low",
+        }
+
+    return merge_request_body(
+        extra_request_body, parse_extra_request_body(args.extra_request_body)
+    )
+
+
+def build_request_payload(
     messages: list[dict[str, str]],
-    chat_url: str,
     model: str,
-    stream: bool = True,
-    min_tokens: int | None = None,
-    max_tokens: int | None = None,
-    timeout_sec: int = 120,
-    conversation_id: str | None = None,
-) -> ServerResponse:
-    payload = {
+    stream: bool,
+    min_tokens: int | None,
+    max_tokens: int | None,
+    conversation_id: str | None,
+    extra_request_body: RequestBody,
+) -> RequestBody:
+    payload: RequestBody = {
         "model": model,
         "messages": messages,
         "seed": 0,
@@ -238,6 +275,31 @@ async def send_request(
 
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+
+    return merge_request_body(payload, extra_request_body)
+
+
+async def send_request(
+    session: aiohttp.ClientSession,
+    messages: list[dict[str, str]],
+    chat_url: str,
+    model: str,
+    stream: bool = True,
+    min_tokens: int | None = None,
+    max_tokens: int | None = None,
+    timeout_sec: int = 120,
+    conversation_id: str | None = None,
+    extra_request_body: RequestBody | None = None,
+) -> ServerResponse:
+    payload = build_request_payload(
+        messages=messages,
+        model=model,
+        stream=stream,
+        min_tokens=min_tokens,
+        max_tokens=max_tokens,
+        conversation_id=conversation_id,
+        extra_request_body=extra_request_body or {},
+    )
 
     headers = {"Content-Type": "application/json"}
 
@@ -424,6 +486,7 @@ async def send_turn(
         max_tokens,
         req_args.timeout_sec,
         conversation_id=conv_id,
+        extra_request_body=req_args.extra_request_body,
     )
 
     if response.valid is False:
@@ -880,6 +943,7 @@ def get_client_config(
         limit_min_tokens=args.limit_min_tokens,
         limit_max_tokens=args.limit_max_tokens,
         timeout_sec=args.request_timeout_sec,
+        extra_request_body=get_extra_request_body(args),
     )
 
     return client_args, req_args
@@ -1435,6 +1499,22 @@ async def main() -> None:
         default=False,
         action="store_true",
         help="Disable stream/streaming mode (set 'stream' to False in the API request)",
+    )
+    parser.add_argument(
+        "--extra-request-body",
+        type=str,
+        default=None,
+        help="Additional JSON object to merge into every chat completion request. "
+        "This can be used for model-specific request fields such as "
+        "chat_template_kwargs or reasoning_effort.",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        default=False,
+        action="store_true",
+        help="Request reasoning models to minimize or disable their thinking budget "
+        "by adding chat_template_kwargs.enable_thinking=false and "
+        "reasoning_effort=low to every request.",
     )
 
     parser.add_argument(
