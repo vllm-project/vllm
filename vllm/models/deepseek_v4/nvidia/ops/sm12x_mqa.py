@@ -287,6 +287,215 @@ def _fp8_paged_mqa_logits_kernel(
     )
 
 
+@triton.jit
+def _fp8_paged_mqa_logits_rowwise_kernel(
+    q_ptr,
+    kv_ptr,
+    scale_ptr,
+    weights_ptr,
+    context_lens_ptr,
+    block_tables_ptr,
+    logits_ptr,
+    token_start,
+    num_rows: tl.constexpr,
+    logits_width: tl.constexpr,
+    next_n: tl.constexpr,
+    num_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_size: tl.constexpr,
+    stride_qb: tl.constexpr,
+    stride_qn: tl.constexpr,
+    stride_qh: tl.constexpr,
+    stride_qd: tl.constexpr,
+    stride_kvb: tl.constexpr,
+    stride_kvs: tl.constexpr,
+    stride_kvd: tl.constexpr,
+    stride_sb: tl.constexpr,
+    stride_ss: tl.constexpr,
+    stride_wm: tl.constexpr,
+    stride_wh: tl.constexpr,
+    stride_clb: tl.constexpr,
+    stride_cln: tl.constexpr,
+    stride_btb: tl.constexpr,
+    stride_btk: tl.constexpr,
+    stride_lm: tl.constexpr,
+    stride_ln: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Per-row paged-MQA logits kernel optimised for long ``token_count``.
+
+    Each Triton program handles one logical row (``batch * next_n + q_pos``)
+    across a ``BLOCK_N``-wide window of token positions. Q is loaded once per
+    head tile and reused for every K element in the window, which preserves
+    L2 / register locality and avoids the M-axis padding waste of the
+    generic 2D-tiled kernel at long contexts (mt-bench c=1 MTP=2 num_rows=3
+    with token_count=131072 launches 12k programs of 128 logits each rather
+    than 8k programs of 64 logits with 25 % M-axis waste).
+    """
+    row = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_local_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_n = token_start + offs_local_n
+    offs_d = tl.arange(0, BLOCK_D)
+
+    valid_row = row < num_rows
+    valid_n = offs_local_n < logits_width
+    batch = row // next_n
+    q_pos = row - batch * next_n
+    context_len = tl.load(
+        context_lens_ptr + batch * stride_clb + q_pos * stride_cln,
+        mask=valid_row,
+        other=0,
+    )
+    if token_start + pid_n * BLOCK_N >= context_len:
+        logits = tl.full((BLOCK_N,), float("-inf"), dtype=tl.float32)
+        tl.store(
+            logits_ptr + row * stride_lm + offs_local_n * stride_ln,
+            logits,
+            mask=valid_row & valid_n,
+        )
+        return
+    context_mask = valid_n & (offs_n < context_len)
+
+    block_rank = offs_n // block_size
+    block_offset = offs_n - block_rank * block_size
+    block_idx = tl.load(
+        block_tables_ptr + batch * stride_btb + block_rank * stride_btk,
+        mask=valid_row & context_mask,
+        other=0,
+    )
+
+    scale = tl.load(
+        scale_ptr + block_idx * stride_sb + block_offset * stride_ss,
+        mask=context_mask,
+        other=0.0,
+    )
+    logits = tl.zeros((BLOCK_N,), dtype=tl.float32)
+
+    for h0 in tl.range(0, num_heads, BLOCK_H):
+        heads = h0 + tl.arange(0, BLOCK_H)
+        valid_h = heads < num_heads
+        scores = tl.zeros((BLOCK_H, BLOCK_N), dtype=tl.float32)
+        for d0 in tl.range(0, head_dim, BLOCK_D):
+            d = d0 + offs_d
+            q = tl.load(
+                q_ptr
+                + batch * stride_qb
+                + q_pos * stride_qn
+                + heads[:, None] * stride_qh
+                + d[None, :] * stride_qd,
+                mask=valid_row & valid_h[:, None] & (d[None, :] < head_dim),
+                other=0.0,
+            ).to(tl.float32)
+            k = tl.load(
+                kv_ptr
+                + block_idx[None, :] * stride_kvb
+                + block_offset[None, :] * stride_kvs
+                + d[:, None] * stride_kvd,
+                mask=context_mask[None, :] & (d[:, None] < head_dim),
+                other=0.0,
+            ).to(tl.float32)
+            scores += tl.dot(q, k, input_precision="tf32")
+
+        weighted = tl.maximum(scores * scale[None, :], 0.0)
+        weight = tl.load(
+            weights_ptr + row * stride_wm + heads * stride_wh,
+            mask=valid_row & valid_h,
+            other=0.0,
+        )
+        logits += tl.sum(weighted * weight[:, None], axis=0)
+
+    logits = tl.where(context_mask & valid_row, logits, float("-inf"))
+    tl.store(
+        logits_ptr + row * stride_lm + offs_local_n * stride_ln,
+        logits,
+        mask=valid_row & valid_n,
+    )
+
+
+def fp8_paged_mqa_logits_rowwise_triton(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+    token_start: int = 0,
+    token_count: int | None = None,
+) -> torch.Tensor:
+    """Rowwise paged-MQA logits wrapper.
+
+    Pre-condition: ``head_dim % 64 == 0`` and ``num_heads % 4 == 0`` so the
+    ``tl.dot`` inside ``_fp8_paged_mqa_logits_rowwise_kernel`` lands on
+    tensor-core friendly tile shapes. DSv4-Flash (head_dim=128,
+    num_heads=64) satisfies both and is the only model that exercises this
+    path today; the generic 2D kernel below remains the fallback for
+    misaligned shapes.
+    """
+    batch_size, next_n, num_heads, head_dim = q.size()
+    kv_values, kv_scale = _view_packed_fp8_paged_mqa_kv_cache(kv_cache, head_dim)
+    _, block_size, _, _ = kv_values.size()
+    num_rows = batch_size * next_n
+    if token_count is None:
+        token_count = max_model_len - token_start
+    assert token_start >= 0
+    assert token_count >= 0
+    assert token_start + token_count <= max_model_len
+    logits = torch.empty(
+        (num_rows, token_count),
+        device=q.device,
+        dtype=torch.float32,
+    )
+    if num_rows == 0 or token_count == 0:
+        return logits
+
+    context_lens_2d = context_lens.reshape(batch_size, -1)
+    if context_lens_2d.shape[1] == 1 and next_n != 1:
+        context_lens_2d = context_lens_2d.expand(batch_size, next_n).contiguous()
+    block_n = 128
+    grid = (num_rows, triton.cdiv(token_count, block_n))
+    _fp8_paged_mqa_logits_rowwise_kernel[grid](
+        q,
+        kv_values,
+        kv_scale,
+        weights,
+        context_lens_2d,
+        block_tables,
+        logits,
+        token_start,
+        num_rows,
+        token_count,
+        next_n,
+        num_heads,
+        head_dim,
+        block_size,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        kv_values.stride(0),
+        kv_values.stride(1),
+        kv_values.stride(3),
+        kv_scale.stride(0),
+        kv_scale.stride(1),
+        weights.stride(0),
+        weights.stride(1),
+        context_lens_2d.stride(0),
+        context_lens_2d.stride(1),
+        block_tables.stride(0),
+        block_tables.stride(1),
+        logits.stride(0),
+        logits.stride(1),
+        BLOCK_N=block_n,
+        BLOCK_D=64,
+        BLOCK_H=8,
+        num_warps=4,
+    )
+    return logits
+
+
 def fp8_paged_mqa_logits_triton(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -298,6 +507,24 @@ def fp8_paged_mqa_logits_triton(
     token_count: int | None = None,
 ) -> torch.Tensor:
     batch_size, next_n, num_heads, head_dim = q.size()
+    # Aligned head shapes (DSv4-Flash and any future MQA model with
+    # ``head_dim % 64 == 0`` and ``num_heads % 4 == 0``) get the rowwise
+    # kernel, which keeps long-context decode (>100K tokens) on a per-row
+    # grid that re-uses Q across the full token window. The generic 2D
+    # kernel below still handles misaligned shapes and remains the canonical
+    # reference for the rowwise variant.
+    if head_dim % 64 == 0 and num_heads % 4 == 0:
+        return fp8_paged_mqa_logits_rowwise_triton(
+            q,
+            kv_cache,
+            weights,
+            context_lens,
+            block_tables,
+            max_model_len,
+            token_start=token_start,
+            token_count=token_count,
+        )
+
     kv_values, kv_scale = _view_packed_fp8_paged_mqa_kv_cache(kv_cache, head_dim)
     _, block_size, _, _ = kv_values.size()
     num_rows = batch_size * next_n
