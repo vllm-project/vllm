@@ -215,6 +215,7 @@ steps:
   optional: true
   timeout_in_minutes: 20
   device: h200_18gb
+  device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
