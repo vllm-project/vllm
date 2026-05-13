@@ -4,7 +4,7 @@ import pytest
 import torch
 
 import vllm.kernels  # noqa: F401
-from tests.kernels.allclose_default import get_default_rtol
+from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from vllm import ir
 from vllm.platforms import current_platform
 
@@ -68,43 +68,44 @@ class TestSiluAndMulWithClamp:
         )
 
         # Gate clamping semantics: gate=large_val clamped to limit, up=1.0.
+        # Exercise each parametrized dtype — bf16/fp16 must also satisfy the
+        # clamp identity, with dtype-appropriate tolerances.
         x_gate = torch.tensor(
             [[limit * 20.0, 1.0]],
-            dtype=torch.float32,
+            dtype=dtype,
             device=current_platform.device_type,
         )
         out_gate = silu_and_mul_with_clamp_native(x_gate, limit)
-        expected_gate = torch.nn.functional.silu(
-            torch.tensor(limit, dtype=torch.float32)
-        ).item()
+        expected_gate = torch.tensor(
+            [[torch.nn.functional.silu(torch.tensor(limit)).item()]],
+            dtype=dtype,
+            device=current_platform.device_type,
+        )
         torch.testing.assert_close(
             out_gate,
-            torch.tensor(
-                [[expected_gate]],
-                dtype=torch.float32,
-                device=current_platform.device_type,
-            ),
-            atol=1e-3,
-            rtol=1e-3,
+            expected_gate,
+            atol=get_default_atol(out_gate),
+            rtol=get_default_rtol(out_gate),
         )
 
         # Up clamping semantics: up >> limit gets clamped to limit.
         x_up = torch.tensor(
             [[1.0, limit * 20.0]],
-            dtype=torch.float32,
+            dtype=dtype,
             device=current_platform.device_type,
         )
         out_up = silu_and_mul_with_clamp_native(x_up, limit)
         silu_1 = torch.nn.functional.silu(torch.tensor(1.0)).item()
+        expected_up = torch.tensor(
+            [[silu_1 * limit]],
+            dtype=dtype,
+            device=current_platform.device_type,
+        )
         torch.testing.assert_close(
             out_up,
-            torch.tensor(
-                [[silu_1 * limit]],
-                dtype=torch.float32,
-                device=current_platform.device_type,
-            ),
-            atol=1e-3,
-            rtol=1e-3,
+            expected_up,
+            atol=get_default_atol(out_up),
+            rtol=get_default_rtol(out_up),
         )
 
     @pytest.mark.parametrize("provider", ["vllm_c", "xpu_kernels"])

@@ -181,6 +181,9 @@ class SiluAndMulWithClamp(CustomOp):
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         return ir.ops.silu_and_mul_with_clamp(x, self.swiglu_limit)
 
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.silu_and_mul_with_clamp(x, self.swiglu_limit)
+
 
 # --8<-- [start:mul_and_silu]
 @CustomOp.register("mul_and_silu")
