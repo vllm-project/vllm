@@ -183,6 +183,56 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             max_num_pages, dtype=torch.int32, device=device
         )
 
+        from aiter import dtypes, get_mla_metadata_info_v1
+
+        # For num_attention_heads < 16 (e.g. kimi-k2.5 head=8 with TP8),
+        # make sure get_mla_metadata_info_v1 / get_mla_metadata_v1 are consistent
+        # with the actual tensor shape passed to mla_decode_fwd.
+        self._num_attention_heads = max(16, self.num_heads)
+        q_dtype = self.decode_attn_out_dtype
+        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
+            kv_cache_dtype_str = "fp8"
+        else:
+            kv_cache_dtype_str = "bf16"
+        kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+        (
+            (work_meta_data_size, work_meta_data_type),
+            (work_indptr_size, work_indptr_type),
+            (work_info_set_size, work_info_set_type),
+            (reduce_indptr_size, reduce_indptr_type),
+            (reduce_final_map_size, reduce_final_map_type),
+            (reduce_partial_map_size, reduce_partial_map_type),
+        ) = get_mla_metadata_info_v1(
+            max_num_reqs,
+            1,
+            self._num_attention_heads,
+            q_dtype,
+            kv_dtype,
+            is_sparse=False,
+            fast_mode=True,
+        )
+        self._mla_work_meta_data = torch.empty(
+            work_meta_data_size, dtype=work_meta_data_type, device=device
+        )
+        self._mla_work_indptr = torch.empty(
+            work_indptr_size, dtype=work_indptr_type, device=device
+        )
+        self._mla_work_info_set = torch.empty(
+            work_info_set_size, dtype=work_info_set_type, device=device
+        )
+        self._mla_reduce_indptr = torch.empty(
+            reduce_indptr_size, dtype=reduce_indptr_type, device=device
+        )
+        self._mla_reduce_final_map = torch.empty(
+            reduce_final_map_size, dtype=reduce_final_map_type, device=device
+        )
+        self._mla_reduce_partial_map = torch.empty(
+            reduce_partial_map_size,
+            dtype=reduce_partial_map_type,
+            device=device,
+        )
+
         # Pre-allocate FP8 MLA prefill PS metadata buffers.  This path is
         # auto-enabled on gfx950 when AITER provides the required kernels;
         # otherwise we silently fall back to flash_attn_varlen_func.
@@ -627,7 +677,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         from aiter import flash_attn_varlen_func
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        self._decode_out = None
 
         # FP8 MLA prefill kernel imports (lazy, only when enabled).
         # Auto-enabled on gfx950 when AITER ships the kernels.
@@ -864,22 +913,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # Linear with num_heads >= 16 this returns q unchanged.
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
-
-        dtype = attn_metadata.decode.attn_out_dtype
-        if (
-            self._decode_out is None
-            or self._decode_out.shape[0] < B
-            or self._decode_out.shape[1] != mla_num_heads
-            or self._decode_out.dtype != dtype
-        ):
-            self._decode_out = torch.zeros(
-                B,
-                mla_num_heads,
-                self.kv_lora_rank,
-                dtype=dtype,
-                device=q.device,
-            )
-        o = self._decode_out[:B]
+        o = torch.empty(
+            B,
+            mla_num_heads,
+            self.kv_lora_rank,
+            dtype=attn_metadata.decode.attn_out_dtype,
+            device=q.device,
+        )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
