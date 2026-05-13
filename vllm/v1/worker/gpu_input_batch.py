@@ -354,9 +354,27 @@ class InputBatch:
         num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             request.prompt_token_ids, request.prompt_embeds
         )
-        self.num_prompt_tokens[req_index] = num_prompt_tokens
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
+        # Defensive guard: the scheduler should have already rejected any
+        # request whose renewed prompt exceeds max_model_len, but catch any
+        # regression here with a clear error before NumPy raises an opaque
+        # broadcast failure.
+        if num_prompt_tokens > self.max_model_len:
+            raise ValueError(
+                f"Request {request.req_id} has prompt length {num_prompt_tokens}"
+                f" which exceeds max_model_len {self.max_model_len}. This is a"
+                " bug; the scheduler should have rejected the request."
+            )
+        if end_idx > self.max_model_len:
+            raise ValueError(
+                f"Request {request.req_id} has total token length {end_idx}"
+                f" (prompt {num_prompt_tokens} + output"
+                f" {len(request.output_token_ids)}) which exceeds"
+                f" max_model_len {self.max_model_len}. This is a bug; the"
+                " scheduler should have rejected the request."
+            )
+        self.num_prompt_tokens[req_index] = num_prompt_tokens
         if request.prompt_token_ids is not None:
             self.token_ids_cpu[req_index, :num_prompt_tokens] = request.prompt_token_ids
             if request.prompt_is_token_ids is not None:
