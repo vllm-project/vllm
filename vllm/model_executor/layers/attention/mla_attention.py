@@ -2051,6 +2051,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         output = None
+        merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
@@ -2126,18 +2127,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
                 merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
+                    output=merge_output,
+                    output_lse=merge_output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-                output = output_tmp
-                output_lse = output_lse_tmp
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         return output, output_lse
 
@@ -2161,6 +2163,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill_metadata.chunked_context.chunk_size is not None
 
         output = None
+        merge_output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
@@ -2232,18 +2235,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = attn_output
                 output_lse = attn_softmax_lse
             else:
-                output_tmp = torch.empty_like(output)
-                output_lse_tmp = torch.empty_like(output_lse)
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
                 merge_attn_states(
-                    output=output_tmp,
-                    output_lse=output_lse_tmp,
+                    output=merge_output,
+                    output_lse=merge_output_lse,
                     prefix_output=output,
                     prefix_lse=output_lse,
                     suffix_output=attn_output,
                     suffix_lse=attn_softmax_lse,
                 )
-                output = output_tmp
-                output_lse = output_lse_tmp
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
 
         return output, output_lse
 

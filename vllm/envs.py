@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_TRITON_ATTN_USE_TD: bool | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -525,6 +526,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Use tensor descriptors for Q/K/V loads and output stores in the
+    # Triton unified-attention kernel.  Enables HW 2D block reads on
+    # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
+    # compile time so other platforms see no overhead.  Tri-state override:
+    # unset (default) lets the `triton_attn` backend auto-select per
+    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
+    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
