@@ -410,6 +410,12 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
+            # Skip requests that have already computed enough tokens
+            # (e.g. when max_tokens < DRAFT_SIZE and a draft block already
+            # satisfied the output requirement).
+            if num_new_tokens <= 0:
+                req_index += 1
+                continue
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
