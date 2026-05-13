@@ -1001,35 +1001,6 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        aux_hidden_states_supported = [
-            "llama",
-            "qwen",
-            "minicpm",
-            "gpt_oss",
-            "hunyuan_vl",
-            "hunyuan_v1_dense",
-            "afmoe",
-            "nemotron_h",
-            "deepseek_v2",
-            "deepseek_v3",
-            "kimi_k2",
-            "kimi_k25",
-            "minimax_m2",
-            "gemma4",
-            "laguna",
-        ]
-        if (
-            self.method in ("eagle3", "extract_hidden_states", "dflash")
-            and self.target_model_config
-            and not any(
-                supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in aux_hidden_states_supported
-            )
-        ):
-            raise ValueError(
-                f"{self.method} is only supported for {aux_hidden_states_supported}"
-                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
-            )
         self.verify_equal_vocab_size_if_draft_model()
         return self
 
