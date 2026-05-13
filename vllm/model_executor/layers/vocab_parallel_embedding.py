@@ -58,9 +58,10 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
         from vllm.model_executor.kernels.linear import choose_w16a16_kernel
 
+        weight_shape = (layer.weight.shape[0], layer.weight.shape[1])
         config = w16a16.Config(
             weight_dtype=layer.weight.dtype,
-            weight_shape=tuple(layer.weight.shape),
+            weight_shape=weight_shape,
             batch_invariant=envs.VLLM_BATCH_INVARIANT
             and current_platform.is_cuda_alike(),
             is_weight_meta=layer.weight.is_meta,

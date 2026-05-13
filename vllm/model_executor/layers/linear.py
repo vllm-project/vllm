@@ -210,20 +210,20 @@ class UnquantizedLinearMethod(LinearMethodBase):
         import vllm.model_executor.kernels.linear.base.w16a16 as w16a16
         from vllm.model_executor.kernels.linear import choose_w16a16_kernel
 
-        if current_platform.is_cpu() and layer.weight.ndim != 2:
+        if layer.weight.ndim != 2:
             # this is not a linear layer
             return
-
+        weight_shape = (layer.weight.shape[0], layer.weight.shape[1])
         config = w16a16.Config(
             weight_dtype=layer.weight.dtype,
-            weight_shape=tuple(layer.weight.shape),
+            weight_shape=weight_shape,
             batch_invariant=envs.VLLM_BATCH_INVARIANT
             and current_platform.is_cuda_alike(),
             is_weight_meta=layer.weight.is_meta,
             weight_contiguous=layer.weight.is_contiguous(),
         )
-        layer.w16a16_kernel = choose_w16a16_kernel(config)
-        layer.w16a16_kernel.process_weights_after_loading(layer)
+        self.w16a16_kernel = choose_w16a16_kernel(config)
+        self.w16a16_kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -231,7 +231,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return layer.w16a16_kernel.apply_weights(layer, x, bias)
+        return self.w16a16_kernel.apply_weights(layer, x, bias)
 
 
 class LinearBase(PluggableLayer):
