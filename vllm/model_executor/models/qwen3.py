@@ -330,9 +330,10 @@ class Qwen3ForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
-        # PROBE: dump logit row stats at position 1 to find where divergence
-        # originates. Only when VLLM_DEBUG_DUMP_HS=1 and batch is large
-        # enough to be a prefill (not single-token decode).
+        # PROBE: scan ALL rows of logits, computing logprob[2701] = logit - lse
+        # at each row. Find the row(s) where logprob matches the failure
+        # signature (-10.5131..., the value at the failing prompt position)
+        # and dump their rank and near-tie candidates.
         import os as _os
 
         if (
@@ -340,51 +341,40 @@ class Qwen3ForCausalLM(
             and logits is not None
             and logits.ndim == 2
             and logits.shape[0] >= 2
+            and logits.shape[1] > 2701
         ):
             import sys
 
-            # PROBE: dump logits ROW 0 — the predictor for position 1's token.
-            # prompt_logprobs[1] = logprob of token at position 1 (=2701, ' following')
-            # is computed using logits[0]. So the rank kernel sees logits[0, :].
-            row = logits[0].detach().cpu().float()
-            head8 = row[:8].tolist()
-            tok2701 = float(row[2701].item()) if row.shape[0] > 2701 else None
-            row_max = float(row.max().item())
-            row_argmax = int(row.argmax().item())
-            row_sum = float(row.sum().item())
-            row_abssum = float(row.abs().sum().item())
-            # logsumexp
-            row_lse = float((row - row.max()).exp().sum().log().item() + row_max)
-            # PROBE: compute the rank directly from logits — exactly what
-            # _ranks_kernel does. If THIS differs across configs while
-            # tok2701 doesn't, the row itself has bit-level differences in
-            # tokens near the comparison boundary.
-            if tok2701 is not None:
-                # Count vocab tokens with logit >= logit[2701] in ROW 0
-                # (matches _ranks_kernel.tl.sum((logits >= x).to(int32)))
-                row_gpu = logits[0].detach()
-                rank_count = int((row_gpu >= row_gpu[2701]).sum().item())
-                # Count "boundary" tokens within tiny tolerance of tok2701
-                # tok_val unused (kept for clarity if extended)
-                # Find tokens within 1e-5 of tok2701 (near-tie candidates)
-                near = (
-                    ((row_gpu - row_gpu[2701]).abs() < 1e-5)
-                    .nonzero(as_tuple=False)
-                    .flatten()
-                    .tolist()
+            logits_gpu = logits.detach()
+            row_max = logits_gpu.max(dim=1).values  # [num_rows]
+            row_lse = (logits_gpu - row_max.unsqueeze(1)).exp().sum(
+                dim=1
+            ).log() + row_max
+            tok2701_per_row = logits_gpu[:, 2701]  # [num_rows]
+            logprob_2701_per_row = tok2701_per_row - row_lse  # [num_rows]
+
+            # Find rows whose logprob[2701] is near the failure signature
+            target = -10.5131
+            near_target_mask = (logprob_2701_per_row - target).abs() < 0.001
+            near_rows = near_target_mask.nonzero(as_tuple=False).flatten().tolist()
+
+            for row_idx in near_rows[:5]:
+                row = logits_gpu[row_idx]
+                tok2701_val = float(row[2701].item())
+                logprob_val = float(logprob_2701_per_row[row_idx].item())
+                lse_val = float(row_lse[row_idx].item())
+                rank_count = int((row >= row[2701]).sum().item())
+                near_mask = (row - row[2701]).abs() < 1e-6
+                near_idx = near_mask.nonzero(as_tuple=False).flatten().tolist()
+                near_vals = [(int(i), float(row[i].item())) for i in near_idx[:8]]
+                print(
+                    f"[VLLM_LOGITS] shape={list(logits.shape)} row={row_idx} "
+                    f"tok2701={tok2701_val:.18g} lse={lse_val:.18g} "
+                    f"logprob={logprob_val:.18g} rank_count={rank_count} "
+                    f"near_count={len(near_idx)} near={near_vals}",
+                    file=sys.stderr,
+                    flush=True,
                 )
-                near_vals = [(int(i), float(row_gpu[i].item())) for i in near[:8]]
-            else:
-                rank_count = None
-                near_vals = []
-            print(
-                f"[VLLM_LOGITS] shape={list(logits.shape)} pos=0_pred_tok2701 "
-                f"head8={head8} tok2701={tok2701} max={row_max} "
-                f"argmax={row_argmax} sum={row_sum} abssum={row_abssum} lse={row_lse} "
-                f"rank_count={rank_count} near={near_vals}",
-                file=sys.stderr,
-                flush=True,
-            )
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
