@@ -25,17 +25,16 @@ def rms_norm_input_quant(
     norm: torch.nn.Module,
     x: torch.Tensor,
     residual: torch.Tensor | None,
-    *,
-    quant_key: QuantKey | None = None,
-    input_scale: torch.Tensor | None = None,
+    linear: torch.nn.Module,
 ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
+    quant_key = getattr(linear, "input_quant_key", None)
     if quant_key is None:
         if residual is None:
             return norm(x), x
         out, residual = norm(x, residual)
         return out, residual
     if quant_key == kFp8StaticTensorSym:
-        return _rms_norm_fp8_static_per_tensor(norm, x, residual, input_scale)
+        return _rms_norm_fp8_static_per_tensor(norm, x, residual, linear)
     raise NotImplementedError(f"rms_norm + {quant_key} not wired")
 
 
@@ -43,7 +42,7 @@ def _rms_norm_fp8_static_per_tensor(
     norm: torch.nn.Module,
     x: torch.Tensor,
     residual: torch.Tensor | None,
-    input_scale: torch.Tensor,
+    linear: torch.nn.Module,
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     out_q = torch.empty(x.shape, dtype=current_platform.fp8_dtype(), device=x.device)
     if residual is None:
@@ -51,7 +50,7 @@ def _rms_norm_fp8_static_per_tensor(
             out_q,
             x,
             norm.weight.data,
-            input_scale,
+            linear.input_scale,
             norm.variance_epsilon,
         )
         residual = x
@@ -61,12 +60,12 @@ def _rms_norm_fp8_static_per_tensor(
             x,
             residual,
             norm.weight.data,
-            input_scale,
+            linear.input_scale,
             norm.variance_epsilon,
         )
     qa = QuantizedActivation(
         data=out_q,
-        scale=input_scale,
+        scale=linear.input_scale,
         orig_dtype=x.dtype,
         orig_shape=x.shape,
         quant_key=kFp8StaticTensorSym,

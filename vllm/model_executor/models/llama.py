@@ -326,8 +326,7 @@ class LlamaDecoderLayer(nn.Module):
             self.input_layernorm,
             hidden_states,
             residual,
-            quant_key=getattr(self.self_attn.qkv_proj, "input_quant_key", None),
-            input_scale=getattr(self.self_attn.qkv_proj, "input_scale", None),
+            self.self_attn.qkv_proj,
         )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
@@ -335,8 +334,7 @@ class LlamaDecoderLayer(nn.Module):
             self.post_attention_layernorm,
             hidden_states,
             residual,
-            quant_key=getattr(self.mlp.gate_up_proj, "input_quant_key", None),
-            input_scale=getattr(self.mlp.gate_up_proj, "input_scale", None),
+            self.mlp.gate_up_proj,
         )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
