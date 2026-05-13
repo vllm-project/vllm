@@ -25,7 +25,7 @@
 ARG CUDA_VERSION=13.0.2
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
-ARG FLASHINFER_VERSION=0.6.11
+ARG FLASHINFER_VERSION=0.6.11.post1
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in

@@ -11,7 +11,7 @@
       "default": "22.04"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.11"
+      "default": "0.6.11.post1"
     },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.2-devel-ubuntu22.04"
