@@ -701,6 +701,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         return output
 
+    _fp8_prefill_seg_counts: ClassVar[dict[int, int]] = {}
+
     def _mla_fp8_prefill_attn(
         self,
         q: torch.Tensor,
@@ -708,6 +710,17 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         v: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
     ) -> torch.Tensor:
+        seg = int(attn_metadata.fp8_prefill_qo_indptr.shape[0]) - 1
+        seen = type(self)._fp8_prefill_seg_counts
+        if seg not in seen:
+            logger.info(
+                "FP8 MLA prefill kernel engaged: NEW segments=%d q=%s k=%s v=%s",
+                seg,
+                tuple(q.shape),
+                tuple(k.shape),
+                tuple(v.shape),
+            )
+        seen[seg] = seen.get(seg, 0) + 1
         """Run FP8 MLA prefill via mla_prefill_ps_asm_fwd + mla_reduce_v1.
 
         Q, K, V are already decompressed (post-kv_b_proj).  After
@@ -847,24 +860,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         if has_context:
             # Chunked context requires merge_attn_states; fall back to parent
             # which handles the two-pass context + suffix merge.
-            return super().forward_mha(
-                q,
-                kv_c_normed,
-                k_pe,
-                kv_c_and_k_pe_cache,
-                attn_metadata,
-                k_scale,
-                output,
-            )
-
-        # AITER mla_prefill_ps_asm_fwd faults on multi-segment varlen
-        # input (e.g. 5 prefill segments packed into a single 16k-token
-        # forward by the chunked-prefill scheduler).  Restrict the FP8 ASM
-        # path to single-segment batches; multi-segment batches use the
-        # safe flash_attn_varlen_func fallback below.
-        prefill_qo_indptr = prefill_metadata.query_start_loc
-        num_prefill_segments = prefill_qo_indptr.shape[0] - 1
-        if num_prefill_segments > 1:
             return super().forward_mha(
                 q,
                 kv_c_normed,
