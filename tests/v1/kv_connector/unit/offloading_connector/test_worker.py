@@ -130,7 +130,7 @@ def test_register_kv_caches(mock_get_layers, backend):
     one Mamba-padded group. Each group has GROUP_SIZE layers.
 
     KVCacheTensors are shared across all groups mirroring the real allocation
-    in kv_cache_utils.py: tensor i is shared by layer i from every group.
+    in kv_cache_planning.py: tensor i is shared by layer i from every group.
     The padded-mamba group has a different page size so its layers get their
     own dedicated tensors.
 
