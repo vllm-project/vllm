@@ -42,7 +42,7 @@ from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.tiering.factory import create_secondary_tier
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -123,7 +123,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             secondary_tiers = []
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
-                    tier = create_secondary_tier(
+                    tier = SecondaryTierFactory.create_secondary_tier(
                         tier_config, primary_kv_view, self.vllm_config
                     )
                     secondary_tiers.append(tier)
