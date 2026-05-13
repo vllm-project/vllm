@@ -27,6 +27,7 @@ from vllm.v1.attention.ops.deepseek_v4_ops import (
     fused_indexer_q_rope_quant,
     fused_inv_rope_fp8_quant,
     fused_q_kv_rmsnorm,
+    quantize_and_insert_k_cache,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
 
@@ -78,6 +79,86 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+def _apply_rope_gptj_last_dims(
+    x: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    rope_dim: int,
+) -> torch.Tensor:
+    """GPT-J-style (interleaved-pair) RoPE on the last rope_dim elements.
+
+    Numerically matches ``fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert`` /
+    tests in ``test_fused_deepseek_v4_qnorm_rope_kv_insert``.
+    """
+    half = rope_dim // 2
+    head_dim = x.shape[-1]
+    nope_dim = head_dim - rope_dim
+
+    cs = cos_sin_cache[positions].to(torch.float32)
+    cos = cs[..., :half]
+    sin = cs[..., half:]
+
+    rope = x[..., nope_dim:].float()
+    shape = rope.shape
+    rope = rope.reshape(*shape[:-1], half, 2)
+    even = rope[..., 0]
+    odd = rope[..., 1]
+
+    for _ in range(rope.ndim - 3):
+        cos = cos.unsqueeze(1)
+        sin = sin.unsqueeze(1)
+
+    new_even = even * cos - odd * sin
+    new_odd = even * sin + odd * cos
+    rope_rotated = torch.stack((new_even, new_odd), dim=-1).reshape(shape)
+
+    out = x.clone().float()
+    out[..., nope_dim:] = rope_rotated
+    return out.to(x.dtype)
+
+
+def _deepseek_v4_qnorm_rope_kv_insert_reference(
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    k_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    eps: float,
+    cache_block_size: int,
+    q_head_norm: nn.Module,
+    rope_dim: int,
+) -> None:
+    """PyTorch/Triton reference for ROCm builds where the fused CUDA op is absent."""
+    head_dim = q.shape[-1]
+
+    q.copy_(
+        _apply_rope_gptj_last_dims(
+            q_head_norm(q.reshape(-1, head_dim)).view_as(q),
+            positions,
+            cos_sin_cache,
+            rope_dim,
+        )
+    )
+
+    num_tokens_insert = slot_mapping.shape[0]
+    if num_tokens_insert == 0:
+        return
+
+    kv_slice = kv[:num_tokens_insert]
+    pos_slice = positions[:num_tokens_insert]
+    kv_roped = _apply_rope_gptj_last_dims(
+        kv_slice, pos_slice, cos_sin_cache, rope_dim
+    )
+    quantize_and_insert_k_cache(
+        kv_roped,
+        k_cache,
+        slot_mapping,
+        block_size=cache_block_size,
+    )
+
 
 # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
 # workspace allocated at _forward_prefill (and the matching profile-time
@@ -541,16 +622,45 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         #   Q side:  q_head_norm (per-head RMSNorm, no weight) + GPT-J RoPE
         #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert
         # kv is unchanged; mla_attn reads kv solely via swa_kv_cache.
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            q,
-            kv,
-            swa_kv_cache_2d,
-            swa_metadata.slot_mapping,
-            positions.to(torch.int64),
-            self.rotary_emb.cos_sin_cache,
-            self.eps,
-            swa_metadata.block_size,
+        fused_op = getattr(
+            torch.ops._C,
+            "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
+            None,
         )
+        pos_i64 = positions.to(torch.int64)
+        cos_sin = self.rotary_emb.cos_sin_cache
+        block_sz = swa_metadata.block_size
+        slot_map = swa_metadata.slot_mapping
+
+        # Commit 628c43630 wired the
+        # kernel into the ROCm build, but its FP8 dtype is selected at
+        # *compile time* via ``HIP_FP8_TYPE_OCP`` whereas MI300X (gfx942)
+        # is FNUZ-only at runtime — a mismatch silently corrupts every K
+        # byte written to the SWA cache. Force the Python reference on
+        # ROCm under ``VLLM_ROCM_USE_V4_TRITON_FALLBACK`` so we match the
+        # pre-rebase numerics; flip the env var to "0" to opt back into
+        # the upstream C++ kernel for bisection.
+        # TODO: fix in the next commit.
+        use_torch_ref = (
+            current_platform.is_rocm()
+            and envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+        )
+
+        if fused_op is not None and not use_torch_ref:
+            fused_op(q, kv, swa_kv_cache_2d, slot_map, pos_i64, cos_sin, self.eps, block_sz)
+        else:
+            _deepseek_v4_qnorm_rope_kv_insert_reference(
+                q,
+                kv,
+                swa_kv_cache_2d,
+                slot_map,
+                pos_i64,
+                cos_sin,
+                self.eps,
+                block_sz,
+                self.q_head_norm,
+                self.rope_head_dim,
+            )
 
 
 def deepseek_v4_attention(
@@ -721,7 +831,16 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.kv_cache = torch.tensor([])
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        if current_platform.is_rocm():
+        if (
+            current_platform.is_rocm()
+            and not envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+        ):
+            # Opt-in (env=0) routes ROCm through the new AITER sparse
+            # MLA backend. Default (env=1) falls through to the unified
+            # FlashMLASparse backend; the actual kernels are then
+            # supplied by ``vllm.v1.attention.ops.flashmla`` which on
+            # ROCm hands off to our Triton fallbacks
+            # (``flash_mla_with_kvcache_rocm`` / ``flash_mla_sparse_fwd_rocm``).
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterMLASparseBackend,
             )
@@ -759,7 +878,14 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
         )
 
-        if current_platform.is_rocm():
+        if (
+            current_platform.is_rocm()
+            and not envs.VLLM_ROCM_USE_V4_TRITON_FALLBACK
+        ):
+            # See the matching gate in ``get_attn_backend``: env=0 opts
+            # into the AITER sparse MLA impl. Default (env=1) falls
+            # through to the unified path below, which routes ROCm to our
+            # Triton kernels via ``flashmla.py``.
             from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
                 DeepseekV4ROCMAiterMLASparseImpl,
             )
@@ -878,12 +1004,19 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 f"Unsupported compress_ratio={self.compress_ratio}; "
                 "expected 1, 4, or 128."
             )
-        assert tile_metadata is not None, (
-            "swa_metadata missing tile_sched entry for "
-            f"compress_ratio={self.compress_ratio}; "
-            "DeepseekSparseSWAMetadataBuilder.build_tile_scheduler did not "
-            "allocate one for this layer type."
-        )
+        # FlashMLA's tile-scheduler metadata is an NVIDIA-only planner state
+        # consumed by the C++/CUDA kernel. Our ROCm fallback
+        # (`flash_mla_with_kvcache_rocm`) discards `tile_scheduler_metadata`
+        # entirely, and `DeepseekSparseSWAMetadataBuilder.build_tile_scheduler`
+        # (correctly) skips allocating it on ROCm — so a `None` here is
+        # expected on AMD and only an error on CUDA.
+        if not current_platform.is_rocm():
+            assert tile_metadata is not None, (
+                "swa_metadata missing tile_sched entry for "
+                f"compress_ratio={self.compress_ratio}; "
+                "DeepseekSparseSWAMetadataBuilder.build_tile_scheduler did "
+                "not allocate one for this layer type."
+            )
 
         out, _ = flash_mla_with_kvcache(
             q=q,

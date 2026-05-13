@@ -93,6 +93,31 @@ if _is_flashmla_available()[0]:
         flash_mla_with_kvcache,
         get_mla_metadata,
     )
+elif current_platform.is_rocm():
+    # ROCm path: substitute the V4-relevant entry points with pure-torch +
+    # Triton fallbacks. The dense / varlen variants have no V4 caller and
+    # remain hard errors so misuse is loud.
+    from vllm.v1.attention.ops.rocm_flash_mla_sparse import (
+        _FlashMLASchedMetaStub as FlashMLASchedMeta,  # noqa: F401
+    )
+    from vllm.v1.attention.ops.rocm_flash_mla_sparse import (
+        flash_mla_sparse_fwd_rocm as flash_mla_sparse_fwd,
+    )
+    from vllm.v1.attention.ops.rocm_flash_mla_sparse import (
+        flash_mla_with_kvcache_rocm as flash_mla_with_kvcache,
+    )
+    from vllm.v1.attention.ops.rocm_flash_mla_sparse import (
+        get_mla_metadata_rocm as get_mla_metadata,
+    )
+
+    flash_attn_varlen_func = _raise_flashmla_unavailable  # type: ignore[assignment]
+    flash_attn_varlen_kvpacked_func = _raise_flashmla_unavailable  # type: ignore[assignment]
+    flash_attn_varlen_qkvpacked_func = _raise_flashmla_unavailable  # type: ignore[assignment]
+    logger.info_once(
+        "FlashMLA C extension unavailable on ROCm; using pure-torch + Triton "
+        "sparse-attention fallback for DeepSeek-V4 (flash_mla_sparse_fwd, "
+        "flash_mla_with_kvcache, get_mla_metadata)."
+    )
 else:
 
     class FlashMLASchedMeta:  # type: ignore[no-redef]

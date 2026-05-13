@@ -647,6 +647,30 @@ def mhc_fused_post_pre(
     assert n_splits in (1, 2, 4, 8)
     assert hidden_size % n_splits == 0
 
+    if current_platform.is_rocm():
+        # tilelang ships only CUDA codegen and the fused kernels here
+        # additionally use PDL (Hopper-only). Compose the existing torch
+        # fallbacks of ``mhc_post`` + ``mhc_pre`` instead — both already
+        # have a ROCm branch and produce the exact output shapes/dtypes
+        # the fused op contracts on.
+        if post_layer_mix.ndim == residual.ndim - 1:
+            post_layer_mix_3d = post_layer_mix.unsqueeze(-1)
+        else:
+            post_layer_mix_3d = post_layer_mix
+        residual_cur = mhc_post(x, residual, post_layer_mix_3d, comb_res_mix)
+        post_mix_cur, comb_mix_cur, layer_input_cur = mhc_pre(
+            residual_cur,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+        return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur
+
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
     x_flat = x.view(num_tokens, hidden_size)
