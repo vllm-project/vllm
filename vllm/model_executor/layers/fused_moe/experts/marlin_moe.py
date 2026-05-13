@@ -580,6 +580,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         self.is_k_full = is_k_full
         self.input_dtype = get_marlin_input_dtype()
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        self.input_global_scale1 = input_global_scale1
+        self.input_global_scale2 = input_global_scale2
 
         super().__init__(
             moe_config=moe_config,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -11,10 +11,13 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    int4_w4a16_moe_quant_config,
+    int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
+    MarlinExpertsBase,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -35,6 +38,7 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
+    FLASHINFER = "FLASHINFER"
 
 
 def backend_to_kernel_cls(
@@ -55,6 +59,13 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
+    elif backend == WNA16MoEBackend.FLASHINFER:
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (  # noqa: E501
+            TrtLlmMxint4ExpertsMonolithic,
+        )
+
+        return [TrtLlmMxint4ExpertsMonolithic]
+
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -64,6 +75,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     Get available backends in priority order based on platform and config.
     """
     _AVAILABLE_BACKENDS = [
+        WNA16MoEBackend.FLASHINFER,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ]
@@ -73,7 +85,6 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
-    weight_bits: int,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -143,16 +154,43 @@ def select_wna16_moe_backend(
     )
 
 
+def make_wna16_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    group_size: int,
+    num_bits: int,
+) -> FusedMoEQuantConfig:
+    """Create the FusedMoEQuantConfig for 4 or 8-bit WNA16 MoE."""
+    if num_bits == 4:
+        return int4_w4a16_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=None,
+            w2_zp=None,
+            block_shape=[0, group_size],
+        )
+    else:
+        assert num_bits == 8
+        return int8_w8a16_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=None,
+            w2_zp=None,
+            block_shape=[0, group_size],
+        )
+
+
 def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts] | None,
-    layer: torch.nn.Module,
-    is_k_full: bool,
-    w13_g_idx: torch.Tensor | None,
-    w2_g_idx: torch.Tensor | None,
-    w13_g_idx_sort_indices: torch.Tensor | None,
-    w2_g_idx_sort_indices: torch.Tensor | None,
+    is_k_full: bool = False,
+    w13_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    w13_g_idx_sort_indices: torch.Tensor | None = None,
+    w2_g_idx_sort_indices: torch.Tensor | None = None,
+    input_global_scale1: torch.Tensor | None = None,
+    input_global_scale2: torch.Tensor | None = None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     # Currently, we only support MarlinExperts and BatchedMarlinExperts
@@ -169,10 +207,22 @@ def make_wna16_moe_kernel(
         allow_new_interface=True,
     )
     assert prepare_finalize is not None
-    assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
+
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+
+    extra_args: dict[str, Any] = {}
+    if issubclass(experts_cls, MarlinExpertsBase):
+        extra_args = {
+            "w13_g_idx": w13_g_idx,
+            "w2_g_idx": w2_g_idx,
+            "w13_g_idx_sort_indices": w13_g_idx_sort_indices,
+            "w2_g_idx_sort_indices": w2_g_idx_sort_indices,
+            "is_k_full": is_k_full,
+            "input_global_scale1": input_global_scale1,
+            "input_global_scale2": input_global_scale2,
+        }
 
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        assert experts_cls == BatchedMarlinExperts
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts: mk.FusedMoEExperts = BatchedMarlinExperts(
@@ -180,28 +230,21 @@ def make_wna16_moe_kernel(
             num_dispatchers=prepare_finalize.num_dispatchers(),
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
+            **extra_args,
         )
     else:
-        assert experts_cls == MarlinExperts
         experts = MarlinExperts(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-            is_k_full=is_k_full,
+            **extra_args,
         )
+
+    is_monolithic = experts_cls.is_monolithic()
 
     return mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=not moe_config.disable_inplace,
+        inplace=not moe_config.disable_inplace and not is_monolithic,
     )
 
 

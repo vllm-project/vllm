@@ -515,7 +515,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         weight_key = QuantKey(quant_type, scale)
 
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
-            moe, weight_key, quant_config.weight_bits
+            moe,
+            weight_key,
         )
 
     def create_weights(
@@ -761,7 +762,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=layer.w13_g_idx,
             w2_g_idx=layer.w2_g_idx,

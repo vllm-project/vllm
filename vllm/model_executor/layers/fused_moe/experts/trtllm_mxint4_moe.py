@@ -11,7 +11,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kInt4Static32,
+)
 
 
 class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
@@ -53,9 +56,7 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # Selected directly by WNA16 oracle based on conditions, not via
-        # QuantKey matching. Always return True here.
-        return True
+        return (weight_key, activation_key) == (kInt4Static32, None)
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
