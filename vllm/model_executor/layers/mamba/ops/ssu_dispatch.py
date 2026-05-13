@@ -274,6 +274,20 @@ def initialize_mamba_ssu_backend(
     global _mamba_ssu_backend
 
     backend = mamba_config.backend
+
+    # On CPU-only platforms (PowerPC, x86 without CUDA) Triton JIT is
+    # unstable or unavailable.  Silently fall back to the pure-PyTorch CPU
+    # backend unless the user explicitly chose something other than "triton".
+    if backend == MambaBackendEnum.TRITON:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cpu():
+            logger.info(
+                "CPU platform detected: overriding Mamba SSU backend "
+                "from 'triton' to 'cpu' (pure-PyTorch fallback)."
+            )
+            backend = MambaBackendEnum.CPU
+
     if backend not in _BACKEND_REGISTRY:
         raise ValueError(
             f"Unknown Mamba SSU backend: {backend}. "
@@ -340,3 +354,4 @@ def selective_state_update(
         cu_seqlens=cu_seqlens,
         is_blackwell=is_blackwell,
     )
+

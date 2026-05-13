@@ -62,18 +62,9 @@ class MambaConfig:
         return value
 
     def __post_init__(self):
-        from vllm.platforms import current_platform
-
-        # On CPU-only platforms, silently override the backend to 'cpu' unless
-        # the user explicitly chose a different backend. Triton JIT is unstable
-        # (and often unavailable) on platforms like PowerPC.
-        if (
-            self.backend == MambaBackendEnum.TRITON
-            and current_platform.is_cpu()
-        ):
-            object.__setattr__(self, "backend", MambaBackendEnum.CPU)
-
         if self.enable_stochastic_rounding:
+            from vllm.platforms import current_platform
+
             if not current_platform.is_cuda():
                 raise ValueError(
                     "Stochastic rounding for Mamba cache is only supported "
@@ -91,3 +82,4 @@ class MambaConfig:
                     "specify `--enable-mamba-cache-stochastic-rounding`, "
                     "or set `--mamba-backend flashinfer`."
                 )
+
