@@ -223,6 +223,7 @@ class Scheduler(SchedulerInterface):
         if hash_block_size is None:
             hash_block_size = block_size
         self.kv_cache_manager = KVCacheManager(
+            vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
@@ -251,6 +252,15 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
+        # Disable mamba block-aligned split for KV consumers: the consumer
+        # receives KV from the producer without Mamba states, so
+        # block-aligned splitting is not needed.
+        if (
+            self.need_mamba_block_aligned_split
+            and vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.is_kv_consumer
+        ):
+            self.need_mamba_block_aligned_split = False
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -283,9 +293,7 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
+
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens

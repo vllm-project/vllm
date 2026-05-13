@@ -610,11 +610,15 @@ def resolve_kv_cache_block_sizes(
     connector_enabled = vllm_config.kv_transfer_config is not None
     if not (cache_config.enable_prefix_caching or connector_enabled):
         return scheduler_block_size, scheduler_block_size
-
+    enable_kv_consumer_partial_group_caching = (
+        connector_enabled
+        and vllm_config.kv_transfer_config.is_kv_consumer
+        and cache_config.enable_prefix_caching
+    )
     # Mamba groups with block_size != cache_config.block_size
     # (mamba_cache_mode != "align") break divisibility; back off to the
     # scheduler block size.
-    if any(
+    if not enable_kv_consumer_partial_group_caching and any(
         isinstance(g.kv_cache_spec, MambaSpec)
         and g.kv_cache_spec.block_size != cache_config.block_size
         for g in groups

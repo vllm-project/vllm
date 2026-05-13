@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from math import lcm
 
+from vllm.config import VllmConfig
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -23,7 +24,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
 )
 from vllm.v1.request import Request
+from vllm.logger import init_logger
 
+logger = init_logger(__name__)
 
 class KVCacheCoordinator(ABC):
     """
@@ -397,6 +400,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         max_num_batched_tokens: int,
@@ -431,6 +435,19 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         ), "block_size must be divisible by hash_block_size"
         assert dcp_world_size == 1, "DCP not support hybrid attn now."
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
+        self.enable_kv_consumer_partial_group_caching = False
+        if (
+            vllm_config.kv_transfer_config is not None
+            and enable_caching
+            and vllm_config.kv_transfer_config.is_kv_consumer
+        ):
+            self.enable_kv_consumer_partial_group_caching = True
+            logger.info(
+                "KV consumer partial-group caching enabled: "
+                "lcm_block_size will be overridden to "
+                "hash_block_size=%d",
+                hash_block_size,
+            )
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
@@ -474,7 +491,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # each attention type. Requiring this because we don't support partial
         # block cache hit yet.
         block_sizes = [spec.block_size for spec, _, _ in attention_groups]
-        self.lcm_block_size = lcm(*block_sizes)
+        if self.enable_kv_consumer_partial_group_caching:
+            self.lcm_block_size = self.hash_block_size
+        else:
+            self.lcm_block_size = lcm(*block_sizes)
 
         # Attention-group indices (into ``self.attention_groups``) that
         # contain at least one EAGLE/MTP KV cache group.
@@ -540,6 +560,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             self.attention_groups[0][0], FullAttentionSpec
         )
 
+        # Track FullAttention hit length separately for KV consumer mode.
+        full_attn_hit_length = 0
+
         # Attention-group indices whose EAGLE drop is verified at the current
         # ``curr_hit_length``. Each eagle group applies the drop at most once
         # per candidate length (see issue #32802).
@@ -587,13 +610,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 curr_hit_length = _new_hit_length
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
+                if isinstance(spec, FullAttentionSpec):
+                    full_attn_hit_length = curr_hit_length
 
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
             if is_simple_hybrid:
                 break
-
+        if self.enable_kv_consumer_partial_group_caching:
+            hit_length = full_attn_hit_length
         # Truncate full attention blocks to final hit_length (if present)
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
@@ -608,6 +634,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
 
 def get_kv_cache_coordinator(
+    vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
     max_num_batched_tokens: int,
@@ -645,6 +672,7 @@ def get_kv_cache_coordinator(
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
+        vllm_config,
         kv_cache_config,
         max_model_len,
         max_num_batched_tokens,
