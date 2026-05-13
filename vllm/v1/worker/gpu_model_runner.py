@@ -1298,9 +1298,6 @@ class GPUModelRunner(
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
 
-            if resumed_from_preemption:
-                self.mamba_state_idx.pop(req_id, None)
-
             if not is_last_rank:
                 if not req_data.new_token_ids:
                     # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
