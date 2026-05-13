@@ -175,6 +175,54 @@ def all_gather_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def all_gatherv(
+    tensor: torch.Tensor, dim: int, sizes: list[int], group_name: str
+) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    if group.device_communicator is None:
+        raise ValueError("No device communicator found")
+    return group.device_communicator.all_gatherv(tensor, dim, sizes)
+
+
+def all_gatherv_fake(
+    tensor: torch.Tensor, dim: int, sizes: list[int], group_name: str
+) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = sum(sizes)
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
+def reduce_scatterv(
+    tensor: torch.Tensor,
+    dim: int,
+    rank_in_group: int,
+    sizes: list[int],
+    group_name: str,
+) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    if group.device_communicator is None:
+        raise ValueError("No device communicator found")
+    return group.device_communicator.reduce_scatterv(tensor, dim, sizes)
+
+
+def reduce_scatterv_fake(
+    tensor: torch.Tensor,
+    dim: int,
+    rank_in_group: int,
+    sizes: list[int],
+    group_name: str,
+) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = sizes[rank_in_group]
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
 def patched_fused_scaled_matmul_reduce_scatter_fake(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -275,6 +323,18 @@ direct_register_custom_op(
     op_name="all_gather",
     op_func=all_gather,
     fake_impl=all_gather_fake,
+)
+
+direct_register_custom_op(
+    op_name="all_gatherv",
+    op_func=all_gatherv,
+    fake_impl=all_gatherv_fake,
+)
+
+direct_register_custom_op(
+    op_name="reduce_scatterv",
+    op_func=reduce_scatterv,
+    fake_impl=reduce_scatterv_fake,
 )
 
 # TODO: Remove this once the pytorch fix
@@ -557,6 +617,17 @@ class GroupCoordinator:
     ):
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
+        if sizes is not None:
+            if isinstance(input_, torch.Tensor):
+                return torch.ops.vllm.all_gatherv(
+                    input_, dim, sizes, group_name=self.unique_name
+                )
+            return [
+                torch.ops.vllm.all_gatherv(
+                    tensor, dim, sizes, group_name=self.unique_name
+                )
+                for tensor in input_
+            ]
         return self.device_communicator.all_gatherv(input_, dim, sizes)
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -580,6 +651,14 @@ class GroupCoordinator:
     ) -> torch.Tensor:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
+        if sizes is not None:
+            return torch.ops.vllm.reduce_scatterv(
+                input_,
+                dim,
+                self.rank_in_group,
+                sizes,
+                group_name=self.unique_name,
+            )
         return self.device_communicator.reduce_scatterv(input_, dim, sizes)
 
     def _reduce_scatter_out_place(self, input_: torch.Tensor, dim: int) -> torch.Tensor:

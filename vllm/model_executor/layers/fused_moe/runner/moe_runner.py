@@ -240,6 +240,8 @@ class MoERunner(MoERunnerInterface):
         self.gate = gate
         self.shared_expert_gate = shared_expert_gate
         self._quant_method = quant_method
+        self._quant_method_generation = 0
+        self._refresh_quant_method_state()
         self.enable_dbo = enable_dbo
 
         # When both gates are present and FSE is enabled, fuse their
@@ -317,14 +319,28 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
         self._quant_method = quant_method
+        self._quant_method_generation += 1
+        self._refresh_quant_method_state()
 
-    @torch.compiler.assume_constant_result
-    def _quant_method_is_monolithic(self) -> bool:
-        return bool(self._quant_method.is_monolithic)
+    def _refresh_quant_method_state(self):
+        # Keep quant-method control-flow flags as normal Python state. Dynamo
+        # can guard on these bools and recompile if _replace_quant_method()
+        # changes them after a graph has already been compiled.
+        self._quant_method_is_monolithic = self._quant_method.is_monolithic
+        self._quant_method_skip_forward_padding = (
+            self._quant_method.skip_forward_padding
+        )
+        moe_kernel = self._quant_method.moe_kernel
+        self._fused_output_is_reduced = (
+            moe_kernel is not None and moe_kernel.output_is_reduced()
+        )
 
-    @torch.compiler.assume_constant_result
-    def _quant_method_skip_forward_padding(self) -> bool:
-        return bool(self._quant_method.skip_forward_padding)
+    def _guard_quant_method_generation(self):
+        # This intentionally reads the replacement generation in compiled
+        # forward. It forces a normal Dynamo guard even when two quant methods
+        # have the same derived bool flags.
+        if self._quant_method_generation < 0:
+            raise AssertionError("quant method generation must be non-negative")
 
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.
@@ -402,13 +418,6 @@ class MoERunner(MoERunnerInterface):
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
 
-    @torch.compiler.assume_constant_result
-    def _fused_output_is_reduced(self) -> bool:
-        return (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
-
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
@@ -424,7 +433,7 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
-            and self._fused_output_is_reduced()
+            and self._fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
@@ -447,7 +456,7 @@ class MoERunner(MoERunnerInterface):
         if (
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            and not self._fused_output_is_reduced()
+            and not self._fused_output_is_reduced
         ):
             states = tensor_model_parallel_all_reduce(states)
 
@@ -505,7 +514,7 @@ class MoERunner(MoERunnerInterface):
         )
         transformed_hidden_dim = hidden_states.shape[-1]
         if (
-            not self._quant_method_skip_forward_padding()
+            not self._quant_method_skip_forward_padding
             and self.moe_config.hidden_dim != transformed_hidden_dim
         ):
             hidden_states = F.pad(
@@ -553,7 +562,7 @@ class MoERunner(MoERunnerInterface):
         # (set by bind_routing_capture_to_model during capturer init)
         routing_replay_out = getattr(layer, "_routing_replay_out", None)
 
-        if self._quant_method_is_monolithic():
+        if self._quant_method_is_monolithic:
             fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
                 x=hidden_states,
@@ -675,6 +684,7 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
+        self._guard_quant_method_generation()
 
         # Apply transform for routed experts (e.g., latent projection
         # for latent MoE)

@@ -205,30 +205,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         compute_type = _moe_compute_type(hidden_states.dtype)
 
-        if use_unwrapped:
-            workspace_dtype = self.workspace_dtype(hidden_states.dtype)
-            intermediate_cache1 = torch.empty(
-                (num_tokens, top_k_num, N),
-                dtype=workspace_dtype,
-                device=hidden_states.device,
-            )
-            intermediate_cache2 = torch.empty(
-                (num_tokens * top_k_num, cache2_dim),
-                dtype=workspace_dtype,
-                device=hidden_states.device,
-            )
-            intermediate_cache3 = torch.empty(
-                (num_tokens, top_k_num, K),
-                dtype=workspace_dtype,
-                device=hidden_states.device,
-            )
-        else:
-            # Note that the output tensor might be in workspace1
-            intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-            intermediate_cache2 = _resize_cache(
-                workspace13, (num_tokens * top_k_num, cache2_dim)
-            )
-            intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        # The modular kernel owns allocation; Triton experts only carve the
+        # backend-specific cache views from the provided workspaces.
+        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        intermediate_cache2 = _resize_cache(
+            workspace13, (num_tokens * top_k_num, cache2_dim)
+        )
+        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
         if use_unwrapped:
             torch.ops.vllm.moe_expert_projection(
@@ -529,30 +512,13 @@ class TritonWNA16Experts(TritonExperts):
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            workspace_dtype = self.workspace_dtype(hidden_states.dtype)
-            intermediate_cache1 = torch.empty(
-                (num_tokens, top_k_num, N),
-                dtype=workspace_dtype,
-                device=hidden_states.device,
-            )
-            intermediate_cache2 = torch.empty(
-                (num_tokens * top_k_num, activation_out_dim),
-                dtype=workspace_dtype,
-                device=hidden_states.device,
-            )
-            intermediate_cache3 = torch.empty(
-                (num_tokens, top_k_num, K),
-                dtype=workspace_dtype,
-                device=hidden_states.device,
-            )
-        else:
-            # Note that the output tensor might be in workspace1
-            intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-            intermediate_cache2 = _resize_cache(
-                workspace13, (num_tokens * top_k_num, activation_out_dim)
-            )
-            intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        # The modular kernel owns allocation; Triton experts only carve the
+        # backend-specific cache views from the provided workspaces.
+        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+        intermediate_cache2 = _resize_cache(
+            workspace13, (num_tokens * top_k_num, activation_out_dim)
+        )
+        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map

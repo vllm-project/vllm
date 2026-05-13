@@ -8,6 +8,7 @@ from math import prod
 from typing import final
 
 import torch
+from torch.fx.experimental.symbolic_shapes import guard_or_false
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -1064,7 +1065,8 @@ class FusedMoEKernelModularImpl:
         See `workspace_shapes` for a description of the remainder of arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
-        assert M_full > 0 and M_chunk > 0
+        assert not guard_or_false(M_full <= 0)
+        assert not guard_or_false(M_chunk <= 0)
 
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
@@ -1079,31 +1081,38 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta,
             activation,
         )
+        # Get intermediate workspace shapes based off the chunked M size.
+        workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
+            M_chunk,
+            N,
+            K,
+            top_k,
+            global_num_experts,
+            local_num_experts,
+            expert_tokens_meta,
+            activation,
+        )
 
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            # Unwrapped experts allocate scratch tensors directly in the graph.
-            # Keep placeholders only to preserve the existing interface.
-            workspace13 = torch.empty(0, dtype=workspace_dtype, device=device)
-            workspace2 = torch.empty(0, dtype=workspace_dtype, device=device)
+            # In unwrapped mode allocation is owned by the modular kernel
+            # rather than by backend experts or the shared workspace manager.
+            # Experts still carve backend-specific views from these buffers.
+            workspace13 = torch.empty(
+                workspace13_shape,
+                dtype=workspace_dtype,
+                device=device,
+            )
+            workspace2 = torch.empty(
+                workspace2_shape,
+                dtype=workspace_dtype,
+                device=device,
+            )
             fused_out = torch.empty(
                 fused_out_shape,
                 dtype=out_dtype,
                 device=device,
             )
         else:
-            # Get intermediate workspace shapes based off the chunked M size.
-            workspace13_shape, workspace2_shape, _ = (
-                self.fused_experts.workspace_shapes(
-                    M_chunk,
-                    N,
-                    K,
-                    top_k,
-                    global_num_experts,
-                    local_num_experts,
-                    expert_tokens_meta,
-                    activation,
-                )
-            )
             # Reuse workspace13 for the output since there is only one chunk.
             max_shape_size = max(prod(workspace13_shape), prod(fused_out_shape))
             common_workspace, workspace2 = current_workspace_manager().get_simultaneous(
@@ -1241,7 +1250,7 @@ class FusedMoEKernelModularImpl:
         # kernels. CUDAGraph compatible all2all kernels like the DeepEP
         # low-latency kernels are always batched and can never run into
         # the tensor.numel() == 0 case.
-        if M_full == 0:
+        if guard_or_false(M_full == 0):
             return torch.empty_like(a1q, dtype=in_dtype)
 
         workspace13, workspace2, fused_out = self._allocate_buffers(
