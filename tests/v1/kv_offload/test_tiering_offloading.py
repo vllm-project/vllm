@@ -22,7 +22,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.tiering.example import ExampleSecondaryTier
+from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTier
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,

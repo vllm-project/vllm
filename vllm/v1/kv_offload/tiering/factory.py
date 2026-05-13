@@ -51,6 +51,6 @@ class SecondaryTierFactory:
 
 SecondaryTierFactory.register_tier(
     "example",
-    "vllm.v1.kv_offload.tiering.example",
+    "vllm.v1.kv_offload.tiering.example.manager",
     "ExampleSecondaryTier",
 )
