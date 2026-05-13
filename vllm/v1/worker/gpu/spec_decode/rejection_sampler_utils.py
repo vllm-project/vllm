@@ -512,9 +512,9 @@ def rejection_sample(
     # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
-    use_fp64: bool = False,
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
+    use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
