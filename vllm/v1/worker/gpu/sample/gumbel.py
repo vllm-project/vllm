@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 
 # Smallest positive normal fp32 value. Used to clamp the uniform draw so that
@@ -121,11 +120,10 @@ def gumbel_block_argmax(
 
         if USE_FP64:
             u = tl_rand64(gumbel_seed, block, includes_zero=False)
-            gumbel_noise = -tl.log(-tl.log(u))
         else:
             u = tl.rand(gumbel_seed, block)
             u = tl.maximum(u, _FP32_TINY)
-            gumbel_noise = -tl.log(-tl.log(u))
+        gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
@@ -152,6 +150,7 @@ def _gumbel_sample_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -178,6 +177,7 @@ def _gumbel_sample_kernel(
         processed_logits_col_ptr,
         vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+        USE_FP64=USE_FP64,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
@@ -193,10 +193,8 @@ def gumbel_sample(
     apply_temperature: bool,
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
-    use_fp64: bool | None = None,
+    use_fp64: bool = False,
 ) -> torch.Tensor:
-    if use_fp64 is None:
-        use_fp64 = bool(envs.VLLM_SAMPLER_FP64_GUMBEL)
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
@@ -220,6 +218,7 @@ def gumbel_sample(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
+        USE_FP64=use_fp64,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

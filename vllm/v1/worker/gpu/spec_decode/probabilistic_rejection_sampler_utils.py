@@ -321,6 +321,7 @@ def _resample_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    USE_FP64: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -397,6 +398,7 @@ def _resample_kernel(
         None,  # processed_logits_col_ptr
         vocab_size,
         APPLY_TEMPERATURE=False,
+        USE_FP64=USE_FP64,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
@@ -492,6 +494,7 @@ def probabilistic_rejection_sample(
     # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
+    use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
@@ -598,7 +601,9 @@ def probabilistic_rejection_sample(
         num_reqs, resample_num_blocks, dtype=torch.int64
     )
     resampled_local_max = target_logits.new_empty(
-        num_reqs, resample_num_blocks, dtype=torch.float64
+        num_reqs,
+        resample_num_blocks,
+        dtype=torch.float64 if use_fp64 else torch.float32,
     )
     _resample_kernel[(num_reqs, resample_num_blocks)](
         resampled_local_argmax,
@@ -622,6 +627,7 @@ def probabilistic_rejection_sample(
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        USE_FP64=use_fp64,
     )
 
     # Insert the resampled tokens into the output sampled.
