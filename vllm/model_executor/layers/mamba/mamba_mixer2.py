@@ -957,8 +957,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 #   block_idx_first_scheduled_token_d >
                 #       block_idx_last_computed_token_d
             else:
-                # Without caching, read and write in-place to the same blocks:
-                state_indices_tensor_d_input = state_indices_tensor_d
+                if attn_metadata.src_ssm_indices_tensor_d is None:
+                    # Read and write in-place to the same blocks.
+                    state_indices_tensor_d_input = state_indices_tensor_d
+                else:
+                    # Read from separate set of blocks. Used for MRV2's "align"
+                    # mamba cache mode.
+                    state_indices_tensor_d_input = (
+                        attn_metadata.src_ssm_indices_tensor_d
+                    )
                 state_indices_tensor_d_output = state_indices_tensor_d
 
             # 2. Convolution sequence transformation

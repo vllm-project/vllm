@@ -981,7 +981,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
-        self.model_state.postprocess_state(input_batch, num_sampled)
+        self.model_state.postprocess_state(
+            input_batch, num_sampled, self.req_states.num_computed_tokens.gpu
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -1079,6 +1081,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
+                scheduler_output.scheduled_spec_decode_tokens,
             )
 
         inputs_embeds = None

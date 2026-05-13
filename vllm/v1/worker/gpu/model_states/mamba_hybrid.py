@@ -11,7 +11,8 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.attention.backends.utils import mamba_get_block_table_tensor
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -68,6 +69,15 @@ class MambaHybridModelState(DefaultModelState):
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
 
+        self.is_spec_decode_align_mode = (
+            vllm_config.num_speculative_tokens > 0
+            and vllm_config.cache_config.mamba_cache_mode == "align"
+        )
+
+        # Used for align mode + spec decoding.
+        self.last_block_tables: tuple[torch.Tensor, ...] | None = None
+        self.last_kv_cache_config: KVCacheConfig | None = None
+
     def prepare_attn(
         self,
         input_batch: InputBatch,
@@ -76,6 +86,7 @@ class MambaHybridModelState(DefaultModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        scheduled_spec_decode_tokens: dict[str, list[int]] | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
@@ -121,6 +132,12 @@ class MambaHybridModelState(DefaultModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
+
+        if self.is_spec_decode_align_mode:
+            # Save state needed during postprocess_state.
+            self.last_block_tables = block_tables
+            self.last_kv_cache_config = kv_cache_config
+
         return build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -142,9 +159,133 @@ class MambaHybridModelState(DefaultModelState):
         self,
         input_batch: InputBatch,
         num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
     ) -> None:
+        num_accepted_tokens = torch.clamp(num_sampled, min=1)
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
-        self.num_accepted_tokens_gpu[input_batch.idx_mapping] = torch.clamp(
-            num_sampled, min=1
+        self.num_accepted_tokens_gpu[input_batch.idx_mapping] = num_accepted_tokens
+        # The last accepted SSM state must be copied from the staging
+        # block to the running block to ensure that the next step's
+        # committed block read is correct.
+        self._copy_ssm_staging_to_committed(
+            input_batch, num_accepted_tokens, num_computed_tokens
         )
+
+    def _copy_ssm_staging_to_committed(
+        self,
+        input_batch: InputBatch,
+        num_accepted_tokens: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        """Copy conv & SSM state from staging blocks back to committed/working
+        blocks. If the accepted tokens trigger any block boundary crossings,
+        the conv & SSM state must be copied to the completed blocks so that
+        future prefix cache hits read correct state.
+        """
+        if not self.is_spec_decode_align_mode:
+            return
+
+        assert self.last_kv_cache_config is not None
+        assert self.last_block_tables is not None
+
+        needs_copy_mask = num_accepted_tokens > 1
+        if not needs_copy_mask.any():
+            return
+
+        fwd_ctx = self.vllm_config.compilation_config.static_forward_context
+        cache_mode = self.vllm_config.cache_config.mamba_cache_mode
+        num_spec_tokens = self.vllm_config.num_speculative_tokens
+        num_reqs = len(num_accepted_tokens)
+        num_computed = num_computed_tokens[input_batch.idx_mapping][:num_reqs]
+        prev_num_computed = num_computed - num_accepted_tokens
+        for idx, group in enumerate(self.last_kv_cache_config.kv_cache_groups):
+            if not isinstance(group.kv_cache_spec, MambaSpec):
+                continue
+
+            block_table = self.last_block_tables[idx]
+            block_size = group.kv_cache_spec.block_size
+
+            # Source: narrow window from seq_lens to find staging blocks.
+            state_indices_tensor = mamba_get_block_table_tensor(
+                block_table,
+                input_batch.seq_lens,
+                group.kv_cache_spec,
+                cache_mode,
+            )[:num_reqs, : 1 + num_spec_tokens]
+
+            # SSM and conv state sources (last accepted states).
+            src_block = (
+                (num_accepted_tokens - 1)
+                .clamp(max=state_indices_tensor.size(1) - 1)
+                .to(torch.int64)
+            )
+            src_phys = state_indices_tensor.gather(1, src_block.unsqueeze(1)).squeeze(1)
+
+            # Get the SSM state committed block that the next step's
+            # src_ssm_indices_tensor_d will read initial state from.
+            ssm_dst_block_idx = torch.clamp((num_computed - 1) // block_size, min=0).to(
+                torch.int64
+            )
+            ssm_dst_phys = (
+                block_table[:num_reqs]
+                .gather(1, ssm_dst_block_idx.unsqueeze(1))
+                .squeeze(1)
+            )
+
+            # Get the conv state working block that the next step will
+            # read initial state from.
+            conv_dst_block_idx = torch.clamp(
+                (num_computed + num_spec_tokens) // block_size, min=0
+            ).to(torch.int64)
+            conv_dst_phys = (
+                block_table[:num_reqs]
+                .gather(1, conv_dst_block_idx.unsqueeze(1))
+                .squeeze(1)
+            )
+
+            # Get boundary sources and destinations.
+            prev_block_idx = torch.clamp(
+                (prev_num_computed - 1) // block_size, min=0
+            ).to(torch.int64)
+            crossed_boundary_mask = ssm_dst_block_idx > prev_block_idx
+            needs_boundary_copy_mask = needs_copy_mask & crossed_boundary_mask
+            boundary_src_phys = None
+            boundary_dst_phys = None
+            if needs_boundary_copy_mask.any():
+                boundary_pos = (prev_block_idx + 1) * block_size - 1
+                boundary_src_block = (
+                    (boundary_pos - prev_num_computed)
+                    .clamp(min=0, max=num_spec_tokens)
+                    .to(torch.int64)
+                )
+                boundary_src_phys = state_indices_tensor.gather(
+                    1, boundary_src_block.unsqueeze(1)
+                ).squeeze(1)
+                boundary_dst_phys = (
+                    block_table[:num_reqs]
+                    .gather(1, prev_block_idx.unsqueeze(1))
+                    .squeeze(1)
+                )
+
+            for layer_name in group.layer_names:
+                layer = fwd_ctx[layer_name]
+                # NOTE: Will NOT work for all models, only Mamba1, Mamba2, and GDN.
+                conv_state = layer.kv_cache[0]
+                ssm_state = layer.kv_cache[1]
+                src_idx = src_phys[needs_copy_mask].long()
+                # Copy conv state.
+                conv_dst_idx = conv_dst_phys[needs_copy_mask].long()
+                conv_state[conv_dst_idx] = conv_state[src_idx]
+                # Copy SSM state.
+                ssm_dst_idx = ssm_dst_phys[needs_copy_mask].long()
+                ssm_state[ssm_dst_idx] = ssm_state[src_idx]
+
+                # If any boundary crossings occurred, conv & SSM state need to be
+                # copied to the completed blocks for prefix caching.
+                if boundary_src_phys is not None:
+                    assert boundary_dst_phys is not None
+                    bsrc = boundary_src_phys[needs_boundary_copy_mask].long()
+                    bdst = boundary_dst_phys[needs_boundary_copy_mask].long()
+                    ssm_state[bdst] = ssm_state[bsrc]
+                    conv_state[bdst] = conv_state[bsrc]

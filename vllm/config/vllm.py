@@ -1894,9 +1894,6 @@ class VllmConfig:
         """Check for features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
 
-        if self.model_config is not None and self.model_config.has_inner_state:
-            unsupported.append("hybrid/mamba models")
-
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
@@ -2023,10 +2020,6 @@ class VllmConfig:
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
-            )
-            # TODO: support align mamba cache mode for model runner v2
-            assert not envs.VLLM_USE_V2_MODEL_RUNNER, (
-                "Model Runner V2 has not yet supported mamba_cache_mode='align'. "
             )
 
     @model_validator(mode="after")

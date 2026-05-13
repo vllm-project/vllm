@@ -60,6 +60,7 @@ class ModelState(ABC):
         self,
         input_batch: InputBatch,
         num_sampled: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
     ) -> None:
         return None
 
@@ -91,6 +92,7 @@ class ModelState(ABC):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        scheduled_spec_decode_tokens: dict[str, list[int]] | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
