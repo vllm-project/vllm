@@ -397,7 +397,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
         return k, v
     
-    def _forward_prefill(
+    def forward_mha(
         self,
         q: torch.Tensor,
         kv_c_normed,
@@ -410,7 +410,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
         if self.window_size is None or self.window_size == (-1, -1):
             k_pe = self._insert_tensor_by_start_loc(k_pe, self.sink_k_pe, attn_metadata.prefill.query_start_loc)
             kv_c_normed = self._insert_tensor_by_start_loc(kv_c_normed, self.sink_compressed_kv, attn_metadata.prefill.query_start_loc)
-            super()._forward_prefill(q, kv_c_normed, k_pe, kv_c_and_k_pe_cache, attn_metadata, k_scale, output)
+            super().forward_mha(q, kv_c_normed, k_pe, kv_c_and_k_pe_cache, attn_metadata, k_scale, output)
         else:
             num_prefills = attn_metadata.num_prefills
             prefill = attn_metadata.prefill
@@ -459,7 +459,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             )
             
     
-    def _forward_decode(
+    def forward_mqa(
         self,
         q,
         kv_c_and_k_pe_cache,
@@ -467,7 +467,7 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
         layer
     ):
         if self.sink_len == 0 or self.window_size is None or self.window_size == (-1, -1):
-            o, lse = super()._forward_decode(q, kv_c_and_k_pe_cache, attn_metadata, layer)
+            o, lse = super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
             return o, lse
         
         assert kv_c_and_k_pe_cache.numel() > 0
@@ -490,6 +490,25 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
 
         block_size = kv_c_and_k_pe_cache.size(1)
         num_sink_blocks = self.sink_len // block_size
+        num_reqs = attn_metadata.decode.seq_lens.shape[0]
+
+        sink_seqlens = torch.full_like(attn_metadata.decode.seq_lens, self.sink_len)
+        sink_scheduler_metadata = get_scheduler_metadata(
+            batch_size=num_reqs,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=self.sink_len,
+            num_heads_q=self.num_heads * self.dcp_world_size,
+            num_heads_kv=1,
+            headdim=self.qk_rope_head_dim,
+            cache_seqlens=sink_seqlens,
+            qkv_dtype=kv_c_and_k_pe_cache.dtype,
+            headdim_v=self.kv_lora_rank,
+            page_size=block_size,
+            cu_seqlens_q=attn_metadata.decode.query_start_loc,
+            causal=False,
+            num_splits=0,
+            window_size=(-1, -1),
+        )
 
         sink_o, sink_lse = flash_attn_varlen_func(
             q=q_pe,
@@ -499,20 +518,40 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_q=attn_metadata.decode.query_start_loc,
             max_seqlen_k=self.sink_len,
-            seqused_k=torch.full_like(attn_metadata.decode.seq_lens, self.sink_len),
+            seqused_k=sink_seqlens,
             block_table=attn_metadata.decode.block_table,
             softmax_scale=self.scale,
             causal=False,
             return_softmax_lse=True,
             fa_version=3,
-            scheduler_metadata=attn_metadata.decode.scheduler_metadata,
-            num_splits=attn_metadata.decode.max_num_splits,
+            scheduler_metadata=sink_scheduler_metadata,
+            num_splits=0,
             cp_world_size=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,
-            window_size=None
+            window_size=None,
         )
         sink_lse = sink_lse.transpose(0, 1)
+
+        window_seqlens = attn_metadata.decode.seq_lens - self.sink_len
+        window_seqlens = torch.clamp(window_seqlens, min=0)
+        max_window_seqlen = max(attn_metadata.decode.max_seq_len - self.sink_len, 1)
+        window_scheduler_metadata = get_scheduler_metadata(
+            batch_size=num_reqs,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_window_seqlen,
+            num_heads_q=self.num_heads * self.dcp_world_size,
+            num_heads_kv=1,
+            headdim=self.qk_rope_head_dim,
+            cache_seqlens=window_seqlens,
+            qkv_dtype=kv_c_and_k_pe_cache.dtype,
+            headdim_v=self.kv_lora_rank,
+            page_size=block_size,
+            cu_seqlens_q=attn_metadata.decode.query_start_loc,
+            causal=True,
+            num_splits=0,
+            window_size=self.window_size,
+        )
 
         no_sink_o, no_sink_lse = flash_attn_varlen_func(
             q=q_pe,
@@ -521,19 +560,19 @@ class FlashAttnStaticSinkMLAImpl(FlashAttnMLAImpl):
             q_v=q_nope,
             max_seqlen_q=max_seqlen_q,
             cu_seqlens_q=attn_metadata.decode.query_start_loc,
-            max_seqlen_k=attn_metadata.decode.max_seq_len - self.sink_len,
-            seqused_k=attn_metadata.decode.seq_lens - self.sink_len,
+            max_seqlen_k=max_window_seqlen,
+            seqused_k=window_seqlens,
             block_table=attn_metadata.decode.block_table[:, num_sink_blocks:],
             softmax_scale=self.scale,
             causal=True,
             return_softmax_lse=True,
             fa_version=3,
-            scheduler_metadata=attn_metadata.decode.scheduler_metadata,
-            num_splits=attn_metadata.decode.max_num_splits,
+            scheduler_metadata=window_scheduler_metadata,
+            num_splits=0,
             cp_world_size=self.dcp_world_size,
             cp_rank=self.dcp_rank,
             cp_tot_seqused_k=attn_metadata.decode.dcp_tot_seq_lens,
-            window_size=self.window_size
+            window_size=self.window_size,
         )
         no_sink_lse = no_sink_lse.transpose(0, 1)
 

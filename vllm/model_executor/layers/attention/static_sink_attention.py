@@ -478,6 +478,20 @@ class StaticSinkMLAAttention(MLAAttention):
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
+            slot_mapping = forward_context.slot_mapping
+
+            assert isinstance(slot_mapping, dict), (
+                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+            )
+
+            self.impl.do_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self_kv_cache,
+                slot_mapping.get(self.layer_name),
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -500,6 +514,13 @@ class StaticSinkMLAAttention(MLAAttention):
                 raise NotImplementedError(
                     "Composite DSA MLA KV cache requires direct attention calls."
                 )
+            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self.layer_name,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
@@ -508,6 +529,7 @@ class StaticSinkMLAAttention(MLAAttention):
                     k_pe,
                     output,
                     self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
                 return output
             else:

@@ -244,6 +244,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         self.is_sparse = mla_modules.is_sparse
 
         self.mome_attn = mome_attn
+        self.prefix = prefix
 
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
