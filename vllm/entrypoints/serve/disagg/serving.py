@@ -34,7 +34,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateStreamResponse,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import should_include_usage
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -80,6 +80,18 @@ class ServingTokens(OpenAIServing):
                 "Tokens-only mode is enabled, skipping detokenization "
                 "step for incoming requests."
             )
+
+        # Mirrors ``OpenAIServingChat`` so we can apply server-side
+        # ``max_tokens`` defaulting when the client omits it. Without this,
+        # ``SamplingParams.max_tokens`` falls back to its dataclass default
+        # of 16 and silently truncates every generation.
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
 
     async def serve_tokens(
         self,
@@ -150,6 +162,20 @@ class ServingTokens(OpenAIServing):
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
         sampling_params = request.sampling_params
+
+        # Apply server-side ``max_tokens`` defaulting when the client did
+        # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
+        # defaults ``max_tokens`` to 16, which would otherwise silently cap
+        # every generation that omits the field.
+        if not request.is_sampling_param_provided("max_tokens"):
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=self.model_config.max_model_len,
+                max_tokens=None,
+                input_length=self._extract_prompt_len(engine_input),
+                default_sampling_params=self.default_sampling_params,
+                override_max_tokens=self.override_max_tokens,
+            )
+
         if self.force_no_detokenize:
             sampling_params.detokenize = False
         if request.stream:

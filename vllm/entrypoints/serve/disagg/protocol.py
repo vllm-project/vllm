@@ -2,7 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
@@ -107,6 +113,39 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+    # Tracks which keys the caller explicitly set inside ``sampling_params``
+    # when the request was parsed from a JSON body. Lets the server tell
+    # "client said max_tokens=16" from "client said nothing → dataclass
+    # default 16" so it can apply server-side defaulting only in the latter
+    # case. ``None`` means the request was constructed with a pre-built
+    # ``SamplingParams`` instance (e.g. from internal callers that have
+    # already resolved values), in which case all fields are considered set.
+    _sampling_params_provided_keys: set[str] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_sampling_params_provided_keys(cls, data: Any, handler):
+        provided: set[str] | None = None
+        if isinstance(data, dict):
+            sp = data.get("sampling_params")
+            if isinstance(sp, dict):
+                provided = set(sp.keys())
+        instance = handler(data)
+        instance._sampling_params_provided_keys = provided
+        return instance
+
+    def is_sampling_param_provided(self, name: str) -> bool:
+        """Whether the caller explicitly set ``sampling_params.<name>``.
+
+        For requests parsed from a JSON body, this reflects the raw input
+        dict. For requests constructed with a pre-built ``SamplingParams``
+        instance, all fields are considered provided so server-side defaults
+        do not clobber values already resolved upstream.
+        """
+        if self._sampling_params_provided_keys is None:
+            return True
+        return name in self._sampling_params_provided_keys
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
