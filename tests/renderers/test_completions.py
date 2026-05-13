@@ -361,6 +361,121 @@ class TestRenderPrompt:
         assert results[0]["prompt_token_ids"] == tokens
         assert results[0]["prompt"] == "[1, 2, 3, 4]"
 
+    def test_large_max_output_tokens_does_not_reject_valid_token_input(self):
+        # Regression test for vllm-project/vllm#42474.
+        # Client-side max_tokens safety ceilings (e.g. Zed/Factory/opencode's
+        # 65535) must not artificially shrink the input space. A token-id
+        # prompt that fits within max_total_tokens should be accepted; the
+        # real output budget is clamped downstream by get_max_tokens().
+        renderer = _build_renderer(MockModelConfig())
+
+        tokens = list(range(70))
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, tokens)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100, max_output_tokens=80),
+        )
+
+        assert len(results) == 1
+        assert results[0]["prompt_token_ids"] == tokens
+
+    def test_large_max_output_tokens_does_not_truncate_text_input(self):
+        # Regression test for vllm-project/vllm#42474.
+        # Under the old semantics (max_input_tokens = max_total - max_output)
+        # tokenizer.encode would receive max_length=21 for max_total=100 and
+        # max_output=80, silently truncating a 70-char text prompt to 21
+        # tokens. This is the actual source of the prefix-cache regression
+        # observed when only _token_len_check is patched: the encoder
+        # truncates and the lenient validator waves the corrupted prompt
+        # through. After the fix the encoder is called with
+        # max_total_tokens + 1 = 101, so the prompt is preserved intact.
+        renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
+
+        text_input = "x" * 70
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, text_input)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(max_total_tokens=100, max_output_tokens=80),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 70
+        assert renderer.tokenizer._captured_encode_kwargs["max_length"] == 101
+
+    def test_input_overflowing_context_still_rejected_with_max_output_tokens(
+        self,
+    ):
+        # Sanity check for vllm-project/vllm#42474: the fix must not weaken
+        # the genuine context-overflow check. Input larger than
+        # max_total_tokens is still rejected regardless of max_output_tokens.
+        renderer = _build_renderer(MockModelConfig())
+
+        long_tokens = list(range(150))  # > max_total_tokens=100
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
+
+        with pytest.raises(ValueError, match="maximum context length is"):
+            renderer.tokenize_prompts(
+                prompts,
+                TokenizeParams(max_total_tokens=100, max_output_tokens=80),
+            )
+
+    def test_neg_truncation_reserves_max_output_tokens(self):
+        # With max_output_tokens=20 and truncate_prompt_tokens=-1, the input
+        # should be truncated to max_total_tokens - max_output_tokens = 80,
+        # leaving 20 tokens of context budget for generation. This is the
+        # contract /v1/responses (truncation="auto") and the benchmark
+        # templates rely on. See vllm-project/vllm#42474.
+        renderer = _build_renderer(MockModelConfig(), truncation_side="right")
+
+        long_tokens = list(range(150))
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, long_tokens)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                max_output_tokens=20,
+                truncate_prompt_tokens=-1,
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 80
+
+
+class TestWithKwargs:
+    # Coverage for TokenizeParams.with_kwargs() chaining, which the
+    # multi-modal model bindings (paligemma, whisper, ultravox, ovis, ...)
+    # rely on to override `add_special_tokens` without touching the parent's
+    # output cap. Regression coverage for vllm-project/vllm#42474.
+
+    def test_inherits_max_output_tokens_when_max_length_not_passed(self):
+        parent = TokenizeParams(max_total_tokens=100, max_output_tokens=20)
+
+        child = parent.with_kwargs(add_special_tokens=False)
+
+        # Output cap survives the chain; without explicit max_length, the
+        # default must not zero out max_output_tokens.
+        assert child.max_total_tokens == 100
+        assert child.max_output_tokens == 20
+        assert child.add_special_tokens is False
+
+    def test_recomputes_max_output_tokens_when_max_length_passed(self):
+        parent = TokenizeParams(max_total_tokens=100, max_output_tokens=20)
+
+        child = parent.with_kwargs(max_length=70)
+
+        # Explicit input budget: derive output cap from it.
+        assert child.max_total_tokens == 100
+        assert child.max_output_tokens == 30
+
 
 class TestRenderEmbedPrompt:
     def _create_test_embed_bytes(self, tensor: torch.Tensor) -> bytes:
