@@ -380,7 +380,9 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
-        buffer.data.copy_(getattr(layer, name))
+        materialized_buffer = layer._buffers.get(name)
+        if materialized_buffer is not None:
+            buffer.data.copy_(materialized_buffer)
 
     _place_kernel_tensors(layer, info)
 

@@ -55,6 +55,28 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     return tensor
 
 
+def _is_non_persistent_parameter_alias_buffer(
+    layer: torch.nn.Module, name: str, buffer: torch.Tensor
+) -> bool:
+    if name not in layer._non_persistent_buffers_set:
+        return False
+
+    try:
+        buffer_storage_ptr = buffer.untyped_storage().data_ptr()
+    except RuntimeError:
+        return False
+
+    for param in layer._parameters.values():
+        if param is None:
+            continue
+        try:
+            if param.untyped_storage().data_ptr() == buffer_storage_ptr:
+                return True
+        except RuntimeError:
+            continue
+    return False
+
+
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
     if layer.__class__.__name__ in SKIP_MODULES:
         return ({}, {})
@@ -70,6 +92,7 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
+            and not _is_non_persistent_parameter_alias_buffer(layer, name, buffer)
         },
     )
 
