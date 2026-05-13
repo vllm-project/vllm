@@ -324,19 +324,7 @@ def packed_ipc_producer(
     shapes: list[list[int]] = []
     dtypes: list[torch.dtype] = []
     tensor_sizes: list[int] = []
-    tensors: list[torch.Tensor] = []
     total_bytes = 0
-
-    def emit() -> PackedIpcChunk:
-        packed = torch.cat(tensors, dim=0)
-        ipc_buffer[: packed.numel()].copy_(packed)
-        return PackedIpcChunk(
-            names=names,
-            shapes=shapes,
-            dtype_names=[str(d).split(".")[-1] for d in dtypes],
-            tensor_sizes=tensor_sizes,
-            ipc_handle={gpu_uuid: ipc_args},
-        )
 
     for name, orig_tensor in iterator:
         flat = (
@@ -350,22 +338,37 @@ def packed_ipc_producer(
                 f"Increase buffer_size_bytes to at least {flat.numel()}."
             )
 
-        if tensors and total_bytes + flat.numel() > buffer_size_bytes:
-            yield emit()
-            # Rebind to fresh lists so the yielded chunk keeps its data
-            # and the prior flat tensors become unreachable for GC.
-            names, shapes, dtypes, tensor_sizes, tensors = [], [], [], [], []
+        if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
+            # Drain queued copies so the consumer sees a fully-written buffer.
+            torch.cuda.current_stream().synchronize()
+            yield PackedIpcChunk(
+                names=names,
+                shapes=shapes,
+                dtype_names=[str(d).split(".")[-1] for d in dtypes],
+                tensor_sizes=tensor_sizes,
+                ipc_handle={gpu_uuid: ipc_args},
+            )
+            # Rebind to fresh lists so the yielded chunk's metadata is
+            # not mutated while the consumer is still reading.
+            names, shapes, dtypes, tensor_sizes = [], [], [], []
             total_bytes = 0
 
-        tensors.append(flat)
+        ipc_buffer[total_bytes : total_bytes + flat.numel()].copy_(flat)
         names.append(name)
         shapes.append(list(orig_tensor.shape))
         dtypes.append(orig_tensor.dtype)
         tensor_sizes.append(flat.numel())
         total_bytes += flat.numel()
 
-    if tensors:
-        yield emit()
+    if total_bytes:
+        torch.cuda.current_stream().synchronize()
+        yield PackedIpcChunk(
+            names=names,
+            shapes=shapes,
+            dtype_names=[str(d).split(".")[-1] for d in dtypes],
+            tensor_sizes=tensor_sizes,
+            ipc_handle={gpu_uuid: ipc_args},
+        )
 
 
 def packed_ipc_consumer(

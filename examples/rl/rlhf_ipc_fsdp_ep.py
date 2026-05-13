@@ -17,7 +17,7 @@ Layout (4 GPUs, TP=1, DP=4, EP):
 Uses the built-in ``ray`` send_mode: each FSDP worker calls
 ``trainer_send_weights`` targeting its colocated LLM actor.
 
-Assumes a single-node cluster with at least 4 GPUs.
+This example was run on 4xH100.
 """
 
 from __future__ import annotations
@@ -302,15 +302,6 @@ def main():
         runtime_env={
             "env_vars": {
                 "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
-                # Workaround: this image has CUDA 12.8 system libs but torch
-                # 2.11+cu130 is installed via pip. vLLM's cumem allocator
-                # dlopens libnvrtc.so.13, which only lives in torch's
-                # pip-installed nvidia/cu13/lib dir — not on the default
-                # loader path. Remove once the system gets CUDA 13 installed.
-                "LD_LIBRARY_PATH": (
-                    "/home/ray/anaconda3/lib/python3.12/site-packages/nvidia/cu13/lib:"
-                    + os.environ.get("LD_LIBRARY_PATH", "")
-                ),
             }
         }
     )
