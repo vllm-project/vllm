@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
@@ -39,11 +39,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.openai.speech_to_text.protocol import (
-    TranscriptionRequest,
-    TranscriptionResponse,
-    TranslationRequest,
-)
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -51,6 +46,11 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionResponse,
+)
+from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
 from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
@@ -118,6 +118,7 @@ AnyResponse: TypeAlias = (
 )
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
+_T = TypeVar("_T")
 
 
 @dataclass(kw_only=True)
@@ -156,6 +157,9 @@ class OpenAIServing:
         self.model_config = engine_client.model_config
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self.has_kv_connector = kv_transfer_config is not None
 
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
@@ -615,6 +619,40 @@ class OpenAIServing:
             return int(rank_str)
         except ValueError:
             return None
+
+    async def _with_kv_transfer_rejection_cleanup(
+        self,
+        awaitable: Awaitable[_T],
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> _T:
+        """Wrap a `create_*` coroutine so that, if it raises or returns an
+        ErrorResponse (i.e. the request never reached the engine), the KV
+        connector is notified to free any pinned remote-prefill blocks."""
+        kv_transfer_params = self.has_kv_connector and request.kv_transfer_params
+        if not kv_transfer_params or not kv_transfer_params.get("do_remote_prefill"):
+            return await awaitable
+
+        notify = True
+        try:
+            result = await awaitable
+            if not isinstance(result, ErrorResponse):
+                notify = False
+            return result
+        finally:
+            if notify:
+                try:
+                    await self.engine_client.notify_kv_transfer_request_rejected(
+                        request.request_id,
+                        kv_transfer_params,
+                        data_parallel_rank=self._get_data_parallel_rank(raw_request),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Failed to notify KV connector about rejected request %s",
+                        request.request_id,
+                        exc_info=True,
+                    )
 
     @staticmethod
     def _parse_tool_calls_from_content(

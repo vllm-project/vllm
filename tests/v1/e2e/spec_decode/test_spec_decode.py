@@ -386,11 +386,6 @@ def _run_eagle_correctness(
     Compare the outputs of an original LLM and a speculative LLM
     which should be the same when using eagle speculative decoding.
     """
-    if attn_backend == "TREE_ATTN":
-        pytest.skip(
-            "TREE_ATTN is flaky in the test disable for now until it can be "
-            "resolved (see https://github.com/vllm-project/vllm/issues/22922)"
-        )
     if model_impl == "transformers":
         import transformers
         from packaging.version import Version
@@ -493,6 +488,10 @@ def _run_eagle_correctness(
 
 
 @single_gpu_only
+@pytest.mark.skipif(
+    current_platform.is_device_capability_family(100),
+    reason="DeepSeek head_dim=192 not supported on SM100/SM110 (Blackwell)",
+)
 @pytest.mark.parametrize(
     [
         "model_setup",
@@ -723,7 +722,15 @@ def test_eagle_correctness_heavy(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
-        (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
+        pytest.param(
+            ("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1),
+            False,
+            0.0,
+            marks=pytest.mark.skipif(
+                current_platform.is_device_capability_family(100),
+                reason="DeepSeek MTP: TRTLLM MoE top_k check fails on Blackwell",
+            ),
+        ),  # dummy model
         (
             ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1),
             False,
