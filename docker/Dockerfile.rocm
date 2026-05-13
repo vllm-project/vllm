@@ -11,7 +11,9 @@ ARG BASE_IMAGE=rocm/vllm-dev:base
 #   --build-arg NIC_BACKEND=none    # Install nothing.
 ARG NIC_BACKEND=all
 # AMD AINIC apt repo settings
-ARG AINIC_VERSION=1.117.5
+# Users can specify a custom version compatible with their host drivers.
+# The default version has been tested with ioinic-dkms=25.11.1.001
+ARG AINIC_VERSION=1.117.3-hydra
 ARG UBUNTU_CODENAME=jammy
 
 # Sccache configuration (only used in release pipeline)
