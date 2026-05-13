@@ -169,6 +169,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -531,7 +532,11 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
             )
-            if self.speculative_config.method == "ngram":
+            if self.speculative_config.method == "custom_class":
+                self.drafter = create_custom_proposer(  # type: ignore[assignment]
+                    self.vllm_config
+                )
+            elif self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
@@ -2342,7 +2347,13 @@ class GPUModelRunner(
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(
-                    self.drafter, (EagleProposer, DFlashProposer, Gemma4Proposer)
+                    self.drafter,
+                    (
+                        EagleProposer,
+                        DFlashProposer,
+                        Gemma4Proposer,
+                        ExtractHiddenStatesProposer,
+                    ),
                 ):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
@@ -4614,6 +4625,14 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu,
                 slot_mappings=slot_mappings,
             )
+        elif spec_config.method == "custom_class":
+            assert isinstance(sampled_token_ids, list)
+            draft_token_ids = cast(Any, self.drafter).propose(
+                sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=slot_mappings,
+            )
         elif spec_config.use_ngram_gpu():
             assert isinstance(self.drafter, NgramProposerGPU)
             (
@@ -4885,7 +4904,8 @@ class GPUModelRunner(
                     )
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
-                    self.drafter.load_model(self.model)
+                    if hasattr(self.drafter, "load_model"):
+                        self.drafter.load_model(self.model)
                     if (
                         hasattr(self.drafter, "model")
                         and is_mixture_of_experts(self.drafter.model)
