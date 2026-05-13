@@ -127,8 +127,10 @@ class GptOssMxfp4Config(Mxfp4Config):
         # Require explicit confirmation that this is a GPT-OSS model.
         # Do NOT fall back to returning the override when hf_config is None,
         # as that would silently claim all mxfp4 checkpoints.
+        # Puzzle variants (e.g. GptOssPuzzleForCausalLM) use their own
+        # model_type but share the same mxfp4 checkpoint layout.
         model_type = getattr(hf_config, "model_type", None)
-        if model_type != "gpt_oss":
+        if model_type not in ("gpt_oss", "gpt_oss_puzzle"):
             return None
         return "gpt_oss_mxfp4"
 
