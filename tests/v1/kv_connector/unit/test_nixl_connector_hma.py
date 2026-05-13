@@ -93,27 +93,39 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "group_spec_types,expansion_stride,remote_block_ids,expected_remote_block_ids",
+    "group_spec_types,remote_physical_per_logical,"
+    "local_physical_per_logical,tp_ratio,remote_block_ids,"
+    "expected_remote_block_ids",
     [
         pytest.param(
             ("FullAttentionSpec", "SlidingWindowSpec"),
             2,
+            2,
+            1,
             ([0, 1, 2], [3, 4]),
             [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
             id="dense_fa_swa",
         ),
+        # Nemotron-3-Nano-30B-A3B 4p1d (P_TP=4, D_TP=1):
+        # remote_physical_per_logical=34, local_physical_per_logical=66.
+        # FA logical block 5 → kernel [170..203], block 6 → [204..237].
+        # Mamba block unchanged.
         pytest.param(
             ("FullAttentionSpec", "MambaSpec"),
-            261,
-            ([0, 1, 2], [10, 11]),
-            [[0, 1, 261, 262, 522, 523], [10, 11]],
+            34,
+            66,
+            -4,
+            ([5, 6], [2]),
+            [list(range(170, 238)), [2]],
             id="mamba_fa_ssm",
         ),
     ],
 )
 def test_read_blocks_for_req_expands_remote_ids(
     group_spec_types,
-    expansion_stride,
+    remote_physical_per_logical,
+    local_physical_per_logical,
+    tp_ratio,
     remote_block_ids,
     expected_remote_block_ids,
 ):
@@ -148,7 +160,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
-    worker._physical_blocks_per_logical_kv_block = 2
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
@@ -159,9 +171,11 @@ def test_read_blocks_for_req_expands_remote_ids(
     remote_engine_id = "remote-engine"
 
     worker.transfer_topo = MagicMock()
-    worker.transfer_topo.tp_ratio.return_value = 1
+    # tp_ratio not exercised (all_source_ranks is empty so no reads run),
+    # but set for realism.
+    worker.transfer_topo.tp_ratio.return_value = tp_ratio
     remote_info = MagicMock()
-    remote_info.remote_physical_blocks_per_logical = expansion_stride
+    remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     worker.transfer_topo.get_engine_info.return_value = remote_info
     worker.use_mla = False
 
@@ -189,6 +203,168 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     assert meta.remote.block_ids == expected_remote_block_ids, (
         f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_physical_per_logical,remote_physical_per_logical,"
+    "local_block_ids,remote_block_ids,"
+    "expected_local,expected_remote",
+    [
+        # 10 kernel blocks of data, local has more logical blocks.
+        # remote physical_per_logical=10 → 1 logical → 10 kernel blocks
+        # local  physical_per_logical=6  → 2 logical → 12 kernel blocks
+        # Trim local from 12 to 10.
+        pytest.param(
+            6,
+            10,
+            [list(range(12)), [42]],
+            [list(range(10)), [42]],
+            [list(range(10)), [42]],
+            [list(range(10)), [42]],
+            id="align_local6_remote10",
+        ),
+        # 10 kernel blocks of data, remote has more logical blocks.
+        # remote physical_per_logical=6  → 2 logical → 12 kernel blocks
+        # local  physical_per_logical=10 → 1 logical → 10 kernel blocks
+        # Trim remote from 12 to 10.
+        pytest.param(
+            10,
+            6,
+            [list(range(10)), [42]],
+            [list(range(12)), [42]],
+            [list(range(10)), [42]],
+            [list(range(10)), [42]],
+            id="align_local10_remote6",
+        ),
+    ],
+)
+def test_apply_prefix_caching_mamba_hybrid(
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    local_block_ids,
+    remote_block_ids,
+    expected_local,
+    expected_remote,
+):
+    """_apply_prefix_caching front-trims FA groups to
+    min(local, remote) for Mamba hybrid models with heterogeneous TP.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        local_block_ids, remote_block_ids, remote_physical_per_logical
+    )
+
+    assert aligned_local == expected_local, (
+        f"Expected local {expected_local}, got {aligned_local}"
+    )
+    assert aligned_remote == expected_remote, (
+        f"Expected remote {expected_remote}, got {aligned_remote}"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_physical_per_logical,remote_physical_per_logical,"
+    "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
+    "correct_remote_fa,correct_local_fa",
+    [
+        # 10 kernel blocks of data (640 tokens).
+        # remote physical_per_logical=10 → 1 logical → 10 kernel [0..9]
+        # local  physical_per_logical=6  → 2 logical → 12 kernel [0..11]
+        # 1st local logical block cached → suffix [6..11]
+        # Correct: transfer only uncached suffix tokens (384-639)
+        #   = remote [6,7,8,9] → local [6,7,8,9].
+        # Actual (front-trim): remote[:6]=[0..5] → local [6..11]. Wrong.
+        pytest.param(
+            6,
+            10,
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            [6, 7, 8, 9, 10, 11],
+            [42],
+            [6, 7, 8, 9],
+            [6, 7, 8, 9],
+            id="local6_remote10_fail",
+        ),
+        # 15 kernel blocks of data (960 tokens).
+        # remote physical_per_logical=6  → 3 logical → 18 kernel [0..17]
+        # local  physical_per_logical=10 → 2 logical → 20 kernel [0..19]
+        # 1st local logical block cached → suffix [10..19]
+        # Correct: transfer only uncached suffix tokens (640-959)
+        #   = remote [10,11,12,13,14] → local [10,11,12,13,14].
+        # Actual (front-trim): remote[:10]=[0..9] → local [10..19]. Wrong.
+        pytest.param(
+            10,
+            6,
+            list(range(18)),
+            list(range(10, 20)),
+            [42],
+            [10, 11, 12, 13, 14],
+            [10, 11, 12, 13, 14],
+            id="local10_remote6_fail",
+        ),
+    ],
+)
+def test_mismatched_physical_per_logical_fails_with_prefix_caching(
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    remote_fa_blocks,
+    local_fa_blocks,
+    ssm_blocks,
+    correct_remote_fa,
+    correct_local_fa,
+):
+    """Demonstrate that _apply_prefix_caching front-trims ([:N])
+    in the Mamba hybrid path, which fails when prefix caching produces
+    suffix-only local blocks.
+
+    Prefix caching operates at logical block granularity. When a logical
+    block is cached locally, the decode side only allocates kernel blocks
+    for the uncached suffix. The front-trim pairs remote prefix blocks
+    with local suffix slots — a silent data corruption.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=True,
+    )
+    worker._has_mamba = True
+    worker._group_spec_types = tuple(
+        type(g.kv_cache_spec) for g in worker.kv_cache_config.kv_cache_groups
+    )
+
+    local_block_ids = (local_fa_blocks, ssm_blocks)
+    remote_block_ids = (remote_fa_blocks, ssm_blocks)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        local_block_ids,
+        remote_block_ids,
+        remote_physical_per_logical,
+    )
+
+    assert (
+        aligned_remote[0] != correct_remote_fa or aligned_local[0] != correct_local_fa
+    ), (
+        f"Prefix caching with mismatched physical_per_logical should not "
+        f"produce correct transfer ids: "
+        f"remote={aligned_remote[0]}, local={aligned_local[0]}, "
+        f"correct_remote={correct_remote_fa}, correct_local={correct_local_fa}"
     )
 
 
@@ -564,3 +740,119 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
     )
 
     assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "mamba_enabled,swa_enabled,"
+    "local_physical_per_logical,remote_physical_per_logical,"
+    "logical_block_ids,expected_kernel_block_ids",
+    [
+        # Qwen3.5-0.8B 4P2D (kernel_block_size=64):
+        #   prefill TP=4: logical_block_size=384 → physical_per_logical=6
+        #   decode  TP=2: logical_block_size=640 → physical_per_logical=10
+        # FA logical [0] → remote kernel [0..9] (1 * 10)
+        # SSM logical [10] → unchanged [10]
+        pytest.param(
+            True,
+            False,
+            6,
+            10,
+            ([0], [10]),
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10]],
+            id="qwen35_4p2d",
+        ),
+        # Qwen3.5-0.8B 2P4D (kernel_block_size=64):
+        #   prefill TP=2: logical_block_size=640 → physical_per_logical=10
+        #   decode  TP=4: logical_block_size=384 → physical_per_logical=6
+        # FA logical [0, 1] → remote kernel [0..5, 6..11] (2 * 6)
+        # SSM logical [10] → unchanged [10]
+        pytest.param(
+            True,
+            False,
+            10,
+            6,
+            ([0, 1], [10]),
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [10]],
+            id="qwen35_2p4d",
+        ),
+        # Homogeneous TP (kernel_block_size=64):
+        #   both sides: logical_block_size=640 → physical_per_logical=10
+        # FA logical [0] → kernel [0..9], SSM unchanged
+        pytest.param(
+            True,
+            False,
+            10,
+            10,
+            ([0], [10]),
+            [[0, 1, 2, 3, 4, 5, 6, 7, 8, 9], [10]],
+            id="homo_tp",
+        ),
+        # remote physical_per_logical=1: early return, no expansion
+        pytest.param(
+            True,
+            False,
+            10,
+            1,
+            ([0, 1, 2], [5]),
+            [[0, 1, 2], [5]],
+            id="mamba_remote_physical_per_logical_1",
+        ),
+        # Pure FA (no mamba): single group expanded with remote stride
+        pytest.param(
+            False,
+            False,
+            2,
+            4,
+            ([0, 1],),
+            [[0, 1, 2, 3, 4, 5, 6, 7]],
+            id="pure_fa",
+        ),
+        # FA + SWA (no mamba): both groups expanded
+        pytest.param(
+            False,
+            True,
+            2,
+            3,
+            ([0, 1], [2, 3]),
+            [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9, 10, 11]],
+            id="fa_swa",
+        ),
+    ],
+)
+def test_logical_to_remote_kernel_block_ids(
+    mamba_enabled,
+    swa_enabled,
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    logical_block_ids,
+    expected_kernel_block_ids,
+):
+    """Verify _logical_to_remote_kernel_block_ids uses the remote
+    physical_per_logical for FA expansion, not the local one.
+
+    This was the root cause of silent accuracy corruption in Qwen3.5
+    heterogeneous TP (e.g. 4P2D): the old code used local physical_per_logical
+    for the expansion arange, producing wrong kernel block indices.
+
+    Qwen3.5-0.8B values verified by verify_conv_split.py (issue #13).
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=mamba_enabled,
+        swa_enabled=swa_enabled,
+    )
+
+    result = worker._logical_to_remote_kernel_block_ids(
+        logical_block_ids,
+        remote_physical_per_logical,
+    )
+    assert list(result) == expected_kernel_block_ids, (
+        f"Expected {expected_kernel_block_ids}, got {result}"
+    )

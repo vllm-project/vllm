@@ -11,7 +11,7 @@ from vllm.config.quantization import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -118,7 +118,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return Mxfp8OnlineLinearMethod()
             else:
                 return Fp8PerTensorOnlineLinearMethod()
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             if should_ignore_layer(
                 prefix,
                 ignore=self.ignored_layers,
