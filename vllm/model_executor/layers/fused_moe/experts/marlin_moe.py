@@ -557,6 +557,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
         w2_g_idx_sort_indices: torch.Tensor | None = None,
+        input_global_scale1: torch.Tensor | None = None,
+        input_global_scale2: torch.Tensor | None = None,
         is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
@@ -564,6 +566,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             quant_config.use_mxfp4_w4a16
             or quant_config.use_nvfp4_w4a16
             or quant_config.use_int4_w4a16
+            or quant_config.use_int8_w8a16
             or quant_config.use_fp8_w8a16
         ), "Supports only {mxfp,nvfp,int}4_w4a16 or fp8_w8a16"
         self.w13_g_idx = w13_g_idx
@@ -636,6 +639,8 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def quant_type_id(self) -> int:
         if self.quant_config.use_int4_w4a16:
             return scalar_types.uint4b8.id
+        elif self.quant_config.use_int8_w8a16:
+            return scalar_types.uint8b128.id
         elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
             return scalar_types.float4_e2m1f.id
         elif (
@@ -752,6 +757,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 w2_scale=self.w2_scale,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                input_global_scale1=self.input_global_scale1,
+                input_global_scale2=self.input_global_scale2,
                 global_scale1=self.g1_alphas,
                 global_scale2=self.g2_alphas,
                 quant_type_id=self.quant_type_id,
@@ -851,6 +858,8 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             w2_scale=self.w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            input_global_scale1=self.input_global_scale1,
+            input_global_scale2=self.input_global_scale2,
             global_scale1=self.g1_alphas,
             global_scale2=self.g2_alphas,
             quant_type_id=self.quant_type_id,
