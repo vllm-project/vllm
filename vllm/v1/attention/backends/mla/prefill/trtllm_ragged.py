@@ -61,6 +61,7 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             v_head_dim=v_head_dim,
             vllm_config=vllm_config,
         )
+        self._get_workspace_buffer()
 
     def _get_workspace_buffer(self) -> torch.Tensor:
         (workspace_buffer,) = current_workspace_manager().get_simultaneous(

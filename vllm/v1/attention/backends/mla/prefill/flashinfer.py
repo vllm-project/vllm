@@ -77,6 +77,13 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         self._prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
         self._prefill_chunks: list[BatchPrefillWithRaggedKVCacheWrapper] = []
         self._global_hyperparameters: PerLayerParameters | None = None
+        self._get_workspace_buffer()
+
+    def _get_workspace_buffer(self) -> torch.Tensor:
+        (workspace_buffer,) = current_workspace_manager().get_simultaneous(
+            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8),
+        )
+        return workspace_buffer
 
     def _ensure_chunks(
         self,
@@ -123,9 +130,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         global_hyperparameters = self._resolve_global_hyperparameters()
         qo_indptr = prefill_metadata.query_start_loc
         has_context = prefill_metadata.chunked_context is not None
-        (workspace_buffer,) = current_workspace_manager().get_simultaneous(
-            ((envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,), torch.uint8),
-        )
+        workspace_buffer = self._get_workspace_buffer()
 
         if self._prefill_main is None:
             self._prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
