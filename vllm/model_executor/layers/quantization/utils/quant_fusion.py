@@ -1,11 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from dataclasses import dataclass
 
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
+
+def manual_input_quant_enabled() -> bool:
+    return os.environ.get("VLLM_HOIST_INPUT_QUANT", "0") == "1"
 
 
 @dataclass

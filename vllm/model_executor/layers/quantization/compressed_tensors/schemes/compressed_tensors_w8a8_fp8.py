@@ -8,6 +8,7 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm._custom_ops import scaled_fp8_quant
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -26,6 +27,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
+)
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    QuantizedActivation,
+    manual_input_quant_enabled,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -188,10 +193,34 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if hasattr(self, "fp8_linear"):
             self.fp8_linear.process_weights_after_loading(layer)
 
-    def apply_weights(
+        if (
+            manual_input_quant_enabled()
+            and self.is_static_input_scheme
+            and self.activation_quant_key == kFp8StaticTensorSym
+        ):
+            layer.input_quant_key = kFp8StaticTensorSym
+
+    def quantize_input(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
+    ) -> QuantizedActivation:
+        x_2d = x.view(-1, x.shape[-1])
+        fp8, _ = scaled_fp8_quant(x_2d, layer.input_scale)
+        return QuantizedActivation(
+            data=fp8.view(x.shape),
+            scale=layer.input_scale,
+            orig_dtype=x.dtype,
+            orig_shape=x.shape,
+            quant_key=kFp8StaticTensorSym,
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if isinstance(x, QuantizedActivation):
+            return self.fp8_linear.apply_weights(layer, x.data, bias)
         return self.fp8_linear.apply_weights(layer, x, bias)
