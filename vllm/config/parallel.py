@@ -65,7 +65,8 @@ class EPLBConfig:
     """Number of redundant experts to use for expert parallelism.
     If None (default), the minimum valid value will be computed automatically
     based on the number of logical experts and the expert parallel size.
-    The value will be rounded to the nearest multiple of the expert parallel size.
+    The value will be rounded up to the nearest multiple of the expert parallel
+    size.
     """
 
     log_balancedness: bool = False
