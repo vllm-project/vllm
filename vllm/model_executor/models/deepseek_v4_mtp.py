@@ -29,19 +29,18 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.multi_stream_utils import AuxStreamType
 
 from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
-    hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
 from .utils import maybe_prefix
@@ -65,6 +64,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         vllm_config: VllmConfig,
         topk_indices_buffer: torch.Tensor,
         prefix: str,
+        aux_stream_list: list[torch.cuda.Stream] | None = None,
     ) -> None:
         super().__init__()
 
@@ -112,15 +112,14 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-        self.aux_stream_dict = {
-            AuxStreamType.Attention: torch.cuda.Stream(),
-        }
         self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
             prefix,
             topk_indices_buffer=topk_indices_buffer,
-            aux_stream_dict=self.aux_stream_dict,
+            aux_stream_list=aux_stream_list,
         )
+
+        self.hc_head_op = HCHeadOp()
 
     def forward(
         self,
@@ -169,6 +168,14 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             device=self.device,
         )
 
+        # Three aux streams shared across all MTP layers, mirroring
+        # DeepseekV4Model. ROCm runs the same work serially for now.
+        aux_stream_list = (
+            None
+            if current_platform.is_rocm()
+            else [torch.cuda.Stream() for _ in range(3)]
+        )
+
         # to map the exact layer index from weights
         self.layers = torch.nn.ModuleDict(
             {
@@ -176,6 +183,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
                     vllm_config,
                     self.topk_indices_buffer,
                     f"{prefix}.layers.{idx}",
+                    aux_stream_list=aux_stream_list,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -224,7 +232,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         hidden_states = hidden_states.view(
             -1, mtp_layer.hc_mult, mtp_layer.config.hidden_size
         )
-        hidden_states = hc_head(
+        hidden_states = self.hc_head_op(
             hidden_states,
             mtp_layer.hc_head_fn,
             mtp_layer.hc_head_scale,

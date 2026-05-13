@@ -64,6 +64,7 @@ from vllm.model_executor.models.bailing_moe import BailingMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
 from .utils import (
@@ -205,13 +206,19 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_parameters = _build_rope_parameters(config)
+        rope_parameters = _build_rope_parameters(config) or {}
+        # MLA rotates the full qk_rope_head_dim,
+        # partial_rotary_factor is for the linear-attn head only.
+        rope_parameters = {
+            k: v for k, v in rope_parameters.items() if k != "partial_rotary_factor"
+        }
+        rope_parameters["rope_dim"] = self.qk_rope_head_dim
         max_position = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             head_size=self.qk_rope_head_dim,
             max_position=max_position,
             is_neox_style=False,
-            rope_parameters=rope_parameters or None,
+            rope_parameters=rope_parameters,
         )
 
         # Build MLAModules for MultiHeadLatentAttentionWrapper
@@ -438,8 +445,8 @@ class BailingMoELinearAttention(PluggableLayer, MambaBase):
     # --8<-- [end:bailing_moe_linear_attention]
 
     @property
-    def mamba_type(self) -> str:
-        return "linear_attention"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.LINEAR
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         """Return state shape for linear attention cache.

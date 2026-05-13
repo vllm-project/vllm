@@ -251,7 +251,7 @@ The following extra parameters are supported:
 Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/tool_calling/openai_responses_client_with_tools.py)
+Code example: [examples/tool_calling/openai_responses_client_with_tools.py](../../examples/tool_calling/openai_responses_client_with_tools.py)
 
 #### Extra parameters
 
@@ -456,8 +456,8 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 #### Example Clients
 
-- [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_client.py) - Upload and transcribe an audio file
-- [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+- [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
+- [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
 
 ### Tokenizer API
 
@@ -542,6 +542,6 @@ Key capabilities:
 - Scales from a single GPU to a multi-node cluster without code changes.
 - Provides observability and autoscaling policies through Ray dashboards and metrics.
 
-The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: [examples/online_serving/ray_serve_deepseek.py](../../examples/online_serving/ray_serve_deepseek.py).
+The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: [examples/ray_serving/ray_serve_deepseek.py](../../examples/ray_serving/ray_serve_deepseek.py).
 
 Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/index.html).
