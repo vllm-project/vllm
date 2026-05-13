@@ -343,7 +343,10 @@ class Qwen3ForCausalLM(
         ):
             import sys
 
-            row = logits[1].detach().cpu().float()
+            # PROBE: dump logits ROW 0 — the predictor for position 1's token.
+            # prompt_logprobs[1] = logprob of token at position 1 (=2701, ' following')
+            # is computed using logits[0]. So the rank kernel sees logits[0, :].
+            row = logits[0].detach().cpu().float()
             head8 = row[:8].tolist()
             tok2701 = float(row[2701].item()) if row.shape[0] > 2701 else None
             row_max = float(row.max().item())
@@ -357,9 +360,9 @@ class Qwen3ForCausalLM(
             # tok2701 doesn't, the row itself has bit-level differences in
             # tokens near the comparison boundary.
             if tok2701 is not None:
-                # Count vocab tokens with logit >= logit[2701]
+                # Count vocab tokens with logit >= logit[2701] in ROW 0
                 # (matches _ranks_kernel.tl.sum((logits >= x).to(int32)))
-                row_gpu = logits[1].detach()
+                row_gpu = logits[0].detach()
                 rank_count = int((row_gpu >= row_gpu[2701]).sum().item())
                 # Count "boundary" tokens within tiny tolerance of tok2701
                 # tok_val unused (kept for clarity if extended)
@@ -375,7 +378,7 @@ class Qwen3ForCausalLM(
                 rank_count = None
                 near_vals = []
             print(
-                f"[VLLM_LOGITS] shape={list(logits.shape)} pos=1 "
+                f"[VLLM_LOGITS] shape={list(logits.shape)} pos=0_pred_tok2701 "
                 f"head8={head8} tok2701={tok2701} max={row_max} "
                 f"argmax={row_argmax} sum={row_sum} abssum={row_abssum} lse={row_lse} "
                 f"rank_count={rank_count} near={near_vals}",
