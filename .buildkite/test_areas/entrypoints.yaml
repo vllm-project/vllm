@@ -43,6 +43,12 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 2)
   key: entrypoints-integration-api-server-openai-part-2
