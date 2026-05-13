@@ -96,7 +96,7 @@ class SharedExperts:
         if self._disable_shared_experts_overlap:
             return SharedExpertsOrder.NO_OVERLAP
 
-        if self._quant_method.mk_owns_shared_expert:
+        if self._quant_method.mk_can_overlap_shared_experts:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
         should_run_shared_in_aux_stream = (

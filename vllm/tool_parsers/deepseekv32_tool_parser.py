@@ -46,13 +46,13 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
+    tool_call_start_token: str = "<｜DSML｜function_calls>"
+    tool_call_end_token: str = "</｜DSML｜function_calls>"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
-
-        # Sentinel token
-        self.tool_call_start_token: str = "<｜DSML｜function_calls>"
 
         # Streaming state
         self.current_tool_index: int = 0
@@ -60,13 +60,16 @@ class DeepSeekV32ToolParser(ToolParser):
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
-            r"<｜DSML｜function_calls>(.*?)</｜DSML｜function_calls>", re.DOTALL
+            re.escape(self.tool_call_start_token)
+            + r"(.*?)"
+            + re.escape(self.tool_call_end_token),
+            re.DOTALL,
         )
         self.invoke_complete_regex = re.compile(
             r'<｜DSML｜invoke\s+name="([^"]+)"\s*>(.*?)</｜DSML｜invoke>', re.DOTALL
         )
         self.parameter_complete_regex = re.compile(
-            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(?:true|false)"\s*>(.*?)</｜DSML｜parameter>',
+            r'<｜DSML｜parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</｜DSML｜parameter>',
             re.DOTALL,
         )
 
@@ -86,7 +89,7 @@ class DeepSeekV32ToolParser(ToolParser):
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
-            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # (e.g. <｜DSML｜function_calls>, </｜DSML｜function_calls>)
             # are not skippedduring decoding.
             # Even though they are not marked as special tokens,
             # setting skip_special_tokens=False ensures proper handling in
@@ -98,10 +101,12 @@ class DeepSeekV32ToolParser(ToolParser):
         """Generate a unique tool call ID."""
         return f"call_{uuid.uuid4().hex[:24]}"
 
-    def _parse_invoke_params(self, invoke_str: str) -> dict:
-        param_dict = dict()
-        for param_name, param_val in self.parameter_complete_regex.findall(invoke_str):
-            param_dict[param_name] = param_val
+    def _parse_invoke_params(self, invoke_str: str) -> dict[str, tuple[str, str]]:
+        param_dict: dict[str, tuple[str, str]] = {}
+        for param_name, string_attr, param_val in self.parameter_complete_regex.findall(
+            invoke_str
+        ):
+            param_dict[param_name] = (param_val, string_attr)
         return param_dict
 
     def _convert_param_value_checked(self, value: str, param_type: str) -> Any:
@@ -139,10 +144,32 @@ class DeepSeekV32ToolParser(ToolParser):
         # return value as fallback
         return value
 
+    @staticmethod
+    def _repair_param_dict(
+        param_dict: dict[str, Any],
+        param_config: dict[str, dict],
+    ) -> dict[str, Any]:
+        """Unwrap single 'arguments' / 'input' wrappers when the wrapper
+        is not part of the requested tool schema and the wrapped object
+        matches the schema fields."""
+        allowed = set(param_config.keys())
+        for wrapper in ("arguments", "input"):
+            if set(param_dict.keys()) != {wrapper} or wrapper in allowed:
+                continue
+            inner = param_dict[wrapper]
+            if isinstance(inner, str):
+                try:
+                    inner = json.loads(inner)
+                except json.JSONDecodeError:
+                    return param_dict
+            if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
+                return inner
+        return param_dict
+
     def _convert_params_with_schema(
         self,
         function_name: str,
-        param_dict: dict[str, str],
+        param_dict: dict[str, tuple[str, str]],
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
         param_config: dict = {}
@@ -159,12 +186,16 @@ class DeepSeekV32ToolParser(ToolParser):
                     break
 
         converted: dict[str, Any] = {}
-        for name, value in param_dict.items():
+        for name, (value, string_attr) in param_dict.items():
+            if string_attr == "true":
+                converted[name] = value
+                continue
+
             param_type = "string"
             if name in param_config and isinstance(param_config[name], dict):
                 param_type = param_config[name].get("type", "string")
             converted[name] = self._convert_param_value(value, param_type)
-        return converted
+        return self._repair_param_dict(converted, param_config)
 
     def extract_tool_calls(
         self,
@@ -188,12 +219,13 @@ class DeepSeekV32ToolParser(ToolParser):
                     tool_call_match
                 ):
                     param_dict = self._parse_invoke_params(invoke_content)
+                    params = self._convert_params_with_schema(invoke_name, param_dict)
                     tool_calls.append(
                         ToolCall(
                             type="function",
                             function=FunctionCall(
                                 name=invoke_name,
-                                arguments=json.dumps(param_dict, ensure_ascii=False),
+                                arguments=json.dumps(params, ensure_ascii=False),
                             ),
                         )
                     )
