@@ -77,7 +77,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[int] | list[str] | list[dict]
+    prompt: str | list[int] | list[str] | list[dict] | list[list[int]]
     prompt_len: int
     expected_output_len: int | None
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
