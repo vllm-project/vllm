@@ -202,6 +202,10 @@ class LLM:
             dictionary or an AttentionConfig instance. If a dictionary, it will
             be converted to an AttentionConfig. Allows specifying the attention
             backend and other attention-related settings.
+        spec_method: Top-level alias for `speculative_config["method"]`.
+        spec_model: Top-level alias for `speculative_config["model"]`.
+        spec_tokens: Top-level alias for
+            `speculative_config["num_speculative_tokens"]`.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -252,6 +256,9 @@ class LLM:
         | OnlineQuantizationConfigArgs
         | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
+        spec_method: str | None = None,
+        spec_model: str | None = None,
+        spec_tokens: int | None = None,
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
@@ -373,6 +380,9 @@ class LLM:
             compilation_config=compilation_config_instance,
             quantization_config=quantization_config,
             logits_processors=logits_processors,
+            spec_method=spec_method,
+            spec_model=spec_model,
+            spec_tokens=spec_tokens,
             **kwargs,
         )
 
