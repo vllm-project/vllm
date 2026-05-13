@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
     MarlinExpertsBase,
 )
+from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
+    TrtLlmMxint4ExpertsMonolithic,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
@@ -46,26 +49,11 @@ def backend_to_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Return the experts class for the given backend, or None for NONE."""
     if backend == WNA16MoEBackend.MARLIN:
-        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
-            MarlinExperts,
-        )
-
         return [MarlinExperts]
-
     elif backend == WNA16MoEBackend.BATCHED_MARLIN:
-        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
-            BatchedMarlinExperts,
-        )
-
         return [BatchedMarlinExperts]
-
     elif backend == WNA16MoEBackend.FLASHINFER:
-        from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (  # noqa: E501
-            TrtLlmMxint4ExpertsMonolithic,
-        )
-
         return [TrtLlmMxint4ExpertsMonolithic]
-
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -183,7 +171,7 @@ def make_wna16_moe_quant_config(
 def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    experts_cls: type[mk.FusedMoEExperts] | None,
+    experts_cls: type[mk.FusedMoEExperts],
     is_k_full: bool = False,
     w13_g_idx: torch.Tensor | None = None,
     w2_g_idx: torch.Tensor | None = None,
@@ -193,8 +181,13 @@ def make_wna16_moe_kernel(
     input_global_scale2: torch.Tensor | None = None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    # Currently, we only support MarlinExperts and BatchedMarlinExperts
-    assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
+    # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts
+    # and BatchedMarlinExperts
+    assert experts_cls in (
+        MarlinExperts,
+        BatchedMarlinExperts,
+        TrtLlmMxint4ExpertsMonolithic,
+    )
 
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
@@ -225,7 +218,7 @@ def make_wna16_moe_kernel(
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+        experts: mk.FusedMoEExperts = experts_cls(
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
             moe_config=moe_config,
@@ -233,7 +226,7 @@ def make_wna16_moe_kernel(
             **extra_args,
         )
     else:
-        experts = MarlinExperts(
+        experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
             **extra_args,

@@ -45,6 +45,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static32,
     kInt8Static,
     kMxfp4Static,
     kMxfp8Static,
@@ -615,6 +616,7 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             kNvfp4Static,
             kInt4Static,
             kInt8Static,
+            kInt4Static32,
         ]
         return weight_key in SUPPORTED_W
 
