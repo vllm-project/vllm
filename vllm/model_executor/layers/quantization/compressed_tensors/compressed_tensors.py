@@ -394,6 +394,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_group_size_32 = quant_args.group_size == 32
         is_float_type = quant_args.type == QuantizationType.FLOAT
         is_4_bits = quant_args.num_bits == 4
+
         return (
             is_group_quant
             and is_float_type

@@ -10,10 +10,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .Mxfp4LinearKernel import Mxfp4LinearKernel, Mxfp4LinearLayerConfig
+from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 
-class XPUMxfp4LinearKernel(Mxfp4LinearKernel):
+class XPUMxfp4LinearKernel(MxFp4LinearKernel):
     """MXFP4 W4A4 GEMM on XPU."""
 
     @classmethod
@@ -25,7 +25,7 @@ class XPUMxfp4LinearKernel(Mxfp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Mxfp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
