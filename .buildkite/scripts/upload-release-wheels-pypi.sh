@@ -41,7 +41,7 @@ set -x # avoid printing secrets above
 
 # install uv if not already available
 if ! command -v uv &> /dev/null; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
+  curl -LsSf https://astral.sh/uv/install.sh | UV_VERSION=0.11.14 sh
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
