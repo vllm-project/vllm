@@ -147,7 +147,6 @@ def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts] | None,
-    layer: torch.nn.Module,
     is_k_full: bool,
     w13_g_idx: torch.Tensor | None,
     w2_g_idx: torch.Tensor | None,

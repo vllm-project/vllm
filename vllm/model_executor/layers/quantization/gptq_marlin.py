@@ -761,7 +761,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=layer.w13_g_idx,
             w2_g_idx=layer.w2_g_idx,
