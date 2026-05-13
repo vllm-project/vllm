@@ -143,6 +143,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if self.pass_config.fuse_gemm_comms:
                     self.passes += [AsyncTPPass(config)]
 
+            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
+                # Run the more specific RMSNorm+router-pad fusion before
+                # AR+RMS, since both consume fused_add_rms_norm.
+                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
             if self.pass_config.fuse_allreduce_rms:
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterAllReduceFusionPass(config)]
@@ -163,9 +168,6 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [ActivationQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
-
-            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
-                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
 
             if self.pass_config.fuse_mla_dual_rms_norm and rocm_aiter_ops.is_enabled():
                 self.passes += [MLADualRMSNormFusionPass(config)]
