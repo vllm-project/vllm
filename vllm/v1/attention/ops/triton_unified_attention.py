@@ -44,8 +44,12 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
     - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
       ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
       their scales separately on S/P inside the loop.
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
-      tensor-wide scale.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor) with bf16/fp16 Q: dequantize
+      inline using the tensor-wide scale.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor) with fp8 Q: keep the tile at
+      fp8 storage magnitude; the caller fuses ``k_scale`` into
+      ``softmax_scale`` (on S) and post-multiplies ``v_scale`` on acc.
+      This mirrors FlashInfer's ``bmm1_scale`` / ``bmm2_scale`` design.
     """
     if KV_QUANT_MODE == 1:
         if Q.dtype.is_fp8():
@@ -200,6 +204,18 @@ def kernel_unified_attention(
     # acc : (BLOCK_M, HEAD_SIZE_PADDED)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
+    # When per-tensor FP8 KV cache is paired with fp8 Q, the tile loop
+    # leaves K and V at fp8 storage magnitude; the descales are applied
+    # once on the fp32 accumulator at S and acc, mirroring FlashInfer's
+    # bmm1_scale / bmm2_scale design.
+    USE_PER_TENSOR_SCALE_AND_FP8_Q: tl.constexpr = (
+        KV_QUANT_MODE == 1
+    ) and Q.dtype.is_fp8()
+    if USE_PER_TENSOR_SCALE_AND_FP8_Q:
+        k_scale_val = tl.load(k_scale)
+        v_scale_val = tl.load(v_scale)
+        scale_for_S = scale * k_scale_val
+
     context_len = seq_len - cur_batch_query_len
 
     if USE_ALIBI_SLOPES:
@@ -302,6 +318,10 @@ def kernel_unified_attention(
             # Per-token-head quant: fuse softmax_scale with per-head k_scale
             # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
             S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
+        elif USE_PER_TENSOR_SCALE_AND_FP8_Q:
+            # Per-tensor fp8 KV with fp8 Q: K is at fp8 storage magnitude;
+            # k_scale_val is fused into scale_for_S outside the tile loop.
+            S += scale_for_S * tl.dot(Q, K)
         else:
             S += scale * tl.dot(Q, K)
 
@@ -336,6 +356,10 @@ def kernel_unified_attention(
             # Per-token-head quant: apply v_scale to P instead of V.
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
+        elif USE_PER_TENSOR_SCALE_AND_FP8_Q:
+            # Per-tensor fp8 KV with fp8 Q: V is at fp8 storage magnitude;
+            # apply v_scale_val on the fp32 acc accumulation.
+            acc += v_scale_val * tl.dot(P.to(V.dtype), V)
         else:
             acc += tl.dot(P.to(V.dtype), V)
 
