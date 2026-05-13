@@ -88,7 +88,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
         self._kv_memoryview: memoryview | None = None
         if mmap_region is not None:
-            self._kv_memoryview = self._create_kv_memoryview()
+            self._kv_memoryview = mmap_region.create_kv_memoryview()
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -101,18 +101,6 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             "mmap_region must be provided to CPUPrimaryTierOffloadingManager"
         )
         return self._kv_memoryview
-
-    def _create_kv_memoryview(self) -> memoryview:
-        assert self._mmap_region is not None
-        kv_tensor = self._mmap_region._base.view(
-            self._mmap_region.num_blocks, self._mmap_region._row_stride
-        )
-        np_arr = kv_tensor.numpy()
-        assert np_arr.ctypes.data == self._mmap_region._base.data_ptr(), (
-            "view()/numpy() created a copy instead of sharing the mmap buffer; "
-            "secondary tiers require zero-copy access to primary KV data"
-        )
-        return memoryview(np_arr)
 
     def shutdown(self) -> None:
         super().shutdown()
