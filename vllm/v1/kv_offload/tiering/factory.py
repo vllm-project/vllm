@@ -4,8 +4,6 @@
 Factory for creating secondary tier implementations.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
@@ -24,7 +22,7 @@ _TIER_REGISTRY: dict[str, type[SecondaryTierManager]] = {
 def create_secondary_tier(
     tier_config: dict,
     primary_kv_view: memoryview,
-    vllm_config: VllmConfig,
+    vllm_config: "VllmConfig",
 ) -> SecondaryTierManager:
     """
     Create a secondary tier from configuration.

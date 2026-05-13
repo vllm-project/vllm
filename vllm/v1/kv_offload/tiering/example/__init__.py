@@ -9,8 +9,6 @@ completion. It's useful for testing the TieringOffloadingManager without
 requiring actual storage or network backends.
 """
 
-from __future__ import annotations
-
 from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
@@ -49,7 +47,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         primary_kv_view: memoryview,
         max_blocks: int = 1000,
         simulate_async: bool = False,

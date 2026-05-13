@@ -4,8 +4,6 @@
 Abstract interfaces and data types for the secondary tiering layer.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
@@ -55,7 +53,7 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished() polls for completion.
     """
 
-    def __init__(self, vllm_config: VllmConfig, primary_kv_view: memoryview) -> None:
+    def __init__(self, vllm_config: "VllmConfig", primary_kv_view: memoryview) -> None:
         self._vllm_config = vllm_config
         self._primary_kv_view: memoryview = primary_kv_view
 

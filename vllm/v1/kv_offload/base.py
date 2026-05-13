@@ -4,8 +4,6 @@
 Core abstractions for KV cache offloading in vLLM v1.
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -328,7 +326,7 @@ class CanonicalKVCaches:
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
-    def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
+    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
             "subject to change in the future as we iterate the design."
@@ -394,7 +392,7 @@ class OffloadingSpec(ABC):
     @abstractmethod
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
+    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], "OffloadingHandler"]]:
         """
         Get offloading handlers along with their respective src and dst types.
 
