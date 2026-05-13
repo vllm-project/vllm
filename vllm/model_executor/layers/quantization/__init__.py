@@ -35,10 +35,9 @@ QuantizationMethods = Literal[
     "deepseek_v4_fp8",
     "cpu_awq",
     "online",
-    # Below are values of the OnlineQuantScheme enum, specified as strings to
-    # avoid circular import issues. This is here to provide a shortcut where
-    # the user can specify "LLM(..., quantization='fp8_per_tensor')" as
-    # shorthand for creating a more complicated online quant config object
+    # Below are online quant shorthand names (see vllm.config.quantization).
+    # Listed here as strings to avoid a circular import; kept in sync with
+    # _ONLINE_SHORTHANDS by the assertion in get_quantization_config().
     "fp8_per_tensor",
     "fp8_per_block",
     "int8_per_channel_weight_only",
@@ -111,7 +110,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
-    from vllm.config.quantization import OnlineQuantScheme
+    from vllm.config.quantization import _ONLINE_SHORTHANDS
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.model_executor.models.deepseek_v4 import DeepseekV4FP8Config
 
@@ -171,16 +170,15 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "online": OnlineQuantizationConfig,
     }
 
-    # Below are values of the OnlineQuantScheme enum. This is here to provide
-    # a shortcut where the user can specify
-    # "LLM(..., quantization='fp8_per_tensor')" as shorthand for creating a
-    # more complicated online quant config object
-    for scheme in OnlineQuantScheme:
-        assert scheme.value not in method_to_config, (
-            f"Online quant scheme {scheme.value!r} conflicts with an "
+    # Register online shorthands as quantization methods so the user can
+    # specify "LLM(..., quantization='fp8_per_tensor')" as shorthand for
+    # creating a more complicated online quant config object.
+    for shorthand in _ONLINE_SHORTHANDS:
+        assert shorthand not in method_to_config, (
+            f"Online quant shorthand {shorthand!r} conflicts with an "
             f"existing quantization method"
         )
-        method_to_config[scheme.value] = OnlineQuantizationConfig
+        method_to_config[shorthand] = OnlineQuantizationConfig
 
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

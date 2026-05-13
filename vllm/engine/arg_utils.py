@@ -118,7 +118,7 @@ from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
-    from vllm.config.quantization import OnlineQuantizationConfigArgs
+    from vllm.config.quantization import QuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
@@ -527,7 +527,12 @@ class EngineArgs:
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
-    quantization_config: "dict[str, Any] | OnlineQuantizationConfigArgs | None" = None
+    quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
+    """User-facing quantization configuration. Carries per-layer-kind
+    QuantSpecs (linear, moe) and ignore patterns; see
+    :class:`QuantizationConfigArgs`. Auto-populated from the matching online
+    shorthand when `quantization` is one of the values in
+    `ONLINE_QUANT_SHORTHAND_NAMES`."""
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -719,9 +724,9 @@ class EngineArgs:
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
 
-        from vllm.config.quantization import resolve_online_quant_config
+        from vllm.config.quantization import resolve_quantization_config
 
-        self.quantization_config = resolve_online_quant_config(
+        self.quantization_config = resolve_quantization_config(
             self.quantization, self.quantization_config
         )
 
@@ -785,6 +790,9 @@ class EngineArgs:
         )
         model_group.add_argument("--max-model-len", **model_kwargs["max_model_len"])
         model_group.add_argument("--quantization", "-q", **model_kwargs["quantization"])
+        model_group.add_argument(
+            "--quantization-config", **model_kwargs["quantization_config"]
+        )
         model_group.add_argument(
             "--allow-deprecated-quantization",
             **model_kwargs["allow_deprecated_quantization"],
