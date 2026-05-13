@@ -22,7 +22,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
-    flash_attn_supports_fp8,
+    flash_attn_supports_kv_cache_dtype,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
@@ -72,6 +72,9 @@ class FlashAttentionBackend(AttentionBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
     ]
 
     @staticmethod
@@ -174,6 +177,8 @@ class FlashAttentionBackend(AttentionBackend):
     def get_fp8_dtype_for_flashattn(kv_cache_dtype: str) -> torch.dtype:
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
+        elif kv_cache_dtype == "fp8_e5m2":
+            return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
 
@@ -192,8 +197,8 @@ class FlashAttentionBackend(AttentionBackend):
         if kv_cache_dtype is None:
             return True
         if is_quantized_kv_cache(kv_cache_dtype):
-            return flash_attn_supports_fp8()
-        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+            return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)
+        return True
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -645,9 +650,12 @@ class FlashAttentionImpl(AttentionImpl):
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
-        if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
+        if is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ) and not flash_attn_supports_kv_cache_dtype(self.kv_cache_dtype):
             raise NotImplementedError(
-                "FlashAttention does not support fp8 kv-cache on this device."
+                f"FlashAttention does not support {self.kv_cache_dtype}"
+                " kv-cache on this device."
             )
 
         self.sinks = sinks

@@ -191,12 +191,14 @@ def is_fa_version_supported(fa_version: int) -> bool:
         return False
 
 
-def flash_attn_supports_fp8() -> bool:
+def flash_attn_supports_kv_cache_dtype(kv_cache_dtype: str = "fp8_e4m3") -> bool:
     if current_platform.is_xpu():
         return True
-    return (
-        get_flash_attn_version() == 3
-        and current_platform.is_device_capability_family(90)
+    fa_version = get_flash_attn_version()
+    if kv_cache_dtype == "fp8_e5m2":
+        return fa_version == 4
+    return fa_version == 4 or (
+        fa_version == 3 and current_platform.is_device_capability_family(90)
     )
 
 
