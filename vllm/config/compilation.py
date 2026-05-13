@@ -150,10 +150,16 @@ class PassConfig:
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
+    """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER Triton
+    kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
+    for layers that support it. Auto-enabled at O1+ on ROCm for models
+    with QK-norm (e.g. Qwen3-MoE)."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
     Larger batch sizes e.g. during prefill will use the unfused kernels.
+    Also applies to the fused QK-Norm+RoPE+KVCache pass.
     """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
@@ -233,6 +239,7 @@ class PassConfig:
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
         "fuse_rope_kvcache_cat_mla",
+        "fuse_qk_norm_rope_kvcache",
         mode="wrap",
     )
     @classmethod
@@ -303,6 +310,12 @@ class PassConfig:
                 "runtime when its conditions are met. This flag will be "
                 "removed in v0.23."
             )
+        if self.fuse_qk_norm_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "QK-Norm+RoPE+KVCache fusion requires ROCm with AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_qk_norm_rope_kvcache = False
 
     def log_enabled_passes(self) -> None:
         """
@@ -962,6 +975,16 @@ class CompilationConfig:
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
+        if self.pass_config.fuse_qk_norm_rope_kvcache:
+            if "+rotary_embedding" not in self.custom_ops:
+                self.custom_ops.append("+rotary_embedding")
+            if not self.use_inductor_graph_partition:
+                self.use_inductor_graph_partition = True
+                logger.info(
+                    "Enabling use_inductor_graph_partition for "
+                    "fuse_qk_norm_rope_kvcache (requires "
+                    "unified_kv_cache_update in compiled graph)."
+                )
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
