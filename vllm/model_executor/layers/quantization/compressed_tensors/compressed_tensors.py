@@ -958,6 +958,24 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
     def quantize_input(self, layer: torch.nn.Module, x: torch.Tensor):
         return layer.scheme.quantize_input(layer, x)
 
+    def rms_norm_quantize_input(
+        self,
+        layer: torch.nn.Module,
+        norm: torch.nn.Module,
+        x: torch.Tensor,
+        residual: torch.Tensor | None,
+    ):
+        scheme = layer.scheme
+        fused = getattr(scheme, "rms_norm_quantize_input", None)
+        if fused is not None:
+            return fused(layer, norm, x, residual)
+        if residual is None:
+            residual = x
+            out = norm(x)
+        else:
+            out, residual = norm(x, residual)
+        return scheme.quantize_input(layer, out), residual
+
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
     """
