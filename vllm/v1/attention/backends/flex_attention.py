@@ -769,8 +769,15 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.kv_cache_spec = kv_cache_spec
         supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
         self.direct_build: bool = supports_small_blocks
-        self.q_block_size: int = 16 if supports_small_blocks else 128
-        self.kv_block_size: int = self.block_size if supports_small_blocks else 128
+
+        self.q_block_size, self.kv_block_size = self._get_block_sizes(
+            vllm_config.attention_config,
+            supports_small_blocks,
+            self.block_size,
+        )
+
+        if self.direct_build and self.kv_block_size != self.block_size:
+            self.direct_build = False
 
         self.max_model_len = self.model_config.max_model_len
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
@@ -791,6 +798,39 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         # initialize later when we can access block_table
         self.persistent_physical_to_logical = None
         self.persistent_kv_indices = None
+
+    @staticmethod
+    def _get_block_sizes(
+        attn_cfg,
+        supports_small_blocks: bool,
+        cache_block_size: int,
+    ) -> tuple[int, int]:
+        q_block_size = 16 if supports_small_blocks else 128
+        kv_block_size = cache_block_size if supports_small_blocks else 128
+
+        q_block_size = attn_cfg.flex_attn_q_block_size or q_block_size
+        if (q_block_size & (q_block_size - 1)) != 0 or (
+            attn_cfg.flex_attn_block_m is not None
+            and q_block_size % attn_cfg.flex_attn_block_m != 0
+        ):
+            raise ValueError(
+                f"flex_attn_q_block_size must be a power of 2 "
+                f"and divisible by flex_attn_block_m, got "
+                f"{q_block_size}, {attn_cfg.flex_attn_block_m}"
+            )
+
+        kv_block_size = attn_cfg.flex_attn_kv_block_size or kv_block_size
+        if (kv_block_size & (kv_block_size - 1)) != 0 or (
+            attn_cfg.flex_attn_block_n is not None
+            and kv_block_size % attn_cfg.flex_attn_block_n != 0
+        ):
+            raise ValueError(
+                f"flex_attn_kv_block_size must be a power of 2 "
+                f"and divisible by flex_attn_block_n, got "
+                f"{kv_block_size}, {attn_cfg.flex_attn_block_n}"
+            )
+
+        return q_block_size, kv_block_size
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -946,6 +986,8 @@ class FlexAttentionImpl(AttentionImpl):
         logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
+        block_m: int | None = None,
+        block_n: int | None = None,
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -985,6 +1027,14 @@ class FlexAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet"
             )
+
+        self.block_m = 16 if envs.VLLM_BATCH_INVARIANT else None
+        self.block_n = 16 if envs.VLLM_BATCH_INVARIANT else None
+
+        if block_m is not None:
+            self.block_m = block_m
+        if block_n is not None:
+            self.block_n = block_n
 
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
@@ -1131,6 +1181,13 @@ class FlexAttentionImpl(AttentionImpl):
         kernel_options = get_kernel_options(
             query, block_m, block_n, attn_metadata.direct_build
         )
+
+        if self.block_m is not None:
+            kernel_options["BLOCK_M"] = self.block_m
+        if self.block_n is not None:
+            kernel_options["BLOCK_N"] = self.block_n
+        if envs.VLLM_BATCH_INVARIANT:
+            kernel_options["IS_DIVISIBLE"] = False
         out = flex_attention_compiled(
             query,
             key_tensor,
@@ -1170,11 +1227,6 @@ def get_kernel_options(
             return block_size
         return candidate
 
-    if envs.VLLM_BATCH_INVARIANT:
-        kernel_options["BLOCK_M"] = 16
-        kernel_options["BLOCK_N"] = 16
-        kernel_options["IS_DIVISIBLE"] = False
-        return kernel_options
     if use_direct_build:
         kernel_options["BLOCK_M"] = block_m
         kernel_options["BLOCK_N"] = block_n
