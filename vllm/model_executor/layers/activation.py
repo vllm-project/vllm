@@ -220,6 +220,9 @@ class MulAndSilu(CustomOp):
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         return ir.ops.mul_and_silu(x)
 
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return ir.ops.mul_and_silu(x)
+
 
 # --8<-- [start:gelu_and_mul_sparse]
 @CustomOp.register("gelu_and_mul_sparse")
