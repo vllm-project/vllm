@@ -13,7 +13,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_fusion import (
     QuantizedActivation,
-    manual_input_quant_enabled,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.model_executor.parameter import (
@@ -32,9 +31,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
-        self._supports_input_quant_fusion = manual_input_quant_enabled() and hasattr(
-            self.kernel, "apply_quantized"
-        )
+        self._supports_input_quant_fusion = hasattr(self.kernel, "apply_quantized")
 
     @classmethod
     def get_min_capability(cls) -> int:

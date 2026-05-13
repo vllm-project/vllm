@@ -30,7 +30,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_fusion import (
     QuantizedActivation,
-    manual_input_quant_enabled,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -195,8 +194,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             self.fp8_linear.process_weights_after_loading(layer)
 
         if (
-            manual_input_quant_enabled()
-            and self.is_static_input_scheme
+            self.is_static_input_scheme
             and self.activation_quant_key == kFp8StaticTensorSym
         ):
             layer.input_quant_key = kFp8StaticTensorSym
