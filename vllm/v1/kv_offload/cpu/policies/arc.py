@@ -94,14 +94,12 @@ class ARCCachePolicy(CachePolicy):
                 # move to MRU position (end) to keep it fresh in the ghost list
                 self.b2.move_to_end(key)
 
-    def clear(self) -> list[tuple[OffloadKey, BlockStatus]]:
-        items = list(self.t1.items()) + list(self.t2.items())
+    def clear(self) -> None:
         self.t1.clear()
         self.t2.clear()
         self.b1.clear()
         self.b2.clear()
         self.target_t1_size = 0.0
-        return items
 
     def evict(
         self, n: int, protected: set[OffloadKey]

@@ -804,6 +804,11 @@ class OffloadingConnectorScheduler:
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._job_reset_counter:
+                logger.debug(
+                    "Skipping stale completed job %d (pre-reset counter: %d)",
+                    job_id,
+                    self._job_reset_counter,
+                )
                 continue
             job_status = self._jobs[job_id]
             job_status.pending_count -= count
@@ -889,12 +894,12 @@ class OffloadingConnectorScheduler:
         """Reset the offloading manager cache, evicting all stored blocks."""
 
         # Flush in-flight load jobs before the pool resets. Loads run on the
-        # cpu_to_gpu CUDA stream. New post-reset stores run on the gpu_to_cpu
-        # stream. These two directions have no ordering guarantee between them,
-        # so if the pool resets and reuses the same CPU block ID, a new store
-        # can race with an old load over the same physical CPU address. Flushing
-        # old load IDs causes workers to synchronize those streams before
-        # starting any new stores, eliminating the race.
+        # load CUDA stream. New post-reset stores run on the store stream.
+        # These two directions have no ordering guarantee between them,
+        # so if the pool resets and reuses the same offload block ID, a new
+        # store can race with an old load over the same offload buffer address.
+        # Flushing old load IDs causes workers to synchronize those streams
+        # before starting any new stores, eliminating the race.
         for job_id, job_status in self._jobs.items():
             if not job_status.is_store:
                 self._current_batch_jobs_to_flush.add(job_id)
@@ -906,14 +911,10 @@ class OffloadingConnectorScheduler:
 
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.
-        if self._blocks_being_loaded:
+        if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.clear()
-        if self._current_batch_load_jobs:
-            self._current_batch_load_jobs.clear()
-        if self._block_id_to_pending_jobs:
-            self._block_id_to_pending_jobs.clear()
-        if self._jobs:
-            self._jobs.clear()
+        self._block_id_to_pending_jobs.clear()
+        self._jobs.clear()
         self._job_reset_counter = self._job_counter
 
     def shutdown(self) -> None:

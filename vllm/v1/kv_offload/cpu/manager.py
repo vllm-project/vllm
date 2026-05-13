@@ -60,7 +60,6 @@ class CPUOffloadingManager(OffloadingManager):
         self.counts: OrderedDict[OffloadKey, int] | None = (
             OrderedDict() if store_threshold >= 2 else None
         )
-        self._pending_removal: set[OffloadKey] = set()
 
     # --- block pool ---
 
@@ -136,10 +135,6 @@ class CPUOffloadingManager(OffloadingManager):
             assert block is not None, f"Block {key!r} not found"
             assert block.ref_cnt > 0, f"Block {key!r} ref_cnt is already 0"
             block.ref_cnt -= 1
-            if block.ref_cnt == 0 and key in self._pending_removal:
-                self._pending_removal.discard(key)
-                self._policy.remove(key)
-                self._free_block(block)
 
     def prepare_store(
         self,
@@ -210,20 +205,12 @@ class CPUOffloadingManager(OffloadingManager):
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
-                    if key in self._pending_removal:
-                        # Store completed for a block that was reset mid-flight.
-                        # Free it without emitting a "stored" event.
-                        self._pending_removal.discard(key)
-                        self._policy.remove(key)
-                        self._free_block(block)
-                    else:
-                        block.ref_cnt = 0
-                        stored_keys.append(key)
+                    block.ref_cnt = 0
+                    stored_keys.append(key)
         else:
             for key in keys:
                 block = self._policy.get(key)
                 if block is not None and not block.is_ready:
-                    self._pending_removal.discard(key)
                     self._policy.remove(key)
                     self._free_block(block)
 
@@ -241,27 +228,11 @@ class CPUOffloadingManager(OffloadingManager):
         # guarantees that complete_load / complete_store are never called for
         # pre-reset jobs, so no lazy cleanup is needed. The scheduler also
         # flushes in-flight load job IDs to the workers before any new stores
-        # can begin, preventing a cross-direction (cpu_to_gpu vs gpu_to_cpu)
-        # data race on reused CPU block IDs.
-        all_blocks = self._policy.clear()
+        # can begin, preventing a cross-direction data race on reused offload block IDs.
+        self._policy.clear()
 
-        # Only emit "removed" events for blocks that were fully stored
-        # (ref_cnt >= 0). In-flight stores (ref_cnt == -1) were never committed
-        # so they should not appear as "removed" from the external view.
-        stored_keys = [key for key, block in all_blocks if block.ref_cnt >= 0]
-
-        self._pending_removal.clear()
         self._free_list.clear()
         self._num_allocated_blocks = 0
-
-        if stored_keys and self.events is not None:
-            self.events.append(
-                OffloadingEvent(
-                    keys=stored_keys,
-                    medium=self.medium,
-                    removed=True,
-                )
-            )
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:

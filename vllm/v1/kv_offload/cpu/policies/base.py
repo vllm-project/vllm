@@ -76,9 +76,9 @@ class CachePolicy(ABC):
         """
 
     @abstractmethod
-    def clear(self) -> list[tuple[OffloadKey, BlockStatus]]:
+    def clear(self) -> None:
         """
-        Remove ALL blocks regardless of ref_cnt and return (key, block) pairs.
+        Remove ALL blocks regardless of ref_cnt.
 
         Ghost lists and adaptive state are also reset.
         """
