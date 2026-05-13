@@ -10,9 +10,9 @@ from torch.nn import Module
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-    from vllm.model_executor.layers.fused_moe.config import (
+    from vllm.model_executor.layers.fused_moe import (
         FusedMoEQuantConfig,
+        RoutedExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
@@ -161,7 +161,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: "FusedMoE",
+        layer: "RoutedExperts",
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -199,8 +199,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def get_fused_moe_quant_config(
