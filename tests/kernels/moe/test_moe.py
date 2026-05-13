@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
@@ -1588,7 +1588,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.apply_router_weight_on_input = False
         layer.routed_scaling_factor = None
         layer.shared_experts = None
-        layer._maybe_init_expert_routing_tables = lambda: None
+        layer._expert_routing_tables = lambda: None
 
         quant_method.process_weights_after_loading(layer)
 
