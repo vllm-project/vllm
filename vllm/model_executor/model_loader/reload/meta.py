@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -56,37 +56,34 @@ def materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
 
 
 def _is_non_persistent_parameter_alias_buffer(
-    layer: torch.nn.Module, name: str, buffer: torch.Tensor
+    layer: torch.nn.Module,
+    name: str,
+    buffer: torch.Tensor,
+    parameter_storage_ptrs: set[int],
 ) -> bool:
     if name not in layer._non_persistent_buffers_set:
         return False
 
-    return _is_parameter_alias_tensor(layer, buffer)
+    buffer_storage_ptr = _tensor_storage_ptr(buffer)
+    return (
+        buffer_storage_ptr is not None
+        and buffer_storage_ptr in parameter_storage_ptrs
+    )
 
 
-def _is_parameter_alias_tensor(
-    layer: torch.nn.Module,
-    tensor: torch.Tensor,
-    extra_parameters: Iterable[torch.Tensor] = (),
-) -> bool:
+def _tensor_storage_ptr(tensor: torch.Tensor) -> int | None:
     try:
-        tensor_storage_ptr = tensor.untyped_storage().data_ptr()
+        return tensor.untyped_storage().data_ptr()
     except RuntimeError:
-        return False
+        return None
 
-    for param in layer.parameters(recurse=True):
-        try:
-            if param.untyped_storage().data_ptr() == tensor_storage_ptr:
-                return True
-        except RuntimeError:
-            continue
-    for param in extra_parameters:
-        try:
-            if param.untyped_storage().data_ptr() == tensor_storage_ptr:
-                return True
-        except RuntimeError:
-            continue
-    return False
+
+def _parameter_storage_ptrs(layer: torch.nn.Module) -> set[int]:
+    return {
+        storage_ptr
+        for param in layer.parameters(recurse=True)
+        if (storage_ptr := _tensor_storage_ptr(param)) is not None
+    }
 
 
 def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
@@ -94,6 +91,7 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
         return ({}, {})
 
     params, buffers = get_layer_params_buffers(layer)
+    parameter_storage_ptrs = _parameter_storage_ptrs(layer)
     return (
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
@@ -104,7 +102,9 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
             if name not in SKIP_TENSORS
-            and not _is_non_persistent_parameter_alias_buffer(layer, name, buffer)
+            and not _is_non_persistent_parameter_alias_buffer(
+                layer, name, buffer, parameter_storage_ptrs
+            )
         },
     )
 

@@ -15,7 +15,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
     SKIP_TENSORS,
-    _is_non_persistent_parameter_alias_buffer,
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
