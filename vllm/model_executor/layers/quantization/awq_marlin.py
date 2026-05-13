@@ -27,7 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    make_wna16_moe_kernel,
+    select_wna16_moe_backend,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -52,7 +55,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     moe_awq_to_marlin_zero_points,
     verify_marlin_supported,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+    kInt4Static,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from vllm.platforms import current_platform
@@ -505,6 +511,9 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
         self.use_marlin = True
+        self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
+            moe, kInt4Static, quant_config.weight_bits
+        )
 
     def create_weights(
         self,
@@ -723,9 +732,26 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
             layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
-    def get_fused_moe_quant_config(
-        self, layer: RoutedExperts
-    ) -> FusedMoEQuantConfig | None:
+        self._setup_kernel(layer)
+
+    def _setup_kernel(self, layer: RoutedExperts) -> None:
+        """Build the FusedMoEKernel for this layer."""
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            layer=layer,
+            is_k_full=self.is_k_full,
+            w13_g_idx=getattr(layer, "w13_g_idx", None),
+            w2_g_idx=getattr(layer, "w2_g_idx", None),
+            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+            routing_tables=layer._expert_routing_tables(),
+        )
+
+    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         from vllm.model_executor.layers.fused_moe.config import (
             awq_marlin_moe_quant_config,
         )
@@ -743,6 +769,8 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
+            a1_gscale=getattr(layer, "w13_input_global_scale", None),
+            a2_gscale=getattr(layer, "w2_input_global_scale", None),
         )
 
     def select_gemm_impl(
@@ -750,66 +778,10 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         prepare_finalize,
         layer: RoutedExperts,
     ):
-        """
-        Select the GEMM implementation for AWQ-Marlin MoE.
-        Returns MarlinExperts configured for AWQ quantization.
-        This is ONLY used when LoRA is enabled.
-        Without LoRA, AWQ uses its own apply() method.
-        """
-        # Only use modular kernels when LoRA is enabled
-        # Without LoRA, AWQ's own apply() method works fine and is more efficient
-        if not self.moe.is_lora_enabled:
-            raise NotImplementedError(
-                "AWQ-Marlin uses its own apply() method when LoRA is not enabled. "
-                "Modular kernels are only used for LoRA support."
-            )
-
-        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-        from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
-            BatchedMarlinExperts,
-            MarlinExperts,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel "
+            "initialization logic. This function should not be called."
         )
-
-        # Ensure quant config is initialized
-        assert self.moe_quant_config is not None, (
-            "moe_quant_config must be initialized before select_gemm_impl"
-        )
-
-        w13_g_idx = getattr(layer, "w13_g_idx", None)
-        w2_g_idx = getattr(layer, "w2_g_idx", None)
-        w13_g_idx_sort_indices = getattr(layer, "w13_g_idx_sort_indices", None)
-        w2_g_idx_sort_indices = getattr(layer, "w2_g_idx_sort_indices", None)
-
-        # Check if using batched expert format (for Expert Parallelism)
-        if (
-            prepare_finalize.activation_format
-            == mk.FusedMoEActivationFormat.BatchedExperts
-        ):
-            # For batched format, use BatchedMarlinExperts
-            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
-            assert max_num_tokens_per_rank is not None
-            return BatchedMarlinExperts(
-                max_num_tokens=max_num_tokens_per_rank,
-                num_dispatchers=prepare_finalize.num_dispatchers(),
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
-        else:
-            # Standard Marlin experts for AWQ
-            return MarlinExperts(
-                moe_config=self.moe,
-                quant_config=self.moe_quant_config,
-                w13_g_idx=w13_g_idx,
-                w2_g_idx=w2_g_idx,
-                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
-                is_k_full=self.is_k_full,
-            )
 
     def apply(
         self,
@@ -820,25 +792,18 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        return fused_marlin_moe(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scales,
-            layer.w2_scales,
-            topk_weights,
-            topk_ids,
-            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
-            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
-            quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            hidden_states=x,
+            w1=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
-            w1_zeros=layer.w13_qzeros,
-            w2_zeros=layer.w2_qzeros,
-            workspace=layer.workspace,
-            input_dtype=self.input_dtype,
-            inplace=not self.moe.disable_inplace,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
