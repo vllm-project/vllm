@@ -2338,9 +2338,17 @@ class NixlConnectorWorker:
                     and num_local_blocks < num_remote_blocks
                 ):
                     # NOTE (NickLucche): With prefix caching on SSM, (remote) blocks
-                    # prior to the last one are placeholders (null blocks). We only
-                    # care about the last one, which maintains the full state in-place.
+                    # prior to the last one are placeholders (null blocks). Mind that
+                    # this doesn't really impact transfer, as we only still care about
+                    # the last "block", the full in-place state.
                     assert num_local_blocks == 1, "SSM can only have one local block"
+                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                elif (
+                    self._physical_blocks_per_logical_kv_block
+                    == remote_physical_per_logical
+                    and num_local_blocks < num_remote_blocks
+                ):
+                    # Partial prefix cache hit for FA group.
                     remote_block_ids[i] = remote_group[-num_local_blocks:]
                 else:
                     max_padding = max(
