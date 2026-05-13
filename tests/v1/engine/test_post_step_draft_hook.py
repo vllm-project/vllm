@@ -21,13 +21,21 @@ class TestPostStepDraftHook:
     """Unit tests for EngineCore.post_step draft-token hook behavior."""
 
     def _make_engine_core_stub(
-        self, use_spec_decode: bool, async_scheduling: bool = False
+        self,
+        use_spec_decode: bool,
+        async_scheduling: bool = False,
+        check_for_draft_tokens: bool | None = None,
     ):
         """Create a minimal stub of EngineCore with mocked dependencies."""
         # We can't instantiate EngineCore directly (requires GPU), so we
         # create a simple object with the same attributes post_step uses.
         stub = MagicMock()
         stub.use_spec_decode = use_spec_decode
+        stub.check_for_draft_tokens = (
+            use_spec_decode
+            if check_for_draft_tokens is None
+            else check_for_draft_tokens
+        )
         stub.async_scheduling = async_scheduling
         stub.model_executor = MagicMock()
         stub.scheduler = MagicMock()
@@ -38,23 +46,36 @@ class TestPostStepDraftHook:
         use_spec_decode is False, enabling plugin-provided draft tokens."""
         from vllm.v1.engine.core import EngineCore
 
-        stub = self._make_engine_core_stub(use_spec_decode=False)
+        stub = self._make_engine_core_stub(
+            use_spec_decode=False, check_for_draft_tokens=True
+        )
         draft_ids = MagicMock()
         stub.model_executor.take_draft_token_ids.return_value = draft_ids
 
-        # Call post_step with model_executed=True
         EngineCore.post_step(stub, model_executed=True)
 
-        # The hook should be called even without spec decode
         stub.model_executor.take_draft_token_ids.assert_called_once()
         stub.scheduler.update_draft_token_ids.assert_called_once_with(draft_ids)
+
+    def test_post_step_skips_hook_when_check_disabled(self):
+        """post_step should avoid the worker RPC unless draft tokens are used."""
+        from vllm.v1.engine.core import EngineCore
+
+        stub = self._make_engine_core_stub(use_spec_decode=False)
+
+        EngineCore.post_step(stub, model_executed=True)
+
+        stub.model_executor.take_draft_token_ids.assert_not_called()
+        stub.scheduler.update_draft_token_ids.assert_not_called()
 
     def test_post_step_noop_when_draft_ids_none(self):
         """post_step should not call update_draft_token_ids when
         take_draft_token_ids returns None (default worker behavior)."""
         from vllm.v1.engine.core import EngineCore
 
-        stub = self._make_engine_core_stub(use_spec_decode=False)
+        stub = self._make_engine_core_stub(
+            use_spec_decode=False, check_for_draft_tokens=True
+        )
         stub.model_executor.take_draft_token_ids.return_value = None
 
         EngineCore.post_step(stub, model_executed=True)
@@ -66,7 +87,9 @@ class TestPostStepDraftHook:
         """post_step should not call the hook when model was not executed."""
         from vllm.v1.engine.core import EngineCore
 
-        stub = self._make_engine_core_stub(use_spec_decode=False)
+        stub = self._make_engine_core_stub(
+            use_spec_decode=False, check_for_draft_tokens=True
+        )
 
         EngineCore.post_step(stub, model_executed=False)
 
@@ -77,7 +100,11 @@ class TestPostStepDraftHook:
         because draft tokens are updated in the worker process."""
         from vllm.v1.engine.core import EngineCore
 
-        stub = self._make_engine_core_stub(use_spec_decode=False, async_scheduling=True)
+        stub = self._make_engine_core_stub(
+            use_spec_decode=False,
+            async_scheduling=True,
+            check_for_draft_tokens=True,
+        )
 
         EngineCore.post_step(stub, model_executed=True)
 

@@ -152,6 +152,9 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        # Plugins that provide draft tokens without speculative_config can
+        # enable this to reuse the draft-token scheduler path.
+        self.check_for_draft_tokens = self.use_spec_decode
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -457,15 +460,7 @@ class EngineCore:
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
-        #
-        # The draft-token hook runs whenever the model was executed (not only
-        # when speculative decoding is enabled). This allows plugins such as
-        # dLLM schedulers/workers to reuse the spec-decode data path by
-        # returning draft token ids from take_draft_token_ids().
-        # The default worker returns None when not doing spec-decode,
-        # so this is backward compatible.
-        # See: https://github.com/vllm-project/vllm/issues/36155
-        if not self.async_scheduling and model_executed:
+        if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
@@ -567,19 +562,14 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # If we are doing speculative decoding (or a plugin that
-            # provides draft tokens, e.g. dLLM) with structured output,
-            # we need to get the draft token ids from the prior step before
-            # we can compute the grammar bitmask for the deferred request.
-            # See: https://github.com/vllm-project/vllm/issues/36155
-            draft_token_ids = self.model_executor.take_draft_token_ids()
-            if draft_token_ids is not None:
-                # Update the draft token ids in the scheduler output to
-                # filter out the invalid spec tokens, which will be padded
-                # with -1 and skipped by the grammar bitmask computation.
-                self.scheduler.update_draft_token_ids_in_output(
-                    draft_token_ids, deferred_scheduler_output
-                )
+            # When draft tokens are used with structured output, validate them
+            # before computing the grammar bitmask for the deferred request.
+            if self.check_for_draft_tokens:
+                draft_token_ids = self.model_executor.take_draft_token_ids()
+                if draft_token_ids is not None:
+                    self.scheduler.update_draft_token_ids_in_output(
+                        draft_token_ids, deferred_scheduler_output
+                    )
             # We now have the tokens needed to compute the bitmask for the
             # deferred request. Get the bitmask and call sample tokens.
             grammar_output = self.scheduler.get_grammar_bitmask(
