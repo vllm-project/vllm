@@ -1,10 +1,13 @@
 //! Shared parser core for JSON tool calls wrapped by text markers.
 
+pub use hermes::HermesToolParser;
+pub use mistral::MistralToolParser;
+pub use qwen::Qwen3XmlToolParser;
+
 mod hermes;
+mod mistral;
 mod qwen;
 
-pub use hermes::HermesToolParser;
-pub use qwen::Qwen3XmlToolParser;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
 use winnow::error::{ModalResult, StrContext, StrContextValue};
