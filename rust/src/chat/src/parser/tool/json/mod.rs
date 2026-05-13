@@ -1,10 +1,12 @@
 //! Shared parser core for JSON tool calls wrapped by text markers.
 
 pub use hermes::HermesToolParser;
+pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use qwen::Qwen3XmlToolParser;
 
 mod hermes;
+mod llama;
 mod mistral;
 mod qwen;
 

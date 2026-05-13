@@ -151,7 +151,6 @@ def_external_tool_parser!(Step3ToolParser, Step3Parser);
 // JSON tool-call formats.
 def_external_tool_parser!(CohereToolParser, CohereParser);
 def_external_tool_parser!(JsonToolParser, JsonParser);
-def_external_tool_parser!(Llama3JsonToolParser, LlamaParser);
 
 // Special-token or custom-syntax tool-call formats.
 def_external_tool_parser!(PythonicToolParser, PythonicParser);
