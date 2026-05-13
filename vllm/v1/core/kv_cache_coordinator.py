@@ -237,7 +237,7 @@ class KVCacheCoordinator(ABC):
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
-    ) -> None:
+    ) -> bool:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
         the removed blocks with null_block.
@@ -247,8 +247,12 @@ class KVCacheCoordinator(ABC):
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
         """
+        block_table_updated = False
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, total_computed_tokens)
+            block_table_updated |= manager.remove_skipped_blocks(
+                request_id, total_computed_tokens
+            )
+        return block_table_updated
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

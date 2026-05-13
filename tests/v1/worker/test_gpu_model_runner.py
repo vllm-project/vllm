@@ -40,7 +40,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
@@ -178,6 +178,7 @@ def _schedule_cached_requests(
             new_token_ids=new_token_ids,
             all_token_ids={},
             new_block_ids=[None] * len(req_ids),
+            block_table_rewrite_req_ids=set(),
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
         ),
@@ -386,6 +387,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         new_token_ids=[[]],
         all_token_ids={},
         new_block_ids=[([0],)],
+        block_table_rewrite_req_ids=set(),
         num_computed_tokens=[0],
         num_output_tokens=[0],
     )
@@ -408,6 +410,81 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_added(model_runner, req_id)
     assert _is_req_scheduled(model_runner, req_id)
     assert _is_req_state_block_table_match(model_runner, req_id)
+
+
+def test_update_states_rewrites_cached_block_table(monkeypatch):
+    req_id = "req_0"
+    req_state = CachedRequestState(
+        req_id=req_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=[],
+        sampling_params=SamplingParams(),
+        generator=None,
+        block_ids=([1, 2, 3],),
+        num_computed_tokens=3,
+        output_token_ids=[],
+    )
+
+    runner = object.__new__(GPUModelRunner)
+    runner.requests = {req_id: req_state}
+    runner.num_prompt_logprobs = {}
+    runner.late_interaction_runner = SimpleNamespace(
+        on_requests_finished=lambda req_ids: None
+    )
+    runner.input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=16,
+        max_num_batched_tokens=4,
+        device=torch.device("cpu"),
+        pin_memory=False,
+        vocab_size=1024,
+        block_sizes=[BLOCK_SIZE],
+        kernel_block_sizes=[BLOCK_SIZE],
+    )
+    runner.input_batch.add_request(req_state)
+    runner.routed_experts_initialized = False
+    runner.encoder_cache = {}
+    runner.speculative_config = None
+    runner.use_async_spec_decode = False
+    runner._may_reorder_batch = lambda scheduler_output: None
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_last_rank=True),
+    )
+
+    rewritten_block_ids = ([0, 2, 3, 4],)
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=[req_id],
+            resumed_req_ids=set(),
+            new_token_ids=[[]],
+            all_token_ids={},
+            new_block_ids=[rewritten_block_ids],
+            block_table_rewrite_req_ids={req_id},
+            num_computed_tokens=[4],
+            num_output_tokens=[0],
+        ),
+        num_scheduled_tokens={req_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    runner._update_states(scheduler_output)
+
+    req_index = runner.input_batch.req_id_to_index[req_id]
+    block_table = runner.input_batch.block_table[0]
+    row_len = block_table.num_blocks_per_row[req_index]
+    assert row_len == len(rewritten_block_ids[0])
+    assert block_table.block_table.np[req_index, :row_len].tolist() == list(
+        rewritten_block_ids[0]
+    )
+    assert runner.requests[req_id].block_ids == rewritten_block_ids
 
 
 def test_get_nans_in_logits(model_runner, dist_init):

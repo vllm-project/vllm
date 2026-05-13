@@ -243,6 +243,7 @@ def make_scheduler_output(
             new_token_ids=[[] for _ in cached_req_ids],
             all_token_ids={},
             new_block_ids=cached_new_block_ids,
+            block_table_rewrite_req_ids=set(),
             num_computed_tokens=[0] * len(cached_req_ids),
             num_output_tokens=[0] * len(cached_req_ids),
         )

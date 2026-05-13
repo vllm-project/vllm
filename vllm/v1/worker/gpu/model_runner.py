@@ -722,7 +722,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_computed_tokens_np[req_index] = num_computed_tokens
             if req_new_block_ids is not None:
                 self.block_tables.append_block_ids(
-                    req_index, req_new_block_ids, overwrite=False
+                    req_index,
+                    req_new_block_ids,
+                    overwrite=req_id in reqs.block_table_rewrite_req_ids,
                 )
 
         # Update num_computed_prefill_tokens.
