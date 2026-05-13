@@ -6,6 +6,7 @@ Includes the store worker, transfer threads, lookup server,
 and MooncakeDistributedStore integration.
 """
 
+import ctypes
 import json
 import os
 import queue
@@ -15,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import regex as re
 import torch
 import zmq
@@ -26,6 +28,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_data import (
@@ -53,6 +56,237 @@ DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE = 1280 * 1024 * 1024
 DISK_OFFLOAD_USABLE_BUDGET_RATIO = 0.9
 _DIRECT_IO_ALIGNMENT = 4096
 _DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
+
+
+class _DummyStagingPool:
+    """Host-SHM staging ring for the dummy-client transfer path.
+
+    The Mooncake dummy client rejects GPU pointers in register_buffer
+    (`dummy_client.cpp:617`: "Dummy only register buffer within the shared
+    memory region"). To offload from a GPU KV cache we stage every block
+    through host SHM allocated from the dummy client's pool. The ring holds
+    `num_slots` fixed-size slots; acquires block on a Condition when the ring
+    is empty so callers get natural back-pressure instead of OOM.
+
+    The pool is also pinned with cudaHostRegister so that cudaMemcpyAsync
+    can pipeline transfers (pageable host forces a sync-per-call which is
+    ~4x slower for the 32-segment KV blocks; see the benchmark in the
+    commit message).
+    """
+
+    def __init__(self, store: Any, total_bytes: int, slot_bytes: int):
+        if slot_bytes <= 0:
+            raise ValueError(f"slot_bytes must be > 0, got {slot_bytes}")
+        num_slots = total_bytes // slot_bytes
+        if num_slots <= 0:
+            raise ValueError(
+                f"Dummy staging pool too small: total_bytes={total_bytes} < "
+                f"slot_bytes={slot_bytes}. Increase 'local_buffer_size'."
+            )
+        usable = num_slots * slot_bytes
+        self.base_addr: int = store.alloc_from_mem_pool(usable)
+        if not self.base_addr:
+            raise RuntimeError(
+                f"alloc_from_mem_pool({usable}) returned 0; the dummy client's "
+                f"local_buffer_size is likely too small"
+            )
+        ret = store.register_buffer(self.base_addr, usable)
+        if ret != 0:
+            raise RuntimeError(f"register_buffer for dummy staging pool failed: {ret}")
+        self.slot_bytes = slot_bytes
+        self.num_slots = num_slots
+        self._total_bytes = usable
+        self._free: list[int] = list(range(num_slots))
+        self._cond = threading.Condition()
+
+        # Pin the SHM so cudaMemcpyAsync can actually pipeline. A failure
+        # here is non-fatal — we fall back to sync cudaMemcpy.
+        self.pinned = False
+        try:
+            cudart = CudaRTLibrary()
+            register = cudart.lib.cudaHostRegister
+            register.restype = ctypes.c_int
+            register.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
+            CUDA_HOST_REGISTER_DEFAULT = 0
+            rc = register(self.base_addr, usable, CUDA_HOST_REGISTER_DEFAULT)
+            if rc != 0:
+                logger.warning(
+                    "cudaHostRegister(%#x, %d) failed: rc=%d -- falling "
+                    "back to sync cudaMemcpy (slower)",
+                    self.base_addr,
+                    usable,
+                    rc,
+                )
+            else:
+                self.pinned = True
+        except Exception as e:
+            logger.warning(
+                "Could not pin dummy staging pool: %s -- falling back to "
+                "sync cudaMemcpy",
+                e,
+            )
+
+    def slot_addr(self, slot: int) -> int:
+        return self.base_addr + slot * self.slot_bytes
+
+    def acquire(self, n: int) -> list[int]:
+        if n > self.num_slots:
+            raise RuntimeError(
+                f"requested {n} staging slots but ring only holds "
+                f"{self.num_slots}; increase 'local_buffer_size'"
+            )
+        with self._cond:
+            while len(self._free) < n:
+                self._cond.wait()
+            taken = self._free[-n:]
+            del self._free[-n:]
+            return taken
+
+    def release(self, slots: list[int]) -> None:
+        if not slots:
+            return
+        with self._cond:
+            self._free.extend(slots)
+            self._cond.notify_all()
+
+
+class _StagingCopier:
+    """Thread-local staging memcpy issuer with three strategies.
+
+    Strategies, picked at init by capability:
+
+    * **batch** — single ``cuMemcpyBatchAsync`` per ``sync()`` covering every
+      ``issue()`` triple. ~3-4x faster than per-segment async because the
+      driver crossing is amortized. Requires the staging pool pinned and
+      ``cuMemcpyBatchAsync`` available (CUDA 12.8+).
+    * **async** — one ``cudaMemcpyAsync`` per ``issue()`` on a dedicated
+      stream, single ``sync()`` per batch. Falls back here if the batch
+      driver entrypoint isn't resolvable.
+    * **sync** — plain ``cudaMemcpy`` per ``issue()`` (only used when the
+      pool failed to pin; pageable host forces sync semantics anyway).
+    """
+
+    _CUDA_MEMCPY_DEFAULT = 4
+
+    def __init__(self, cudart: CudaRTLibrary, pool_pinned: bool):
+        self._cudart = cudart
+        self._dsts: list[int] = []
+        self._srcs: list[int] = []
+        self._sizes: list[int] = []
+        # Driver API calls (cuMemcpyBatchAsync) need a current CUDA context
+        # on the calling thread. The send/recv threads have none until they
+        # touch CUDA, so we lazily attach on first issue() from each thread.
+        self._tls = threading.local()
+
+        if not pool_pinned:
+            self._mode = "sync"
+            self._stream = None
+            self._stream_handle = None
+            self._memcpy_async = None
+            self._batch_fn = None
+            return
+
+        self._stream = torch.cuda.Stream()
+        self._stream_handle = self._stream.cuda_stream
+
+        # Try the batch driver call first.
+        try:
+            from vllm.v1.simple_kv_offload.cuda_mem_ops import (
+                _CUmemcpyAttributes,
+                _resolve_batch_memcpy,
+            )
+
+            self._batch_fn = _resolve_batch_memcpy()
+            self._attrs = _CUmemcpyAttributes(srcAccessOrder=3)  # ANY
+            self._attrs_idx = ctypes.c_size_t(0)
+            self._fail_idx = ctypes.c_size_t(0)
+            self._mode = "batch"
+            self._memcpy_async = None
+            return
+        except Exception as e:
+            logger.info(
+                "cuMemcpyBatchAsync unavailable (%s); falling back to "
+                "per-segment cudaMemcpyAsync",
+                e,
+            )
+
+        f = cudart.lib.cudaMemcpyAsync
+        f.restype = ctypes.c_int
+        f.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+            ctypes.c_int,
+            ctypes.c_void_p,
+        ]
+        self._memcpy_async = f
+        self._batch_fn = None
+        self._mode = "async"
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def _ensure_context(self) -> None:
+        """First call from a thread: attach the CUDA primary context.
+
+        Driver-API calls (cuMemcpyBatchAsync, the cudaMemcpyAsync ctypes
+        wrapper) require a current context on the calling thread. The
+        spawned send/recv threads have none until they touch CUDA, so
+        the very first driver call returns CUDA_ERROR_INVALID_VALUE.
+        Allocating a one-element tensor implicitly attaches the primary
+        context for the current accelerator on this thread.
+        """
+        if getattr(self._tls, "attached", False):
+            return
+        torch.zeros(1, device="cuda")
+        self._tls.attached = True
+
+    def issue(self, dst: int, src: int, size: int) -> None:
+        if self._mode == "sync":
+            self._cudart.cudaMemcpy(dst, src, size)
+        elif self._mode == "async":
+            self._ensure_context()
+            assert self._memcpy_async is not None
+            self._memcpy_async(
+                dst, src, size, self._CUDA_MEMCPY_DEFAULT, self._stream_handle
+            )
+        else:  # batch
+            self._dsts.append(dst)
+            self._srcs.append(src)
+            self._sizes.append(size)
+
+    def sync(self) -> None:
+        if self._mode == "sync":
+            return
+        if self._mode == "batch" and self._dsts:
+            self._ensure_context()
+            assert self._batch_fn is not None
+            dsts = np.array(self._dsts, dtype=np.uint64)
+            srcs = np.array(self._srcs, dtype=np.uint64)
+            sizes = np.array(self._sizes, dtype=np.uint64)
+            err = self._batch_fn(
+                dsts.ctypes.data,
+                srcs.ctypes.data,
+                sizes.ctypes.data,
+                len(self._dsts),
+                ctypes.addressof(self._attrs),
+                ctypes.byref(self._attrs_idx),
+                1,
+                ctypes.byref(self._fail_idx),
+                self._stream_handle,
+            )
+            self._dsts.clear()
+            self._srcs.clear()
+            self._sizes.clear()
+            if err != 0:
+                raise RuntimeError(
+                    f"cuMemcpyBatchAsync failed: err={err} "
+                    f"fail_idx={self._fail_idx.value}"
+                )
+        # batch + async both need a stream sync
+        assert self._stream is not None
+        self._stream.synchronize()
 
 
 @dataclass
@@ -328,6 +562,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event,
         enable_kv_event: bool = False,
         replicate_config: Any | None = None,
+        staging_pool: _DummyStagingPool | None = None,
     ):
         super().__init__(
             store,
@@ -342,6 +577,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
         self.replicate_config = replicate_config
+        self.staging_pool = staging_pool
+        self._cudart: CudaRTLibrary | None = (
+            CudaRTLibrary() if staging_pool is not None else None
+        )
+        self._copier: _StagingCopier | None = (
+            _StagingCopier(self._cudart, staging_pool.pinned)
+            if staging_pool is not None and self._cudart is not None
+            else None
+        )
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -478,6 +722,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
         if current_event is not None:
             current_event.synchronize()
 
+        slots: list[int] = []
+        if self.staging_pool is not None:
+            slots = self.staging_pool.acquire(len(keys))
+            staged_addrs: list[list[int]] = []
+            assert self._copier is not None
+            for key_idx, (gpu_addrs_k, sizes_k) in enumerate(zip(addrs, sizes)):
+                slot_base = self.staging_pool.slot_addr(slots[key_idx])
+                sub_addrs: list[int] = []
+                offset = 0
+                for src_addr, sz in zip(gpu_addrs_k, sizes_k):
+                    dst_addr = slot_base + offset
+                    self._copier.issue(dst_addr, src_addr, sz)
+                    sub_addrs.append(dst_addr)
+                    offset += sz
+                staged_addrs.append(sub_addrs)
+            self._copier.sync()
+            addrs = staged_addrs
+
         try:
             if self.replicate_config is None:
                 res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
@@ -522,6 +784,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
         except Exception as e:
             logger.error("Failed to put key %s, error: %s", keys, e)
+        finally:
+            if slots and self.staging_pool is not None:
+                self.staging_pool.release(slots)
 
         if self.enable_kv_event and stored_events:
             self.update_kv_event(stored_events)
@@ -541,6 +806,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         tp_rank: int,
         ready_event: threading.Event,
         disk_offload_buffer_budget_bytes: int | None = None,
+        staging_pool: _DummyStagingPool | None = None,
     ):
         super().__init__(
             store,
@@ -557,6 +823,15 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             else _get_usable_disk_offload_buffer_budget_bytes(
                 disk_offload_buffer_budget_bytes
             )
+        )
+        self.staging_pool = staging_pool
+        self._cudart: CudaRTLibrary | None = (
+            CudaRTLibrary() if staging_pool is not None else None
+        )
+        self._copier: _StagingCopier | None = (
+            _StagingCopier(self._cudart, staging_pool.pinned)
+            if staging_pool is not None and self._cudart is not None
+            else None
         )
 
     def _handle_request(self, req_meta: ReqMeta):
@@ -636,9 +911,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         try:
             for batch_keys, batch_addrs, batch_sizes in load_batches:
                 current_batch_keys = batch_keys
-                res = self.store.batch_get_into_multi_buffers(
-                    batch_keys, batch_addrs, batch_sizes
-                )
+                res = self._batch_get_into(batch_keys, batch_addrs, batch_sizes)
                 failed = [
                     (key, value)
                     for key, value in zip(batch_keys, res, strict=True)
@@ -662,6 +935,52 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
+
+    def _batch_get_into(
+        self,
+        batch_keys: list[str],
+        batch_addrs: list[list[int]],
+        batch_sizes: list[list[int]],
+    ) -> list[int]:
+        """Call batch_get_into_multi_buffers, optionally staging via SHM.
+
+        Real-client mode goes straight to the store with GPU buffers. Dummy
+        mode lands bytes in SHM slots first, then copies SHM → GPU for keys
+        that returned success (negative rc means the load failed; GPU memory
+        for that key is left untouched so vLLM falls back to recompute).
+        """
+        if self.staging_pool is None:
+            return self.store.batch_get_into_multi_buffers(
+                batch_keys, batch_addrs, batch_sizes
+            )
+
+        assert self._copier is not None
+        slots = self.staging_pool.acquire(len(batch_keys))
+        try:
+            staged_addrs: list[list[int]] = []
+            for key_idx, sizes_k in enumerate(batch_sizes):
+                slot_base = self.staging_pool.slot_addr(slots[key_idx])
+                sub: list[int] = []
+                offset = 0
+                for sz in sizes_k:
+                    sub.append(slot_base + offset)
+                    offset += sz
+                staged_addrs.append(sub)
+            res = self.store.batch_get_into_multi_buffers(
+                batch_keys, staged_addrs, batch_sizes
+            )
+            for key_idx, rc in enumerate(res):
+                if rc < 0:
+                    continue
+                shm_addrs_k = staged_addrs[key_idx]
+                gpu_addrs_k = batch_addrs[key_idx]
+                sizes_k = batch_sizes[key_idx]
+                for src_addr, dst_addr, sz in zip(shm_addrs_k, gpu_addrs_k, sizes_k):
+                    self._copier.issue(dst_addr, src_addr, sz)
+            self._copier.sync()
+            return res
+        finally:
+            self.staging_pool.release(slots)
 
 
 # ============================================================
@@ -775,6 +1094,13 @@ class MooncakeStoreWorker:
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
 
+        # In dummy-client mode, the wheel's register_buffer rejects raw GPU
+        # pointers; we stage every block through host SHM. Pool is built once
+        # the per-block byte size is known (in register_kv_caches).
+        self.enable_dummy_client = store_config.enable_dummy_client
+        self.dummy_local_buffer_size = store_config.requester_local_buffer_size
+        self.dummy_staging_pool: _DummyStagingPool | None = None
+
     @staticmethod
     def _setup_mooncake_store(
         store: Any,
@@ -870,14 +1196,18 @@ class MooncakeStoreWorker:
 
             if base_addr not in seen_ptrs:
                 seen_ptrs.add(base_addr)
-                ret = self.store.register_buffer(base_addr, region_len)
-                if ret != 0:
-                    logger.error(
-                        "register_buffer failed for addr %#x len %d: %d",
-                        base_addr,
-                        region_len,
-                        ret,
-                    )
+                # Dummy mode rejects GPU pointers by design (see
+                # _DummyStagingPool docstring); skip GPU registration and
+                # rely on the SHM staging ring built below.
+                if not getattr(self, "enable_dummy_client", False):
+                    ret = self.store.register_buffer(base_addr, region_len)
+                    if ret != 0:
+                        logger.error(
+                            "register_buffer failed for addr %#x len %d: %d",
+                            base_addr,
+                            region_len,
+                            ret,
+                        )
 
             if not outer_dims:
                 # Blocks-first layout (FlashInfer / MLA): one segment.
@@ -906,6 +1236,24 @@ class MooncakeStoreWorker:
         self.token_database.set_kv_caches_base_addr(self.kv_caches_base_addr)
         self.token_database.set_block_len(self.block_len)
 
+        # Dummy-mode staging ring: one slot per in-flight block, slot size =
+        # full per-block KV bytes (sum across segments).
+        if getattr(self, "enable_dummy_client", False):
+            slot_bytes = sum(self.block_len)
+            self.dummy_staging_pool = _DummyStagingPool(
+                self.store, self.dummy_local_buffer_size, slot_bytes
+            )
+            probe = _StagingCopier(CudaRTLibrary(), self.dummy_staging_pool.pinned)
+            logger.info(
+                "Dummy-client staging pool ready: base=%#x slots=%d "
+                "slot_bytes=%d pinned=%s copier_mode=%s",
+                self.dummy_staging_pool.base_addr,
+                self.dummy_staging_pool.num_slots,
+                slot_bytes,
+                self.dummy_staging_pool.pinned,
+                probe.mode,
+            )
+
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:
             ready_event_sending = threading.Event()
@@ -919,6 +1267,7 @@ class MooncakeStoreWorker:
                 ready_event_sending,
                 self.enable_kv_events,
                 getattr(self, "store_replicate_config", None),
+                staging_pool=getattr(self, "dummy_staging_pool", None),
             )
             self.kv_send_thread.start()
 
@@ -930,6 +1279,7 @@ class MooncakeStoreWorker:
             self.tp_rank,
             ready_event_recving,
             disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
+            staging_pool=getattr(self, "dummy_staging_pool", None),
         )
         self.kv_recv_thread.start()
         ready_event_recving.wait()

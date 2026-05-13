@@ -11,7 +11,8 @@
 #   bash start_mooncake_owner.sh --stop
 #
 # Flags:
-#   --cpu-mem-size <GB>   Owner CPU memory size in GB (required unless --stop)
+#   --cpu-mem-size <GB>   Owner CPU memory size in GB (required unless --stop
+#                         or sourced from --config)
 #   --disk-size <GB>      Enable disk offload with the given quota in GB
 #   --disk-path <dir>     Disk offload directory (default: /mnt/data/mooncake_offload)
 #   --host <ip-or-host>   Owner host/IP to advertise (default: first hostname -I entry)
@@ -22,8 +23,14 @@
 #   --protocol <name>     Transport protocol (default: MOONCAKE_PROTOCOL or rdma)
 #   --device <names>      RDMA device name(s) (default: MC_OWNER_DEVICE)
 #   --threads <n>         Owner RPC worker threads (default: 1)
+#   --config <path>       Read defaults from the same JSON used by vLLM
+#                         (also honored via MOONCAKE_CONFIG_PATH). Fields used:
+#                         master_server_address, metadata_server, protocol,
+#                         device_name, global_segment_size.
 #   --bg                  Run in background
 #   --stop                Stop the backgrounded owner launched by this script
+#
+# Precedence: CLI flag > matching env var > JSON config > built-in default.
 #
 # The owner auto-selects active RDMA devices when MC_OWNER_DEVICE/--device is
 # unset. For diagnostics, use:
@@ -47,11 +54,15 @@ DISK_PATH="/mnt/data/mooncake_offload"
 OWNER_HOST=""
 SEGMENT_PORT="${MC_OWNER_SEGMENT_PORT:-50053}"
 RPC_PORT="${MC_OWNER_RPC_PORT:-50052}"
-MASTER_SERVER="${MOONCAKE_MASTER:-127.0.0.1:50051}"
-METADATA_SERVER="${MOONCAKE_TE_META_DATA_SERVER:-http://127.0.0.1:8080/metadata}"
-PROTOCOL="${MOONCAKE_PROTOCOL:-rdma}"
-DEVICE_NAME="${MC_OWNER_DEVICE:-}"
 THREADS="${MC_OWNER_THREADS:-1}"
+
+# Optional defaults from JSON. Precedence: CLI > env > JSON > built-in.
+CONFIG_PATH="${MOONCAKE_CONFIG_PATH:-}"
+JSON_MASTER=""
+JSON_METADATA=""
+JSON_PROTOCOL=""
+JSON_DEVICE=""
+JSON_CPU_MEM_GB=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -68,26 +79,67 @@ while [[ $# -gt 0 ]]; do
         --rpc-port)
             RPC_PORT="$2"; shift 2 ;;
         --master)
-            MASTER_SERVER="$2"; shift 2 ;;
+            CLI_MASTER="$2"; shift 2 ;;
         --metadata-server)
-            METADATA_SERVER="$2"; shift 2 ;;
+            CLI_METADATA="$2"; shift 2 ;;
         --protocol)
-            PROTOCOL="$2"; shift 2 ;;
+            CLI_PROTOCOL="$2"; shift 2 ;;
         --device)
-            DEVICE_NAME="$2"; shift 2 ;;
+            CLI_DEVICE="$2"; shift 2 ;;
         --threads)
             THREADS="$2"; shift 2 ;;
+        --config)
+            CONFIG_PATH="$2"; shift 2 ;;
         --bg)
             OPT_BG=true; shift ;;
         --stop)
             OPT_STOP=true; shift ;;
         *)
             echo "Unknown flag: $1" >&2
-            echo "Usage: $0 [--bg] [--stop] --cpu-mem-size <GB> [--disk-size <GB>]" >&2
+            echo "Usage: $0 [--bg] [--stop] [--config path] [--cpu-mem-size GB] [--disk-size GB]" >&2
             exit 1
             ;;
     esac
 done
+
+if [[ -n "$CONFIG_PATH" ]]; then
+    [[ -f "$CONFIG_PATH" ]] || {
+        echo "Error: --config/MOONCAKE_CONFIG_PATH points to missing file: $CONFIG_PATH" >&2
+        exit 1
+    }
+    eval "$(MOONCAKE_CONFIG_PATH="$CONFIG_PATH" "${SCRIPT_DIR}/../../.venv/bin/python" - <<'PY'
+import json, os, re, shlex
+with open(os.environ["MOONCAKE_CONFIG_PATH"]) as f:
+    cfg = json.load(f)
+def parse_gb(value):
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(int(value) // (1024**3))
+    m = re.match(r'^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$', str(value).strip().lower())
+    if not m:
+        return ""
+    n = float(m.group(1))
+    mult = {"gb": 1024**3, "mb": 1024**2, "kb": 1024, "b": 1}[m.group(2) or "b"]
+    return str(max(int(n * mult) // (1024**3), 0))
+out = {
+    "JSON_MASTER": cfg.get("master_server_address", "") or "",
+    "JSON_METADATA": cfg.get("metadata_server", "") or "",
+    "JSON_PROTOCOL": cfg.get("protocol", "") or "",
+    "JSON_DEVICE": cfg.get("device_name", "") or "",
+    "JSON_CPU_MEM_GB": parse_gb(cfg.get("global_segment_size")),
+}
+for k, v in out.items():
+    print(f"{k}={shlex.quote(str(v))}")
+PY
+)"
+fi
+
+MASTER_SERVER="${CLI_MASTER:-${MOONCAKE_MASTER:-${JSON_MASTER:-127.0.0.1:50051}}}"
+METADATA_SERVER="${CLI_METADATA:-${MOONCAKE_TE_META_DATA_SERVER:-${JSON_METADATA:-http://127.0.0.1:8080/metadata}}}"
+PROTOCOL="${CLI_PROTOCOL:-${MOONCAKE_PROTOCOL:-${JSON_PROTOCOL:-rdma}}}"
+DEVICE_NAME="${CLI_DEVICE:-${MC_OWNER_DEVICE:-${JSON_DEVICE:-}}}"
+[[ -z "$CPU_MEM_GB" && -n "$JSON_CPU_MEM_GB" ]] && CPU_MEM_GB="$JSON_CPU_MEM_GB"
 
 is_our_owner() {
     local pid=$1

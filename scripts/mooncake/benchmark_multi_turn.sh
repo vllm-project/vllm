@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+
 # Benchmark multi-turn chat with/without CPU KV cache offloading.
 # Launches a vllm server, runs `vllm-bench` with multi-turn options,
 # then repeats with offloading enabled.
@@ -20,6 +20,8 @@
 #   RESULT_DIR            - Output directory             (default: ./bench_results)
 #   BACKENDS              - Comma-separated backends     (default: baseline,mooncake)
 #   MOONCAKE_CONFIG_PATH  - Path to mooncake config JSON (required for mooncake, auto-skipped if unset)
+#   DUMMY_CLIENT          - 1 to make vLLM use Mooncake dummy-client mode  (default: 1)
+#   REAL_CLIENT_ADDR      - Real-client (owner) RPC address                (default: 127.0.0.1:50052)
 #   MULTI_TURN_NUM_TURNS  - Number of turns per conversation  (default: 4)
 #   MULTI_TURN_CONCURRENCY - Concurrent conversations         (default: 8)
 #   MULTI_TURN_DELAY_MS   - Delay between turns in ms         (default: 500)
@@ -30,11 +32,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-MODEL="${1:-meta-llama/Llama-3.1-8B-Instruct}"
+# MODEL="${1:-meta-llama/Llama-3.1-8B-instruct}"
+MODEL="${1:-deepseek-ai/DeepSeek-V4-Flash}"
 INPUT_LEN="${2:-70000}"
 OUTPUT_LEN="${3:-200}"
-NUM_PROMPTS="${4:-200}"
-CPU_OFFLOAD_GIB="${CPU_OFFLOAD_GIB:-600}"
+NUM_PROMPTS="${4:-50}"
+CPU_OFFLOAD_GIB="${CPU_OFFLOAD_GIB:-150}"
 DISK_OFFLOAD_GIB="${DISK_OFFLOAD_GIB:-2000}"
 PORT="${PORT:-8192}"
 RESULT_DIR="${RESULT_DIR:-./bench_results}"
@@ -46,11 +49,17 @@ MULTI_TURN_DELAY_MS="${MULTI_TURN_DELAY_MS:-500}"
 GLOBAL_PREFIX_RATIO="${GLOBAL_PREFIX_RATIO:-0.1}"
 CONV_PREFIX_RATIO="${CONV_PREFIX_RATIO:-0.8}"
 
+DUMMY_CLIENT="${DUMMY_CLIENT:-1}"
+REAL_CLIENT_ADDR="${REAL_CLIENT_ADDR:-127.0.0.1:50052}"
+if [[ "$DUMMY_CLIENT" == "1" ]]; then
+    export MOONCAKE_ENABLE_DUMMY_CLIENT=1
+    export MOONCAKE_REAL_CLIENT_ADDRESS="$REAL_CLIENT_ADDR"
+fi
+
 mkdir -p "$RESULT_DIR"
 
 SERVER_COMMON=(
     --model "$MODEL"
-    --disable-hybrid-kv-cache-manager
     --port "$PORT"
     --no-enable-log-requests
     --attention-backend FLASHINFER
@@ -68,6 +77,26 @@ if [[ "$MODEL" == "nvidia/Qwen3.5-397B-A17B-NVFP4" ]]; then
         --enable-expert-parallel
         --language-model-only
         --reasoning-parser qwen3
+    )
+fi
+
+if [[ "$MODEL" == *"DeepSeek-V4-"* ]]; then
+    export HF_HOME="${HF_HOME:-/mnt/lustre/hf-models}"
+    export VLLM_DEEP_GEMM_WARMUP="skip"
+    SERVER_COMMON+=(
+        --block-size 256
+        # -dp 4 -ep
+        -tp 4
+        --tokenizer-mode deepseek_v4
+        --reasoning-parser deepseek_v4
+        --kv-cache-dtype fp8
+        --max-model-len auto
+        --no-enable-flashinfer-autotune
+        --load-format dummy
+        --compilation-config '{"cudagraph_mode":"FULL_AND_PIECEWISE","custom_ops":["all"]}'
+        --no-disable-hybrid-kv-cache-manager
+        --disable-uvicorn-access-log
+        --enable-ep-weight-filter
     )
 fi
 
@@ -92,14 +121,14 @@ BENCH_COMMON=(
 
 wait_for_server() {
     echo "  Waiting for server on port $PORT..."
-    for _ in $(seq 1 180); do
+    for _ in $(seq 1 600); do
         if curl -sf "http://127.0.0.1:${PORT}/health" > /dev/null 2>&1; then
             echo "  Server ready."
             return 0
         fi
         sleep 1
     done
-    echo "  ERROR: server did not start within 180s" >&2
+    echo "  ERROR: server did not start within 600s" >&2
     return 1
 }
 
@@ -153,6 +182,9 @@ echo "  Backends:      $BACKENDS"
 echo "  CPU offload:   ${CPU_OFFLOAD_GIB} GiB"
 if [[ -n "$DISK_OFFLOAD_GIB" ]]; then
 echo "  Disk offload:  ${DISK_OFFLOAD_GIB} GiB"
+fi
+if [[ "$DUMMY_CLIENT" == "1" ]]; then
+echo "  Dummy client:  ON  -> $REAL_CLIENT_ADDR"
 fi
 echo "============================================"
 
