@@ -30,7 +30,7 @@ from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
 )
 
-_CTX = ReqContext()
+_CTX = ReqContext(req_id="test")
 _MOCK_VLLM_CONFIG = MagicMock()
 
 
@@ -106,6 +106,7 @@ class TestExampleSecondaryTier:
                 keys=[new_block],
                 block_ids=np.array([0], dtype=np.int64),
                 is_promotion=False,
+                req_context=_CTX,
             )
         )
 
@@ -138,6 +139,7 @@ class TestExampleSecondaryTier:
                 keys=blocks,
                 block_ids=np.array([0, 1], dtype=np.int64),
                 is_promotion=False,
+                req_context=_CTX,
             )
         )
 
@@ -447,8 +449,8 @@ class TestTieringOffloadingManager:
             wraps=self.secondary_tier1.submit_load
         )
 
-        ctx_a = ReqContext()
-        ctx_b = ReqContext()
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_b = ReqContext(req_id="req_b")
 
         # All lookups return None: secondary hit triggers promotion (in-flight)
         assert self.manager.lookup(blocks[0], ctx_a) is None
@@ -485,8 +487,8 @@ class TestTieringOffloadingManager:
             wraps=self.secondary_tier1.submit_load
         )
 
-        ctx_a = ReqContext()
-        ctx_b = ReqContext()
+        ctx_a = ReqContext(req_id="req_a")
+        ctx_b = ReqContext(req_id="req_b")
 
         result_a = self.manager.lookup(shared_block, ctx_a)
         result_b = self.manager.lookup(shared_block, ctx_b)
@@ -511,7 +513,7 @@ class TestTieringOffloadingManager:
             wraps=self.secondary_tier1.submit_store
         )
 
-        ctx = ReqContext(kv_transfer_params={"key": "value"})
+        ctx = ReqContext(req_id="req_ctx", kv_transfer_params={"key": "value"})
 
         self.manager.prepare_store(blocks, ctx)
         self.manager.complete_store(blocks, ctx, success=True)

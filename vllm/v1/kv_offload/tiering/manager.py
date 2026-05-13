@@ -50,9 +50,9 @@ logger = init_logger(__name__)
 class PendingPromotion:
     """Accumulator for blocks awaiting submit_load() for one (tier, request)."""
 
+    req_context: ReqContext
     keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
-    req_context: ReqContext = field(default_factory=ReqContext)
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -157,10 +157,10 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in take_events().
-        # Outer key: tier. Inner key: id(req_context) — the same ReqContext
+        # Outer key: tier. Inner key: req_context.req_id — the same ReqContext
         # object is reused for all block lookups of a given request per engine step.
         self._pending_load_submissions: dict[
-            SecondaryTierManager, dict[int, PendingPromotion]
+            SecondaryTierManager, dict[str, PendingPromotion]
         ] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
@@ -303,7 +303,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Defer submit_load to take_events(). Group by (tier, request) so each
         # request's blocks are submitted as one batched job per tier.
         tier_pending = self._pending_load_submissions.setdefault(tier, {})
-        ctx_id = id(req_context)
+        ctx_id = req_context.req_id
         if ctx_id not in tier_pending:
             tier_pending[ctx_id] = PendingPromotion(
                 keys=[], block_ids=[], req_context=req_context

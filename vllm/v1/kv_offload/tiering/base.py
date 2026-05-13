@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -30,7 +30,7 @@ class JobMetadata:
     keys: Collection[OffloadKey]
     block_ids: np.ndarray
     is_promotion: bool
-    req_context: ReqContext = field(default_factory=ReqContext)
+    req_context: ReqContext
 
 
 @dataclass
