@@ -578,7 +578,10 @@ def mhc_post(
             comb_res_mix.to(torch.float32),
             residual.to(torch.float32),
         )
-        post_term = post_layer_mix.to(torch.float32) * x.unsqueeze(-2).to(torch.float32)
+        post_mix = post_layer_mix.to(torch.float32)
+        if post_mix.ndim == x.ndim:
+            post_mix = post_mix.unsqueeze(-1)
+        post_term = post_mix * x.unsqueeze(-2).to(torch.float32)
         return (mixed_residual + post_term).to(residual.dtype)
     out = torch.empty_like(residual)
     mhc_post_tilelang(
@@ -652,6 +655,32 @@ def mhc_fused_post_pre(
     x_flat = x.view(num_tokens, hidden_size)
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
+
+    if current_platform.is_rocm():
+        residual_cur = mhc_post(
+            x_flat,
+            residual_flat,
+            post_layer_mix_flat,
+            comb_res_mix_flat,
+        )
+        post_mix_cur, comb_mix_cur, layer_input_cur = mhc_pre(
+            residual_cur,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+            n_splits,
+        )
+        return (
+            residual_cur.view(*outer_shape, hc_mult, hidden_size),
+            post_mix_cur.view(*outer_shape, hc_mult, 1),
+            comb_mix_cur.view(*outer_shape, hc_mult, hc_mult),
+            layer_input_cur.view(*outer_shape, hidden_size),
+        )
 
     fma_token_threshold = 16
     if num_tokens <= fma_token_threshold:

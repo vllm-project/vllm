@@ -905,19 +905,27 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             .view(e, n, -1)
         )
 
-        # View as native FP4 dtype for AITER shuffle
-        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
-        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
-
-        # Shuffle weights and scales for AITER CK kernel layout
-        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
+        # AITER CK kernels key off torch.float4_e2m1fn_x2, not raw uint8.
+        # Return fresh Parameters instead of assigning .data so the dtype and
+        # Tensor metadata survive replace_parameter() unchanged.
+        w13_weight = torch.nn.Parameter(
+            rocm_aiter_ops.shuffle_weight_a16w4(
+                w13_weight.data.view(torch.float4_e2m1fn_x2), 16, True
+            ).view(torch.float4_e2m1fn_x2),
+            requires_grad=False,
+        )
         shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
             w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
             num_experts,
             True,
         )
 
-        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
+        w2_weight = torch.nn.Parameter(
+            rocm_aiter_ops.shuffle_weight_a16w4(
+                w2_weight.data.view(torch.float4_e2m1fn_x2), 16, False
+            ).view(torch.float4_e2m1fn_x2),
+            requires_grad=False,
+        )
         shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
             w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
             num_experts,
@@ -1277,17 +1285,27 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             .view(e, n, -1)
         )
 
-        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
-        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
-
-        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
+        # AITER CK kernels key off torch.float4_e2m1fn_x2, not raw uint8.
+        # Return fresh Parameters instead of assigning .data so the dtype and
+        # Tensor metadata survive replace_parameter() unchanged.
+        w13_weight = torch.nn.Parameter(
+            rocm_aiter_ops.shuffle_weight_a16w4(
+                w13_weight.data.view(torch.float4_e2m1fn_x2), 16, True
+            ).view(torch.float4_e2m1fn_x2),
+            requires_grad=False,
+        )
         shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
             w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
             num_experts,
             True,
         )
 
-        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
+        w2_weight = torch.nn.Parameter(
+            rocm_aiter_ops.shuffle_weight_a16w4(
+                w2_weight.data.view(torch.float4_e2m1fn_x2), 16, False
+            ).view(torch.float4_e2m1fn_x2),
+            requires_grad=False,
+        )
         shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
             w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
             num_experts,

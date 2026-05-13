@@ -127,12 +127,24 @@ def merge_attn_states_kernel(
     s_lse = float("-inf") if s_lse == float("inf") else s_lse
 
     max_lse = tl.maximum(p_lse, s_lse)
+
+    # When both prefix and suffix have no tokens (e.g. chunked prefill
+    # request with zero context length), both LSEs are -inf.
+    # IEEE 754: -inf - (-inf) = NaN, which then propagates through
+    # exp and division.  The CUDA merge_attn_states kernel handles
+    # this via an early-return branch on isinf(max_lse).  Here we
+    # replace -inf with a finite floor so the subtraction yields -inf
+    # (not NaN) and exp() gives exactly 0.  The epsilon in the
+    # denominator then prevents the resulting 0/0, producing zero
+    # output (correct, since there are no attention scores to merge).
+    max_lse = tl.where(max_lse == float("-inf"), -1e30, max_lse)
+
     p_lse = p_lse - max_lse
     s_lse = s_lse - max_lse
     # Will reuse precomputed Exp values for scale factor computation.
     p_se = tl.exp(p_lse)
     s_se = tl.exp(s_lse)
-    out_se = p_se + s_se
+    out_se = p_se + s_se + 1e-10
 
     if OUTPUT_LSE:
         out_lse = tl.log(out_se) + max_lse

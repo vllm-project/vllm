@@ -975,15 +975,13 @@ def requant_weight_ue8m0_inplace(
 
 
 def _upcast_e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
-    """Upcast E8M0 (exponent-only) scale to float32.
+    """Decode E8M0 (exponent-only) scale tensors to float32.
 
-    E8M0 stores only the 8-bit biased exponent (bias=127). To convert
-    to float32 we place those 8 bits into the exponent field of an
-    IEEE-754 float32 (bits 23-30) with sign=0 and mantissa=0.
+    E8M0 stores an unsigned exponent with IEEE-754 bias 127. Keep the
+    conversion in one helper so CUDA DeepGEMM and ROCm fallback paths use
+    identical scale semantics for checkpoints that store UE8M0 scales.
     """
-    exp_bits = scale.view(torch.uint8).to(torch.int32)
-    fp32_bits = exp_bits << 23
-    return fp32_bits.view(torch.float32)
+    return torch.exp2(scale.view(torch.uint8).to(torch.float32) - 127)
 
 
 def deepgemm_post_process_fp8_weight_block(
@@ -1292,6 +1290,10 @@ def process_fp8_weight_block_strategy(
         weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale
         )
+
+    if weight_scale.dtype == torch.float8_e8m0fnu and not is_deep_gemm_e8m0_used():
+        # ROCm fallback kernels do not accept UE8M0 scale tensors directly.
+        weight_scale = _upcast_e8m0_to_fp32(weight_scale)
 
     weight = _maybe_pad_fp8_weight(weight)
     return weight, weight_scale
