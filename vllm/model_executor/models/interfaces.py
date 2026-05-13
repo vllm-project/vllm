@@ -1199,6 +1199,17 @@ class SupportsTranscription(Protocol):
         return text
 
     @classmethod
+    def get_streaming_post_processor(cls) -> Callable[[str, bool], str]:
+        """
+        Return a stateful post-processor for streaming output deltas.
+
+        The callable receives the next decoded text delta and whether the
+        request output is final. It returns the cleaned delta that should be
+        sent to the client.
+        """
+        return lambda text_delta, finished: text_delta
+
+    @classmethod
     def get_language_detection_prompt(
         cls,
         audio: np.ndarray,
