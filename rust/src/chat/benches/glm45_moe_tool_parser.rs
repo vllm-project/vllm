@@ -11,8 +11,7 @@ use utils::{feed_external_parser, feed_parser, openai_tools};
 const GLM45_PARSER_NAME: &str = "glm45";
 const GLM47_PARSER_NAME: &str = "glm47";
 const CHUNK_CHARS: usize = 7;
-const LONG_NORMAL_TEXT_CHUNK_CHARS: usize = 37;
-const LONG_NORMAL_TEXT_REPEATS: usize = 4096;
+const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
 
 fn glm45_mixed_fixture() -> String {
     concat!(
@@ -187,7 +186,7 @@ fn bench_glm45_moe_tool_parser(c: &mut Criterion) {
         GLM45_PARSER_NAME,
         &tools,
         &long_normal_text,
-        LONG_NORMAL_TEXT_CHUNK_CHARS,
+        CHUNK_CHARS,
         &long_normal_text,
         0,
     );
@@ -198,7 +197,7 @@ fn bench_glm45_moe_tool_parser(c: &mut Criterion) {
         GLM47_PARSER_NAME,
         &tools,
         &long_normal_text,
-        LONG_NORMAL_TEXT_CHUNK_CHARS,
+        CHUNK_CHARS,
         &long_normal_text,
         0,
     );

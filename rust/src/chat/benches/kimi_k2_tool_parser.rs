@@ -9,8 +9,8 @@ mod utils;
 use utils::{feed_external_parser, feed_parser, openai_tools};
 
 const PARSER_NAME: &str = "kimi_k2";
-const LONG_NORMAL_TEXT_CHUNK_CHARS: usize = 37;
-const LONG_NORMAL_TEXT_REPEATS: usize = 4096;
+const CHUNK_CHARS: usize = 7;
+const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
 
 fn mixed_fixture() -> String {
     concat!(
@@ -125,7 +125,7 @@ fn bench_kimi_k2_tool_parser(c: &mut Criterion) {
     let mixed_text = mixed_fixture();
     let mixed_chunks = mixed_chunks();
     let long_normal_text = long_normal_text_fixture();
-    let long_normal_chunks = split_by_chars(&long_normal_text, LONG_NORMAL_TEXT_CHUNK_CHARS);
+    let long_normal_chunks = split_by_chars(&long_normal_text, CHUNK_CHARS);
 
     run_stream_group(
         c,

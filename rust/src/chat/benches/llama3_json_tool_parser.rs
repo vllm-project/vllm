@@ -10,8 +10,7 @@ use utils::{feed_external_parser, feed_parser, openai_tools};
 
 const PARSER_NAME: &str = "llama3_json";
 const CHUNK_CHARS: usize = 7;
-const LONG_NORMAL_TEXT_CHUNK_CHARS: usize = 37;
-const LONG_NORMAL_TEXT_REPEATS: usize = 4096;
+const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
 
 fn tool_call(function_name: &str, parameters: &str) -> String {
     format!(r#"{{"name":"{function_name}","parameters":{parameters}}}"#)
@@ -122,7 +121,7 @@ fn bench_llama3_json_tool_parser(c: &mut Criterion) {
         "llama3_json_tool_parser/long_normal_text",
         &tools,
         &long_normal_text,
-        LONG_NORMAL_TEXT_CHUNK_CHARS,
+        CHUNK_CHARS,
         &long_normal_text,
         0,
     );

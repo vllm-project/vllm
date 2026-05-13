@@ -10,8 +10,7 @@ use utils::{feed_external_parser, feed_parser, openai_tools};
 
 const PARSER_NAME: &str = "qwen3_coder";
 const CHUNK_CHARS: usize = 7;
-const LONG_NORMAL_TEXT_CHUNK_CHARS: usize = 37;
-const LONG_NORMAL_TEXT_REPEATS: usize = 4096;
+const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
 
 fn mixed_fixture() -> String {
     concat!(
@@ -132,7 +131,7 @@ fn bench_qwen3_coder_tool_parser(c: &mut Criterion) {
         "qwen3_coder_tool_parser/long_normal_text",
         &tools,
         &long_normal_text,
-        LONG_NORMAL_TEXT_CHUNK_CHARS,
+        CHUNK_CHARS,
         &long_normal_text,
         0,
     );
