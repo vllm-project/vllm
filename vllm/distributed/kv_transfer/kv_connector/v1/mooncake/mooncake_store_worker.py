@@ -65,10 +65,34 @@ class MooncakeStoreConfig:
     device_name: str
     master_server_address: str
 
+    # Dummy-client mode: vLLM colocates with a per-host Real Client process
+    # (e.g. `mooncake_client`) that owns the RDMA resources, and this worker
+    # forwards KV cache operations to it over IPC/RPC.
+    enable_dummy_client: bool = False
+    real_client_address: str = ""
+
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
+        enable_dummy_client = bool(
+            _get_config_or_env_value(
+                config,
+                "enable_dummy_client",
+                "MOONCAKE_ENABLE_DUMMY_CLIENT",
+                False,
+            )
+        )
+        real_client_address = _get_config_or_env_value(
+            config,
+            "real_client_address",
+            "MOONCAKE_REAL_CLIENT_ADDRESS",
+            "",
+        )
+        if enable_dummy_client and not real_client_address:
+            raise ValueError(
+                "'real_client_address' must be set when 'enable_dummy_client' is true."
+            )
         return MooncakeStoreConfig(
             metadata_server=_get_config_or_env_value(
                 config, "metadata_server", "MOONCAKE_TE_META_DATA_SERVER", ""
@@ -83,6 +107,8 @@ class MooncakeStoreConfig:
             master_server_address=_get_config_or_env_value(
                 config, "master_server_address", "MOONCAKE_MASTER", ""
             ),
+            enable_dummy_client=enable_dummy_client,
+            real_client_address=real_client_address,
         )
 
     @staticmethod
@@ -718,24 +744,16 @@ class MooncakeStoreWorker:
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_env()
         extra_config = _get_kv_connector_extra_config(vllm_config)
-        store_config.device_name = rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
+        if not store_config.enable_dummy_client:
+            store_config.device_name = rdma_utils.get_configured_worker_rnic(
+                protocol=store_config.protocol,
+                configured_device=store_config.device_name,
+            )
         self.store = MooncakeDistributedStore()
-        local_ip = get_ip()
-        local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
-        ret = self.store.setup(
-            local_hostname,
-            store_config.metadata_server,
-            0,
-            store_config.requester_local_buffer_size,
-            store_config.protocol,
-            store_config.device_name,
-            store_config.master_server_address,
-        )
+        ret = self._setup_mooncake_store(self.store, store_config)
         if ret != 0:
-            msg = "Initialize MooncakeDistributedStore failed."
+            mode = "DummyClient" if store_config.enable_dummy_client else "RealClient"
+            msg = f"Initialize MooncakeDistributedStore failed in {mode} mode."
             logger.error(msg)
             raise RuntimeError(msg)
 
@@ -756,6 +774,47 @@ class MooncakeStoreWorker:
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
+
+    @staticmethod
+    def _setup_mooncake_store(
+        store: Any,
+        store_config: MooncakeStoreConfig,
+    ) -> int:
+        if store_config.enable_dummy_client:
+            logger.info(
+                "Initializing MooncakeDistributedStore with DummyClient: "
+                "real_client_address=%s, local_buffer_size=%d",
+                store_config.real_client_address,
+                store_config.requester_local_buffer_size,
+            )
+            return store.setup_dummy(
+                0,
+                store_config.requester_local_buffer_size,
+                store_config.real_client_address,
+            )
+
+        local_ip = get_ip()
+        local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
+        logger.info(
+            "Initializing MooncakeDistributedStore with RealClient: "
+            "local_hostname=%s, metadata_server=%s, master=%s, "
+            "protocol=%s, device_name=%s, local_buffer_size=%d",
+            local_hostname,
+            store_config.metadata_server,
+            store_config.master_server_address,
+            store_config.protocol,
+            store_config.device_name,
+            store_config.requester_local_buffer_size,
+        )
+        return store.setup(
+            local_hostname,
+            store_config.metadata_server,
+            0,
+            store_config.requester_local_buffer_size,
+            store_config.protocol,
+            store_config.device_name,
+            store_config.master_server_address,
+        )
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
