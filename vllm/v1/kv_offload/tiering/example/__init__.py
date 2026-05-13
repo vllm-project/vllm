@@ -9,7 +9,6 @@ reference for writing new tiers and is useful for testing the
 TieringOffloadingManager without requiring actual storage or network backends.
 """
 
-from collections import OrderedDict
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -42,14 +41,12 @@ class ExampleSecondaryTier(SecondaryTierManager):
     This implementation:
     - Stores blocks in a dictionary (key -> True)
     - Completes transfers immediately (synchronous)
-    - Uses LRU eviction policy
     """
 
     def __init__(
         self,
         vllm_config: "VllmConfig",
         primary_kv_view: memoryview,
-        max_blocks: int = 1000,
     ):
         """
         Initialize the example secondary tier.
@@ -57,13 +54,11 @@ class ExampleSecondaryTier(SecondaryTierManager):
         Args:
             vllm_config: Global vLLM configuration.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            max_blocks: Maximum number of blocks this tier can store
         """
         super().__init__(vllm_config, primary_kv_view)
-        self.max_blocks = max_blocks
 
         # key -> True (only care about presence)
-        self.blocks: OrderedDict[OffloadKey, bool] = OrderedDict()
+        self.blocks: dict[OffloadKey, bool] = {}
 
         # Completed jobs waiting to be retrieved by get_finished()
         self.completed_jobs: list[JobResult] = []
@@ -83,7 +78,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         """
-        Submit an async job to store blocks from primary tier to this tier.
+        Submit a job to store blocks from primary tier to this tier.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
@@ -97,37 +92,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
             f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
 
-        # Filter out blocks already present
-        blocks_to_store = [bh for bh in keys if bh not in self.blocks]
-
-        if not blocks_to_store:
-            # All blocks already present
-            return
-
-        # Evict blocks if needed (LRU policy)
-        num_blocks_to_evict = len(blocks_to_store) - (
-            self.max_blocks - len(self.blocks)
-        )
-
-        evicted = []
-        if num_blocks_to_evict > 0:
-            # Collect eviction candidates first (LRU order), then delete atomically
-            protected = set(keys)
-            for key in self.blocks:
-                if key not in protected:
-                    evicted.append(key)
-                    if len(evicted) == num_blocks_to_evict:
-                        break
-            else:
-                # Could not collect enough eviction candidates
-                return
-            for key in evicted:
-                del self.blocks[key]
-
-        # Create internal job metadata
-        internal_job_metadata = _JobMetadata(
-            job_id=job_id, keys=blocks_to_store, is_store=True
-        )
+        internal_job_metadata = _JobMetadata(job_id=job_id, keys=keys, is_store=True)
 
         self._complete_store_job(internal_job_metadata)
 
@@ -181,18 +146,6 @@ class ExampleSecondaryTier(SecondaryTierManager):
         """Complete a load job."""
         # Return simplified JobResult (only job_id and success)
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
-
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """
-        Mark blocks as recently used (move to end of LRU list).
-
-        Args:
-            keys: Blocks to mark as recently used.
-            req_context: Per-request context.
-        """
-        for key in reversed(list(keys)):
-            if key in self.blocks:
-                self.blocks.move_to_end(key)
 
     @staticmethod
     def get_tier_type() -> str:

@@ -24,9 +24,7 @@ Example configuration:
     "eviction_policy": "lru",
     "secondary_tiers": [
         {
-            "type": "example",
-            # Tier-specific parameters (for ExampleSecondaryTier):
-            "max_blocks": 10000
+            "type": "example"
         }
     ]
 }
