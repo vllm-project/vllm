@@ -19,9 +19,11 @@ from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
 
-def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
+def make_req_context(
+    req_id: str = "", kv_transfer_params: dict | None = None
+) -> ReqContext:
     """Create a ReqContext as production code would, from a request's params."""
-    return ReqContext(kv_transfer_params=kv_transfer_params)
+    return ReqContext(req_id=req_id, kv_transfer_params=kv_transfer_params)
 
 
 _EMPTY_REQ_CTX = make_req_context()
