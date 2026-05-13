@@ -286,6 +286,113 @@ class TestHarmonyToResponseOutput:
         assert len(output_items) == 0
 
 
+class TestHarmonyToResponseOutputWithFunctionToolNames:
+    """Tests for bare function name handling with function_tool_names."""
+
+    def test_bare_name_creates_function_call_when_in_tool_names(self):
+        """Bare function name matching a known tool creates function call."""
+        message = Message.from_role_and_content(
+            Role.ASSISTANT, '{"location": "San Francisco"}'
+        )
+        message = message.with_channel("commentary")
+        message = message.with_recipient("get_weather")
+
+        fn_names = frozenset({"get_weather"})
+        output_items = harmony_to_response_output(message, fn_names)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].type == "function_call"
+        assert output_items[0].name == "get_weather"
+        assert output_items[0].arguments == '{"location": "San Francisco"}'
+
+    def test_bare_name_creates_mcp_call_when_not_in_tool_names(self):
+        """Bare name not matching any known tool creates MCP call."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
+        message = message.with_channel("commentary")
+        message = message.with_recipient("custom_tool")
+
+        fn_names = frozenset({"get_weather"})
+        output_items = harmony_to_response_output(message, fn_names)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], McpCall)
+        assert output_items[0].type == "mcp_call"
+
+    def test_dotted_function_name_creates_function_call(self):
+        """Dotted function name in tool names creates function call."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"a": 1, "b": 2}')
+        message = message.with_channel("commentary")
+        message = message.with_recipient("math.sum")
+
+        fn_names = frozenset({"math.sum"})
+        output_items = harmony_to_response_output(message, fn_names)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].name == "math.sum"
+
+    def test_empty_tool_names_defaults_to_mcp(self):
+        """With empty function_tool_names, bare names become MCP calls."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
+        message = message.with_channel("commentary")
+        message = message.with_recipient("get_weather")
+
+        output_items = harmony_to_response_output(message, frozenset())
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], McpCall)
+
+    def test_prefixed_name_always_function_call(self):
+        """functions. prefix always creates function call even with empty tool names."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
+        message = message.with_channel("commentary")
+        message = message.with_recipient("functions.get_weather")
+
+        output_items = harmony_to_response_output(message, frozenset())
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionToolCall)
+        assert output_items[0].name == "get_weather"
+
+
+class TestParserStateWithFunctionToolNames:
+    """Tests for parser_state_to_response_output with function_tool_names."""
+
+    def test_bare_name_creates_function_call(self):
+        from unittest.mock import Mock
+
+        parser = Mock()
+        parser.current_content = '{"arg": "value"}'
+        parser.current_role = Role.ASSISTANT
+        parser.current_channel = "commentary"
+        parser.current_recipient = "get_weather"
+
+        fn_names = frozenset({"get_weather"})
+        items = parser_state_to_response_output(parser, fn_names)
+
+        assert len(items) == 1
+        assert isinstance(items[0], ResponseFunctionToolCall)
+        assert items[0].name == "get_weather"
+        assert items[0].status == "in_progress"
+
+    def test_bare_name_creates_mcp_when_not_in_tool_names(self):
+        from unittest.mock import Mock
+
+        parser = Mock()
+        parser.current_content = '{"arg": "value"}'
+        parser.current_role = Role.ASSISTANT
+        parser.current_channel = "commentary"
+        parser.current_recipient = "unknown_tool"
+
+        fn_names = frozenset({"get_weather"})
+        items = parser_state_to_response_output(parser, fn_names)
+
+        assert len(items) == 1
+        assert isinstance(items[0], McpCall)
+        assert items[0].name == "unknown_tool"
+
+
 def test_parse_mcp_call_basic() -> None:
     """Test that MCP calls are parsed with correct type and server_label."""
     message = Message.from_role_and_content(Role.ASSISTANT, '{"path": "/tmp"}')
