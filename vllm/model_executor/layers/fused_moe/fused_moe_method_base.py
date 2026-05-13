@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from inspect import signature
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -137,7 +137,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> FusedMoEExpertsModular:
         experts_cls = source_experts.__class__
         assert self.moe_quant_config is not None
-        experts_kwargs = {
+        experts_kwargs: dict[str, Any] = {
             "moe_config": moe_config,
             "quant_config": self.moe_quant_config,
         }
