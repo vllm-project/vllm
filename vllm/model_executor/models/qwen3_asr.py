@@ -22,10 +22,10 @@
 # limitations under the License.
 """Inference-only Qwen3-ASR model."""
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+import regex as re
 import torch
 import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
@@ -580,7 +580,7 @@ class Qwen3ASRForConditionalGeneration(
         system_turn = ""
         if request_prompt:
             safe_prompt = _sanitize_transcription_user_text(request_prompt)
-            system_turn = f"<|im_start|>system\n{safe_prompt}<|redacted_im_end|>\n"
+            system_turn = f"<|im_start|>system\n{safe_prompt}<|im_end|>\n"
 
         safe_prefix = _sanitize_transcription_user_text(response_prefix)
 

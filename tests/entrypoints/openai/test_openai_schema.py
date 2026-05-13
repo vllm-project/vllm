@@ -133,7 +133,9 @@ def test_openapi_stateless(case: Case):
     # (weight_transfer_config) and are meant to be stateful.
     if case.operation.path in (
         "/init_weight_transfer_engine",
+        "/start_weight_update",
         "/update_weights",
+        "/finish_weight_update",
     ):
         return
 
@@ -143,6 +145,7 @@ def test_openapi_stateless(case: Case):
         ("POST", "/v1/chat/completions/batch"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/completions"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/messages"): LONG_TIMEOUT_SECONDS,
+        ("POST", "/inference/v1/generate"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
