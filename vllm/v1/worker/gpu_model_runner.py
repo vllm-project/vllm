@@ -169,6 +169,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -542,7 +543,11 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
             )
-            if self.speculative_config.method == "ngram":
+            if self.speculative_config.method == "custom_class":
+                self.drafter = create_custom_proposer(  # type: ignore[assignment]
+                    self.vllm_config
+                )
+            elif self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
@@ -1006,16 +1011,23 @@ class GPUModelRunner(
         if len(token_type_id_requests) == 0:
             return model_kwargs
 
-        seq_lens = self.seq_lens[:num_reqs]
+        # Build ids on CPU using the CPU-resident upper bound for seq_lens;
+        # `torch.arange(seq_lens[i])` with a GPU scalar would force a sync.
+        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].tolist()
         token_type_ids = []
 
         for i in range(num_reqs):
-            pos = token_type_id_requests.get(i, seq_lens[i])
-            ids = (torch.arange(seq_lens[i]) >= pos).int()
+            seq_len_i = seq_lens_cpu[i]
+            pos = token_type_id_requests.get(i, seq_len_i)
+            ids = (torch.arange(seq_len_i) >= pos).int()
             token_type_ids.append(ids)
 
-        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
-            device=self.device
+        token_type_ids_cpu = torch.empty(
+            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=self.pin_memory
+        )
+        torch.cat(token_type_ids, out=token_type_ids_cpu)
+        model_kwargs["token_type_ids"] = token_type_ids_cpu.to(
+            device=self.device, non_blocking=True
         )
         return model_kwargs
 
@@ -2346,7 +2358,13 @@ class GPUModelRunner(
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(
-                    self.drafter, (EagleProposer, DFlashProposer, Gemma4Proposer)
+                    self.drafter,
+                    (
+                        EagleProposer,
+                        DFlashProposer,
+                        Gemma4Proposer,
+                        ExtractHiddenStatesProposer,
+                    ),
                 ):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
@@ -2726,10 +2744,9 @@ class GPUModelRunner(
         # There might have leftover indices in logits_indices[num_logits:]
         # from previous iterations, whose values may be greater than the
         # batch size in the current iteration. To ensure indices are always
-        # valid, we fill the padded indices with the last index.
-        self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
-            logits_indices[-1].item()
-        )
+        # valid, fill the padded indices with the last index. Broadcast the
+        # scalar GPU-side to avoid a D2H sync on `.item()`.
+        self.kv_sharing_fast_prefill_logits_indices[num_logits:] = logits_indices[-1]
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_logits, invalid_modes={CUDAGraphMode.FULL}
@@ -4619,6 +4636,14 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu,
                 slot_mappings=slot_mappings,
             )
+        elif spec_config.method == "custom_class":
+            assert isinstance(sampled_token_ids, list)
+            draft_token_ids = cast(Any, self.drafter).propose(
+                sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=slot_mappings,
+            )
         elif spec_config.use_ngram_gpu():
             assert isinstance(self.drafter, NgramProposerGPU)
             (
@@ -4890,7 +4915,8 @@ class GPUModelRunner(
                     )
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
-                    self.drafter.load_model(self.model)
+                    if hasattr(self.drafter, "load_model"):
+                        self.drafter.load_model(self.model)
                     if (
                         hasattr(self.drafter, "model")
                         and is_mixture_of_experts(self.drafter.model)

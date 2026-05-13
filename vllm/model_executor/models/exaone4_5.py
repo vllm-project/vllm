@@ -23,7 +23,6 @@ import torch
 import torch.nn as nn
 from transformers.models.exaone4_5 import (
     Exaone4_5_Config,
-    Exaone4_5_ImageProcessor,
     Exaone4_5_Processor,
 )
 from transformers.models.exaone4_5.configuration_exaone4_5 import Exaone4_5_VisionConfig
@@ -303,9 +302,6 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
-
-    def get_image_processor(self, **kwargs: object) -> Exaone4_5_ImageProcessor:
-        return Exaone4_5_ImageProcessor(**kwargs)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
