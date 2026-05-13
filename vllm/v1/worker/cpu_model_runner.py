@@ -119,8 +119,8 @@ class CPUModelRunner(GPUModelRunner):
         torch.set_printoptions(profile="full", sci_mode=False)
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
-        # with _set_global_compilation_settings(self.vllm_config):
-        #     self.profile_run()
+        with _set_global_compilation_settings(self.vllm_config):
+            self.profile_run()
         logger.info("Warming up done.")
 
     def initialize_kv_cache(
