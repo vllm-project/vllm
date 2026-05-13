@@ -152,4 +152,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 "available in the fp8 checkpoint."
             )
 
-        del layer.k_scale, layer.v_scale, layer.q_scale, layer.prob_scale
+        del layer.k_scale
+        del layer.v_scale
+        del layer.q_scale
+        del layer.prob_scale
