@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
+import weakref
 from abc import ABC, abstractmethod
 
 import tokenizers
@@ -43,7 +45,13 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 #     fastokens' shim), rebuild a real one from its JSON state for HF's
 #     ``DecodeStream.step`` to consume. We duck-type via ``to_str()`` so this
 #     works for any future shim that exposes the same serialization contract.
-_rebuilt_hf_tokenizer_cache: dict[int, Tokenizer] = {}
+# Keyed by the shim object itself (not ``id()``) so a garbage-collected shim
+# can't collide with a later object that happens to reuse the same address,
+# and so cache entries drop automatically instead of leaking for the life of
+# the process.
+_rebuilt_hf_tokenizer_cache: "weakref.WeakKeyDictionary[object, Tokenizer]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _to_hf_tokenizer(tokenizer_inner: object) -> Tokenizer:
@@ -59,11 +67,14 @@ def _to_hf_tokenizer(tokenizer_inner: object) -> Tokenizer:
     to_str = getattr(tokenizer_inner, "to_str", None)
     if not callable(to_str):
         return tokenizer_inner  # type: ignore[return-value]
-    cached = _rebuilt_hf_tokenizer_cache.get(id(tokenizer_inner))
+    cached = _rebuilt_hf_tokenizer_cache.get(tokenizer_inner)
     if cached is not None:
         return cached
     real_tok = Tokenizer.from_str(to_str())
-    _rebuilt_hf_tokenizer_cache[id(tokenizer_inner)] = real_tok
+    # Non-weak-referenceable shims (rare) just skip the cache write and rebuild
+    # on the next call rather than failing detokenization.
+    with contextlib.suppress(TypeError):
+        _rebuilt_hf_tokenizer_cache[tokenizer_inner] = real_tok
     return real_tok
 
 
