@@ -62,6 +62,7 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
 ]
@@ -511,7 +512,16 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if self.method is None:
+        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
+        if (
+            self.model is not None
+            and "." in self.model
+            and not self.model.startswith(("http://", "https://", "file://"))
+            and "/" not in self.model  # not a HuggingFace repo (org/model)
+        ):
+            # Treat as a custom class path
+            self.method = "custom_class"
+        elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
             else:
@@ -545,6 +555,14 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "custom_class":
+                # method was set explicitly, but model should already contain the
+                # custom module path. If not, this is a configuration error.
+                if self.model is None:
+                    raise ValueError(
+                        "method='custom_class' requires 'model' to contain the "
+                        "custom proposer module path (e.g., 'my_module.MyProposer')."
+                    )
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -588,6 +606,18 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "custom_class":
+            # Custom class proposer does not need a draft model.
+            # It will dynamically load the user-provided class at runtime.
+            logger.warning_once(
+                "Using a custom class-based proposer backend. This is an "
+                "experimental feature and the proposer interface is subject to "
+                "breaking changes in future vLLM releases."
+            )
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         elif self.method == "extract_hidden_states":
             from vllm.transformers_utils.configs.extract_hidden_states import (
                 ExtractHiddenStatesConfig,
@@ -1063,7 +1093,13 @@ class SpeculativeConfig:
         method = self.method
         model = (
             None
-            if method in ("ngram", "suffix", "extract_hidden_states")
+            if method
+            in (
+                "ngram",
+                "suffix",
+                "extract_hidden_states",
+                "custom_class",
+            )
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
