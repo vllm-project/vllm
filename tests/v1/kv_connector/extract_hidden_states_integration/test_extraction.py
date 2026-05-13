@@ -83,7 +83,7 @@ def register_predictable_model():
 
 
 def test_extract_hidden_states_with_predictable_dummy_model(
-    predictable_llama_config_path, tmp_path
+    predictable_llama_config_path, tmp_path, monkeypatch
 ):
     """Comprehensive test using a predictable dummy model with synthetic weights.
 
@@ -94,6 +94,12 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     3. Layer ordering is preserved correctly (non-sequential layer IDs)
     4. Multiple prompts of different lengths produce consistent layer values
     """
+    # Force fork so the engine worker inherits the autouse fixture's
+    # ModelRegistry.register_model("PredictableLlamaForCausalLM", ...).
+    # Spawn (the CI default) starts a fresh Python process that wouldn't
+    # see the registration.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
+
     # Test with non-sequential layer ordering to verify correct association
     layer_ids = [5, 2, 10]
     num_layers = len(layer_ids)
@@ -153,3 +159,55 @@ def test_extract_hidden_states_with_predictable_dummy_model(
                 f"but got mean={layer_hidden.mean():.3f}, "
                 f"min={layer_hidden.min():.3f}, max={layer_hidden.max():.3f}"
             )
+
+
+def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
+    """Smoke test for Qwen3.5 hybrid (mamba + full-attention) models.
+    Uses load_format="dummy" to just check shape/plumbing.
+    """
+    layer_ids = [5, 11, 17]
+    hidden_size = 1024  # Qwen/Qwen3.5-0.8B hidden_size
+
+    llm = LLM(
+        model="Qwen/Qwen3.5-0.8B",
+        speculative_config={
+            "method": "extract_hidden_states",
+            "num_speculative_tokens": 1,
+            "draft_model_config": {
+                "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
+            },
+        },
+        kv_transfer_config={
+            "kv_connector": "ExampleHiddenStatesConnector",
+            "kv_role": "kv_producer",
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        },
+        max_model_len=256,
+        enforce_eager=True,
+        gpu_memory_utilization=0.4,
+        load_format="dummy",
+    )
+
+    prompts = ["Hello world", "Test prompt with several tokens"]
+    sampling_params = SamplingParams(max_tokens=1, temperature=0.0)
+    outputs = llm.generate(prompts, sampling_params)
+    del llm
+    gc.collect()
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        assert output.kv_transfer_params is not None
+        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+        assert hidden_states_path is not None
+        assert os.path.exists(hidden_states_path)
+
+        with safe_open(hidden_states_path, "pt") as f:
+            token_ids = f.get_tensor("token_ids")
+            hidden_states = f.get_tensor("hidden_states")
+
+        assert torch.equal(token_ids, torch.tensor(output.prompt_token_ids))
+        assert hidden_states.shape == (
+            len(output.prompt_token_ids),
+            len(layer_ids),
+            hidden_size,
+        )

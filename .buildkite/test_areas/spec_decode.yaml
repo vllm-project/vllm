@@ -16,7 +16,7 @@ steps:
 - label: Spec Decode Eagle Nightly B200
   key: spec-decode-eagle-nightly-b200
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   optional: true
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -40,7 +40,7 @@ steps:
 - label: Spec Decode Speculators + MTP Nightly B200
   key: spec-decode-speculators-mtp-nightly-b200
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   optional: true
   source_file_dependencies:
     - vllm/v1/spec_decode/
@@ -84,23 +84,23 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
-- label: DFlash Speculators Correctness
-  key: dflash-speculators-correctness
-  timeout_in_minutes: 30
+- label: Speculators Correctness
+  key: speculators-correctness
+  timeout_in_minutes: 60
   device: h100
   optional: true
   num_devices: 1
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
-    - tests/v1/spec_decode/test_speculators_dflash.py
+    - tests/v1/spec_decode/test_speculators_correctness.py
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_speculators_dflash.py -m slow_test
+    - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
 - label: Spec Decode MTP hybrid (B200)
   timeout_in_minutes: 30
-  device: b200
+  device: b200-k8s
   optional: true
   source_file_dependencies:
     - vllm/v1/spec_decode/
