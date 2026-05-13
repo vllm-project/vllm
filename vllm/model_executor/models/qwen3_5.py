@@ -565,6 +565,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         # Qwen3.5 does not support multimodal pruning (EVS).
@@ -778,6 +779,7 @@ class Qwen3_5MoeForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         # Qwen3.5 does not support multimodal pruning (EVS).

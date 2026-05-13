@@ -154,7 +154,7 @@ def _compute_block_stats_kernel(
 
 
 @triton.jit
-def _probabilistic_rejection_kernel(
+def _rejection_kernel(
     # [num_reqs, num_speculative_steps + 1]
     sampled_ptr,
     sampled_stride,
@@ -198,9 +198,12 @@ def _probabilistic_rejection_kernel(
     seed_ptr,
     # [num_logits]
     pos_ptr,
+    # [num_speculative_steps]
+    synthetic_conditional_rates_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -217,7 +220,7 @@ def _probabilistic_rejection_kernel(
     for i in range(num_tokens - 1):
         if accepted:
             logit_idx = start_idx + i
-            draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1)
+            draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
             if temp == 0.0:
                 # Greedy sampling. Accept IFF draft matches target argmax.
                 # NOTE: Target argmax is stored directly so that resampling
@@ -236,9 +239,19 @@ def _probabilistic_rejection_kernel(
                     target_local_argmax_ptr
                     + logit_idx * target_local_argmax_stride
                     + max_target_block_idx
+                ).to(tl.int64)
+
+                if SYNTHETIC_MODE:
+                    pos = tl.load(pos_ptr + logit_idx)
+                    u = tl_rand64(seed, pos, includes_zero=False)
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted &= u < rate
+                else:
+                    accepted &= target_argmax == draft_sampled
+                tl.store(
+                    sampled_ptr + req_idx * sampled_stride + i,
+                    draft_sampled if accepted else target_argmax,
                 )
-                accepted &= target_argmax == draft_sampled
-                tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
             else:
                 target_logit = tl.load(
                     target_logits_ptr + logit_idx * target_logits_stride + draft_sampled
@@ -275,9 +288,14 @@ def _probabilistic_rejection_kernel(
                 else:
                     # One-hot draft: q(draft_token) = 1, log_q = 0.
                     draft_log_prob = 0
-                # Probability ratio test: p(x) > u * q(x)
-                # Equivalent log form: log_p(x) > log(u) + log_q(x)
-                accepted &= target_log_prob > tl.log(u) + draft_log_prob
+
+                if SYNTHETIC_MODE:
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted &= u < rate
+                else:
+                    # Probability ratio test: p(x) > u * q(x)
+                    # Equivalent log form: log_p(x) > log(u) + log_q(x)
+                    accepted &= target_log_prob > tl.log(u) + draft_log_prob
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
@@ -470,7 +488,7 @@ def _insert_resampled_kernel(
     )
 
 
-def probabilistic_rejection_sample(
+def rejection_sample(
     # [num_logits, V]
     target_logits: torch.Tensor,
     # [max_num_reqs, num_speculative_steps, V]
@@ -492,6 +510,8 @@ def probabilistic_rejection_sample(
     # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
+    # [num_speculative_steps]
+    synthetic_conditional_rates: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
@@ -557,7 +577,7 @@ def probabilistic_rejection_sample(
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
     target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
     draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    _probabilistic_rejection_kernel[(num_reqs,)](
+    _rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
         num_sampled,
@@ -584,9 +604,11 @@ def probabilistic_rejection_sample(
         temperature,
         seed,
         pos,
+        synthetic_conditional_rates,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         num_warps=1,
     )
 
