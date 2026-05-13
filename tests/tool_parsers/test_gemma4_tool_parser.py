@@ -11,9 +11,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.tool_parsers.gemma4_tool_parser import (
     TOOL_CALL_END,
     TOOL_CALL_START,
+    TOOL_RESPONSE,
     Gemma4ToolParser,
     _parse_gemma4_args,
     _parse_gemma4_array,
+    _stable_partial_json_prefix,
 )
 
 # ---------------------------------------------------------------------------
@@ -25,8 +27,25 @@ from vllm.tool_parsers.gemma4_tool_parser import (
 def mock_tokenizer():
     tokenizer = MagicMock()
     tokenizer.encode.return_value = [1, 2, 3]
-    # Include the tool call start token in the vocab for the parser
-    tokenizer.get_vocab.return_value = {TOOL_CALL_START: 48, TOOL_CALL_END: 49}
+    # Include Gemma4 tool boundary tokens in the vocab for the parser.
+    tokenizer.get_vocab.return_value = {
+        TOOL_CALL_START: 48,
+        TOOL_CALL_END: 49,
+        TOOL_RESPONSE: 50,
+    }
+
+    def decode(token_ids, skip_special_tokens=False):
+        token_map = {
+            48: TOOL_CALL_START,
+            49: TOOL_CALL_END,
+            50: TOOL_RESPONSE,
+            100: "call:first_tool{alpha:15",
+            101: ",beta:1,gamma:1990}",
+            102: "call:second_tool{delta:9,epsilon:30}",
+        }
+        return "".join(token_map.get(token_id, "") for token_id in token_ids)
+
+    tokenizer.decode.side_effect = decode
     return tokenizer
 
 
@@ -40,6 +59,7 @@ def mock_request():
     request = MagicMock(spec=ChatCompletionRequest)
     request.tools = []
     request.tool_choice = "auto"
+    request.parallel_tool_calls = True
     return request
 
 
@@ -77,6 +97,20 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("score:3.14")
         assert result == {"score": 3.14}
 
+    def test_exponent_number_value(self):
+        result = _parse_gemma4_args("score:1e3")
+        assert result == {"score": 1000.0}
+
+    def test_trailing_dot_float_partial_withheld(self):
+        assert _parse_gemma4_args("score:108.", partial=True) == {}
+        assert _parse_gemma4_args("score:108.,next:1", partial=True) == {}
+        assert _parse_gemma4_args("score:108.") == {"score": 108.0}
+
+    def test_partial_exponent_withheld(self):
+        assert _parse_gemma4_args("score:1e", partial=True) == {}
+        assert _parse_gemma4_args("score:1e+", partial=True) == {}
+        assert _parse_gemma4_args("score:1e3") == {"score": 1000.0}
+
     def test_boolean_true(self):
         result = _parse_gemma4_args("flag:true")
         assert result == {"flag": True}
@@ -85,6 +119,11 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("flag:false")
         assert result == {"flag": False}
 
+    def test_partial_bool_withheld(self):
+        assert _parse_gemma4_args("flag:tru", partial=True) == {}
+        assert _parse_gemma4_args("flag:fals", partial=True) == {}
+        assert _parse_gemma4_args("flag:true") == {"flag": True}
+
     def test_null_value(self):
         # Bare `null` must parse as None (Python), not the string "null".
         # Without this, tool_choice=auto would emit `{"param": "null"}`
@@ -92,6 +131,11 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args("param:null")
         assert result == {"param": None}
         assert json.dumps(result) == '{"param": null}'
+
+    def test_partial_null_withheld(self):
+        assert _parse_gemma4_args("param:nu", partial=True) == {}
+        assert _parse_gemma4_args("param:nul", partial=True) == {}
+        assert _parse_gemma4_args("param:null") == {"param": None}
 
     def test_mixed_types(self):
         result = _parse_gemma4_args(
@@ -116,6 +160,14 @@ class TestParseGemma4Args:
         """Unterminated strings should take everything after the delimiter."""
         result = _parse_gemma4_args('key:<|"|>unterminated')
         assert result == {"key": "unterminated"}
+
+    def test_partial_unterminated_string_keeps_stable_prefix(self):
+        result = _parse_gemma4_args('key:<|"|>unterminated', partial=True)
+        assert result == {"key": "unterminated"}
+
+    def test_partial_string_delimiter_overlap_withheld(self):
+        result = _parse_gemma4_args('key:<|"|>value<|', partial=True)
+        assert result == {"key": "value"}
 
     def test_empty_value(self):
         """Key with no value after colon."""
@@ -154,6 +206,20 @@ class TestParseGemma4Array:
         result = _parse_gemma4_array("42,true,3.14")
         assert result == [42, True, 3.14]
 
+    def test_trailing_dot_float_partial_withheld(self):
+        assert _parse_gemma4_array("108.", partial=True) == []
+        assert _parse_gemma4_array("108.,109", partial=True) == []
+        assert _parse_gemma4_array("108.") == [108.0]
+
+    def test_partial_bare_literal_withheld(self):
+        assert _parse_gemma4_array("tru", partial=True) == []
+        assert _parse_gemma4_array("nu", partial=True) == []
+        assert _parse_gemma4_array("1e", partial=True) == []
+        assert _parse_gemma4_array("42,tru", partial=True) == [42]
+
+    def test_partial_string_delimiter_overlap_withheld(self):
+        assert _parse_gemma4_array('<|"|>value<|', partial=True) == ["value"]
+
     @pytest.mark.timeout(5)
     def test_string_element_with_closing_bracket(self):
         result = _parse_gemma4_array('[<|"|>a]b<|"|>,<|"|>c<|"|>],<|"|>tail<|"|>')
@@ -165,6 +231,24 @@ class TestParseGemma4Array:
         assert result == [42]
 
 
+class TestStablePartialJsonPrefix:
+    def test_trims_only_syntactic_suffix(self):
+        assert _stable_partial_json_prefix('{"path": "src/main.rs"}') == (
+            '{"path": "src/main.rs'
+        )
+
+    def test_preserves_closing_chars_inside_string_values(self):
+        assert _stable_partial_json_prefix('{"pattern": "value}]"}') == (
+            '{"pattern": "value}]'
+        )
+
+    def test_trims_nested_syntactic_suffix(self):
+        assert (
+            _stable_partial_json_prefix('{"payload": {"path": "src/main.rs"}}')
+            == '{"payload": {"path": "src/main.rs'
+        )
+
+
 # ---------------------------------------------------------------------------
 # Non-streaming extraction tests
 # ---------------------------------------------------------------------------
@@ -172,7 +256,7 @@ class TestParseGemma4Array:
 
 class TestExtractToolCalls:
     def test_no_tool_calls(self, parser, mock_request):
-        model_output = "Hello, how can I help you today?"
+        model_output = "Hello, how can I help you toalpha?"
         result = parser.extract_tool_calls(model_output, mock_request)
 
         assert result.tools_called is False
@@ -369,6 +453,42 @@ class TestStreamingExtraction:
                     if arg:
                         args_text += arg
         return args_text
+
+    def _collect_argument_prefixes(self, results):
+        """Collect the assembled argument string after each argument delta."""
+        prefixes: list[str] = []
+        args_text = ""
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        arg = func.get("arguments", "")
+                    else:
+                        arg = getattr(func, "arguments", "") or ""
+                    if arg:
+                        args_text += arg
+                        prefixes.append(args_text)
+        return prefixes
+
+    def _collect_tool_calls_by_index(self, results):
+        calls: dict[int, dict[str, str | None]] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    entry = calls.setdefault(tc.index, {"name": None, "arguments": ""})
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        name = func.get("name")
+                        arg = func.get("arguments", "")
+                    else:
+                        name = getattr(func, "name", None)
+                        arg = getattr(func, "arguments", "") or ""
+                    if name:
+                        entry["name"] = name
+                    if arg:
+                        entry["arguments"] += arg
+        return calls
 
     def _collect_function_name(self, results):
         """Extract the function name from streaming results."""
@@ -620,9 +740,9 @@ class TestStreamingExtraction:
         captured_current_texts: list[str] = []
         original_extract_streaming = parser._extract_streaming
 
-        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+        def wrapped_extract_streaming(current_text, request):
             captured_current_texts.append(current_text)
-            return original_extract_streaming(previous_text, current_text, delta_text)
+            return original_extract_streaming(current_text, request)
 
         monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
 
@@ -699,3 +819,326 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+    def test_streaming_complete_tool_call_in_single_delta(self, parser, mock_request):
+        """A complete tool call in one delta must be emitted."""
+        chunks = [
+            '<|tool_call>call:get_station{location:<|"|>Milano<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls_by_index(results)
+
+        assert set(calls) == {0}
+        assert calls[0]["name"] == "get_station"
+        assert json.loads(calls[0]["arguments"] or "{}") == {"location": "Milano"}
+
+    def test_streaming_multiple_complete_tool_calls_in_single_delta(
+        self, parser, mock_request
+    ):
+        """Multiple complete calls in one accepted delta must all be emitted."""
+        chunks = [
+            "<|tool_call>call:first_tool{alpha:15,beta:1,gamma:1990}"
+            "<tool_call|><|tool_call>call:second_tool{delta:9,epsilon:30}"
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls_by_index(results)
+
+        assert set(calls) == {0, 1}
+        assert calls[0]["name"] == "first_tool"
+        assert json.loads(calls[0]["arguments"] or "{}") == {
+            "alpha": 15,
+            "beta": 1,
+            "gamma": 1990,
+        }
+        assert calls[1]["name"] == "second_tool"
+        assert json.loads(calls[1]["arguments"] or "{}") == {
+            "delta": 9,
+            "epsilon": 30,
+        }
+
+    def test_streaming_parallel_false_keeps_only_first_call_in_single_delta(
+        self, parser, mock_request
+    ):
+        """parallel_tool_calls=false exposes only the first streamed call."""
+        mock_request.parallel_tool_calls = False
+        chunks = [
+            "<|tool_call>call:first_tool{alpha:15,beta:1,gamma:1990}"
+            "<tool_call|><|tool_call>call:second_tool{delta:9,epsilon:30}"
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls_by_index(results)
+
+        assert set(calls) == {0}
+        assert calls[0]["name"] == "first_tool"
+        assert json.loads(calls[0]["arguments"] or "{}") == {
+            "alpha": 15,
+            "beta": 1,
+            "gamma": 1990,
+        }
+
+    def test_streaming_close_then_open_in_same_delta(self, parser, mock_request):
+        """A delta can close one call and open the next without dropping either."""
+        chunks = [
+            "<|tool_call>call:first_tool{alpha:15,beta:1,gamma:1990}",
+            "<tool_call|><|tool_call>call:second_tool{delta:9,epsilon:30}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls_by_index(results)
+
+        assert set(calls) == {0, 1}
+        assert json.loads(calls[0]["arguments"] or "{}") == {
+            "alpha": 15,
+            "beta": 1,
+            "gamma": 1990,
+        }
+        assert json.loads(calls[1]["arguments"] or "{}") == {
+            "delta": 9,
+            "epsilon": 30,
+        }
+
+    def test_streaming_incomplete_tool_call_emits_stable_partial_args(
+        self, parser, mock_request
+    ):
+        """Incomplete calls may stream append-only stable argument prefixes."""
+        chunks = [
+            "<|tool_call>",
+            "call:first_tool{",
+            "alpha:15,beta:1",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        assert self._collect_function_name(results) == "first_tool"
+        args_text = self._collect_arguments(results)
+        assert args_text == '{"alpha": 15'
+        assert "beta" not in args_text
+
+    def test_streaming_partial_string_argument_is_append_only(
+        self, parser, mock_request
+    ):
+        """String argument chunks may stream before the closing delimiter."""
+        chunks = [
+            "<|tool_call>",
+            "call:read_file{",
+            'path:<|"|>src/main.',
+            'rs<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        prefixes = self._collect_argument_prefixes(results)
+
+        assert json.loads(args_text) == {"path": "src/main.rs"}
+        assert any(prefix == '{"path": "src/main.' for prefix in prefixes)
+        assert all(args_text.startswith(prefix) for prefix in prefixes)
+
+    def test_streaming_partial_string_delimiter_overlap_is_withheld(
+        self, parser, mock_request
+    ):
+        """Partial string delimiter bytes must not be streamed as arguments."""
+        chunks = [
+            "<|tool_call>",
+            "call:add_note{",
+            'content:<|"|>Buy milk<|',
+            '"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        prefixes = self._collect_argument_prefixes(results)
+
+        assert json.loads(args_text) == {"content": "Buy milk"}
+        assert all("<|" not in prefix for prefix in prefixes)
+        assert all(args_text.startswith(prefix) for prefix in prefixes)
+
+    def test_streaming_nested_partial_args_are_append_only(self, parser, mock_request):
+        """Nested objects and arrays stream only prefixes that can grow."""
+        chunks = [
+            "<|tool_call>",
+            "call:update_item{",
+            'payload:{path:<|"|>src/main.',
+            'rs<|"|>,enabled:true},items:[<|"|>a<|"|>,<|"|>b',
+            'eta<|"|>]}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        prefixes = self._collect_argument_prefixes(results)
+
+        assert json.loads(args_text) == {
+            "payload": {"path": "src/main.rs", "enabled": True},
+            "items": ["a", "beta"],
+        }
+        assert any(prefix == '{"payload": {"path": "src/main.' for prefix in prefixes)
+        assert all(args_text.startswith(prefix) for prefix in prefixes)
+
+    def test_streaming_repairs_final_end_marker_from_token_ids(
+        self, parser, mock_request
+    ):
+        """Speculative streaming may omit the terminal end marker from text."""
+        chunks = [
+            (TOOL_CALL_START, [48]),
+            ("call:first_tool{alpha:15,beta:1,gamma:1990}", [0]),
+            ("", [49, 50]),
+        ]
+        results = []
+        previous_text = ""
+        previous_token_ids = []
+
+        for delta_text, delta_token_ids in chunks:
+            current_text = previous_text + delta_text
+            current_token_ids = previous_token_ids + delta_token_ids
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                previous_token_ids=tuple(previous_token_ids),
+                current_token_ids=tuple(current_token_ids),
+                delta_token_ids=tuple(delta_token_ids),
+                request=mock_request,
+            )
+            results.append((delta, current_text))
+            previous_text = current_text
+            previous_token_ids = list(current_token_ids)
+
+        calls = self._collect_tool_calls_by_index(results)
+        assert calls[0]["name"] == "first_tool"
+        assert json.loads(calls[0]["arguments"] or "{}") == {
+            "alpha": 15,
+            "beta": 1,
+            "gamma": 1990,
+        }
+        assert all(
+            not (delta and delta.content and TOOL_RESPONSE in delta.content)
+            for delta, _ in results
+        )
+
+    def test_streaming_repairs_empty_mtp_tool_text_from_token_ids(
+        self, parser, mock_request
+    ):
+        """MTP can emit tool token IDs while text deltas stay empty."""
+        chunks = [
+            ("", [48]),
+            ("", [100]),
+            ("", [101, 49, 48, 102, 49, 50]),
+        ]
+        results = []
+        previous_text = ""
+        previous_token_ids = []
+
+        for delta_text, delta_token_ids in chunks:
+            current_text = previous_text + delta_text
+            current_token_ids = previous_token_ids + delta_token_ids
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=delta_text,
+                previous_token_ids=tuple(previous_token_ids),
+                current_token_ids=tuple(current_token_ids),
+                delta_token_ids=tuple(delta_token_ids),
+                request=mock_request,
+            )
+            results.append((delta, current_text))
+            previous_text = current_text
+            previous_token_ids = list(current_token_ids)
+
+        calls = self._collect_tool_calls_by_index(results)
+        assert set(calls) == {0, 1}
+        assert calls[0]["name"] == "first_tool"
+        assert json.loads(calls[0]["arguments"] or "{}") == {
+            "alpha": 15,
+            "beta": 1,
+            "gamma": 1990,
+        }
+        assert calls[1]["name"] == "second_tool"
+        assert json.loads(calls[1]["arguments"] or "{}") == {
+            "delta": 9,
+            "epsilon": 30,
+        }
+        assert all(
+            not (delta and delta.content and TOOL_RESPONSE in delta.content)
+            for delta, _ in results
+        )
+
+    def test_streaming_trailing_dot_float_split_across_chunks(
+        self, parser, mock_request
+    ):
+        """Split decimal floats must not corrupt the final streamed JSON."""
+        chunks = [
+            "<|tool_call>",
+            "call:set_coordinates{latitude:108.",
+            "2,longitude:22.",
+            "8}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert args_text
+        assert json.loads(args_text) == {"latitude": 108.2, "longitude": 22.8}
+
+    def test_streaming_split_start_delimiter_after_completed_call(
+        self, parser, mock_request
+    ):
+        """A split start delimiter after a close delimiter should still replay."""
+        chunks = [
+            "<|tool_call>",
+            "call:get_station_info{",
+            'location:<|"|>Milano<|"|>}<tool_call|><',
+            '|tool_call>call:get_station_info{location:<|"|>Piacenza<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        calls = self._collect_tool_calls_by_index(results)
+
+        assert set(calls) == {0, 1}
+        assert calls[0]["name"] == "get_station_info"
+        assert json.loads(calls[0]["arguments"] or "{}") == {"location": "Milano"}
+        assert calls[1]["name"] == "get_station_info"
+        assert json.loads(calls[1]["arguments"] or "{}") == {"location": "Piacenza"}
+
+    def test_streaming_filename_suffix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """File extensions split across chunks must not be dropped."""
+        chunks = [
+            "<|tool_call>",
+            "call:read_file{",
+            'path:<|"|>src/main.',
+            'rs<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"path": "src/main.rs"}
+
+    def test_streaming_string_prefix_preserved_across_chunks(
+        self, parser, mock_request
+    ):
+        """String values split after the first character must be preserved."""
+        chunks = [
+            "<|tool_call>",
+            "call:open_item{",
+            'mode:<|"|>e',
+            'dit<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+
+        assert json.loads(args_text) == {"mode": "edit"}
