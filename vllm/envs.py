@@ -1715,6 +1715,19 @@ class QuantSettings(BaseSettings):
         default=False,
         description="If set, vLLM will disable the MLA attention optimizations.",
     )
+    triton_attn_use_td: bool | None = Field(
+        default=None,
+        description=(
+            "Use tensor descriptors for Q/K/V loads and output stores in the "
+            "Triton unified-attention kernel. Enables HW 2D block reads on "
+            "Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at "
+            "Triton compile time so other platforms see no overhead. "
+            "Tri-state override: unset (default) lets the `triton_attn` "
+            "backend auto-select per platform (currently auto-enabled on "
+            "XPU only); ``1`` forces TD on; ``0`` forces TD off. Useful "
+            "for A/B benchmarking the TD path."
+        ),
+    )
     compute_nans_in_logits: bool = Field(
         default=False,
         description=(
@@ -1800,6 +1813,15 @@ class QuantSettings(BaseSettings):
             return v
         if isinstance(v, str):
             return bool(int(v))
+        return v
+
+    @field_validator("triton_attn_use_td", mode="before")
+    @classmethod
+    def _parse_triton_attn_use_td(cls, v: Any) -> Any:
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return {"1": True, "0": False}.get(v.strip())
         return v
 
 
