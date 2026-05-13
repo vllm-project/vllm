@@ -144,20 +144,26 @@ class CpuGpuBuffer:
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
 
 
-def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> str:
+def get_engine_client_zmq_addr(
+    local_only: bool,
+    host: str,
+    port: int = 0,
+    *,
+    defer_port: bool = False,
+) -> str:
     """Assign a new ZMQ socket address.
 
-    If local_only is True, participants are colocated and so a unique IPC
-    address will be returned.
+    local_only: return an IPC path.
+    defer_port: return ``tcp://host:0`` for the child to bind atomically
+      (avoids parent-probe vs child-bind TOCTOU; child must report back via
+      ``getsockopt(zmq.LAST_ENDPOINT)``).
+    Otherwise: TCP with ``port`` (or ``get_open_port()`` if 0)."""
 
-    Otherwise, the provided host and port will be used to construct a TCP
-    address (port == 0 means assign an available port)."""
-
-    return (
-        get_open_zmq_ipc_path()
-        if local_only
-        else (get_tcp_uri(host, port or get_open_port()))
-    )
+    if local_only:
+        return get_open_zmq_ipc_path()
+    if defer_port:
+        return get_tcp_uri(host, 0)
+    return get_tcp_uri(host, port or get_open_port())
 
 
 class APIServerProcessManager:
@@ -178,6 +184,7 @@ class APIServerProcessManager:
         target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
         tensor_queue: Queue | None = None,
+        defer_addresses: bool = False,
     ):
         """Initialize and start API server worker processes.
 
@@ -191,6 +198,10 @@ class APIServerProcessManager:
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
             tensor_queue: Optional tensor IPC queue for sharing MM tensors
+            defer_addresses: Treat ``input_addresses``/``output_addresses``
+                as placeholders; each child reports its real bound endpoint
+                via a per-child pipe (collected by
+                :py:meth:`gather_actual_addresses`).
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -199,11 +210,14 @@ class APIServerProcessManager:
         # Start API servers
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
+        self._address_pipes: list[connection.Connection] | None = (
+            [] if defer_addresses else None
+        )
 
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
-            client_config = {
+            client_config: dict[str, Any] = {
                 "input_address": in_addr,
                 "output_address": out_addr,
                 "client_count": num_servers,
@@ -214,6 +228,12 @@ class APIServerProcessManager:
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
 
+            child_send: connection.Connection | None = None
+            if self._address_pipes is not None:
+                parent_recv, child_send = spawn_context.Pipe(duplex=False)
+                self._address_pipes.append(parent_recv)
+                client_config["actual_address_pipe"] = child_send
+
             proc = spawn_context.Process(
                 target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
@@ -222,11 +242,90 @@ class APIServerProcessManager:
             self.processes.append(proc)
             proc.start()
 
+            # Drop parent's write end so reader sees EOF on child death.
+            if child_send is not None:
+                child_send.close()
+
         logger.info("Started %d API server processes", len(self.processes))
 
         # Shutdown only the API server processes on garbage collection
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+
+    def gather_actual_addresses(
+        self,
+        timeout: float = 60.0,
+    ) -> tuple[list[str], list[str]]:
+        """Return (inputs, outputs) reported by each child, indexed by
+        ``client_index``. Requires ``defer_addresses=True``. Raises
+        ``RuntimeError`` on timeout or premature child exit."""
+        if self._address_pipes is None:
+            raise RuntimeError(
+                "gather_actual_addresses() requires that "
+                "APIServerProcessManager was constructed with "
+                "defer_addresses=True"
+            )
+
+        n = len(self._address_pipes)
+        inputs: list[str | None] = [None] * n
+        outputs: list[str | None] = [None] * n
+        pending: dict[connection.Connection, int] = {
+            pipe: i for i, pipe in enumerate(self._address_pipes)
+        }
+        sentinel_to_idx: dict[Any, int] = {
+            proc.sentinel: i for i, proc in enumerate(self.processes)
+        }
+
+        deadline = time.monotonic() + timeout
+        try:
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    missing = [self.processes[i].name for i in pending.values()]
+                    raise RuntimeError(
+                        f"Timed out after {timeout:.1f}s waiting for "
+                        f"API server(s) to report bound ZMQ addresses: "
+                        f"{missing}"
+                    )
+                waitables: list[Any] = list(pending.keys()) + list(
+                    sentinel_to_idx.keys()
+                )
+                ready = connection.wait(waitables, timeout=remaining)
+                # Drain pipes first: a child that sent its message and
+                # then exited can surface both pipe-readable and sentinel
+                # in the same poll, and we must record the success before
+                # observing the exit.
+                for item in ready:
+                    if isinstance(item, connection.Connection) and item in pending:
+                        idx = pending.pop(item)
+                        try:
+                            msg: dict[str, str] = item.recv()
+                        except EOFError as e:
+                            raise RuntimeError(
+                                f"API server {self.processes[idx].name} "
+                                f"closed its address pipe without "
+                                f"reporting its bound ZMQ addresses"
+                            ) from e
+                        inputs[idx] = msg["input_address"]
+                        outputs[idx] = msg["output_address"]
+                for item in ready:
+                    if item in sentinel_to_idx:
+                        # Pop to avoid re-firing on the same sentinel.
+                        idx = sentinel_to_idx.pop(item)
+                        pipe = self._address_pipes[idx]
+                        if pipe in pending:
+                            proc = self.processes[idx]
+                            raise RuntimeError(
+                                f"API server process {proc.name} exited "
+                                f"(code={proc.exitcode}) before reporting "
+                                f"its bound ZMQ addresses"
+                            )
+        finally:
+            for pipe in pending:
+                with contextlib.suppress(Exception):
+                    pipe.close()
+
+        return inputs, outputs  # type: ignore[return-value]
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""

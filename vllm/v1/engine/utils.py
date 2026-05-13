@@ -955,8 +955,16 @@ class CoreEngineActorManager:
 def get_engine_zmq_addresses(
     vllm_config: VllmConfig,
     num_api_servers: int = 1,
+    *,
+    defer_api_server_ports: bool = False,
 ) -> EngineZmqAddresses:
-    """Allocate ZMQ addresses for engine-client communication."""
+    """Allocate ZMQ addresses for engine-client communication.
+
+    ``defer_api_server_ports``: emit TCP placeholders (``tcp://host:0``)
+    for per-API-server input/output addresses; the actual ports are picked
+    by the kernel in each child at bind time and must be reported back via
+    ``APIServerProcessManager.gather_actual_addresses`` before the engine
+    handshake. No-op for the IPC (colocated) case."""
     parallel_config = vllm_config.parallel_config
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
@@ -980,11 +988,15 @@ def get_engine_zmq_addresses(
 
     return EngineZmqAddresses(
         inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
+            get_engine_client_zmq_addr(
+                client_local_only, host, defer_port=defer_api_server_ports
+            )
             for _ in range(num_api_servers)
         ],
         outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
+            get_engine_client_zmq_addr(
+                client_local_only, host, defer_port=defer_api_server_ports
+            )
             for _ in range(num_api_servers)
         ],
     )
