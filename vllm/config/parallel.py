@@ -3,7 +3,6 @@
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -96,7 +95,6 @@ class EPLBConfig:
 
 
 @config
-@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -388,7 +386,7 @@ class ParallelConfig:
             # divisible by ep_size, supporting non-standard ep_size values
             min_redundant = (ep_size - num_logical_experts % ep_size) % ep_size
             self.eplb_config.num_redundant_experts = min_redundant
-            logger.info(
+            logger.info_once(
                 "EPLB num_redundant_experts not specified, "
                 "defaulting to minimum valid value: %d "
                 "(num_logical_experts=%d, ep_size=%d)",

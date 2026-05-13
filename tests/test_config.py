@@ -1079,50 +1079,6 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
-@pytest.mark.parametrize(
-    (
-        "model_id",
-        "data_parallel_size",
-        "external_lb",
-        "expected_needs_coordinator",
-    ),
-    [
-        # Non-MoE model with DP=1 should not need coordinator
-        ("facebook/opt-125m", 1, False, False),
-        # Non-MoE model with DP>1 internal LB should need coordinator
-        ("facebook/opt-125m", 2, False, True),
-        # Non-MoE model with DP>1 external LB should not need coordinator
-        ("facebook/opt-125m", 2, True, False),
-        # MoE model with DP=1 should not need coordinator
-        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
-        # MoE model with DP>1 internal LB should need both coordinator
-        # and wave coordination
-        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, False, True),
-        # MoE model with DP>1 external LB needs coordinator for wave coordination
-        # (wave coordination runs in coordinator process)
-        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, True, True),
-    ],
-)
-def test_needs_dp_coordination(
-    model_id,
-    data_parallel_size,
-    external_lb,
-    expected_needs_coordinator,
-):
-    """Test that DP coordinator and wave coordination are configured correctly."""
-    from vllm.config import ParallelConfig
-
-    model_config = ModelConfig(model_id)
-    parallel_config = ParallelConfig(
-        data_parallel_size=data_parallel_size,
-        data_parallel_external_lb=external_lb,
-    )
-    vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
-
-    assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
-
-
-
 def test_eplb_num_redundant_experts_default():
     """Test that num_redundant_experts defaults to None and can be set."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig
@@ -1182,7 +1138,10 @@ def test_eplb_num_redundant_experts_auto_computation(
     """
     from vllm.config.parallel import ParallelConfig
 
-    with patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True):
+    with patch(
+        "vllm.config.parallel.current_platform.is_cuda_alike",
+        return_value=True,
+    ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=tp_size,
             data_parallel_size=dp_size,
@@ -1234,7 +1193,10 @@ def test_eplb_num_redundant_experts_explicit_value_preserved():
     """Test that explicitly set num_redundant_experts is not overwritten."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig
 
-    with patch("vllm.config.parallel.current_platform.is_cuda_alike", return_value=True):
+    with patch(
+        "vllm.config.parallel.current_platform.is_cuda_alike",
+        return_value=True,
+    ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=4,
             data_parallel_size=2,
@@ -1250,6 +1212,49 @@ def test_eplb_num_redundant_experts_explicit_value_preserved():
 
     # Should still be the explicit value
     assert parallel_config.eplb_config.num_redundant_experts == 10
+
+
+@pytest.mark.parametrize(
+    (
+        "model_id",
+        "data_parallel_size",
+        "external_lb",
+        "expected_needs_coordinator",
+    ),
+    [
+        # Non-MoE model with DP=1 should not need coordinator
+        ("facebook/opt-125m", 1, False, False),
+        # Non-MoE model with DP>1 internal LB should need coordinator
+        ("facebook/opt-125m", 2, False, True),
+        # Non-MoE model with DP>1 external LB should not need coordinator
+        ("facebook/opt-125m", 2, True, False),
+        # MoE model with DP=1 should not need coordinator
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
+        # MoE model with DP>1 internal LB should need both coordinator
+        # and wave coordination
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, False, True),
+        # MoE model with DP>1 external LB needs coordinator for wave coordination
+        # (wave coordination runs in coordinator process)
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, True, True),
+    ],
+)
+def test_needs_dp_coordination(
+    model_id,
+    data_parallel_size,
+    external_lb,
+    expected_needs_coordinator,
+):
+    """Test that DP coordinator and wave coordination are configured correctly."""
+    from vllm.config import ParallelConfig
+
+    model_config = ModelConfig(model_id)
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_external_lb=external_lb,
+    )
+    vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
+
+    assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
 def test_eagle_draft_model_config():
@@ -1270,4 +1275,3 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
-
