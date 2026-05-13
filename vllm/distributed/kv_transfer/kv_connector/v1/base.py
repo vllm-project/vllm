@@ -372,34 +372,9 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Get the set of block IDs that failed to load.
-
-        Returns:
-            Set of block IDs that encountered load errors.
-            Empty set if no load errors occurred.
-
-        Notes:
-            - Applies to both sync- and async-loading requests.
-            - Async loading: failed blocks may be reported in any forward pass
-              up to and including the pass where the request ID is returned by
-              `get_finished()`. Even if failures occur, the request must still
-              be reported via `get_finished()`, and the failed block IDs must
-              appear here no later than that same pass.
-            - Sync loading: failed blocks should be reported in the forward
-              pass in which they are detected.
-        """
-        return set()
-
     def get_request_ids_with_load_errors(self) -> set[str]:
         """
         Get the set of request IDs whose KV load failed.
-
-        This is the request-level counterpart of
-        get_block_ids_with_load_errors(). Connectors that report errors at
-        request granularity should override this method instead of (or in
-        addition to) the block-level one.
 
         Returns:
             Set of request IDs that encountered load errors.
