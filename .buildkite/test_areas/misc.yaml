@@ -79,6 +79,7 @@ steps:
     - tests/v1/core
     - tests/v1/executor
     - tests/v1/kv_offload
+    - tests/v1/simple_kv_offload
     - tests/v1/worker
     - tests/v1/kv_connector/unit
     - tests/v1/metrics
@@ -90,6 +91,7 @@ steps:
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/simple_kv_offload
     - pytest -v -s v1/worker
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
