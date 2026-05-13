@@ -124,6 +124,37 @@ class Glm4MoeModelToolParser(ToolParser):
         return json.dumps(s, ensure_ascii=False)[1:-1]
 
     @staticmethod
+    def _infer_string_type_from_schema(schema: dict[str, Any]) -> bool:
+        """Recursively infer whether a JSON Schema resolves to string type.
+
+        Handles ``anyOf``/``oneOf``/``allOf``/``$ref`` constructs that are
+        common in Claude Code tool definitions (Plan mode, MCP tools, etc.).
+        """
+        # Direct type field
+        if "type" in schema:
+            t = schema["type"]
+            if isinstance(t, str):
+                return t == "string"
+            if isinstance(t, list):
+                return "string" in t
+            return False
+
+        # anyOf / oneOf — string if any branch is string
+        for key in ("anyOf", "oneOf"):
+            if key in schema and isinstance(schema[key], list):
+                for sub in schema[key]:
+                    if isinstance(sub, dict) and Glm4MoeModelToolParser._infer_string_type_from_schema(sub):
+                        return True
+
+        # allOf — string if any branch is string
+        if "allOf" in schema and isinstance(schema["allOf"], list):
+            for sub in schema["allOf"]:
+                if isinstance(sub, dict) and Glm4MoeModelToolParser._infer_string_type_from_schema(sub):
+                    return True
+
+        return False
+
+    @staticmethod
     def _is_string_type(
         tool_name: str,
         arg_name: str,
@@ -136,12 +167,12 @@ class Glm4MoeModelToolParser(ToolParser):
                 continue
             if tool.function.parameters is None:
                 return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
+            arg_spec = (
+                tool.function.parameters.get("properties", {}).get(arg_name)
             )
-            return arg_type == "string"
+            if not isinstance(arg_spec, dict):
+                return False
+            return Glm4MoeModelToolParser._infer_string_type_from_schema(arg_spec)
         logger.debug("No tool named '%s'.", tool_name)
         return False
 
