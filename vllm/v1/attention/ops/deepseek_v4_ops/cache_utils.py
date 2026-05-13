@@ -17,6 +17,7 @@ preparation.
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import has_cutedsl
 
 
 @triton.jit
@@ -303,7 +304,7 @@ def _dequantize_and_gather_k_kernel(
             tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
 
 
-def dequantize_and_gather_k_cache(
+def dequantize_and_gather_k_cache_triton(
     # [num_reqs, max_num_tokens, head_size]
     out: torch.Tensor,
     # [num_blocks, block_size, head_bytes]
@@ -346,6 +347,34 @@ def dequantize_and_gather_k_cache(
         output_dim=512,
         fp8_max=FP8_MAX,
         n_quant_blocks=7,
+    )
+
+
+def dequantize_and_gather_k_cache(
+    # [num_reqs, max_num_tokens, head_size]
+    out: torch.Tensor,
+    # [num_blocks, block_size, head_bytes]
+    k_cache: torch.Tensor,
+    # [num_reqs]
+    seq_lens: torch.Tensor,
+    # [num_reqs]
+    gather_lens: torch.Tensor | None,
+    # [num_reqs, max_blocks_per_seq]
+    block_table: torch.Tensor,
+    block_size: int,
+    offset: int,
+) -> None:
+    if has_cutedsl():
+        # lazily import, otherwise some tests fail due to CUDA driver init failure.
+        from .dequant_gather_k_cutedsl import dequantize_and_gather_k_cache_cutedsl
+
+        dequantize_and_gather_k_cache_cutedsl(
+            out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        )
+        return
+
+    dequantize_and_gather_k_cache_triton(
+        out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
     )
 
 
