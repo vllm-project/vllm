@@ -16,33 +16,46 @@
 // causal_conv1d_update
 // ---------------------------------------------------------------------------
 at::Tensor causal_conv1d_update_cpu_impl(
-    at::Tensor& x,  // modified in-place (re-typed to float32)
+    at::Tensor& x,
     at::Tensor& conv_state, const at::Tensor& weight,
     const c10::optional<at::Tensor>& bias,
     const c10::optional<std::string>& activation,
     const c10::optional<at::Tensor>& conv_state_indices,
     const c10::optional<at::Tensor>& query_start_loc, int64_t pad_slot_id) {
-  
+
   bool do_silu = false;
   if (activation.has_value()) {
     const std::string& act = activation.value();
     do_silu = (act == "silu" || act == "swish");
   }
 
-  // Causal conv still works in float32 for now (minimal overhead compared to SSM)
-  at::Tensor x_f32 = x.to(at::kFloat).contiguous();
-  at::Tensor state_f32 = conv_state.to(at::kFloat).contiguous();
-  at::Tensor w_f32 = weight.to(at::kFloat).contiguous();
+  at::ScalarType dtype = x.scalar_type();
+
+  // Ensure contiguous in native dtype — no float32 conversion.
+  at::Tensor x_c = x.is_contiguous() ? x : x.contiguous();
+  // conv_state is modified in-place; make a contiguous working copy if needed.
+  bool state_copied = !conv_state.is_contiguous() ||
+                       conv_state.scalar_type() != dtype;
+  at::Tensor state_c = state_copied ?
+      conv_state.to(dtype).contiguous() :
+      conv_state;
+  // Weight: coerce to same dtype if needed (should match in practice)
+  at::Tensor w_c = (weight.scalar_type() != dtype) ?
+      weight.to(dtype).contiguous() :
+      (weight.is_contiguous() ? weight : weight.contiguous());
+
+  // Bias stays float32 (small tensor, used for accumulation only)
   at::Tensor bias_f32;
-  if (bias.has_value() && bias.value().defined()) bias_f32 = bias.value().to(at::kFloat).contiguous();
+  if (bias.has_value() && bias.value().defined())
+    bias_f32 = bias.value().to(at::kFloat).contiguous();
 
-  int64_t batch = x_f32.size(0);
-  int64_t dim = x_f32.size(1);
-  int64_t seqlen = (x_f32.dim() == 3) ? x_f32.size(2) : 1;
-  int64_t width = w_f32.size(1);
-  int64_t state_len = state_f32.size(2);
+  int64_t batch     = x_c.size(0);
+  int64_t dim       = x_c.size(1);
+  int64_t seqlen    = (x_c.dim() == 3) ? x_c.size(2) : 1;
+  int64_t width     = w_c.size(1);
+  int64_t state_len = state_c.size(2);
 
-  at::Tensor out_f32 = at::empty_like(x_f32);
+  at::Tensor out = at::empty_like(x_c);  // native dtype, no float32 alloc
 
   const int32_t* cache_idx_ptr = nullptr;
   at::Tensor cache_idx_int;
@@ -51,15 +64,23 @@ at::Tensor causal_conv1d_update_cpu_impl(
     cache_idx_ptr = cache_idx_int.data_ptr<int32_t>();
   }
 
-  mamba_cpu::causal_conv1d_update_kernel(
-      x_f32.data_ptr<float>(), state_f32.data_ptr<float>(),
-      w_f32.data_ptr<float>(), bias_f32.defined() ? bias_f32.data_ptr<float>() : nullptr,
-      out_f32.data_ptr<float>(), cache_idx_ptr, static_cast<int32_t>(pad_slot_id),
-      batch, dim, seqlen, width, state_len, do_silu);
+  VLLM_DISPATCH_FLOATING_TYPES(dtype, "causal_conv1d_update", [&] {
+    mamba_cpu::causal_conv1d_update_kernel<scalar_t>(
+        x_c.data_ptr<scalar_t>(),
+        state_c.data_ptr<scalar_t>(),
+        w_c.data_ptr<scalar_t>(),
+        bias_f32.defined() ? bias_f32.data_ptr<float>() : nullptr,
+        out.data_ptr<scalar_t>(),
+        cache_idx_ptr, static_cast<int32_t>(pad_slot_id),
+        batch, dim, seqlen, width, state_len, do_silu);
+  });
 
-  conv_state.copy_(state_f32.to(conv_state.scalar_type()));
-  return out_f32.to(x.scalar_type());
+  // Write state back only if we made a working copy
+  if (state_copied) conv_state.copy_(state_c);
+
+  return out;
 }
+
 
 // ---------------------------------------------------------------------------
 // selective_state_update

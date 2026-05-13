@@ -16,12 +16,15 @@
 namespace mamba_cpu {
 
 // ---------------------------------------------------------------------------
-// causal_conv1d_update
+// causal_conv1d_update — templated for native BF16/FP32
+// x, state, weight, out are in scalar_t; accumulation in float32.
+// Eliminates 5 dtype-conversion copies that the old float32-only path did.
 // ---------------------------------------------------------------------------
+template<typename scalar_t>
 inline void causal_conv1d_update_kernel(
-    const float* __restrict__ x_ptr, float* __restrict__ state_ptr,
-    const float* __restrict__ weight_ptr, const float* __restrict__ bias_ptr,
-    float* __restrict__ out_ptr, const int32_t* __restrict__ cache_idxs,
+    const scalar_t* __restrict__ x_ptr, scalar_t* __restrict__ state_ptr,
+    const scalar_t* __restrict__ weight_ptr, const float* __restrict__ bias_ptr,
+    scalar_t* __restrict__ out_ptr, const int32_t* __restrict__ cache_idxs,
     int32_t pad_slot_id, int64_t batch, int64_t dim, int64_t seqlen,
     int64_t width, int64_t state_len, bool do_silu) {
 
@@ -31,36 +34,37 @@ inline void causal_conv1d_update_kernel(
     if (cache_idx == pad_slot_id) continue;
 
     for (int64_t t = 0; t < seqlen; ++t) {
-      const float* x_b = x_ptr + (b * dim * seqlen + t);
-      float* out_b = out_ptr + (b * dim * seqlen + t);
-      float* s = state_ptr + cache_idx * dim * state_len;
+      const scalar_t* x_b = x_ptr + (b * dim * seqlen + t);
+      scalar_t* out_b = out_ptr + (b * dim * seqlen + t);
+      scalar_t* s = state_ptr + cache_idx * dim * state_len;
 
       for (int64_t d = 0; d < dim; ++d) {
-        float x_val = x_b[d * seqlen];
-        float* sd = s + d * state_len;
+        float x_val = static_cast<float>(x_b[d * seqlen]);
+        scalar_t* sd = s + d * state_len;
+        const scalar_t* w = weight_ptr + d * width;
 
-        const float* w = weight_ptr + d * width;
+        // Accumulate in float32 for precision
         float acc = (bias_ptr != nullptr) ? bias_ptr[d] : 0.0f;
-
         for (int64_t k = 0; k < state_len; ++k) {
-          acc += w[k] * sd[k];
+          acc += static_cast<float>(w[k]) * static_cast<float>(sd[k]);
         }
-        acc += w[state_len] * x_val;
+        acc += static_cast<float>(w[state_len]) * x_val;
 
+        // Shift state left, append new input — native dtype, no copy
         if (state_len > 1) {
-          std::memmove(sd, sd + 1, (state_len - 1) * sizeof(float));
+          std::memmove(sd, sd + 1, (state_len - 1) * sizeof(scalar_t));
         }
         if (state_len > 0) {
-          sd[state_len - 1] = x_val;
+          sd[state_len - 1] = static_cast<scalar_t>(x_val);
         }
 
         if (do_silu) {
-            float sigmoid = (acc >= 0) ?
-                1.0f / (1.0f + std::exp(-acc)) :
-                std::exp(acc) / (1.0f + std::exp(acc));
-            acc *= sigmoid;
+          float sigmoid = (acc >= 0) ?
+              1.0f / (1.0f + std::exp(-acc)) :
+              std::exp(acc) / (1.0f + std::exp(acc));
+          acc *= sigmoid;
         }
-        out_b[d * seqlen] = acc;
+        out_b[d * seqlen] = static_cast<scalar_t>(acc);
       }
     }
   }
