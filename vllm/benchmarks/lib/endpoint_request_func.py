@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The request function for API endpoints."""
 
+import codecs
 import io
 import json
 import os
@@ -25,11 +26,12 @@ class StreamedResponseHandler:
 
     def __init__(self):
         self.buffer = ""
+        self._decoder = codecs.getincrementaldecoder("utf-8")()
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
         messages."""
-        chunk_str = chunk_bytes.decode("utf-8")
+        chunk_str = self._decoder.decode(chunk_bytes)
         self.buffer += chunk_str
 
         messages = []
@@ -93,6 +95,7 @@ class RequestFuncOutput:
     prompt_len: int = 0
     error: str = ""
     start_time: float = 0.0
+    input_audio_duration: float = 0.0  # in seconds
 
 
 class RequestFunc(Protocol):
@@ -236,6 +239,8 @@ async def async_request_openai_completions(
                                 generated_text += text or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
+                                if (pt := usage.get("prompt_tokens")) is not None:
+                                    output.prompt_len = pt
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -357,6 +362,8 @@ async def async_request_openai_chat_completions(
                                 generated_text += content or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
+                                if (pt := usage.get("prompt_tokens")) is not None:
+                                    output.prompt_len = pt
 
                             most_recent_timestamp = timestamp
 
@@ -422,6 +429,8 @@ async def async_request_openai_audio(
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
+        output.input_audio_duration = soundfile.info(f).duration
+        f.seek(0)
 
         generated_text = ""
         ttft = 0.0
@@ -442,7 +451,9 @@ async def async_request_openai_audio(
 
                         messages = handler.add_chunk(chunk_bytes)
                         for message in messages:
-                            chunk = message.decode("utf-8").removeprefix("data: ")
+                            if type(message) is bytes:
+                                message = message.decode("utf-8")
+                            chunk = message.removeprefix("data: ")
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
@@ -741,6 +752,37 @@ async def async_request_infinity_embeddings_clip(
     )
 
 
+async def async_request_vllm_pooling(
+    request_func_input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    api_url = request_func_input.api_url
+    _validate_api_url(api_url, "vLLM Pooling API", "pooling")
+
+    payload = {
+        "model": request_func_input.model_name
+        if request_func_input.model_name
+        else request_func_input.model,
+        "truncate_prompt_tokens": -1,
+    }
+
+    payload = payload | request_func_input.prompt
+
+    _update_payload_common(payload, request_func_input)
+
+    headers = _get_headers("application/json")
+    _update_headers_common(headers, request_func_input)
+
+    return await _run_pooling_request(
+        session,
+        api_url,
+        payload=payload,
+        headers=headers,
+        pbar=pbar,
+    )
+
+
 # TODO: Add more request functions for different API protocols.
 ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm": async_request_openai_completions,
@@ -755,7 +797,19 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "infinity-embeddings": async_request_infinity_embeddings,
     "infinity-embeddings-clip": async_request_infinity_embeddings_clip,
     # (Infinity embedding server does not support vlm2vec)
+    "vllm-pooling": async_request_vllm_pooling,
     "vllm-rerank": async_request_vllm_rerank,
+}
+
+POOLING_BACKENDS = {
+    "openai-embeddings",
+    "openai-embeddings-chat",
+    "openai-embeddings-clip",
+    "openai-embeddings-vlm2vec",
+    "infinity-embeddings",
+    "infinity-embeddings-clip",
+    "vllm-pooling",
+    "vllm-rerank",
 }
 
 OPENAI_COMPATIBLE_BACKENDS = [

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Jurassic model."""
 
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -22,8 +23,10 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -36,7 +39,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -232,6 +234,7 @@ class Step3p5Attention(nn.Module):
                 hidden_size,
                 self.total_num_heads,
                 bias=False,
+                quant_config=quant_config,
                 prefix=f"{prefix}.g_proj",
             )
 
@@ -352,7 +355,7 @@ class FusedMoEBlock(nn.Module):
         if swiglu_limit not in (None, 0):
             swiglu_limit = float(swiglu_limit)
             assert swiglu_limit == 7.0, (
-                "Swiglu limit in fused moe block only suport 7.0 now."
+                "Swiglu limit in fused moe block only support 7.0 now."
             )
             activation = "swiglustep"
             logger.debug(
@@ -371,14 +374,13 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.share_expert,
             gate=self.gate,
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             activation=activation,
@@ -396,28 +398,14 @@ class FusedMoEBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # router_logits: (num_tokens, n_experts)
+            # TODO(bnell): this gate could be moved into the FusedMoE?
             router_logits, _ = self.gate(hidden_states)
-            fused_moe_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
-            )
-
-        shared_output, final_hidden_states = fused_moe_out
-        if self.share_expert is None:
-            assert shared_output is None
-
-        if self.share_expert is not None:
-            assert shared_output is not None
-            final_hidden_states += shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
             )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
@@ -640,12 +628,25 @@ class Step3p5Model(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        base_layer = (
+            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
+        )
 
+        # Old packed 3D format: .moe.gate_proj.weight [num_experts, out, in]
         expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
+            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
+            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
         ]
+
+        # New per-expert format: .moe.experts.E.gate_proj.weight_packed [out, in]
+        per_expert_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.moe_num_experts,
+        )
 
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
 
@@ -668,6 +669,54 @@ class Step3p5Model(nn.Module):
                     layer_idx = int(parts[2])
                     if layer_idx >= config.num_hidden_layers:
                         continue
+
+            # Per-expert MoE weights (new format from LLM Compressor):
+            # .moe.experts.{E}.{gate,up,down}_proj.{weight_packed,scale,...}
+            # Each weight is individual per-expert, not stacked 3D.
+            if ".moe.experts." in local_name:
+                is_expert_weight = False
+                for mapping in per_expert_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in local_name:
+                        continue
+                    is_expert_weight = True
+                    name_mapped = local_name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(name_mapped, self):
+                        continue
+                    if name_mapped not in params_dict:
+                        continue
+                    param = params_dict[name_mapped]
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
+                        param,
+                        loaded_weight,
+                        name_mapped,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                        return_success=True,
+                    )
+                    if success:
+                        loaded_params.add(name_mapped)
+                        break
+                else:
+                    if (
+                        not is_expert_weight
+                        and not is_pp_missing_parameter(local_name, self)
+                        and local_name in params_dict
+                    ):
+                        # Not an expert proj — use default loader
+                        # (e.g. share_expert weights if they matched)
+                        param = params_dict[local_name]
+                        weight_loader = getattr(
+                            param,
+                            "weight_loader",
+                            default_weight_loader,
+                        )
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(local_name)
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in local_name:
@@ -704,6 +753,16 @@ class Step3p5Model(nn.Module):
                     param = params_dict[replaced_name]
                     weight_loader = param.weight_loader
                     moe_expert_num = self.moe_num_experts
+                    # Per-tensor global scales (e.g. weight_global_scale)
+                    # have shape [1] in compressed-tensors NVFP4 checkpoints.
+                    # Expand to per-expert before the iteration loop.
+                    if (
+                        loaded_weight.shape[0] == 1
+                        and loaded_weight.shape[0] != moe_expert_num
+                    ):
+                        loaded_weight = loaded_weight.expand(
+                            moe_expert_num, *loaded_weight.shape[1:]
+                        )
                     assert loaded_weight.shape[0] == moe_expert_num
                     for expert_id in range(moe_expert_num):
                         loaded_weight_expert = loaded_weight[expert_id]
@@ -758,6 +817,12 @@ class Step3p5Model(nn.Module):
 
 
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+    # Required so quantization exclude lists match fused module prefixes.
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
@@ -770,37 +835,17 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        self.config = config
-        self.vllm_config = vllm_config
-
         self.model = Step3p5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-
-        self.moe_layers: list[FusedMoEBlock] = []
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-            assert isinstance(layer, Step3p5DecoderLayer)
-            if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
-                self.moe_layers.append(layer.moe)
-
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE
-                if not lora_config
-                else lora_config.lora_vocab_padding_size,
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
-            self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, config.vocab_size
-            )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -809,6 +854,14 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         )
 
         # Set MoE hyperparameters
+        self.moe_layers: list[FusedMoEBlock] = []
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, Step3p5DecoderLayer)
+            if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
+                self.moe_layers.append(layer.moe)
+
         self.expert_weights = []
         assert len(self.moe_layers) > 0, "No MoE layers found in the model."
         example_layer = self.moe_layers[0]

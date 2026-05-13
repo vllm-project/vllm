@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import regex as re
 import torch
 from torch import nn
 
@@ -15,6 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
     FusedMoE3DWithLoRA,
+    FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
 )
@@ -25,17 +25,22 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_in_target_modules,
     is_moe_model,
+    is_supported_lora_module,
     process_packed_modules_mapping,
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.models import SupportsLoRA, supports_multimodal
-from vllm.model_executor.models.interfaces import is_pooling_model
+from vllm.model_executor.models import (
+    SupportsLoRA,
+    is_pooling_model,
+    supports_multimodal,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
 
@@ -157,14 +162,47 @@ class LoRAModelManager:
             device=self.device,
             lora_config=self.lora_config,
         )
+
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
-        if self.lora_config.enable_tower_connector_lora:
-            self.supports_tower_connector_lora = self.supports_mm and hasattr(
-                self.model, "get_num_mm_encoder_tokens"
-            )
+        # First, determine if the model supports tower connector LoRA.
+        self.supports_tower_connector_lora = self.supports_mm and hasattr(
+            self.model, "get_num_mm_encoder_tokens"
+        )
+
+        # Then, handle the case where the feature is disabled in the config.
+        if not self.lora_config.enable_tower_connector_lora:
+            if self.supports_tower_connector_lora:
+                logger.info(
+                    "%s supports adding LoRA to the tower modules. If needed, "
+                    "please set `enable_tower_connector_lora=True`.",
+                    self.model.__class__.__name__,
+                )
+            self.supports_tower_connector_lora = False
+            return
+
+        # After this point, the feature is enabled in the config.
+        # Now check if it's supported by the model.
         if not self.supports_tower_connector_lora:
+            # Enabled but not supported: log warning and return.
+            logger.warning(
+                "LoRA with tower connector is enabled, but the model %s "
+                "does not support it. This will be ignored.",
+                self.model.__class__.__name__,
+            )
+            return
+
+        # Check if initialize the language model only.
+        if (
+            vllm_config.model_config.multimodal_config
+            and vllm_config.model_config.multimodal_config.language_model_only
+        ):
+            logger.warning(
+                "Disabling `enable_tower_connector_lora` because the multimodal "
+                "model is configured to initialize the language model only."
+            )
+            self.supports_tower_connector_lora = False
             return
 
         logger.warning(
@@ -253,6 +291,9 @@ class LoRAModelManager:
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
+                logger.debug(
+                    "No LoRA weights found for module %s, skipping.", module_name
+                )
                 continue
 
             module.set_lora(
@@ -260,7 +301,7 @@ class LoRAModelManager:
                 module_lora.lora_a,
                 module_lora.lora_b,
             )
-
+            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -330,8 +371,8 @@ class LoRAModelManager:
             punica_wrapper = self._get_punica_wrapper(module_name)
             if punica_wrapper is None:
                 logger.warning(
-                    "Regarding %s, vLLM currently only supports adding LoRA to"
-                    " language model, %s will be ignored.",
+                    "Regarding %s, no matching PunicaWrapper "
+                    "is found; %s will be ignored.",
                     self.model.__class__.__name__,
                     module_name,
                 )
@@ -347,7 +388,6 @@ class LoRAModelManager:
                     "LoRA is not supported for non-gated MoE gate module."
                     " %s will be ignored.",
                     module_name,
-                    scope="local",
                 )
                 continue
 
@@ -397,12 +437,21 @@ class LoRAModelManager:
                     ),
                 )
 
-            # In some models, especially multimodal ones, layers with the same
-            # name may have different types, such as nn.Linear and
-            # ReplicatedLinear. The nn.Linear layers cannot be replaced with
-            # LoRA layers, leading to assertion error. The following check
-            # aims to prevent this error
-            if self.supports_mm and not isinstance(new_module, BaseLayerWithLoRA):
+            # Some matched modules can be unsupported by LoRA wrappers
+            # (e.g. subclasses with specialized forward behavior).
+            if not isinstance(new_module, BaseLayerWithLoRA):
+                error_msg = (
+                    "LoRA target module "
+                    f"{module_name} ({type(module).__name__}) matched the "
+                    "deployment configuration but could not be wrapped by any "
+                    "LoRA layer implementation."
+                )
+                if self.lora_config.target_modules is not None:
+                    raise ValueError(
+                        f"{error_msg} target_modules="
+                        f"{sorted(self.lora_config.target_modules)}"
+                    )
+                logger.warning_once("%s It will be ignored.", error_msg)
                 continue
             self.register_module(module_name, new_module)
 
@@ -514,7 +563,16 @@ class LoRAModelManager:
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
+                n_slices = getattr(module, "n_slices", len(replacements))
+                if module.__class__.__name__ == "FusedMoEWithLoRA":
+                    replacements = replacements[
+                        : len(module.lora_a_stacked) // self.lora_slots
+                    ]
                 subloras: list[LoRALayerWeights | None] = []
+                # HACK: overrides replacements for qkvz = qkv + z case.
+                # Any better methods to handle this case?
+                if n_slices != len(replacements):
+                    replacements = [f"slice_{i}" for i in range(n_slices)]
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,
@@ -538,13 +596,58 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
-        return any(
-            re.match(
-                r".*\.{target_module}$".format(target_module=target_module), module_name
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        """Return a dummy LoRA rank compatible with wrapped modules.
+
+        Dummy LoRAs keep warmup memory low by using a small rank. Fully
+        sharded MoE wrappers additionally require the dummy rank to be divisible
+        by tensor parallel size because they shard W13 along the rank axis.
+        """
+        if not self.lora_config.fully_sharded_loras:
+            return default_rank
+
+        required_multiple = 1
+        for module in self.modules.values():
+            if not getattr(module, "fully_sharded", False):
+                continue
+            required_multiple = math.lcm(required_multiple, module.tp_size)
+
+        if required_multiple == 1 or default_rank % required_multiple == 0:
+            return default_rank
+
+        adjusted_rank = (
+            (default_rank + required_multiple - 1) // required_multiple
+        ) * required_multiple
+        if adjusted_rank > self.lora_config.max_lora_rank:
+            raise ValueError(
+                "Unable to choose a dummy LoRA warmup rank compatible with "
+                "fully sharded MoE modules: "
+                f"default_rank={default_rank}, "
+                f"required_multiple={required_multiple}, "
+                f"max_lora_rank={self.lora_config.max_lora_rank}"
             )
-            or target_module == module_name
-            for target_module in self.supported_lora_modules
+        return adjusted_rank
+
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module should have LoRA applied.
+
+        This method first checks if the module is in vLLM's supported LoRA
+        modules, then applies deployment-time restrictions based on
+        LoRAConfig.target_modules.
+
+        Args:
+            module_name: Full dot-separated module name (e.g.,
+                "model.layers.0.self_attn.o_proj")
+
+        Returns:
+            True if LoRA should be applied to this module, False otherwise.
+        """
+        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+            return False
+        return is_in_target_modules(
+            module_name,
+            self.lora_config.target_modules,
+            self.packed_modules_mapping,
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
@@ -596,8 +699,8 @@ class LoRAModelManager:
                 replacement_loras[i] = None
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
-                replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                replaced_module_name = module_name.removeprefix("model.")
+                if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
@@ -623,6 +726,8 @@ class LoRAModelManager:
         for module_name, module in self.modules.items():
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
+            elif isinstance(module, FusedMoEWithLoRA):
+                self._slice_moe_lora_ep(lora_model, module, module_name)
 
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
@@ -669,23 +774,33 @@ class LoRAModelManager:
             assert gate_up_proj_lora is not None
             assert down_proj_lora is not None
             if self._is_3d_moe_model:
-                num_experts = module.w13_lora_a_stacked[0].shape[1]
+                local_num_experts = module.w13_lora_a_stacked[0].shape[1]
+                # The checkpoint holds weights for all global experts, but
+                # each EP rank owns only local_num_experts. Reshape against
+                # the adapter's actual expert count, then slice this rank's
+                # owned expert range before it gets copied into the local
+                # stacked buffer. For non-EP (local == global) this is a
+                # no-op slice.
+                global_num_experts = module.base_layer.global_num_experts
+                ep_rank = module.base_layer.ep_rank
+                expert_start = ep_rank * local_num_experts
+                expert_end = expert_start + local_num_experts
 
                 # (num_experts,rank,input_size)
                 gate_up_proj_lora.lora_a = gate_up_proj_lora.lora_a.reshape(
-                    num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
-                )
+                    global_num_experts, -1, gate_up_proj_lora.lora_a.shape[-1]
+                )[expert_start:expert_end].contiguous()
                 down_proj_lora.lora_a = down_proj_lora.lora_a.reshape(
-                    num_experts, -1, down_proj_lora.lora_a.shape[-1]
-                )
+                    global_num_experts, -1, down_proj_lora.lora_a.shape[-1]
+                )[expert_start:expert_end].contiguous()
 
                 # (output_size,rank,num_experts)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.reshape(
-                    gate_up_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                    gate_up_proj_lora.lora_b.shape[0], -1, global_num_experts
+                )[..., expert_start:expert_end]
                 down_proj_lora.lora_b = down_proj_lora.lora_b.reshape(
-                    down_proj_lora.lora_b.shape[0], -1, num_experts
-                )
+                    down_proj_lora.lora_b.shape[0], -1, global_num_experts
+                )[..., expert_start:expert_end]
 
                 # (num_experts,output_size,rank)
                 gate_up_proj_lora.lora_b = gate_up_proj_lora.lora_b.permute(
@@ -735,6 +850,43 @@ class LoRAModelManager:
                 module_lora.lora_a = lora_a
                 module_lora.lora_b = lora_b
 
+    def _slice_moe_lora_ep(
+        self,
+        lora_model: LoRAModel,
+        module: FusedMoEWithLoRA,
+        module_name: str,
+    ) -> None:
+        """Slice the cached LoRA tensors down to this rank's local experts.
+
+        The 2D MoE checkpoint enters as a list of per-(w1/w2/w3) tensors of
+        shape (num_experts, rank, in) / (num_experts, out, rank). When EP
+        is active each rank only owns local_num_experts; without this slice
+        the CPU LoRAModel keeps the full global weight and set_lora has to
+        re-slice on every activation.
+        """
+        if not module.base_layer.use_ep:
+            return
+        module_lora = self._get_lora_layer_weights(lora_model, module_name)
+        if module_lora is None or not isinstance(module_lora.lora_a, list):
+            return
+
+        local_num_experts = module.base_layer.local_num_experts
+        global_num_experts = module.base_layer.global_num_experts
+        ep_rank = module.base_layer.ep_rank
+        expert_start = ep_rank * local_num_experts
+        expert_end = expert_start + local_num_experts
+
+        new_lora_a: list[torch.Tensor | None] = []
+        new_lora_b: list[torch.Tensor | None] = []
+        for a, b in zip(module_lora.lora_a, module_lora.lora_b):
+            if a is not None and b is not None and a.shape[0] == global_num_experts:
+                a = a[expert_start:expert_end].contiguous()
+                b = b[expert_start:expert_end].contiguous()
+            new_lora_a.append(a)
+            new_lora_b.append(b)
+        module_lora.lora_a = new_lora_a
+        module_lora.lora_b = new_lora_b
+
     def _get_lora_layer_weights(
         self, lora_model: LoRAModel, module_name: str
     ) -> LoRALayerWeights | None:
@@ -742,7 +894,7 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.replace("model.", "")
+            module_name = module_name.removeprefix("model.")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
                 logger.info_once(

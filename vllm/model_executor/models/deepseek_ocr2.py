@@ -12,6 +12,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -27,7 +28,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -76,8 +76,10 @@ class DeepseekOCR2ProcessingInfo(BaseProcessingInfo):
             crop_mode=CROP_MODE,
             strategy="v2",
         )
+
         return self.ctx.get_hf_processor(
-            DeepseekOCRProcessor, **{**kwargs, **v2_processor_config}
+            DeepseekOCRProcessor,
+            **{**v2_processor_config, **kwargs},
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -137,7 +139,7 @@ class DeepseekOCR2DummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 

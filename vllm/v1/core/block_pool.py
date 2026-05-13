@@ -20,7 +20,9 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    generate_block_hash_extra_keys,
     get_block_hash,
+    get_group_id,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
 )
@@ -279,13 +281,31 @@ class BlockPool:
                     block_hashes[num_cached_blocks - 1]
                 )
 
+            # Calculate token range for the blocks being cached
+            start_token_idx = num_cached_blocks * block_size
+            end_token_idx = num_full_blocks * block_size
+
+            # Generate extra keys for each block individually.
+            # Each block may have different extra_keys (e.g., different MM
+            # features, or cache_salt only for the first block).
+            # Skip null blocks to match the length of new_hashes.
+            extra_keys_list: list[tuple[Any, ...] | None] = []
+            curr_mm_idx = 0
+            for i in range(num_cached_blocks, num_full_blocks):
+                if blocks[i].is_null:
+                    continue
+                block_start = i * block_size
+                block_end = block_start + block_size
+                extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                    request, block_start, block_end, curr_mm_idx
+                )
+                extra_keys_list.append(extra_keys)
+
             self.kv_event_queue.append(
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.all_token_ids[
-                        num_cached_blocks * block_size : num_full_blocks * block_size
-                    ],
+                    token_ids=request.all_token_ids[start_token_idx:end_token_idx],
                     block_size=block_size,
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
@@ -294,6 +314,8 @@ class BlockPool:
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
+                    extra_keys=extra_keys_list if extra_keys_list else None,
+                    group_idx=kv_cache_group_id,
                 )
             )
 
@@ -357,14 +379,11 @@ class BlockPool:
         block.reset_hash()
 
         if self.enable_kv_cache_events:
-            # FIXME (Chen): Not sure whether we should return `hash_value`
-            # or `(hash_value, group_id)` here. But it's fine now because
-            # we disable hybrid kv cache manager when kv cache event is
-            # enabled, so there is only one group.
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
                     medium=MEDIUM_GPU,
+                    group_idx=get_group_id(block_hash),
                 )
             )
         return True

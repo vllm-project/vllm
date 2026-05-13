@@ -48,7 +48,7 @@ def test_profiling(model_id: str, max_model_len: int):
     )  # image start, image, image end
 
     assert total_num_patches == sum(
-        item.get_num_embeds for item in mm_inputs["mm_placeholders"]["image"]
+        item.get_num_embeds() for item in mm_inputs["mm_placeholders"]["image"]
     )
     assert total_tokens == sum(
         placeholder.length for placeholder in mm_inputs["mm_placeholders"]["image"]

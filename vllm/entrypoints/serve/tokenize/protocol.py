@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from typing import Any, TypeAlias
+from typing import Annotated, Any, TypeAlias
 
 from pydantic import ConfigDict, Field, model_validator
 
@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 
@@ -100,6 +101,13 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description="Additional kwargs to pass to the HF processor.",
@@ -113,9 +121,9 @@ class TokenizeChatRequest(OpenAIBaseModel):
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+                "`add_generation_prompt` to True.",
             )
         return data
 
@@ -134,6 +142,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -156,7 +165,10 @@ class TokenizeResponse(OpenAIBaseModel):
 
 class DetokenizeRequest(OpenAIBaseModel):
     model: str | None = None
-    tokens: list[int]
+    # TODO: Factor `torch.iinfo` out. `torch.iinfo` pulls torch into a
+    # Pydantic protocol file that currently has no torch dependency.
+    # See: https://github.com/vllm-project/vllm/pull/34468#discussion_r2801173630
+    tokens: list[Annotated[int, Field(ge=0, le=2**63 - 1)]]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(

@@ -6,13 +6,12 @@ from typing import Any, Union
 import torch
 from packaging import version
 
-from vllm.model_executor.layers.fused_moe.config import (
+from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
+    RoutedExperts,
+    SharedExperts,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -26,6 +25,24 @@ from vllm.model_executor.layers.quantization import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _check_bitsandbytes_version():
+    min_version = "0.49.2" if current_platform.is_rocm() else "0.48.1"
+    try:
+        import bitsandbytes
+
+        if version.parse(bitsandbytes.__version__) < version.parse(min_version):
+            raise ImportError(
+                "bitsandbytes version is wrong. Please "
+                f"install bitsandbytes>={min_version}."
+            )
+    except ImportError as err:
+        raise ImportError(
+            f"Please install bitsandbytes>={min_version} via "
+            f"`pip install bitsandbytes>={min_version}` to use "
+            "bitsandbytes quantizer."
+        ) from err
 
 
 class BitsAndBytesConfig(QuantizationConfig):
@@ -146,7 +163,7 @@ class BitsAndBytesConfig(QuantizationConfig):
             if is_layer_skipped_bnb(prefix, self.llm_int8_skip_modules):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
 
@@ -183,21 +200,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: BitsAndBytesConfig):
-        try:
-            import bitsandbytes
-
-            if version.parse(bitsandbytes.__version__) < version.parse("0.46.1"):
-                raise ImportError(
-                    "bitsandbytes version is wrong. Please "
-                    "install bitsandbytes>=0.46.1."
-                )
-        except ImportError as err:
-            raise ImportError(
-                "Please install bitsandbytes>=0.46.1 via "
-                "`pip install bitsandbytes>=0.46.1` to use "
-                "bitsandbytes quantizer."
-            ) from err
-
+        _check_bitsandbytes_version()
         self.quant_config = quant_config
 
     def create_weights(
@@ -336,16 +339,6 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             current_index += output_size
 
-            # only update the matmul_states if it is not profile_run
-            if (
-                generation > 0
-                and not self.quant_config.llm_int8_has_fp16_weight
-                and matmul_states[i].CB is not None
-                and matmul_states[i].CxB is not None
-            ):
-                del matmul_states[i].CB
-                qweight[offsets[i] : offsets[i + 1]] = matmul_states[i].CxB
-
         out = out.to(original_type)
 
         if reshape_after_matmul:
@@ -452,25 +445,12 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
-        try:
-            import bitsandbytes
-
-            if version.parse(bitsandbytes.__version__) < version.parse("0.46.1"):
-                raise ImportError(
-                    "bitsandbytes version is wrong. Please "
-                    "install bitsandbytes>=0.46.1."
-                )
-        except ImportError as err:
-            raise ImportError(
-                "Please install bitsandbytes>=0.46.1 via "
-                "`pip install bitsandbytes>=0.46.1` to use "
-                "bitsandbytes quantizer."
-            ) from err
+        _check_bitsandbytes_version()
         self.quant_config = quant_config
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -491,17 +471,19 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         # TODO(bnell): Do these need to be called on the hot path?

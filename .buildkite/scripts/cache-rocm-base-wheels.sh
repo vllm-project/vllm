@@ -15,8 +15,6 @@
 #
 # Environment variables:
 #   S3_BUCKET          - S3 bucket name (default: vllm-wheels)
-#   PYTHON_VERSION     - Python version (affects cache key)
-#   PYTORCH_ROCM_ARCH  - GPU architectures (affects cache key)
 #
 # Note: ROCm version is determined by BASE_IMAGE in Dockerfile.rocm_base,
 #       so changes to ROCm version are captured by the Dockerfile hash.
@@ -36,13 +34,7 @@ generate_cache_key() {
     fi
     local dockerfile_hash=$(sha256sum "$DOCKERFILE" | cut -c1-16)
 
-    # Include key build args that affect the output
-    # These should match the ARGs in Dockerfile.rocm_base that change the build output
-    # Note: ROCm version is determined by BASE_IMAGE in the Dockerfile, so it's captured by dockerfile_hash
-    local args_string="${PYTHON_VERSION:-}|${PYTORCH_ROCM_ARCH:-}"
-    local args_hash=$(echo "$args_string" | sha256sum | cut -c1-8)
-
-    echo "${dockerfile_hash}-${args_hash}"
+    echo "${dockerfile_hash}"
 }
 
 CACHE_KEY=$(generate_cache_key)
@@ -52,9 +44,6 @@ case "${1:-}" in
     check)
         echo "Checking cache for key: ${CACHE_KEY}" >&2
         echo "Cache path: ${CACHE_PATH}" >&2
-        echo "Variables used in cache key:" >&2
-        echo "  PYTHON_VERSION: ${PYTHON_VERSION:-<not set>}" >&2
-        echo "  PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH:-<not set>}" >&2
 
         # Check if cache exists by listing objects
         # We look for at least one .whl file
@@ -83,7 +72,7 @@ case "${1:-}" in
             exit 1
         fi
 
-        WHEEL_COUNT=$(ls artifacts/rocm-base-wheels/*.whl 2>/dev/null | wc -l)
+        WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         if [[ "$WHEEL_COUNT" -eq 0 ]]; then
             echo "ERROR: No wheels found in artifacts/rocm-base-wheels/" >&2
             exit 1
@@ -104,15 +93,17 @@ case "${1:-}" in
         echo "Cache key: ${CACHE_KEY}"
         echo "Cache path: ${CACHE_PATH}"
         echo ""
-
         mkdir -p artifacts/rocm-base-wheels
-        aws s3 cp --recursive "${CACHE_PATH}" artifacts/rocm-base-wheels/
-
+        
+        # Use sync with include/exclude to only download .whl files
+        aws s3 sync "${CACHE_PATH}" artifacts/rocm-base-wheels/ \
+            --exclude "*" \
+            --include "*.whl"
+        
         echo ""
         echo "Downloaded wheels:"
-        ls -lh artifacts/rocm-base-wheels/
-
-        WHEEL_COUNT=$(ls artifacts/rocm-base-wheels/*.whl 2>/dev/null | wc -l)
+        find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' -exec ls -lh {} \;
+        WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         echo ""
         echo "Total: $WHEEL_COUNT wheels"
         echo "========================================"

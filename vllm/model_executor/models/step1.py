@@ -31,7 +31,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -274,7 +279,7 @@ class StepDecoderLayer(nn.Module):
         return loaded_params
 
 
-class StepDecoderModel(nn.Module):
+class StepDecoderModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -303,9 +308,6 @@ class StepDecoderModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers: tuple[int, ...] = getattr(
-            config, "aux_hidden_state_layers", ()
-        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"],
             config.hidden_size,
@@ -333,14 +335,12 @@ class StepDecoderModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            if idx in self.aux_hidden_state_layers:
-                if residual is None:
-                    aux_hidden_states.append(hidden_states)
-                else:
-                    aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -353,7 +353,7 @@ class StepDecoderModel(nn.Module):
         return hidden_states
 
 
-class Step1ForCausalLM(nn.Module, SupportsPP):
+class Step1ForCausalLM(nn.Module, SupportsPP, SupportsEagle, SupportsEagle3):
     packed_modules_mapping = STEP_PACKED_MODULES_MAPPING
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

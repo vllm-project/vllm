@@ -150,6 +150,7 @@ class LlamaModel(nn.Module):
             self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
+        self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
 
         current_vllm_config = get_current_vllm_config()
 
@@ -175,6 +176,13 @@ class LlamaModel(nn.Module):
                 fc_input_size = self.config.target_hidden_size * 3
             else:
                 fc_input_size = self.config.hidden_size * 3
+            if self.norm_before_fc:
+                self.input_norm = RMSNorm(
+                    fc_input_size,
+                    eps=self.config.rms_norm_eps,
+                )
+            else:
+                self.input_norm = None
             self.fc = ReplicatedLinear(
                 input_size=fc_input_size,
                 output_size=self.config.hidden_size,
@@ -279,13 +287,16 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         # proper layer_types indexing in draft models
         self.config.target_layer_count = target_layer_num
         self.model = LlamaModel(
-            vllm_config=vllm_config, prefix="model", start_layer_id=target_layer_num
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            start_layer_id=target_layer_num,
         )
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
         self.lm_head = ParallelLMHead(
             self.config.draft_vocab_size,
             self.config.hidden_size,
+            quant_config=get_draft_quant_config(vllm_config),
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(
@@ -357,6 +368,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         if not self.model.use_aux_hidden_state:
             return hidden_states
         # combine multiple auxiliary hidden states returned by eagle3
+
+        if self.model.norm_before_fc:
+            hidden_states = self.model.input_norm(hidden_states)
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
@@ -403,6 +417,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs.append("embed_tokens")
         if not self.model.use_aux_hidden_state:
             skip_substrs.append("fc.")
+        if not self.model.norm_before_fc:
+            skip_substrs.append("input_norm.")
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,

@@ -103,7 +103,7 @@ vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$GPU_COUNT" \
   --enforce-eager \
   --pooler-config "$POOLER_CONFIG" \
-  --served-model-name ${MODEL_CODE} \
+  --served-model-name "${MODEL_CODE}" \
   --api-key "$API_KEY" \
   --trust-remote-code \
   --port "$PORT" \
@@ -119,7 +119,7 @@ echo "   - API Key: $API_KEY"
 echo "   - Native Pooling: $POOLING_TYPE | Cross-chunk: MEAN"
 echo ""
 echo "🧪 Test the server with:"
-echo "   python examples/online_serving/openai_embedding_long_text/client.py"
+echo "   python examples/pooling/embed/openai_embedding_long_text/client.py"
 echo ""
 echo "📚 Enhanced features enabled:"
 echo "   ✅ Intelligent native pooling type detection"

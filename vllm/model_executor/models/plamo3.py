@@ -4,7 +4,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -46,28 +46,29 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
-
 # Only used for type hinting.
-class Plamo3Config(PretrainedConfig):  # type: ignore
-    model_type: str = "plamo3"
+if TYPE_CHECKING:
 
-    hidden_size: int
-    num_hidden_layers: int
-    rms_norm_eps: float
-    # Attention
-    num_attention_heads: int
-    head_dim: int
-    num_key_value_heads: int
-    # vllm rename `sliding_window` attr to `interleaved_sliding_window`
-    # if `sliding_window` is list
-    interleaved_sliding_window: list[int | None]
-    sliding_window_pattern: int
-    rope_parameters: dict[str, Any]
-    rope_local_theta: int
-    # MLP
-    intermediate_size: int
-    # Tokenizer
-    vocab_size: int
+    class Plamo3Config(PretrainedConfig):  # type: ignore
+        model_type: str = "plamo3"
+
+        hidden_size: int
+        num_hidden_layers: int
+        rms_norm_eps: float
+        # Attention
+        num_attention_heads: int
+        head_dim: int
+        num_key_value_heads: int
+        # vllm rename `sliding_window` attr to `interleaved_sliding_window`
+        # if `sliding_window` is list
+        interleaved_sliding_window: list[int | None]
+        sliding_window_pattern: int
+        rope_parameters: dict[str, Any]
+        rope_local_theta: int
+        # MLP
+        intermediate_size: int
+        # Tokenizer
+        vocab_size: int
 
 
 def rms_norm_weight_loader(offset: float) -> LoaderFunction:
@@ -80,7 +81,7 @@ def rms_norm_weight_loader(offset: float) -> LoaderFunction:
 class DenseMLP(nn.Module):
     def __init__(
         self,
-        config: Plamo3Config,
+        config: "Plamo3Config",
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -317,7 +318,6 @@ class Plamo3Model(nn.Module):
         config = vllm_config.model_config.hf_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 

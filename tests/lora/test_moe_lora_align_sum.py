@@ -6,6 +6,9 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def round_up(x, base):
@@ -27,7 +30,7 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = random.randint(0, max_loras - 1)
 
-    return topk_ids.to("cuda"), token_lora_mapping.to("cuda")
+    return topk_ids.to(DEVICE_TYPE), token_lora_mapping.to(DEVICE_TYPE)
 
 
 @pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
@@ -47,6 +50,8 @@ def test_moe_lora_align_block_size(
     # compute paddings
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = topk_ids.numel() * block_size
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     # init output tensors
@@ -54,14 +59,21 @@ def test_moe_lora_align_block_size(
         (max_loras * max_num_tokens_padded,),
         topk_ids.numel(),
         dtype=torch.int32,
-        device="cuda",
+        device=DEVICE_TYPE,
     )
     expert_ids = torch.full(
-        (max_loras * max_num_m_blocks,), num_experts, dtype=torch.int32, device="cuda"
+        (max_loras * max_num_m_blocks,),
+        num_experts,
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
     )
-    num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32, device="cuda")
-    adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32, device="cuda")
-    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device="cuda")
+    num_tokens_post_pad = torch.zeros(
+        (max_loras,), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    adapter_enabled = torch.ones(
+        (max_loras + 1,), dtype=torch.int32, device=DEVICE_TYPE
+    )
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device=DEVICE_TYPE)
 
     # call kernel
     ops.moe_lora_align_block_size(

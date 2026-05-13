@@ -70,6 +70,16 @@ class LMCacheKVEvents(KVConnectorKVEvents):
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """
+        LMCache requires PIECEWISE CUDA graph mode when layerwise
+        operations are enabled. The wait_for_layer_load and save_kv_layer
+        methods perform actual async synchronization that cannot be
+        captured in CUDA graphs.
+        """
+        return extra_config.get("use_layerwise", False)
+
     def __init__(
         self,
         vllm_config: "VllmConfig",

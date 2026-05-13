@@ -23,6 +23,13 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    ref_nvfp4_quant_dequant,
+)
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    per_tensor_dequantize,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -160,8 +167,15 @@ def _int8_quantize(
     # activations apply per-token quantization. Otherwise, assume
     # activation tensor-wise fp8/int8 quantization, dynamic or static
     if block_shape is None:
-        assert per_act_token, "int8 quantization only supports block or channel-wise"
-        A, A_scale = per_token_quant_int8(A)
+        if per_act_token:
+            A, A_scale = per_token_quant_int8(A)
+        elif A_scale is not None:
+            # Static per-tensor: use the optimized CUDA kernel
+            A, A_scale, _ = ops.scaled_int8_quant(A, scale=A_scale)
+        elif A_scale is None:
+            # Dynamic per-tensor: compute scale then quantize via kernel
+            A_scale = torch.clamp(A.abs().max() / 127.0, min=1e-10)
+            A, A_scale, _ = ops.scaled_int8_quant(A, scale=A_scale)
     else:
         assert not per_act_token
         assert len(block_shape) == 2
@@ -193,11 +207,13 @@ def _mxfp8_e4m3_quantize(
     A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
+    is_sf_swizzled_layout: bool = False,
+    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
-    assert block_shape is None
-    return mxfp8_e4m3_quantize(A)
+    assert block_shape is None or block_shape == [1, 32]
+    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout, mx_alignment)
 
 
 def _mxfp6_e3m2_quantize(
@@ -240,36 +256,91 @@ def moe_kernel_quantize_input(
     quant_dtype: None | torch.dtype | str,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
-    is_fp4_scale_swizzled: bool = True,
+    is_scale_swizzled: bool = True,
+    ocp_mx_scheme: str | None = None,
+    quantization_emulation: bool = False,
+    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if quant_dtype == torch.float8_e4m3fn:
+    # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
+    if ocp_mx_scheme is not None:
+        if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
+            pass  # No QDQ needed for these schemes
+        elif ocp_mx_scheme.endswith("a_fp8"):
+            # Perform QDQ (quantize and dequantize) on activation for emulation
+            # purpose, because there is no native kernel for weight in ocp_mx_scheme
+            # and activation in FP8. The implementation is based on existing
+            # non-emulation ops.
+            qA, qA_scale = ops.scaled_fp8_quant(
+                A, A_scale, use_per_token_if_dynamic=False
+            )
+            A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
+            # After QDQ, we don't need further quantization
+            return A, None
+        # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
+        # weights are already dequantized, and we proceed with normal
+        # activation quantization below.
+
+    if quant_dtype == current_platform.fp8_dtype():
+        if quantization_emulation:
+            raise NotImplementedError(
+                f"moe_kernel_quantize_input does not support quant_dtype={quant_dtype}"
+                " MOE quantization emulation. Please open an issue."
+            )
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
+        if quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input does not support quant_dtype=torch.int8"
+                " MOE quantization emulation. Please open an issue."
+            )
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "nvfp4":
-        return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_fp4_scale_swizzled)
+        if not quantization_emulation:
+            return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_scale_swizzled)
+        else:
+            A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
+            return A, None
     elif quant_dtype == "mxfp4":
+        if not quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input should not be used for native"
+                " quant_dtype='mxfp4' MOE. Please open an issue."
+            )
         return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+        if quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
+                "quantization emulation. Please open an issue."
+            )
+        return _mxfp8_e4m3_quantize(
+            A,
+            A_scale,
+            per_act_token_quant,
+            block_shape,
+            is_sf_swizzled_layout=is_scale_swizzled,
+            mx_alignment=mx_alignment,
+        )
     elif quant_dtype == "mxfp6_e3m2":
+        if not quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input should not be used for native "
+                " quant_dtype='mxfp6_e3m2'MOE. Please open an issue."
+            )
+
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
+        if not quantization_emulation:
+            raise NotImplementedError(
+                "moe_kernel_quantize_input should not be used for native"
+                " quant_dtype='mxfp6_e2m3' MOE. Please open an issue."
+            )
+
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
-
-
-def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """
-    A permutation routine that works on fp8 types.
-    """
-    if torch.is_floating_point(m) and m.dtype.itemsize == 1:
-        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
-    else:
-        return m[idx, ...]
 
 
 def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
@@ -297,89 +368,39 @@ def normalize_batched_scales_shape(
     return scales
 
 
-def _validate_scale_shape(
-    a: torch.Tensor,
-    a_scale: torch.Tensor | None,
-    per_act_token_quant: bool,
-    block_shape: list[int] | None,
-) -> None:
-    if a_scale is None:
-        return
-
-    if not per_act_token_quant and block_shape is None:
-        assert a_scale.numel() == 1, f"{a_scale.shape}"
-    elif per_act_token_quant:
-        assert a_scale.shape[0] == a.shape[0] and a_scale.shape[1] == 1, (
-            f"{a_scale.shape[0]} == {a.shape[0]} and {a_scale.shape[1]} == 1"
-        )
-    else:
-        assert block_shape is not None
-        expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
-        assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
-
-
-def activation_without_mul(activation: str) -> str:
-    return activation + "_no_mul"
-
-
-RELU2_NO_MUL: str = activation_without_mul("relu2")
-SILU_NO_MUL: str = activation_without_mul("silu")
-GELU_NO_MUL: str = activation_without_mul("gelu")
-
-
-def apply_moe_activation(
-    activation: str,
-    output: torch.Tensor,
-    input: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply MoE activation function.
-
-    For *_and_mul activations (silu, gelu, swigluoai):
-        - Expects output.size(-1) * 2 == input.size(-1)
-
-    For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
-        - Expects output.size(-1) == input.size(-1)
-    """
-    is_no_mul = activation.endswith("_no_mul")
-    if is_no_mul:
-        assert output.size(-1) == input.size(-1), (
-            f"{activation} expects equal sizes: {output.size(-1)} vs {input.size(-1)}"
-        )
-    else:
-        assert output.size(-1) * 2 == input.size(-1), (
-            f"{activation} expects 2x ratio: {output.size(-1) * 2} vs {input.size(-1)}"
-        )
-
-    # Activations with gated multiplication (gate × activation(up))
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(output, input)
-    elif activation == "gelu":
-        torch.ops._C.gelu_and_mul(output, input)
-    elif activation == "swigluoai":
-        torch.ops._C.swigluoai_and_mul(output, input)
-    elif activation == "swiglustep":
-        from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
-
-        swiglustep_and_mul_triton(output, input)
-
-    # Activations without gated multiplication
-    elif activation == SILU_NO_MUL:
-        output.copy_(F.silu(input))
-    elif activation == GELU_NO_MUL:
-        output.copy_(F.gelu(input))
-    elif activation == RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
-    else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}")
-
-    return output
-
-
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
 # disable inplace for torch >= 2.9.
 # See https://github.com/vllm-project/vllm/issues/26378
 @functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def trtllm_moe_pack_topk_ids_weights(
+    topk_ids: torch.Tensor, topk_weights: torch.Tensor
+) -> torch.Tensor:
+    """
+    Pack topk_ids and topk_weights into a single int32 tensor.
+    Format: (expert_id << 16) | weight_bf16.view(int16)
+    """
+    return (topk_ids.to(torch.int32) << 16) | topk_weights.to(torch.bfloat16).view(
+        torch.int16
+    )
+
+
+@torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
+def swiglu_limit_func(
+    output: torch.Tensor,
+    input: torch.Tensor,  # first half is gate, second half is up
+    swiglu_limit: float = 0.0,
+) -> None:
+    d = input.shape[1] // 2
+    gate = input[:, :d]
+    up = input[:, d:]
+
+    if swiglu_limit > 0:
+        gate = torch.clamp(gate, max=swiglu_limit)
+        up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
+
+    output.copy_(F.silu(gate) * up)

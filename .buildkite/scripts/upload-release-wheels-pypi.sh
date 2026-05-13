@@ -7,7 +7,7 @@ SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version)
-GIT_VERSION=$(git describe --exact-match --tags $BUILDKITE_COMMIT 2>/dev/null)
+GIT_VERSION=$(git describe --exact-match --tags "$BUILDKITE_COMMIT" 2>/dev/null)
 
 echo "Release version from Buildkite: $RELEASE_VERSION"
 
@@ -39,10 +39,17 @@ fi
 
 set -x # avoid printing secrets above
 
-# install twine from pypi
-python3 -m venv /tmp/vllm-release-env
+# install uv if not already available
+if ! command -v uv &> /dev/null; then
+  curl -LsSf https://astral.sh/uv/install.sh | UV_VERSION=0.11.14 sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+
+# install twine and sdist build prerequisites using uv with Python 3.12
+uv venv --python 3.12 /tmp/vllm-release-env
 source /tmp/vllm-release-env/bin/activate
-pip install twine
+uv pip install twine
+uv pip install -r requirements/build/cuda.txt
 python3 -m twine --version
 
 # copy release wheels to local directory
@@ -54,9 +61,12 @@ mkdir -p $DIST_DIR
 # include only wheels for the release version, ignore all files with "dev" or "rc" in the name (without excluding 'aarch64')
 aws s3 cp --recursive --exclude "*" --include "vllm-${PURE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc[0-9]*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
-# generate source tarball
-git archive --format=tar.gz --output="$DIST_DIR/vllm-${PURE_VERSION}.tar.gz" $BUILDKITE_COMMIT
+# generate source distribution using setup.py
+python setup.py sdist --dist-dir=$DIST_DIR
 ls -la $DIST_DIR
+
+SDIST_FILE=$(find $DIST_DIR -name "vllm*.tar.gz")
+echo "Found sdist: $SDIST_FILE"
 
 # upload wheels to PyPI (only default variant, i.e. files without '+' in the name)
 PYPI_WHEEL_FILES=$(find $DIST_DIR -name "vllm-${PURE_VERSION}*.whl" -not -name "*+*")
@@ -65,6 +75,6 @@ if [[ -z "$PYPI_WHEEL_FILES" ]]; then
   exit 1
 fi
 
-python3 -m twine check $PYPI_WHEEL_FILES
-python3 -m twine upload --non-interactive --verbose $PYPI_WHEEL_FILES
-echo "Wheels uploaded to PyPI"
+python3 -m twine check "$PYPI_WHEEL_FILES" "$SDIST_FILE"
+python3 -m twine upload --non-interactive --verbose "$PYPI_WHEEL_FILES" "$SDIST_FILE"
+echo "Wheels and source distribution uploaded to PyPI"

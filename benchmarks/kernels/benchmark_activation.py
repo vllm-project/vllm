@@ -7,6 +7,7 @@ import itertools
 import torch
 
 import vllm.model_executor.layers.activation  # noqa F401
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.custom_op import op_registry
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -18,6 +19,7 @@ intermediate_size = [3072, 9728, 12288]
 configs = list(itertools.product(batch_size_range, seq_len_range, intermediate_size))
 
 
+@default_vllm_config()
 def benchmark_activation(
     batch_size: int,
     seq_len: int,

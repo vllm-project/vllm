@@ -10,6 +10,7 @@ from .utils import (
     MESSAGES_ASKING_FOR_TOOLS,
     MESSAGES_WITH_TOOL_RESPONSE,
     SEARCH_TOOL,
+    SEED,
     WEATHER_TOOL,
 )
 
@@ -27,6 +28,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
     )
 
     choice = chat_completion.choices[0]
@@ -71,6 +73,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
         max_completion_tokens=100,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
 
@@ -154,6 +157,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
     )
 
     choice = chat_completion.choices[0]
@@ -171,6 +175,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
 

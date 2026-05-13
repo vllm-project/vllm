@@ -19,18 +19,15 @@ from vllm.multimodal.inputs import PlaceholderRange
 def test_placeholder_range_get_num_embeds(is_embed, expected):
     length = len(is_embed) if is_embed is not None else 5
     pr = PlaceholderRange(offset=0, length=length, is_embed=is_embed)
-    assert pr.get_num_embeds == expected
+    assert pr.get_num_embeds() == expected
 
 
 @pytest.mark.parametrize(
     "is_embed,expected",
     [
         (None, None),
-        (
-            torch.tensor([False, True, False, True, True]),
-            torch.tensor([0, 1, 1, 2, 3]),
-        ),
-        (torch.tensor([True, True, True]), torch.tensor([1, 2, 3])),
+        (torch.tensor([False, True, False, True, True]), [0, 1, 1, 2, 3]),
+        (torch.tensor([True, True, True]), [1, 2, 3]),
     ],
 )
 def test_placeholder_range_embeds_cumsum(is_embed, expected):
@@ -41,6 +38,6 @@ def test_placeholder_range_embeds_cumsum(is_embed, expected):
         assert pr.embeds_cumsum is None
         return
 
-    assert torch.equal(pr.embeds_cumsum, expected)
+    assert pr.embeds_cumsum == expected
     # cached_property should return the same object on repeated access
     assert pr.embeds_cumsum is pr.embeds_cumsum

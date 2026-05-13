@@ -34,7 +34,7 @@ def do_sample(
 def test_mixtral_lora(mixtral_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all"""
     if (
-        torch.cuda.device_count() < tp_size
+        torch.accelerator.device_count() < tp_size
         and tp_size > 1
         and current_platform.is_cuda_alike()
     ):

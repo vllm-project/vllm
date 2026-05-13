@@ -34,3 +34,33 @@ class VLLMValidationError(ValueError):
         if self.value is not None:
             extras.append(f"value={self.value}")
         return f"{base} ({', '.join(extras)})" if extras else base
+
+
+class VLLMNotFoundError(Exception):
+    """vLLM-specific NotFoundError"""
+
+    pass
+
+
+class LoRAAdapterNotFoundError(VLLMNotFoundError):
+    """Exception raised when a LoRA adapter is not found.
+
+    This exception is thrown when a requested LoRA adapter does not exist
+    in the system.
+
+    Attributes:
+        message: The error message string describing the exception
+    """
+
+    message: str
+
+    def __init__(
+        self,
+        lora_name: str,
+        lora_path: str,
+    ) -> None:
+        message = f"Loading lora {lora_name} failed: No adapter found for {lora_path}"
+        self.message = message
+
+    def __str__(self):
+        return self.message
