@@ -220,7 +220,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         sink_len: int = 0,
         sliding_window: int | None = None,
         mome_attn: Optional[nn.Module] = None,
-        is_hybrid_kv: bool = False
+        # is_hybrid_kv: bool = False
     ) -> None:
         PluggableLayer.__init__(self)
         self.hidden_size = hidden_size
@@ -269,7 +269,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             indexer=self.indexer,
             sink_len=sink_len,
             sliding_window=sliding_window,
-            is_hybrid_kv=True
+            # is_hybrid_kv=True
         )
     
     def forward(

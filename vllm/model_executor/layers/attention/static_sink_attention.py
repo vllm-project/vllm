@@ -55,7 +55,6 @@ logger = init_logger(__name__)
 def create_static_sink_attention_backend(
     underlying_attn_backend: type[AttentionBackend],
     sink_len: int = 0,
-    sink_kv_block_offset: int = 1
 ) -> type[AttentionBackend]:
     prefix = "StaticSink_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -85,13 +84,33 @@ def create_static_sink_attention_backend(
                 device=device,
                 dtype=torch.int32,
             )
-            self.block_table_with_sink[:, : self.num_sink_blocks] = torch.arange(
-                sink_kv_block_offset,
-                self.num_sink_blocks + sink_kv_block_offset,
+            # self.block_table_with_sink[:, : self.num_sink_blocks] = torch.arange(
+            #     sink_kv_block_offset,
+            #     self.num_sink_blocks + sink_kv_block_offset,
+            #     device=device,
+            #     dtype=torch.int32,
+            # )
+            # self.sink_kv_block_offset = sink_kv_block_offset
+            self.seq_lens_with_sink = torch.zeros(
+                scheduler_config.max_num_seqs,
                 device=device,
                 dtype=torch.int32,
             )
+            self.set_sink_kv_block_offset(1) 
+
+        def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
+            """Re-bind the sink block offset and rewrite the prepended
+            sink block ids in `block_table_with_sink` accordingly."""
             self.sink_kv_block_offset = sink_kv_block_offset
+            if self.num_sink_blocks > 0:
+                self.block_table_with_sink[:, : self.num_sink_blocks] = (
+                    torch.arange(
+                        sink_kv_block_offset,
+                        self.num_sink_blocks + sink_kv_block_offset,
+                        device=self.block_table_with_sink.device,
+                        dtype=torch.int32,
+                    )
+                )
 
         def build(
             self,
@@ -99,22 +118,38 @@ def create_static_sink_attention_backend(
             common_attn_metadata: CommonAttentionMetadata,
             fast_build: bool = False,
         ) -> AttentionMetadata:
-            if common_attn_metadata.block_table_tensor[0, 0] != self.sink_kv_block_offset:
-                max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
-                num_reqs = common_attn_metadata.num_reqs
-                self.block_table_with_sink[
-                    :num_reqs, self.num_sink_blocks : self.num_sink_blocks + max_num_blocks
-                ] = common_attn_metadata.block_table_tensor[:, :max_num_blocks]
-                common_attn_metadata.block_table_tensor = self.block_table_with_sink[:num_reqs]
-                common_attn_metadata.block_table_tensor.masked_fill_(
-                    common_attn_metadata.block_table_tensor == -1 , 0
-                )
+            num_reqs = common_attn_metadata.num_reqs
+            max_num_blocks = cdiv(common_attn_metadata.max_seq_len, self.block_size)
 
-                zero_mask = common_attn_metadata.seq_lens.eq(0)
-                common_attn_metadata.seq_lens.add_(self.sink_len)
-                common_attn_metadata.seq_lens.masked_fill_(zero_mask, 0)
-                common_attn_metadata.max_seq_len += self.sink_len
+            # Refresh the per-request portion of `block_table_with_sink`.
+            # The sink columns are already set by `set_sink_kv_block_offset`
+            # and never change after init. Zero the rest first to avoid
+            # leaving stale block ids from previous (potentially longer)
+            # forward passes in positions that the current request does
+            # not own.
+            self.block_table_with_sink[:, self.num_sink_blocks :] = 0
+            self.block_table_with_sink[
+                :num_reqs,
+                self.num_sink_blocks : self.num_sink_blocks + max_num_blocks,
+            ] = common_attn_metadata.block_table_tensor[:, :max_num_blocks]
+            common_attn_metadata.block_table_tensor = (
+                self.block_table_with_sink[:num_reqs]
+            )
+            common_attn_metadata.block_table_tensor.masked_fill_(
+                common_attn_metadata.block_table_tensor == -1, 0
+            )
 
+            # Write `seq_lens + sink_len` into the per-builder persistent
+            # buffer instead of mutating the shared `seq_lens` tensor.
+            # Padding positions (seq_lens == 0) must stay 0 so attention
+            # backends can identify unused slots.
+            src_seq_lens = common_attn_metadata.seq_lens
+            zero_mask = src_seq_lens.eq(0)
+            dst_seq_lens = self.seq_lens_with_sink[:num_reqs]
+            torch.add(src_seq_lens, self.sink_len, out=dst_seq_lens)
+            dst_seq_lens.masked_fill_(zero_mask, 0)
+            common_attn_metadata.seq_lens = dst_seq_lens
+            common_attn_metadata.max_seq_len += self.sink_len
 
             return super().build(common_prefix_len, common_attn_metadata, fast_build)
 
@@ -264,9 +299,14 @@ class StaticSinkAttention(Attention, CustomOp):
         CustomOp.__init__(self)
 
         self.sink_len = sink_len
+        self.block_size = block_size
+        self.sink_kv_block_offset = 1
         self.sink_populated = False
         self.sink_key = None
         self.sink_value = None
+
+    def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
+        self.sink_kv_block_offset = sink_kv_block_offset
 
     def update_sink_kv(self, sink_key, sink_value) -> None:
         self.sink_key = sink_key
@@ -304,8 +344,10 @@ class StaticSinkAttention(Attention, CustomOp):
 
     def populate_sink_kv(self, self_kv_cache):
         sink_kv_slot_mapping = torch.arange(
-            self.block_size,
-            self.sink_len + self.block_size,
+            # self.block_size,
+            # self.sink_len + self.block_size,
+            self.block_size * self.sink_kv_block_offset,
+            self.sink_len + self.block_size * self.sink_kv_block_offset,
             device=torch.accelerator.current_device_index(),
             dtype=torch.long,
         )
@@ -385,7 +427,7 @@ class StaticSinkMLAAttention(MLAAttention):
         indexer: nn.Module | None = None,
         sink_len: int | None = None,
         sliding_window: int | None = None,
-        is_hybrid_kv: bool = False,
+        # is_hybrid_kv: bool = False,
         **extra_impl_args,
     ):
         super().__init__(
@@ -413,12 +455,12 @@ class StaticSinkMLAAttention(MLAAttention):
         self.sink_populated = False
         self.sink_k_pe = None
         self.sink_compressed_kv = None
-        if is_hybrid_kv and self.sliding_window is None:
-            self.sink_kv_block_offset += self.sink_len // self.block_size
+        # if is_hybrid_kv and self.sliding_window is None:
+        #     self.sink_kv_block_offset += self.sink_len // self.block_size
         self.attn_backend = create_static_sink_attention_backend(
             self.attn_backend,
             sink_len=self.sink_len,
-            sink_kv_block_offset=self.sink_kv_block_offset
+            # sink_kv_block_offset=self.sink_kv_block_offset
         )
         impl_cls = FlashMLASparseImpl if use_sparse else FlashAttnStaticSinkMLAImpl
         impl_cls = cast(type[MLAAttentionImpl], impl_cls)
@@ -443,6 +485,9 @@ class StaticSinkMLAAttention(MLAAttention):
             indexer=indexer,
             **extra_impl_args,
         )
+
+    def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
+        self.sink_kv_block_offset = sink_kv_block_offset
 
     def update_sink_kv(self, sink_k_pe, sink_compressed_kv) -> None:
         self.sink_k_pe = sink_k_pe

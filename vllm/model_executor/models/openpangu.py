@@ -22,7 +22,7 @@
 # limitations under the License.
 import typing
 from collections.abc import Callable, Iterable
-from typing import Any, Optional
+from typing import Any, Optional, cast
 import torch
 from torch import nn
 from transformers import PretrainedConfig
@@ -242,6 +242,15 @@ class MomeAttention(MambaBase, CustomOp):
         forward_context = get_forward_context()
         if forward_context.attn_metadata is None:
             return hidden_states
+        return torch.ops.vllm.mome_attention(hidden_states, state_indice,
+                                             self.prefix)
+
+    def _forward_impl(self, hidden_states: torch.Tensor,
+                      state_indice: int) -> torch.Tensor:
+        print(f"[DEBUG] MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.sum(): {hidden_states.sum()}")
+        if "model.layers.0" in self.prefix and state_indice == 0:
+            print(f"[DEBUG] first layer MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.sum(): {hidden_states.sum()}")
+        forward_context = get_forward_context()
         mome_metadata = forward_context.attn_metadata[self.prefix]
         self_kv_cache = self.kv_cache
 
@@ -333,6 +342,33 @@ class MomeAttention(MambaBase, CustomOp):
                                                  shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+
+def mome_attention(
+    hidden_states: torch.Tensor,
+    state_indice: int,
+    layer_name: str,
+) -> torch.Tensor:
+    forward_context = get_forward_context()
+    layer = forward_context.no_compile_layers[layer_name]
+    return cast(MomeAttention, layer)._forward_impl(hidden_states, state_indice)
+
+
+def mome_attention_fake(
+    hidden_states: torch.Tensor,
+    state_indice: int,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="mome_attention",
+    op_func=mome_attention,
+    mutates_args=[],
+    fake_impl=mome_attention_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 
 class PanguIndexer(nn.Module):
