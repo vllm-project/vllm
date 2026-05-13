@@ -43,14 +43,14 @@ Multi-lora shrink/expand Triton kernel tuning follows a similar methodology from
 
 ### File Naming
 
-| Kernel Type               | File Name Template                          | Example                                     |
-|---------------------------|--------------------------------------------|---------------------------------------------|
-| shrink                    | `{gpu_name}_SHRINK.json`                   | `NVIDIA_H200_SHRINK.json`                  |
-| expand                    | `{gpu_name}_EXPAND_{add_input}.json`       | `NVIDIA_H200_EXPAND_TRUE.json`             |
+| Kernel Type               | File Name Template                          | Example                                      |
+| ------------------------- | ------------------------------------------- | -------------------------------------------- |
+| shrink                    | `{gpu_name}_SHRINK.json`                    | `NVIDIA_H200_SHRINK.json`                    |
+| expand                    | `{gpu_name}_EXPAND_{add_input}.json`        | `NVIDIA_H200_EXPAND_TRUE.json`               |
 | fused_moe_lora_w13_shrink | `{gpu_name}_FUSED_MOE_LORA_W13_SHRINK.json` | `NVIDIA_H200_FUSED_MOE_LORA_W13_SHRINK.json` |
 | fused_moe_lora_w13_expand | `{gpu_name}_FUSED_MOE_LORA_W13_EXPAND.json` | `NVIDIA_H200_FUSED_MOE_LORA_W13_EXPAND.json` |
-| fused_moe_lora_w2_shrink  | `{gpu_name}_FUSED_MOE_LORA_W2_SHRINK.json`  | `NVIDIA_H200_FUSED_MOE_LORA_W2_SHRINK.json` |
-| fused_moe_lora_w2_expand  | `{gpu_name}_FUSED_MOE_LORA_W2_EXPAND.json`  | `NVIDIA_H200_FUSED_MOE_LORA_W2_EXPAND.json` |
+| fused_moe_lora_w2_shrink  | `{gpu_name}_FUSED_MOE_LORA_W2_SHRINK.json`  | `NVIDIA_H200_FUSED_MOE_LORA_W2_SHRINK.json`  |
+| fused_moe_lora_w2_expand  | `{gpu_name}_FUSED_MOE_LORA_W2_EXPAND.json`  | `NVIDIA_H200_FUSED_MOE_LORA_W2_EXPAND.json`  |
 
 The `gpu_name` can be automatically detected by calling `torch.cuda.get_device_name()`.
 

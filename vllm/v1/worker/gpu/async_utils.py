@@ -17,7 +17,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -25,7 +24,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_event = copy_event
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -78,12 +77,11 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         is_valid: torch.Tensor | None,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
     ):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
         self.is_valid = is_valid
-        self.copy_event = copy_event
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -95,8 +93,8 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
             self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
+        pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
         self.copy_event.synchronize()
-        pooler_output = self.pooler_output_cpu.unbind(dim=0)
         if self.is_valid_cpu is not None:
             is_valid_cpu = self.is_valid_cpu.tolist()
             for i, is_valid in enumerate(is_valid_cpu):

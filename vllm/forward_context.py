@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+import vllm.ir
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -69,27 +70,8 @@ def _compute_sp_num_tokens(
     return sp_tokens.tolist()
 
 
-def _compute_chunked_local_num_tokens(
-    num_tokens_across_dp_cpu: torch.Tensor,
-    sequence_parallel_size: int,
-    max_num_tokens: int,
-    chunk_idx: int,
-) -> list[int]:
-    sp_tokens = _compute_sp_num_tokens(num_tokens_across_dp_cpu, sequence_parallel_size)
-    sp_size = len(sp_tokens)
-
-    local_size = [-1] * sp_size
-    for i in range(sp_size):
-        # Take into account sharding if MoE activation is sequence parallel.
-        local_size[i] = min(max_num_tokens, sp_tokens[i] - (max_num_tokens * chunk_idx))
-        if local_size[i] <= 0:
-            local_size[i] = 1  # ensure lockstep even if done
-    return local_size
-
-
 @dataclass
 class DPMetadata:
-    max_tokens_across_dp_cpu: torch.Tensor
     num_tokens_across_dp_cpu: torch.Tensor
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
@@ -112,47 +94,7 @@ class DPMetadata:
         assert num_tokens_across_dp_cpu[dp_rank] == batchsize, (
             f"{num_tokens_across_dp_cpu[dp_rank]} {batchsize}"
         )
-        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp_cpu)
-        return DPMetadata(max_tokens_across_dp_cpu, num_tokens_across_dp_cpu)
-
-    @contextmanager
-    def chunked_sizes(
-        self, sequence_parallel_size: int, max_chunk_size_per_rank: int, chunk_idx: int
-    ):
-        """
-        Context manager to compute and temporarily set the per-rank local token
-        sizes for a specific chunk during chunked forward execution.
-
-        This is necessary to ensure each DP (data parallel) rank processes its
-        designated portion of tokens in lockstep with others, even when the
-        token counts are uneven or some ranks have completed their input early.
-
-        For chunked execution, we break up the total tokens on each rank into
-        multiple chunks (of at most `max_chunk_size_per_rank`), and for a given
-        `chunk_idx`, this context manager sets `self.local_sizes` to the number
-        of tokens to process in that chunk on each rank.
-
-        `self.local_sizes` is only valid inside the context.
-
-        Args:
-            sequence_parallel_size: When Attn is TP and MoE layers are EP,
-                                    we use SP between the layers to avoid
-                                    redundant ops. We need this value to
-                                    compute the chunked sizes.
-            max_chunk_size_per_rank: The max number of tokens each rank is
-                                     allowed to process in this chunk.
-            chunk_idx: The index of the chunk to compute sizes for.
-        """
-        self.local_sizes = _compute_chunked_local_num_tokens(
-            self.num_tokens_across_dp_cpu,
-            sequence_parallel_size,
-            max_chunk_size_per_rank,
-            chunk_idx,
-        )
-        try:
-            yield self.local_sizes
-        finally:
-            self.local_sizes = None
+        return DPMetadata(num_tokens_across_dp_cpu)
 
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
@@ -175,7 +117,7 @@ class DPMetadata:
     # Get the cumulative tokens across sequence parallel ranks.
     # In this case the input to the MoEs will be distributed w.r.t both
     # DP and TP rank.
-    # When sp_size==1, this is just the cummulative num tokens across DP.
+    # When sp_size==1, this is just the cumulative num tokens across DP.
     def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
         num_tokens_across_sp_cpu = (
             self.num_tokens_across_dp_cpu - 1 + sp_size
@@ -197,8 +139,6 @@ class ForwardContext:
     for each microbatch.
     Set dynamically for each forward pass
     """
-    # TODO: remove after making all virtual_engines share the same kv cache
-    virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
     dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
@@ -265,7 +205,6 @@ def is_forward_context_available() -> bool:
 def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
@@ -282,7 +221,6 @@ def create_forward_context(
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=all_moe_layers,
-        virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
@@ -313,7 +251,6 @@ def override_forward_context(forward_context: ForwardContext | None):
 def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
-    virtual_engine: int = 0,
     num_tokens: int | None = None,
     num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
@@ -362,7 +299,6 @@ def set_forward_context(
     additional_kwargs = current_platform.set_additional_forward_context(
         attn_metadata=attn_metadata,
         vllm_config=vllm_config,
-        virtual_engine=virtual_engine,
         dp_metadata=dp_metadata,
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
@@ -374,7 +310,6 @@ def set_forward_context(
     forward_context = create_forward_context(
         attn_metadata,
         vllm_config,
-        virtual_engine,
         dp_metadata,
         cudagraph_runtime_mode,
         batch_descriptor,
@@ -385,7 +320,13 @@ def set_forward_context(
     )
 
     try:
-        with override_forward_context(forward_context):
+        with (
+            override_forward_context(forward_context),
+            vllm_config.kernel_config.ir_op_priority.set_priority(),
+            vllm.ir.enable_torch_wrap(
+                vllm_config.compilation_config.ir_enable_torch_wrap
+            ),
+        ):
             yield
     finally:
         global last_logging_time, batchsize_logging_interval

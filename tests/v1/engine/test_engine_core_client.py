@@ -24,17 +24,23 @@ from vllm import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
+    DPLBAsyncMPClient,
     EngineCoreClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.pool.late_interaction import (
+    LATE_INTERACTION_MODE_CACHE_QUERY,
+    LATE_INTERACTION_MODE_SCORE_DOC,
+)
 
 from ...distributed.conftest import MockSubscriber
 from ...utils import create_new_process_for_each_test
@@ -108,7 +114,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
             return 1
 
         def recv_multipart(self):
-            return (b"\x00\x00", b"ready")
+            return (b"\x00\x00", b"")
 
     class DummySocket:
         def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):
@@ -144,6 +150,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         data_parallel_hybrid_lb=False,
         data_parallel_external_lb=False,
         local_engines_only=False,
+        enable_elastic_ep=False,
     )
     vllm_config = SimpleNamespace(parallel_config=parallel_config)
 
@@ -162,6 +169,71 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         assert poll_timeouts == [timeout_value * 1000]
     finally:
         client.shutdown()
+
+
+def _make_pooling_request(
+    request_id: str, *, mode: str | None = None, query_key: str | None = None
+) -> EngineCoreRequest:
+    late_interaction_params = None
+    if mode is not None and query_key is not None:
+        late_interaction_params = LateInteractionParams(
+            mode=mode,
+            query_key=query_key,
+        )
+
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        sampling_params=None,
+        pooling_params=PoolingParams(
+            task="token_embed",
+            late_interaction_params=late_interaction_params,
+        ),
+        arrival_time=time.time(),
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def test_dplb_late_interaction_sticky_routing():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[0, 0], [0, 0], [0, 0]]
+    client.eng_start_index = 0
+
+    query_key = "rerank-abc-query-0"
+    query_request = _make_pooling_request(
+        "query-req", mode=LATE_INTERACTION_MODE_CACHE_QUERY, query_key=query_key
+    )
+    doc_request = _make_pooling_request(
+        "doc-req", mode=LATE_INTERACTION_MODE_SCORE_DOC, query_key=query_key
+    )
+
+    query_engine = client.get_core_engine_for_request(query_request)
+    doc_engine = client.get_core_engine_for_request(doc_request)
+
+    assert query_engine == doc_engine
+    assert client.reqs_in_flight["query-req"] == query_engine
+    assert client.reqs_in_flight["doc-req"] == doc_engine
+
+
+def test_dplb_non_late_interaction_still_uses_lb():
+    client = object.__new__(DPLBAsyncMPClient)
+    client.client_count = 1
+    client.reqs_in_flight = {}
+    client.core_engines = [b"\x00\x00", b"\x01\x00", b"\x02\x00"]
+    client.lb_engines = [[2, 1], [0, 0], [1, 0]]
+    client.eng_start_index = 0
+
+    request = make_request(SamplingParams(max_tokens=1))
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == client.core_engines[1]
+    assert client.lb_engines[1][0] == 1
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):
@@ -865,6 +937,13 @@ async def test_engine_core_client_future_utility_async(
 
 
 @pytest.mark.parametrize(
+    "model_name,num_groups",
+    [
+        ("meta-llama/Llama-3.2-1B-Instruct", 1),
+        ("google/gemma-3-1b-it", 7),
+    ],
+)
+@pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
     indirect=["publisher_config"],
@@ -872,12 +951,14 @@ async def test_engine_core_client_future_utility_async(
 def test_kv_cache_events(
     multiprocessing_mode: bool,
     publisher_config,
+    model_name: str,
+    num_groups: int,
 ):
     block_size = 16
     num_blocks = 2
 
     engine_args = EngineArgs(
-        model=MODEL_NAME,
+        model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
         block_size=block_size,
@@ -913,26 +994,29 @@ def test_kv_cache_events(
         assert result is not None, "No message received"
 
         seq, received = result
-
         assert seq == 0, "Sequence number mismatch"
-        assert len(received.events) == 1, "We should have exactly one BlockStored event"
-        event = received.events[0]
-        assert isinstance(event, BlockStored), "We should have a BlockStored event"
-        assert len(event.block_hashes) == num_blocks, (
-            "We should have a BlockStored event with 2 block_hashes"
+        assert len(received.events) == num_groups, (
+            f"Expected {num_groups} BlockStored event(s), got {len(received.events)}"
         )
-        assert event.block_size == block_size, (
-            "Block size should be the same as the block size"
-        )
-        assert event.parent_block_hash is None, "Parent block hash should be None"
-        assert event.lora_id is None, "Lora id should be None"
-        assert event.lora_name is None, "Lora name should be None"
-        assert len(event.token_ids) == num_blocks * block_size, (
-            "Token ids should be the same as the custom tokens"
-        )
-        assert event.token_ids == custom_tokens, (
-            "Token ids should be the same as the custom tokens"
-        )
+
+        for index, event in enumerate(received.events):
+            assert isinstance(event, BlockStored), "We should have a BlockStored event"
+            assert len(event.block_hashes) == num_blocks, (
+                "We should have a BlockStored event with 2 block_hashes"
+            )
+            assert event.block_size == block_size, (
+                "Block size should be the same as the block size"
+            )
+            assert event.parent_block_hash is None, "Parent block hash should be None"
+            assert event.lora_id is None, "Lora id should be None"
+            assert event.lora_name is None, "Lora name should be None"
+            assert len(event.token_ids) == num_blocks * block_size, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.token_ids == custom_tokens, (
+                "Token ids should be the same as the custom tokens"
+            )
+            assert event.group_idx == index
     finally:
         client.shutdown()
         subscriber.close()

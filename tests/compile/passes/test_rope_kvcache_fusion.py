@@ -28,12 +28,12 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
@@ -101,13 +101,8 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         # Initialize attn MetadataBuilder
-        self.builder = self.attn.attn_backend.get_builder_cls()(
-            kv_cache_spec=AttentionSpec(
-                block_size=self.block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=head_size,
-                dtype=self.kv_cache_dtype,
-            ),
+        self.builder = self.attn_backend.get_builder_cls()(
+            kv_cache_spec=self.attn.get_kv_cache_spec(vllm_config),
             layer_names=[self.attn.layer_name],
             vllm_config=vllm_config,
             device=device,
@@ -125,12 +120,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         num_blocks = batch_size * max_blocks
 
         # Fetch the attention backend and kv cache shape and stride order
-        attn_backend = self.attn.attn_backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
+        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size
         )
         try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order()
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
@@ -148,7 +142,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
-        self.attn.kv_cache = [kv_cache]
+        self.attn.kv_cache = kv_cache
 
         # Build attn metadata
         attn_metadata = self.builder.build(
@@ -170,7 +164,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size)
         kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-            k, v, self.layer_name
+            k, v, _encode_layer_name(self.layer_name)
         )
         return q, k, v, kv_cache_dummy_dep
 
@@ -196,6 +190,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
 @pytest.mark.parametrize("enable_rope_custom_op", [True])  # [True, False])
@@ -294,7 +289,7 @@ def test_rope_kvcache_fusion(
             }
             q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
+            kv_cache_unfused = attn_layer.kv_cache
         del dummy
 
         torch._dynamo.mark_dynamic(qkv, 0)
@@ -308,7 +303,7 @@ def test_rope_kvcache_fusion(
             }
             q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
+            kv_cache_fused = attn_layer.kv_cache
         del dummy
 
         assert fusion_pass.matched_count == 1

@@ -29,7 +29,7 @@ from typing import Any
 import torch
 import torchvision.transforms as T
 from PIL import Image, ImageOps
-from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
+from transformers import BatchFeature, LlamaTokenizerFast
 from transformers.processing_utils import ProcessorMixin
 
 
@@ -401,6 +401,3 @@ class DeepseekVLV2Processor(ProcessorMixin):
             images_spatial_crop,
             num_image_tokens,
         )
-
-
-AutoProcessor.register("DeepseekVLV2Processor", DeepseekVLV2Processor)

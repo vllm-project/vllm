@@ -32,9 +32,8 @@ from collections.abc import AsyncGenerator, Mapping
 import numpy as np
 import torch
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsRealtime,
@@ -233,7 +232,6 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
     info=Qwen3ASRProcessingInfo,
     dummy_inputs=Qwen3ASRDummyInputsBuilder,
 )
-@support_torch_compile
 class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealtime):
     realtime_max_tokens = 128
 

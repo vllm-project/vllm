@@ -38,11 +38,10 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -178,6 +177,26 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
+
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int] | None = None,
+    ) -> Mapping[str, int]:
+        mm_counts = mm_counts or {}
+        if mm_counts.get("audio", 0) <= 0:
+            return {}
+
+        feature_extractor = self.get_feature_extractor()
+        chunk_length = min(feature_extractor.chunk_length, 30)
+        audio_len = int(chunk_length * feature_extractor.sampling_rate)
+        hop_length = feature_extractor.hop_length
+        max_mel_seq_len = audio_len // hop_length
+
+        input_lengths = torch.tensor([max_mel_seq_len], dtype=torch.long)
+        _, output_lengths = _get_feat_extract_output_lengths(input_lengths)
+
+        return {"audio": int(output_lengths.item())}
 
 
 class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingInfo]):

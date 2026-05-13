@@ -62,7 +62,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
         error = base_server.create_error_response(
-            message="The model does not support Messages API"
+            NotImplementedError("The model does not support Messages API")
         )
         return translate_error_response(error)
 
@@ -108,7 +108,7 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
         error = base_server.create_error_response(
-            message="The model does not support Messages API"
+            NotImplementedError("The model does not support Messages API")
         )
         return translate_error_response(error)
 
