@@ -155,18 +155,19 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         """Poll in-flight transfers; return completed (job_id, success) pairs."""
         results: list[JobResult] = []
         for job_id, entry in list(self._transfers.items()):
-            state = ""
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
             except Exception as exc:
-                logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
-            if state == NIXL_PROC:
-                continue
-            elif state == NIXL_DONE:
-                success = True
-            else:
                 success = False
-                logger.warning("transfer failed job=%d state=%s", job_id, state)
+                logger.warning("check_xfer_state raised for job %d: %s", job_id, exc)
+            else:
+                if state == NIXL_PROC:
+                    continue
+                elif state == NIXL_DONE:
+                    success = True
+                else:
+                    success = False
+                    logger.warning("transfer failed job=%d state=%s", job_id, state)
             del self._transfers[job_id]
             self._agent.release_xfer_handle(entry.xfer_handle)
             self._agent.deregister_memory(entry.files_desc)
@@ -177,9 +178,12 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         for job_id, entry in self._transfers.items():
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)
+            except Exception as exc:
+                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
+            try:
                 self._agent.deregister_memory(entry.files_desc)
             except Exception as exc:
-                logger.warning("cleanup failed for job %d: %s", job_id, exc)
+                logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
         self._transfers.clear()
         if self._primary_reg is not None:
             try:
