@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -61,16 +61,28 @@ def _is_non_persistent_parameter_alias_buffer(
     if name not in layer._non_persistent_buffers_set:
         return False
 
+    return _is_parameter_alias_tensor(layer, buffer)
+
+
+def _is_parameter_alias_tensor(
+    layer: torch.nn.Module,
+    tensor: torch.Tensor,
+    extra_parameters: Iterable[torch.Tensor] = (),
+) -> bool:
     try:
-        buffer_storage_ptr = buffer.untyped_storage().data_ptr()
+        tensor_storage_ptr = tensor.untyped_storage().data_ptr()
     except RuntimeError:
         return False
 
     for param in layer.parameters(recurse=True):
-        if param is None:
-            continue
         try:
-            if param.untyped_storage().data_ptr() == buffer_storage_ptr:
+            if param.untyped_storage().data_ptr() == tensor_storage_ptr:
+                return True
+        except RuntimeError:
+            continue
+    for param in extra_parameters:
+        try:
+            if param.untyped_storage().data_ptr() == tensor_storage_ptr:
                 return True
         except RuntimeError:
             continue

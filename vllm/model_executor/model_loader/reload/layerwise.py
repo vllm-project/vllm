@@ -15,6 +15,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
     SKIP_TENSORS,
+    _is_non_persistent_parameter_alias_buffer,
+    _is_parameter_alias_tensor,
     capture_layer_to_meta,
     get_numel_loaded,
     materialize_layer,
@@ -380,6 +382,10 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
+        if name not in layer._buffers and _is_parameter_alias_tensor(
+            layer, buffer, parameters.values()
+        ):
+            continue
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
