@@ -57,22 +57,23 @@ _rebuilt_hf_tokenizer_cache: "weakref.WeakKeyDictionary[object, Tokenizer]" = (
 def _to_hf_tokenizer(tokenizer_inner: object) -> Tokenizer:
     """Return a ``tokenizers.Tokenizer`` suitable for HF's ``DecodeStream``.
 
-    Real ``Tokenizer`` instances are returned unchanged. Anything else that
-    exposes a ``to_str()`` returning a tokenizer-JSON string is rebuilt into
-    a real ``Tokenizer`` and cached (e.g. ``fastokens._compat._TokenizerShim``).
-    Other types pass through so downstream errors stay informative.
+    Real ``Tokenizer`` instances are returned unchanged. For
+    ``fastokens._compat._TokenizerShim``, rebuild a ``Tokenizer`` from the
+    shim's ``_json`` — the HF-formatted JSON captured at shim construction
+    time.
     """
     if isinstance(tokenizer_inner, Tokenizer):
         return tokenizer_inner
-    to_str = getattr(tokenizer_inner, "to_str", None)
-    if not callable(to_str):
-        return tokenizer_inner  # type: ignore[return-value]
     cached = _rebuilt_hf_tokenizer_cache.get(tokenizer_inner)
     if cached is not None:
         return cached
-    real_tok = Tokenizer.from_str(to_str())
-    # Non-weak-referenceable shims (rare) just skip the cache write and rebuild
-    # on the next call rather than failing detokenization.
+    json_str = getattr(tokenizer_inner, "_json", None)
+    if not isinstance(json_str, str):
+        raise TypeError(
+            f"Cannot rebuild a tokenizers.Tokenizer from "
+            f"{type(tokenizer_inner).__name__}: no ``_json`` attribute."
+        )
+    real_tok = Tokenizer.from_str(json_str)
     with contextlib.suppress(TypeError):
         _rebuilt_hf_tokenizer_cache[tokenizer_inner] = real_tok
     return real_tok
