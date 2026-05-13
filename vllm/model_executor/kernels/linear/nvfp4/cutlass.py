@@ -49,33 +49,16 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        output_size = layer.output_size_per_partition
+        output_dtype = x.dtype
+        output_shape = [*x.shape[:-1], output_size]
+
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="cutlass",
         )
-        return self.apply_quantized(
-            layer,
-            x_fp4,
-            x_blockscale,
-            orig_shape=x.shape,
-            output_dtype=x.dtype,
-            bias=bias,
-        )
-
-    def apply_quantized(
-        self,
-        layer: torch.nn.Module,
-        x_fp4: torch.Tensor,
-        x_blockscale: torch.Tensor,
-        *,
-        orig_shape: torch.Size,
-        output_dtype: torch.dtype,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        output_size = layer.output_size_per_partition
-        output_shape = [*orig_shape[:-1], output_size]
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
             x_fp4, getattr(layer, "weights_padding_cols", 0)

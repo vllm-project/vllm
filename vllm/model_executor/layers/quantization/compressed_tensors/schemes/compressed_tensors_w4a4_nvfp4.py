@@ -5,16 +5,11 @@ from collections.abc import Callable
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm._custom_ops import scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.utils.quant_fusion import (
-    QuantizedActivation,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -31,7 +26,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
-        self._supports_input_quant_fusion = hasattr(self.kernel, "apply_quantized")
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -129,41 +123,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Convert layer to NVFP4 linear kernel format
         self.kernel.process_weights_after_loading(layer)
 
-        if self._supports_input_quant_fusion:
-            layer.input_quant_key = kNvfp4Dynamic
-
-    def quantize_input(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-    ) -> QuantizedActivation:
-        data, scale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="cutlass",
-        )
-        return QuantizedActivation(
-            data=data,
-            scale=scale,
-            orig_dtype=x.dtype,
-            orig_shape=x.shape,
-            quant_key=kNvfp4Dynamic,
-        )
-
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | QuantizedActivation,
+        x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if isinstance(x, QuantizedActivation):
-            return self.kernel.apply_quantized(
-                layer,
-                x.data,
-                x.scale,
-                orig_shape=x.orig_shape,
-                output_dtype=x.orig_dtype,
-                bias=bias,
-            )
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)

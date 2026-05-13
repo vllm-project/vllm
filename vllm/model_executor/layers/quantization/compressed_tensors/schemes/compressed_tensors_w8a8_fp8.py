@@ -8,7 +8,6 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm._custom_ops import scaled_fp8_quant
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -199,21 +198,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         ):
             layer.input_quant_key = kFp8StaticTensorSym
 
-    def quantize_input(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-    ) -> QuantizedActivation:
-        x_2d = x.view(-1, x.shape[-1])
-        fp8, _ = scaled_fp8_quant(x_2d, layer.input_scale)
-        return QuantizedActivation(
-            data=fp8.view(x.shape),
-            scale=layer.input_scale,
-            orig_dtype=x.dtype,
-            orig_shape=x.shape,
-            quant_key=kFp8StaticTensorSym,
-        )
-
     def rms_norm_quantize_input(
         self,
         layer: torch.nn.Module,
@@ -221,8 +205,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[QuantizedActivation, torch.Tensor]:
-        fp8_dtype = current_platform.fp8_dtype()
-        out_q = torch.empty(x.shape, dtype=fp8_dtype, device=x.device)
+        out_q = torch.empty(
+            x.shape, dtype=current_platform.fp8_dtype(), device=x.device
+        )
         if residual is None:
             torch.ops._C.rms_norm_static_fp8_quant(
                 out_q,
@@ -256,6 +241,4 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if isinstance(x, QuantizedActivation):
-            return self.fp8_linear.apply_weights(layer, x.data, bias)
         return self.fp8_linear.apply_weights(layer, x, bias)
