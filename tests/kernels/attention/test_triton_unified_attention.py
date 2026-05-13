@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from unittest.mock import patch
-
 import pytest
 import torch
 
@@ -11,7 +9,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import (
-    select_2d_config,
     unified_attention,
 )
 
@@ -349,43 +346,4 @@ def test_triton_unified_attn_fp16_input_fp8_output(
     (
         torch.testing.assert_close(output_fp16, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output_fp16 - ref_output))}",
-    )
-
-
-@pytest.mark.parametrize("head_size", [128, 256, 512])
-@pytest.mark.parametrize("element_size", [1, 2])
-@pytest.mark.parametrize("max_seqlen_q", [1, 128, 256, 512])
-def test_select_2d_config_navi_lds_limit(
-    head_size: int,
-    element_size: int,
-    max_seqlen_q: int,
-):
-    """Verify select_2d_config never produces a Q-tile exceeding 64KB on Navi.
-
-    Regression test for head_size=512 (Gemma 4) where BLOCK_M=128 caused
-    OutOfResources: 128 * 512 * 2 = 131072 > 65536.
-    """
-    navi_lds_bytes = 65536
-
-    with (
-        patch.object(current_platform, "is_rocm", return_value=True),
-        patch.object(current_platform, "is_navi", return_value=True),
-    ):
-        config = select_2d_config(
-            block_size=16,
-            head_size=head_size,
-            sliding_window=None,
-            all_decode=False,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=1024,
-            num_queries_per_kv=1,
-            num_2d_prgms=1,
-            element_size=element_size,
-        )
-
-    block_m = config["BLOCK_M"]
-    q_tile_bytes = block_m * head_size * element_size
-    assert q_tile_bytes <= navi_lds_bytes, (
-        f"Q-tile {q_tile_bytes} bytes (BLOCK_M={block_m}, head_size={head_size}, "
-        f"element_size={element_size}) exceeds {navi_lds_bytes}-byte Navi LDS limit"
     )
