@@ -271,7 +271,7 @@ class BatchDCPPrefillWrapper:
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
             head_dim_vo=head_dim,
-            causal=True,  # This is newtokens run
+            causal=self._use_causal,
             sm_scale=sm_scale,
             window_left=window_left,
             logits_soft_cap=logits_soft_cap,
@@ -339,6 +339,10 @@ class FlashInferBackend(AttentionBackend):
         # Note: Not sure for all platforms, but on Blackwell,
         # only support a page size of 16, 32, 64.
         return [16, 32, 64]
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @staticmethod
     def get_name() -> str:
@@ -547,6 +551,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.cache_config = vllm_config.cache_config
         self.model_config = vllm_config.model_config
         self.attention_config = vllm_config.attention_config
+        # For non-causal (bidirectional) models, disable causal masking
+        # in the new-tokens and prefill plan calls.
+        self._use_causal = not getattr(
+            vllm_config.attention_config, 'use_non_causal', False
+        )
         self._workspace_buffer = None
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
@@ -1061,7 +1070,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 num_kv_heads=self.num_kv_heads,
                 head_dim=self.head_dim,
                 page_size=self.page_size,
-                causal=True,
+                causal=self._use_causal,
                 sm_scale=self.sm_scale,
                 window_left=self.window_left,
                 logits_soft_cap=self.logits_soft_cap,
@@ -1157,7 +1166,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
                         page_size=self.page_size,
-                        causal=True,
+                        causal=self._use_causal,
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
                         logits_soft_cap=self.logits_soft_cap,
@@ -1480,7 +1489,6 @@ class FlashInferImpl(AttentionImpl):
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._new_tokens._sm_scale == self.scale
-                    assert prefill_wrapper._new_tokens._causal
 
                     prefill_wrapper.run(
                         layer,
@@ -1499,7 +1507,6 @@ class FlashInferImpl(AttentionImpl):
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
