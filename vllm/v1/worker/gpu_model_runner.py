@@ -870,7 +870,6 @@ class GPUModelRunner(
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
-        self._mamba_block_size: int | None = None
         self.layerwise_nvtx_hooks_registered = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -1300,7 +1299,7 @@ class GPUModelRunner(
             req_state.num_computed_tokens = num_computed_tokens
 
             if resumed_from_preemption:
-                req_state.mamba_last_scheduled_idx = -1
+                self.mamba_state_idx.pop(req_id, None)
 
             if not is_last_rank:
                 if not req_data.new_token_ids:
@@ -1485,21 +1484,12 @@ class GPUModelRunner(
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
-        if self.cache_config.mamba_cache_mode == "align":
+        is_align = self.cache_config.mamba_cache_mode == "align"
+        if is_align:
             for i, num_tokens in enumerate(
                 self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
             ):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-            mamba_utils.postprocess_mamba(
-                scheduler_output,
-                self.kv_cache_config,
-                self.input_batch,
-                self.requests,
-                self.mamba_state_idx,
-                self.compilation_config.static_forward_context,
-                self.model.get_mamba_state_copy_func(),
-                self._get_mamba_copy_bufs(),
-            )
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
                 self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
@@ -1507,24 +1497,23 @@ class GPUModelRunner(
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
-        if self.mamba_prev_last_scheduled_idx is not None:
-            if self._mamba_block_size is None:
-                self._mamba_block_size = next(
-                    g.kv_cache_spec.block_size
-                    for g in self.kv_cache_config.kv_cache_groups
-                    if isinstance(g.kv_cache_spec, MambaSpec)
-                )
-            block_size = self._mamba_block_size
-            full_decode_len = 1 + self.num_spec_tokens
-            scheduled = scheduler_output.num_scheduled_tokens
-            for req_id in self.input_batch.req_ids[:num_reqs]:
-                req = self.requests[req_id]
-                num_query = scheduled.get(req_id, 0)
-                if num_query == full_decode_len:
-                    seq_len = req.num_computed_tokens + num_query
-                    req.mamba_last_scheduled_idx = max(0, (seq_len - 1) // block_size)
-                else:
-                    req.mamba_last_scheduled_idx = -1
+        mamba_utils.postprocess_mamba(
+            scheduler_output,
+            self.kv_cache_config,
+            self.cache_config,
+            self.input_batch,
+            self.requests,
+            self.mamba_state_idx,
+            self.num_spec_tokens,
+            num_reqs,
+            forward_context=(
+                self.compilation_config.static_forward_context if is_align else None
+            ),
+            mamba_state_copy_funcs=(
+                self.model.get_mamba_state_copy_func() if is_align else None
+            ),
+            copy_bufs=self._get_mamba_copy_bufs() if is_align else None,
+        )
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
@@ -2024,11 +2013,13 @@ class GPUModelRunner(
             self.num_accepted_tokens.gpu.fill_(1)
 
         if self.mamba_prev_last_scheduled_idx is not None:
-            np_view = self.mamba_prev_last_scheduled_idx.np
-            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-                np_view[i] = self.requests[req_id].mamba_last_scheduled_idx
-            np_view[num_reqs:].fill(-1)
-            self.mamba_prev_last_scheduled_idx.copy_to_gpu()
+            mamba_utils.preprocess_mamba_all_specdec(
+                scheduler_output,
+                self.input_batch,
+                self.mamba_state_idx,
+                num_reqs,
+                self.mamba_prev_last_scheduled_idx,
+            )
 
         # Update num_computed_tokens on GPU. In async spec decode,
         # CPU values are optimistic (all drafts accepted). The kernel
