@@ -321,6 +321,82 @@ if current_platform.is_rocm():
 logger = init_logger(__name__)
 
 
+def create_shuffle_view_k(cache_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """
+    Create K cache tensor view with SHUFFLE layout.
+
+    Transforms NHD layout [num_blocks, block_size, num_kv_heads, head_size]
+    to SHUFFLE layout [num_blocks, num_kv_heads, head_size//X, block_size, X]
+
+    Args:
+        cache_tensor: K cache in NHD layout (4D)
+        dtype: Tensor dtype (determines X packing factor)
+
+    Returns:
+        5D tensor view in SHUFFLE layout
+    """
+    num_blocks, block_size, num_kv_heads, head_size = cache_tensor.shape
+
+    # Determine X-packing factor based on dtype
+    if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+        X = 16
+    elif dtype == torch.float16:
+        X = 8
+    else:
+        raise ValueError(f"Unsupported dtype for SHUFFLE: {dtype}")
+
+    assert head_size % X == 0, f"head_size {head_size} not divisible by X={X}"
+
+    # Create template with SHUFFLE shape
+    k_template = torch.empty(
+        [num_blocks, num_kv_heads, head_size // X, block_size, X],
+        dtype=cache_tensor.dtype,
+        device="meta",
+    )
+
+    # Use view_as() to create SHUFFLE view with inferred strides
+    return cache_tensor.view_as(k_template)
+
+
+def create_shuffle_view_v(cache_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """
+    Create V cache tensor view with SHUFFLE layout.
+
+    Transforms NHD layout [num_blocks, block_size, num_kv_heads, head_size]
+    to SHUFFLE layout [num_blocks, num_kv_heads, block_size//X, head_size, X]
+
+    Note: V has different dimension ordering than K.
+
+    Args:
+        cache_tensor: V cache in NHD layout (4D)
+        dtype: Tensor dtype (determines X packing factor)
+
+    Returns:
+        5D tensor view in SHUFFLE layout
+    """
+    num_blocks, block_size, num_kv_heads, head_size = cache_tensor.shape
+
+    # Determine X-packing factor based on dtype
+    if dtype in [torch.float8_e4m3fn, torch.float8_e5m2]:
+        X = 16
+    elif dtype == torch.float16:
+        X = 8
+    else:
+        raise ValueError(f"Unsupported dtype for SHUFFLE: {dtype}")
+
+    assert block_size % X == 0, f"block_size {block_size} not divisible by X={X}"
+
+    # Create template with SHUFFLE shape (different from K!)
+    v_template = torch.empty(
+        [num_blocks, num_kv_heads, block_size // X, head_size, X],
+        dtype=cache_tensor.dtype,
+        device="meta",
+    )
+
+    # Use view_as() to create SHUFFLE view with inferred strides
+    return cache_tensor.view_as(v_template)
+
+
 @dataclass
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
@@ -1144,10 +1220,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
                 # Multi-token speculative decode path.
                 if decode_max_query_len > 1:
-                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Shuffle KV cache layout is not supported with "
-                        "speculative decoding (multi-token decode)."
-                    )
+                    # SHUFFLE is now supported with MTP via unified_attention
                     if not attn_metadata.causal:
                         from aiter.ops.triton.attention.mha_v3 import (
                             flash_attn_with_kvcache,
@@ -1193,10 +1266,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             num_decodes,
                             key_cache.shape[2],
                         )
+
+                        # Create SHUFFLE views if enabled
+                        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                            k_cache = create_shuffle_view_k(key_cache, key_cache.dtype)
+                            v_cache = create_shuffle_view_v(value_cache, value_cache.dtype)
+                        else:
+                            k_cache = key_cache
+                            v_cache = value_cache
+
                         unified_attention(
                             q=query[:num_decode_tokens],
-                            k=key_cache,
-                            v=value_cache,
+                            k=k_cache,
+                            v=v_cache,
                             out=output[:num_decode_tokens],
                             cu_seqlens_q=attn_metadata.query_start_loc[
                                 : num_decodes + 1
@@ -1225,10 +1307,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
 
                 if use_unified_attention:
-                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "unified_attention fallback with shuffle layout "
-                        "is not supported yet."
-                    )
+                    # SHUFFLE is now supported in unified_attention
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
                     )
@@ -1240,10 +1319,19 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         num_decodes,
                         key_cache.shape[2],
                     )
+
+                    # Create SHUFFLE views if enabled
+                    if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                        k_cache = create_shuffle_view_k(key_cache, key_cache.dtype)
+                        v_cache = create_shuffle_view_v(value_cache, value_cache.dtype)
+                    else:
+                        k_cache = key_cache
+                        v_cache = value_cache
+
                     unified_attention(
                         q=query[:num_decode_tokens],
-                        k=key_cache,
-                        v=value_cache,
+                        k=k_cache,
+                        v=v_cache,
                         out=output[:num_decode_tokens],
                         cu_seqlens_q=decode_cu_seqlens_q,
                         max_seqlen_q=1,
