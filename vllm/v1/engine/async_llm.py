@@ -460,16 +460,18 @@ class AsyncLLM(EngineClient):
             try:
                 async for input_chunk in input_stream:
                     sp = input_chunk.sampling_params
-                    if sp:
+                    if sp is not None:
                         self._validate_streaming_input_sampling_params(sp)
+                        validate_params = True
                     else:
                         sp = sampling_params
-                    # TODO(nick): Avoid re-validating reused sampling parameters
+                        validate_params = False
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
                         params=sp,
                         resumable=True,
+                        validate_params=validate_params,
                         **inputs,  # type: ignore[arg-type]
                     )
                     req.external_req_id = request_id

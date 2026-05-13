@@ -244,8 +244,10 @@ class InputProcessor:
         priority: int = 0,
         data_parallel_rank: int | None = None,
         resumable: bool = False,
+        validate_params: bool = True,
     ) -> EngineCoreRequest:
-        self._validate_params(params, supported_tasks)
+        if validate_params:
+            self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config

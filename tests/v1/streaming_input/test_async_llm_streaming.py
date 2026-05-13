@@ -8,10 +8,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.engine.protocol import StreamingInput
+from vllm.inputs import TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import RequestOutputCollector
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture
@@ -104,6 +108,106 @@ def make_output(request_id: str, finished: bool) -> RequestOutput:
         outputs=[],
         finished=finished,
     )
+
+
+def make_engine_core_request(
+    request_id: str,
+    sampling_params: SamplingParams,
+) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        prompt_token_ids=[1],
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        arrival_time=0.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+    )
+
+
+def make_streaming_llm() -> AsyncLLM:
+    llm = MagicMock(spec=AsyncLLM)
+    llm.get_supported_tasks = AsyncMock(return_value=("generate",))
+    llm.input_processor = MagicMock()
+
+    def process_inputs(*_args, **kwargs):
+        return make_engine_core_request(
+            kwargs["request_id"],
+            kwargs["params"],
+        )
+
+    llm.input_processor.process_inputs.side_effect = process_inputs
+    llm.input_processor.assign_request_id.side_effect = lambda request: setattr(
+        request, "request_id", f"{request.request_id}-internal"
+    )
+    llm.model_config = MagicMock()
+    llm.model_config.is_encoder_decoder = False
+    llm._add_request = AsyncMock()
+    llm._run_output_handler = MagicMock()
+    llm.log_requests = False
+    llm._validate_streaming_input_sampling_params = (
+        AsyncLLM._validate_streaming_input_sampling_params
+    )
+    llm._add_streaming_input_request = AsyncLLM._add_streaming_input_request.__get__(
+        llm,
+        AsyncLLM,
+    )
+    return llm
+
+
+@pytest.mark.asyncio
+async def test_streaming_input_reused_sampling_params_skip_validation():
+    sampling_params = SamplingParams(max_tokens=10)
+    llm = make_streaming_llm()
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(prompt=TokensPrompt(prompt_token_ids=[1]))
+        yield StreamingInput(prompt=TokensPrompt(prompt_token_ids=[2]))
+
+    queue = await llm._add_streaming_input_request(
+        "test",
+        input_generator(),
+        sampling_params,
+    )
+    task = queue._input_stream_task
+    assert task is not None
+    await task
+
+    validate_params = [
+        call.kwargs.get("validate_params", True)
+        for call in llm.input_processor.process_inputs.call_args_list
+    ]
+    assert validate_params == [True, False, False]
+
+
+@pytest.mark.asyncio
+async def test_streaming_input_per_chunk_sampling_params_validate():
+    sampling_params = SamplingParams(max_tokens=10)
+    chunk_params = SamplingParams(max_tokens=5)
+    llm = make_streaming_llm()
+
+    async def input_generator() -> AsyncGenerator[StreamingInput, None]:
+        yield StreamingInput(
+            prompt=TokensPrompt(prompt_token_ids=[1]),
+            sampling_params=chunk_params,
+        )
+
+    queue = await llm._add_streaming_input_request(
+        "test",
+        input_generator(),
+        sampling_params,
+    )
+    task = queue._input_stream_task
+    assert task is not None
+    await task
+
+    validate_params = [
+        call.kwargs.get("validate_params", True)
+        for call in llm.input_processor.process_inputs.call_args_list
+    ]
+    assert validate_params == [True, True]
 
 
 @pytest.mark.asyncio
