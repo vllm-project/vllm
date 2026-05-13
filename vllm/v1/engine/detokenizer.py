@@ -35,30 +35,35 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 # generation on models whose embedding matrix exceeds ``tokenizer.json``'s
 # declared vocab (see https://github.com/crusoecloud/fastokens/issues/30).
 #
-# Mirror dynamo's encode-only approach: keep streaming detokenization on HF's
+# Take an encode-only approach: keep streaming detokenization on HF's
 # ``DecodeStream`` regardless of which encode backend is in use. Two pieces:
 # (1) use the locally-bound ``DecodeStream`` import above so fastokens'
 #     module-level patch does not reach this hot path;
-# (2) when the tokenizer is a fastokens shim, rebuild a real
-#     ``tokenizers.Tokenizer`` from the shim's JSON state for HF's
-#     ``DecodeStream.step`` to consume.
-_shim_to_hf_tokenizer: dict[int, Tokenizer] = {}
+# (2) when the inner tokenizer isn't a real ``tokenizers.Tokenizer`` (e.g.
+#     fastokens' shim), rebuild a real one from its JSON state for HF's
+#     ``DecodeStream.step`` to consume. We duck-type via ``to_str()`` so this
+#     works for any future shim that exposes the same serialization contract.
+_rebuilt_hf_tokenizer_cache: dict[int, Tokenizer] = {}
 
 
 def _to_hf_tokenizer(tokenizer_inner: object) -> Tokenizer:
-    """Return a ``tokenizers.Tokenizer`` for HF's ``DecodeStream``.
+    """Return a ``tokenizers.Tokenizer`` suitable for HF's ``DecodeStream``.
 
-    Most code paths already pass a real ``Tokenizer``; this helper exists for
-    the fastokens path where ``tokenizer._tokenizer`` is a ``_TokenizerShim``.
+    Real ``Tokenizer`` instances are returned unchanged. Anything else that
+    exposes a ``to_str()`` returning a tokenizer-JSON string is rebuilt into
+    a real ``Tokenizer`` and cached (e.g. ``fastokens._compat._TokenizerShim``).
+    Other types pass through so downstream errors stay informative.
     """
-    if type(tokenizer_inner).__name__ != "_TokenizerShim":
+    if isinstance(tokenizer_inner, Tokenizer):
+        return tokenizer_inner
+    to_str = getattr(tokenizer_inner, "to_str", None)
+    if not callable(to_str):
         return tokenizer_inner  # type: ignore[return-value]
-    cached = _shim_to_hf_tokenizer.get(id(tokenizer_inner))
+    cached = _rebuilt_hf_tokenizer_cache.get(id(tokenizer_inner))
     if cached is not None:
         return cached
-    json_str = getattr(tokenizer_inner, "_json", None) or tokenizer_inner.to_str()
-    real_tok = Tokenizer.from_str(json_str)
-    _shim_to_hf_tokenizer[id(tokenizer_inner)] = real_tok
+    real_tok = Tokenizer.from_str(to_str())
+    _rebuilt_hf_tokenizer_cache[id(tokenizer_inner)] = real_tok
     return real_tok
 
 
