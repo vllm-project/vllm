@@ -22,7 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-ASR model."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 import torch
@@ -90,6 +90,7 @@ from vllm.transformers_utils.processors.qwen3_asr import (
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
+_LANGUAGE_PREFIX = "language "
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -599,3 +600,37 @@ class Qwen3ASRForConditionalGeneration(
         # Split on <asr_text> tag and take the transcription part
         _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
         return text_part
+
+    @classmethod
+    def get_streaming_post_processor(cls) -> Callable[[str, bool], str]:
+        raw_text = ""
+        emitted_text = ""
+        is_structured_output: bool | None = None
+
+        def post_process_delta(text_delta: str, finished: bool) -> str:
+            nonlocal raw_text, emitted_text, is_structured_output
+
+            raw_text += text_delta
+
+            if is_structured_output is None:
+                text_without_leading_space = raw_text.lstrip()
+                maybe_structured_output = (
+                    text_without_leading_space == ""
+                    or _LANGUAGE_PREFIX.startswith(text_without_leading_space)
+                    or text_without_leading_space.startswith(_LANGUAGE_PREFIX)
+                )
+                if maybe_structured_output and _ASR_TEXT_TAG not in raw_text:
+                    if not finished:
+                        return ""
+                    is_structured_output = False
+                else:
+                    is_structured_output = _ASR_TEXT_TAG in raw_text
+
+            processed_text = (
+                cls.post_process_output(raw_text) if is_structured_output else raw_text
+            )
+            new_text = processed_text[len(emitted_text) :]
+            emitted_text = processed_text
+            return new_text
+
+        return post_process_delta
