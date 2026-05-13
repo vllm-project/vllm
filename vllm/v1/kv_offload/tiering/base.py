@@ -145,6 +145,10 @@ class SecondaryTierManager(ABC):
         """
         return
 
+    def shutdown(self) -> None:
+        """Release resources held by this tier (threads, connections, etc.)."""
+        return
+
     @staticmethod
     @abstractmethod
     def get_tier_type() -> str:

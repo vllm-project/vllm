@@ -521,4 +521,6 @@ class TieringOffloadingManager(OffloadingManager):
 
     def shutdown(self) -> None:
         """Shutdown all tiers and release resources."""
+        for tier in self.secondary_tiers:
+            tier.shutdown()
         self.primary_tier.shutdown()
