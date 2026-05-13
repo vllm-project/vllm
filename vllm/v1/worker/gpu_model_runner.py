@@ -435,7 +435,7 @@ class GPUModelRunner(
         )
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
-        self.requires_sequential_video_encoding = False
+        self.model_handles_video_batching = False
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
@@ -2830,6 +2830,20 @@ class GPUModelRunner(
         # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
 
+        # Sort by modality so that group_and_batch_mm_kwargs sees consecutive
+        # same-modality items and can batch them across requests.
+        # Example: [video_req1, audio_req1, video_req2, audio_req2]
+        #       -> [audio_req1, audio_req2, video_req1, video_req2]
+        # mm_hashes and mm_lora_refs are kept in sync so that:
+        # - the cache-by-hash logic below (zip(mm_hashes, encoder_outputs))
+        #   remains correct, and
+        # - the LoRA mapping block below iterates mm_lora_refs in the same
+        #   order that group_and_batch_mm_kwargs will dispatch to the encoder.
+        _perm = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
+        mm_kwargs = [mm_kwargs[i] for i in _perm]
+        mm_hashes = [mm_hashes[i] for i in _perm]
+        mm_lora_refs = [mm_lora_refs[i] for i in _perm]
+
         if self.lora_config and self.lora_manager.supports_tower_connector_lora():
             # Build LoRA mappings independently for encoder inputs
             # (encoder batch structure is different from main batch)
@@ -2916,16 +2930,11 @@ class GPUModelRunner(
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
-            # dynamic res video for nemotron temporarily uses this hack via
-            # requires_sequential_video_encoding
-            # because it doesn't yet support video batching.
             # TODO(ywang96): Fix memory profiling to take EVS into account and
             # remove this hack.
             if (
-                (
-                    self.is_multimodal_pruning_enabled
-                    or self.requires_sequential_video_encoding
-                )
+                self.is_multimodal_pruning_enabled
+                and not self.model_handles_video_batching
                 and modality == "video"
                 and num_items > 1
             ):
@@ -2942,13 +2951,10 @@ class GPUModelRunner(
                                 pin_memory=self.pin_memory,
                             )
                         )
-
                         micro_batch_outputs = model.embed_multimodal(
                             **micro_batch_mm_inputs
                         )
-
                         batch_outputs_lst.extend(micro_batch_outputs)
-
                 batch_outputs = batch_outputs_lst
             else:
                 # Run the encoder.
@@ -2958,7 +2964,6 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-
                 with self.timed_encoder_operation(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
@@ -4979,9 +4984,9 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
-        self.requires_sequential_video_encoding = hasattr(
-            self.get_model(), "requires_sequential_video_encoding"
-        )  # Temporary hack for dynamic res video w/o support for bs>1 yet
+        self.model_handles_video_batching = getattr(
+            self.get_model(), "handles_video_batching_internally", False
+        )
 
         if (
             is_mixture_of_experts(self.model)

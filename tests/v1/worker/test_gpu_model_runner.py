@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
@@ -1425,6 +1427,77 @@ def test_is_uniform_decode() -> None:
         num_tokens=16,
         num_reqs=15,
         force_uniform_decode=False,
+    )
+
+
+def test_mm_encoder_tower_lora_mapping_follows_modality_sort():
+    mm_hashes = ["A_img", "A_vid", "B_vid", "B_img"]
+    mm_kwargs = [
+        ("image", SimpleNamespace(tag="A_img")),
+        ("video", SimpleNamespace(tag="A_vid")),
+        ("video", SimpleNamespace(tag="B_vid")),
+        ("image", SimpleNamespace(tag="B_img")),
+    ]
+    mm_lora_refs = [
+        ("req_A", SimpleNamespace(get_num_embeds=lambda: 10)),
+        ("req_A", SimpleNamespace(get_num_embeds=lambda: 20)),
+        ("req_B", SimpleNamespace(get_num_embeds=lambda: 30)),
+        ("req_B", SimpleNamespace(get_num_embeds=lambda: 40)),
+    ]
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.observability_config = None
+    runner.lora_config = MagicMock()
+    runner.is_multimodal_pruning_enabled = False
+    runner.model_handles_video_batching = False
+    runner.encoder_cudagraph_manager = None
+    runner.device = "cpu"
+    runner.pin_memory = False
+    runner.lora_manager = MagicMock()
+    runner.lora_manager.supports_tower_connector_lora.return_value = True
+    runner.input_batch = SimpleNamespace(
+        req_id_to_index={"req_A": 0, "req_B": 1},
+        request_lora_mapping=np.array([1, 2], dtype=np.int64),
+        lora_id_to_lora_request={
+            1: LoRARequest("lora_1", 1, "/tmp/lora_1"),
+            2: LoRARequest("lora_2", 2, "/tmp/lora_2"),
+        },
+    )
+
+    model = MagicMock()
+    model.get_num_mm_encoder_tokens.side_effect = {10: 2, 20: 3, 30: 5, 40: 7}.get
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=False)
+    runner.model = model
+    runner._batch_mm_inputs_from_scheduler = MagicMock(
+        return_value=(mm_hashes, mm_kwargs, mm_lora_refs)
+    )
+
+    with patch(
+        "vllm.v1.worker.gpu_model_runner.group_and_batch_mm_kwargs",
+        return_value=iter(()),
+    ):
+        runner._execute_mm_encoder(scheduler_output=MagicMock())
+
+    _, mapping = runner.lora_manager.set_active_adapters.call_args.args
+    assert mapping.prompt_mapping == (1, 2, 1, 2)
+    assert mapping.index_mapping == (
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        1,
+        1,
+        1,
+        2,
+        2,
+        2,
+        2,
+        2,
     )
 
 

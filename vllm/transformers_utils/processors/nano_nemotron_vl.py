@@ -916,14 +916,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         ]
         video_num_patches = torch.tensor([len(item) for item in pixel_values_lst_video])
 
-        # Normalization already fused into resize above.
-        # Skip the torch.cat copy when there is exactly one video
-        if len(pixel_values_lst_video) == 1:
-            pixel_values_flat = pixel_values_lst_video[0]
-        else:
-            pixel_values_flat = torch.cat(pixel_values_lst_video)
+        # Keep one tensor per video; the model-side batched("video") parser
+        # now treats each list element as a video and flattens frames later.
         video_inputs = {
-            "pixel_values_flat_video": pixel_values_flat,
+            "pixel_values_flat_video": pixel_values_lst_video,
             "video_num_patches": video_num_patches,
             "frames_indices": frames_indices_lst,
             "frame_duration_ms": torch.tensor(frame_duration_ms_lst),
@@ -1061,6 +1057,11 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         if ragged_frames_indices:
             combined_inputs.pop("frames_indices")
 
+        # The video field is declared MultiModalFieldConfig.batched("video"),
+        # which requires a per-video list[Tensor] so it can build one item
+        # per video.
+        pixel_values_flat_video = combined_inputs.pop("pixel_values_flat_video", None)
+
         if self.dynamic_tiler is None:
             batch = BatchFeature(
                 {**combined_inputs, **image_inputs},
@@ -1077,6 +1078,8 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 torch.as_tensor(frame_indices, dtype=torch.int64)
                 for frame_indices in frames_indices
             ]
+        if pixel_values_flat_video is not None:
+            batch["pixel_values_flat_video"] = pixel_values_flat_video
         return batch
 
     def get_image_repl(
