@@ -7,7 +7,13 @@ from weakref import WeakKeyDictionary, ref
 import pytest
 import torch
 
+import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+    record_metadata_for_reloading,
+)
 from vllm.model_executor.model_loader.reload.meta import (
     capture_layer_to_meta,
     get_numel_loaded,
@@ -19,6 +25,16 @@ from vllm.model_executor.model_loader.reload.meta import (
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.platforms import current_platform
+
+
+class _AliasedBufferLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        weight = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        self.weight = torch.nn.Parameter(weight)
+        self.register_buffer(
+            "weight_view", self.weight.detach().view(-1), persistent=False
+        )
 
 
 def test_move_metatensors():
@@ -121,6 +137,38 @@ def test_get_numel_loaded():
     num_loaded, ret = get_numel_loaded(complex_weight_loader, args)
     assert num_loaded == 6
     assert ret == "value"
+
+
+def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):
+    layer = _AliasedBufferLayer()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(-123.0)
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.weight, loaded_weight)
+    assert layer.weight_view.untyped_storage().data_ptr() == (
+        layer.weight.untyped_storage().data_ptr()
+    )
 
 
 @pytest.mark.parametrize(
