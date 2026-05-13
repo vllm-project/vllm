@@ -20,13 +20,15 @@
  * limitations under the License.
  */
 
-#include <ATen/ATen.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
 
 #include "core/registration.h"
+#include "libtorch_stable/torch_utils.h"
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
 
 #include <cstdlib>
 #include <mutex>
@@ -34,7 +36,7 @@
 namespace {
 
 inline int getSMVersion() {
-  auto* props = at::cuda::getCurrentDeviceProperties();
+  auto* props = get_device_prop();
   return props->major * 10 + props->minor;
 }
 
@@ -700,37 +702,40 @@ template void invokeFusedAGemm<__nv_bfloat16, 7168, 2112, 16>(
     __nv_bfloat16*, __nv_bfloat16 const*, __nv_bfloat16 const*, int num_tokens,
     cudaStream_t);
 
-void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
-                       torch::Tensor const& mat_b) {
-  TORCH_CHECK(mat_a.dim() == 2 && mat_b.dim() == 2 && output.dim() == 2);
+void dsv3_fused_a_gemm(torch::stable::Tensor& output,
+                       torch::stable::Tensor const& mat_a,
+                       torch::stable::Tensor const& mat_b) {
+  STD_TORCH_CHECK(mat_a.dim() == 2 && mat_b.dim() == 2 && output.dim() == 2);
   int const num_tokens = mat_a.size(0);
   int const hd_in = mat_a.size(1);
   int const hd_out = mat_b.size(1);
 
   constexpr int kHdIn = 7168;
   constexpr int kHdOut = 2112;
-  TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
-              "required 1 <= mat_a.shape[0] <= 16")
-  TORCH_CHECK(hd_in == kHdIn, "required mat_a.shape[1] == 7168")
-  TORCH_CHECK(hd_out == kHdOut, "required mat_b.shape[1] == 2112")
-  TORCH_CHECK(output.size(0) == num_tokens,
-              "required output.shape[0] == mat_a.shape[0]")
-  TORCH_CHECK(output.size(1) == hd_out,
-              "required output.shape[1] == mat_b.shape[1]")
+  STD_TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
+                  "required 1 <= mat_a.shape[0] <= 16");
+  STD_TORCH_CHECK(hd_in == kHdIn, "required mat_a.shape[1] == 7168");
+  STD_TORCH_CHECK(hd_out == kHdOut, "required mat_b.shape[1] == 2112");
+  STD_TORCH_CHECK(output.size(0) == num_tokens,
+                  "required output.shape[0] == mat_a.shape[0]");
+  STD_TORCH_CHECK(output.size(1) == hd_out,
+                  "required output.shape[1] == mat_b.shape[1]");
 
-  TORCH_CHECK(mat_a.stride(1) == 1, "mat_a must be a row major tensor");
-  TORCH_CHECK(output.stride(1) == 1, "output must be a row major tensor");
-  TORCH_CHECK(mat_b.stride(0) == 1, "mat_b must be a column major tensor");
+  STD_TORCH_CHECK(mat_a.stride(1) == 1, "mat_a must be a row major tensor");
+  STD_TORCH_CHECK(output.stride(1) == 1, "output must be a row major tensor");
+  STD_TORCH_CHECK(mat_b.stride(0) == 1, "mat_b must be a column major tensor");
 
-  TORCH_CHECK(mat_a.scalar_type() == torch::kBFloat16 &&
-                  mat_b.scalar_type() == torch::kBFloat16,
-              "Only BFloat16 input dtype is supported")
-  TORCH_CHECK(output.scalar_type() == torch::kBFloat16,
-              "Only BFloat16 output dtype is supported")
+  STD_TORCH_CHECK(
+      mat_a.scalar_type() == torch::headeronly::ScalarType::BFloat16 &&
+          mat_b.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Only BFloat16 input dtype is supported");
+  STD_TORCH_CHECK(
+      output.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Only BFloat16 output dtype is supported");
 
-  TORCH_CHECK(getSMVersion() >= 90, "required CUDA ARCH >= SM_90");
+  STD_TORCH_CHECK(getSMVersion() >= 90, "required CUDA ARCH >= SM_90");
 
-  auto stream = at::cuda::getCurrentCUDAStream(mat_a.get_device());
+  auto stream = get_current_cuda_stream(mat_a.get_device_index());
   if (num_tokens <= 8) {
     invokeFusedAGemm<__nv_bfloat16, kHdIn, kHdOut, 8>(
         reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr()),
@@ -746,6 +751,6 @@ void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
   }
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("dsv3_fused_a_gemm", &dsv3_fused_a_gemm);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("dsv3_fused_a_gemm", TORCH_BOX(&dsv3_fused_a_gemm));
 }
