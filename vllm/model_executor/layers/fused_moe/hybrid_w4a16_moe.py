@@ -113,16 +113,24 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
     # threshold the Triton prefill kernel is used instead.
     MAX_SKINNY_BATCH_SIZE = 5
 
-    # Default Triton BLOCK_SIZE_M for prefill.  P-1 autotune (Strix Halo,
-    # Qwen3.5-A3B prefill shapes M=128 N=1024 K=2048 + M=128 N=2048 K=1024)
-    # showed BLOCK_M=128 with BLOCK_N=32, BLOCK_K=128, GROUP_SIZE_M=8,
-    # num_warps=4, num_stages=1 wins both shapes (-12% / -30% kernel time
-    # vs the prior BM=64,BN=64,BK=32,GM=8,nw=4,ns=2 default; joint -19%).
-    # Gated behind VLLM_HYBRID_W4A16_TRITON_TUNED_P1=1 (default ON) so the
-    # change can be toggled off if a regression is later observed on a
-    # different MoE prefill shape.
-    _P1_TUNED = os.environ.get("VLLM_HYBRID_W4A16_TRITON_TUNED_P1", "1") == "1"
-    TRITON_BLOCK_SIZE_M = 128 if _P1_TUNED else 64
+    # Default Triton BLOCK_SIZE_M for prefill / large-batch decode.
+    #
+    # The alignment block_size used by moe_align_block_size is the same
+    # value as this BLOCK_SIZE_M (the kernel reads expert_ids[block]
+    # for block ∈ [0, EM/BLOCK_M) so they MUST match).  num_slots ≈
+    # num_tokens·top_k + E·(BLOCK_M−1); for large-E models (Qwen3.5-
+    # A3B has E=256) the second term dominates, so a smaller BLOCK_M
+    # shrinks num_slots dramatically (33536 → 8960 = 4×) and slashes
+    # padding-block dispatch overhead.  Per-shape sweep on Strix Halo
+    # (Qwen3.5-A3B gemm1 K=2048 N=1024 + gemm2 K=512 N=2048, E=256)
+    # found BLOCK_M=32 wins ~2× on gemm1 and ~4-5× on gemm2 across the
+    # full routing-density range, reproducible via
+    # benchmarks/kernels/sweep_int4g_moe_kernel.py for the kernel half
+    # (the workspace-size half comes from the BLOCK_M cascade below).
+    # For small-E MoE (Mixtral E=8) the padding term is small either
+    # way, so the alignment switch is expected to be approximately
+    # neutral (not measured in this PR).
+    TRITON_BLOCK_SIZE_M = 32
 
     @staticmethod
     def _select_block_size_m(num_tokens: int, topk: int, E: int) -> int:
@@ -179,38 +187,68 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
         output = (M, K)
         return (workspace1, workspace2, output)
 
-    def _triton_config(self, K: int) -> dict:
+    def _triton_config(
+        self,
+        K: int,
+        M: int | None = None,
+        align_block_size_m: int | None = None,
+    ) -> dict:
         """Return Triton kernel config for shuffle-packed MoE prefill.
 
-        P-1 (2026-05-10): autotune sweep over the Qwen3.5-A3B prefill
-        MoE shapes on Strix Halo (Radeon 8060S, gfx1151) found the joint
-        optimum is BLOCK_M=128, BLOCK_N=32, BLOCK_K=group_size,
-        GROUP_SIZE_M=8, num_warps=4, num_stages=1 (-19% kernel time vs
-        the prior default).  The previous code clamped BLOCK_K to
-        min(group_size, 32) which was overly conservative — BLOCK_K can
-        equal group_size (one scale per K-tile) and the larger tile is
-        clearly faster on this GPU.  Gated behind
-        VLLM_HYBRID_W4A16_TRITON_TUNED_P1 (default ON).
+        Returns a per-K config tuned on Strix Halo (gfx1151) for the
+        Qwen3.5-A3B prefill MoE shapes (gemm1: K=hidden=2048; gemm2:
+        K=intermediate=512).  See the K<1024 and K>=1024 branches below
+        for the exact (BN, BK, GM, nw, ns) tuples and their per-shape
+        evidence.
+
+        BLOCK_SIZE_M constraint (load-bearing): the kernel reads
+        expert_ids[block] where block ∈ [0, EM/BLOCK_M).  expert_ids is
+        sized for the alignment block_size_m used by moe_align_block_size.
+        apply() handles the BLOCK_M < align_block_size_m case by
+        repeat-interleaving expert_ids; for that to be valid we require
+        BLOCK_SIZE_M divides align_block_size_m.  Today we only emit
+        BLOCK_SIZE_M = align_block_size_m so this is a no-op, but the
+        infrastructure stays in place to enable future per-gemm BLOCK_M
+        tuning when paired with per-gemm alignment.
         """
-        if HybridW4A16MoEExperts._P1_TUNED:
-            BLOCK_SIZE_K = self._group_size  # = 128 for the Qwen3.5-A3B path
-            assert BLOCK_SIZE_K % 8 == 0
-            return {
-                "BLOCK_SIZE_M": self.TRITON_BLOCK_SIZE_M,  # 128 when tuned
-                "BLOCK_SIZE_N": 32,
-                "BLOCK_SIZE_K": BLOCK_SIZE_K,
-                "GROUP_SIZE_M": 8,
-                "num_warps": 4,
-                "num_stages": 1,
-            }
-        BLOCK_SIZE_K = min(self._group_size, 32)
-        # Ensure BLOCK_K is a multiple of 8 for shuffle interleave
+        BLOCK_SIZE_K = self._group_size  # = 128 for the Qwen3.5-A3B path
         assert BLOCK_SIZE_K % 8 == 0
+
+        # Per-shape sweep on Strix Halo (gfx1151) at BLOCK_M=32 (the
+        # current alignment), using benchmarks/kernels/
+        # sweep_int4g_moe_kernel.py + a per-shape direct call to
+        # invoke_fused_moe_kernel_hybrid_triton.  The two K ranges
+        # land on different sub-tile optima -- short-K (gemm2)
+        # wants wider BN/BK to amortize the short inner loop;
+        # long-K (gemm1) wants narrower BN and BK=group_size to
+        # keep per-WG work moderate.
+        if K < 1024:
+            # gemm2-style: short contraction (K=512 on Qwen3.5-A3B).
+            # (BN=64, BK=64, GM=1, nw=2, ns=1) wins ~4-5x over the
+            # prior (BLOCK_M=128, BN=32, BK=group, GM=8, nw=4, ns=1)
+            # baseline across all routing densities (conc_16 through
+            # uniform) at NUM_TOKENS=128.  Note BLOCK_K=64 is capped
+            # to min(BLOCK_K, group_size)=64 inside the invoke
+            # wrapper (group_size=128 here, no cap fires).
+            return dict(
+                BLOCK_SIZE_M=self.TRITON_BLOCK_SIZE_M,
+                BLOCK_SIZE_N=64,
+                BLOCK_SIZE_K=64,
+                GROUP_SIZE_M=1,
+                num_warps=2,
+                num_stages=1,
+            )
+        # gemm1-style: long contraction (K >= 1024; K=2048 on
+        # Qwen3.5-A3B).  (BN=16, BK=group, GM=4, nw=2, ns=1) wins
+        # ~2x over the prior baseline across all routing densities
+        # at NUM_TOKENS=128.
         return {
             "BLOCK_SIZE_M": self.TRITON_BLOCK_SIZE_M,
-            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_N": 16,
             "BLOCK_SIZE_K": BLOCK_SIZE_K,
-            "GROUP_SIZE_M": 8,
+            "GROUP_SIZE_M": 4,
+            "num_warps": 2,
+            "num_stages": 1,
         }
 
     def apply(
@@ -313,7 +351,31 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 if w1.dtype == torch.int32 and hidden_states.dtype == torch.float16
                 else tl.bfloat16
             )
-            config = self._triton_config(K)
+            # Compute one config per GEMM: gemm1's contraction is K
+            # (hidden_dim), gemm2's is activation_out_dim.  Pass the
+            # alignment block_size_m so _triton_config only emits
+            # BLOCK_SIZE_M values that divide it.
+            M_routed = num_tokens * top_k_num
+            config_gemm1 = self._triton_config(K, M_routed, block_size_m)
+            config_gemm2 = self._triton_config(
+                activation_out_dim, M_routed, block_size_m
+            )
+
+            # When a config picks a smaller BLOCK_SIZE_M than the
+            # alignment used, repeat-interleave expert_ids so the kernel
+            # reads a valid expert id for every (smaller) block.  This
+            # is exact: kernel block 4i..4i+3 with BLOCK_M=32 covers
+            # the same 128-row range that one BLOCK_M=128 block did, so
+            # they all process the same expert.
+            def _expert_ids_for(cfg: dict) -> torch.Tensor:
+                kbm = cfg["BLOCK_SIZE_M"]
+                if kbm == block_size_m:
+                    return expert_ids
+                assert block_size_m % kbm == 0, (
+                    f"BLOCK_SIZE_M={kbm} must divide alignment "
+                    f"block_size_m={block_size_m}"
+                )
+                return expert_ids.repeat_interleave(block_size_m // kbm)
 
             # GEMM 1 (Triton prefill path)
             # The kernel gathers from hidden_states via
@@ -325,11 +387,11 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 B_scale=self.w1_scale,
                 topk_weights=topk_weights if apply_router_weight_on_input else None,
                 sorted_token_ids=sorted_token_ids,
-                expert_ids=expert_ids,
+                expert_ids=_expert_ids_for(config_gemm1),
                 num_tokens_post_padded=num_tokens_post_padded,
                 mul_routed_weight=apply_router_weight_on_input,
                 top_k=top_k_num,
-                config=config,
+                config=config_gemm1,
                 compute_type=compute_type,
                 group_size=self._group_size,
             )
@@ -352,11 +414,11 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 B_scale=self.w2_scale,
                 topk_weights=None,
                 sorted_token_ids=sorted_token_ids,
-                expert_ids=expert_ids,
+                expert_ids=_expert_ids_for(config_gemm2),
                 num_tokens_post_padded=num_tokens_post_padded,
                 mul_routed_weight=False,
                 top_k=1,
-                config=config,
+                config=config_gemm2,
                 compute_type=compute_type,
                 group_size=self._group_size,
             )
