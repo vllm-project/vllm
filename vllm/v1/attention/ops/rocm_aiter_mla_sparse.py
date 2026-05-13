@@ -32,6 +32,39 @@ if current_platform.is_cuda_alike():
     pass
 
 
+@functools.lru_cache(maxsize=1)
+def _check_indexer_fp8_format_consistency() -> None:
+    # The C++ indexer_k_quant_and_cache kernel picks FP8 byte format at build
+    # time via HIP_FP8_TYPE_OCP, while current_platform.fp8_dtype() reports
+    # float8_e4m3fnuz on every gfx942 build. A disagreement halves every
+    # recovered K value during indexer scoring with no other visible error.
+    if not _ON_GFX942:
+        return
+    from vllm import _custom_ops as ops
+
+    head_dim = 128
+    quant_block_size = 128
+    cache_stride = head_dim + head_dim * 4 // quant_block_size
+    # amax = 1.0 with divisor=224 → ue8m0 scale = 2^-7 → post-scale value = 128.
+    # FNUZ encoding of 128: 1.0 * 2^7, biased exp 15, byte = 0x78.
+    # OCP encoding of 128:  1.0 * 2^7, biased exp 14, byte = 0x70.
+    k = torch.full((1, head_dim), 1.0, dtype=torch.bfloat16, device="cuda")
+    kv_cache = torch.zeros((1, 1, cache_stride), dtype=torch.uint8, device="cuda")
+    slot_mapping = torch.tensor([0], dtype=torch.int64, device="cuda")
+    ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, quant_block_size, "ue8m0")
+    first_byte = int(kv_cache[0, 0, 0].item())
+    if first_byte != 0x78:
+        raise RuntimeError(
+            f"Indexer FP8 KV cache format mismatch on gfx942: probe byte is "
+            f"{first_byte:#04x}, expected 0x78. The C++ "
+            f"indexer_k_quant_and_cache kernel appears to write "
+            f"{'OCP e4m3fn' if first_byte == 0x70 else 'unknown'} bytes while "
+            f"vllm.platforms.rocm.fp8_dtype() reports float8_e4m3fnuz. "
+            f"Rebuild with HIP_FP8_TYPE_OCP=0 or align fp8_dtype() to the "
+            f"producer."
+        )
+
+
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
     k_ptr,  # [num_tokens, head_dim]
@@ -922,6 +955,7 @@ def rocm_aiter_sparse_attn_indexer(
 
     if not skip_k_cache_insert:
         if _ON_GFX942:
+            _check_indexer_fp8_format_consistency()
             ops.indexer_k_quant_and_cache(
                 k,
                 kv_cache,
