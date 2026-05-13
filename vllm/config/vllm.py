@@ -1316,6 +1316,22 @@ class VllmConfig:
                     "the `reasoning_start_str` and `reasoning_end_str`."
                 )
 
+        if self.cache_config.strip_thinking_tokens_from_cache:
+            if not self.cache_config.enable_prefix_caching:
+                logger.warning_once(
+                    "--strip-thinking-tokens-from-cache has no effect when "
+                    "prefix caching is disabled. Disabling the feature."
+                )
+                self.cache_config.strip_thinking_tokens_from_cache = False
+            elif (self.reasoning_config is None
+                  or not self.reasoning_config.enabled):
+                logger.warning_once(
+                    "--strip-thinking-tokens-from-cache requires "
+                    "--reasoning-parser or a valid --reasoning-config. "
+                    "Disabling the feature."
+                )
+                self.cache_config.strip_thinking_tokens_from_cache = False
+
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
         #   disables it

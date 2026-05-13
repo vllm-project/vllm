@@ -632,15 +632,34 @@ def resolve_kv_cache_block_sizes(
     return scheduler_block_size, hash_block_size
 
 
+def _find_token_sequence(
+    token_ids: Sequence[int],
+    start_idx: int,
+    end_idx: int,
+    pattern: Sequence[int],
+) -> int | None:
+    plen = len(pattern)
+    if plen == 0:
+        return None
+    for i in range(start_idx, end_idx - plen + 1):
+        if list(token_ids[i:i + plen]) == list(pattern):
+            return i
+    return None
+
+
 def get_request_block_hasher(
     block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
+    thinking_start_token_ids: Sequence[int] | None = None,
 ) -> Callable[[Request], list[BlockHash]]:
     """
     Returns a function which computes the list of un-computed block hashes
     of a request."""
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
+        if thinking_start_token_ids and request._in_thinking_section:
+            return []
+
         start_token_idx = len(request.block_hashes) * block_size
         num_tokens = request.num_tokens
 
@@ -665,6 +684,17 @@ def get_request_block_hasher(
             if end_token_idx > num_tokens:
                 # We only hash full blocks
                 break
+
+            if thinking_start_token_ids is not None:
+                found = _find_token_sequence(
+                    request.all_token_ids,
+                    start_token_idx,
+                    end_token_idx,
+                    thinking_start_token_ids,
+                )
+                if found is not None:
+                    request._in_thinking_section = True
+                    break
 
             # MM and LoRA requests need extra keys for block-hash computation.
             extra_keys, curr_mm_idx = generate_block_hash_extra_keys(

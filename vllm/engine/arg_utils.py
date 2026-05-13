@@ -498,6 +498,9 @@ class EngineArgs:
     )
     block_size: int | None = None
     enable_prefix_caching: bool | None = None
+    strip_thinking_tokens_from_cache: bool = (
+        CacheConfig.strip_thinking_tokens_from_cache
+    )
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
@@ -1095,6 +1098,10 @@ class EngineArgs:
                 **cache_kwargs["enable_prefix_caching"],
                 "default": None,
             },
+        )
+        cache_group.add_argument(
+            "--strip-thinking-tokens-from-cache",
+            **cache_kwargs["strip_thinking_tokens_from_cache"],
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
@@ -1699,6 +1706,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
+            strip_thinking_tokens_from_cache=self.strip_thinking_tokens_from_cache,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
