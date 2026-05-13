@@ -1419,23 +1419,11 @@ class EngineArgs:
         vllm_group.add_argument(
             "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
+        speculative_kwargs = get_kwargs(SpeculativeConfig)
+        vllm_group.add_argument("--spec-method", **speculative_kwargs["method"])
+        vllm_group.add_argument("--spec-model", **speculative_kwargs["model"])
         vllm_group.add_argument(
-            "--spec-method",
-            type=str,
-            default=None,
-            help="Top-level alias for speculative_config['method'].",
-        )
-        vllm_group.add_argument(
-            "--spec-model",
-            type=str,
-            default=None,
-            help="Top-level alias for speculative_config['model'].",
-        )
-        vllm_group.add_argument(
-            "--spec-tokens",
-            type=int,
-            default=None,
-            help="Top-level alias for speculative_config['num_speculative_tokens'].",
+            "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
@@ -1635,29 +1623,23 @@ class EngineArgs:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
         """
-        spec_aliases = {
-            flag: (key, value)
-            for flag, key, value in (
-                ("--spec-method", "method", self.spec_method),
-                ("--spec-model", "model", self.spec_model),
-                ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
-            )
-            if value is not None
-        }
-
-        if self.speculative_config is None:
-            if not spec_aliases:
-                return None
-            self.speculative_config = {}
-
-        for flag, (key, value) in spec_aliases.items():
-            existing = self.speculative_config.get(key, value)
-            if existing != value:
+        for flag, key, value in (
+            ("--spec-method", "method", self.spec_method),
+            ("--spec-model", "model", self.spec_model),
+            ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+        ):
+            if value is None:
+                continue
+            if self.speculative_config is None:
+                self.speculative_config = {}
+            if key in self.speculative_config:
                 raise ValueError(
-                    f"Conflicting speculative config: {flag}={value!r} and "
-                    f"--speculative-config['{key}']={existing!r}."
+                    f"{flag} and --speculative-config['{key}'] are mutually exclusive"
                 )
             self.speculative_config[key] = value
+
+        if self.speculative_config is None:
+            return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
