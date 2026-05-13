@@ -305,6 +305,20 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+- label: Batch Invariance (A100)
+  key: batch-invariance-a100
+  timeout_in_minutes: 30
+  device: a100
+  source_file_dependencies:
+    - vllm/v1/attention
+    - vllm/model_executor/layers
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
+
 - label: Batch Invariance (H100)
   key: batch-invariance-h100
   timeout_in_minutes: 30
