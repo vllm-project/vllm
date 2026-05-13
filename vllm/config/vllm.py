@@ -1316,9 +1316,7 @@ class VllmConfig:
                     "the `reasoning_start_str` and `reasoning_end_str`."
                 )
 
-        # Handle the KV connector configs before evaluating HMA rules so that
-        # features like KV offloading (which populate kv_transfer_config
-        # automatically) are accounted for in the SupportsHMA check below.
+        # Populate KV connector config before evaluating HMA rules
         self._post_init_kv_transfer_config()
 
         # Hybrid KV cache manager (HMA) runtime rules:
@@ -1356,16 +1354,12 @@ class VllmConfig:
                 need_disable_hybrid_kv_cache_manager = True
 
         if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
-            # Default to disable HMA, but only if the user didn't express a preference.
             if (
                 self.kv_transfer_config is not None
                 and self.kv_transfer_config.kv_connector is not None
             ):
-                # Only auto-disable HMA when the configured connector does not
-                # advertise SupportsHMA. HMA-capable connectors (e.g.
-                # NixlConnector) should keep HMA on so hybrid models like
-                # DeepSeek V4 don't have their SWA/chunked-local layers
-                # promoted to full attention during KV-cache profiling.
+                # Disable HMA if the configured connector does not
+                # implement SupportsHMA.
                 from vllm.distributed.kv_transfer.kv_connector.factory import (
                     KVConnectorFactory,
                 )
