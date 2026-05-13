@@ -362,6 +362,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 initial_state_idx=block_idx_last_computed_token_p,
                 num_computed_tokens=num_computed_tokens_p,
                 block_size_to_align=mamba_block_size,
+                metadata=attn_metadata,
             )
             # 3. State Space Model sequence transformations.
             discrete_time_step_p, B_p, C_p = self._ssm_transform(
