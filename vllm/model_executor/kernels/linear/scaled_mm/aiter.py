@@ -221,11 +221,11 @@ class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        if not rocm_aiter_ops.is_hip_fp8bmm_enabled():
+        if not rocm_aiter_ops.is_linear_hipbmm_enabled():
             return (
                 False,
                 "requires setting `VLLM_ROCM_USE_AITER=1` "
-                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. ",
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1` "
                 "and `VLLM_ROCM_USE_AITER_LINEAR_HIPBMM=1`. ",
             )
         try:
