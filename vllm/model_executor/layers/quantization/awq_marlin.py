@@ -16,17 +16,18 @@ from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported,
+    RoutedExperts,
+    SharedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
-    FusedMoEMethodBase,
-    FusedMoeWeightScaleSupported,
-    UnquantizedFusedMoEMethod,
-)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -286,7 +287,7 @@ class AWQMarlinConfig(QuantizationConfig):
             quant_method = AWQMarlinLinearMethod(self)
             quant_method.input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
             if is_layer_skipped(
@@ -507,7 +508,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -606,7 +607,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         device = layer.w13_qweight.device
         layer.workspace = marlin_make_workspace_new(device, 4)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         num_experts = layer.w13_qweight.shape[0]
         device = layer.w13_qweight.device
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
@@ -723,7 +724,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         from vllm.model_executor.layers.fused_moe.config import (
             awq_marlin_moe_quant_config,
@@ -747,7 +748,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
     ):
         """
         Select the GEMM implementation for AWQ-Marlin MoE.
@@ -812,10 +813,11 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         return fused_marlin_moe(
