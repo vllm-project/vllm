@@ -435,6 +435,17 @@ class SlidingWindowSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        # Mirror ``FullAttentionSpec.real_page_size_bytes`` for NVFP4 KV cache.
+        if self.kv_quant_mode.is_nvfp4:
+            last_dim = nvfp4_kv_cache_full_dim(
+                self.head_size
+            ) + nvfp4_kv_cache_full_dim(self.head_size_v)
+            return (
+                self.block_size
+                * self.num_kv_heads
+                * last_dim
+                * get_dtype_size(self.dtype)
+            )
         return (
             self.block_size
             * self.num_kv_heads
