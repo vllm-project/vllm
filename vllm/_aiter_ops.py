@@ -744,10 +744,6 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
     token_num = input_.shape[0]
-    # Mirror aiter's 1-stage gate; restrict to the bf16/fp16 dtypes vLLM
-    # exercises on this op. See dispatchFusedAllReduceRMSNorm in aiter v0.1.13
-    # (the version pinned by docker/Dockerfile.rocm_base):
-    # https://github.com/ROCm/aiter/blob/cdcfa833bdf554ca75594c90dde4316ea9b50199/csrc/include/custom_all_reduce.cuh#L2549
     if input_.dtype in (torch.bfloat16, torch.float16):
         pack_size = 16 // input_.element_size()
         hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
