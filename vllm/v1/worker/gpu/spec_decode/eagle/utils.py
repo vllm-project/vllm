@@ -11,12 +11,17 @@ from vllm.model_executor.model_loader import get_model
 def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     """Share when the draft has no own copy, or its copy matches the target."""
 
-    if not getattr(eagle, flag, False):
+    if not getattr(eagle, flag, False) or draft is None:
         return True
-    if draft is None or target is None:
+    if target is None:
         return False
-    # Perform comparison on CPU to avoid extra GPU memory overhead.
-    return torch.equal(draft.weight.cpu(), target.weight.cpu())
+    # torch.equal on GPU allocates a bool mask the size of the input.
+    # Use the faster GPU path when there is plenty of headroom;
+    # otherwise compare on CPU.
+    w = draft.weight
+    if w.is_cuda and torch.cuda.mem_get_info(w.device)[0] < w.numel() * 2:
+        return torch.equal(w.cpu(), target.weight.cpu())
+    return torch.equal(w, target.weight)
 
 
 def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
