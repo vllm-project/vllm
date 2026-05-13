@@ -34,6 +34,108 @@ def scheduler():
     return create_scheduler(vllm_config)
 
 
+def test_async_loads_count_toward_active_request_limit():
+    vllm_config = create_vllm_config(
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        kv_load_failure_policy="recompute",
+    )
+    scheduler = create_scheduler(vllm_config)
+
+    num_external_computed_tokens = scheduler.block_size
+    requests = [create_request(num_tokens=2 * scheduler.block_size) for _ in range(3)]
+    for request in requests:
+        scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens for request in requests
+    }
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.running) == 0
+    assert len(scheduler.skipped_waiting) == 2
+    assert len(scheduler.waiting) == 1
+    assert scheduler_output.total_num_scheduled_tokens == 0
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+    for request in scheduler.skipped_waiting:
+        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving={request.request_id for request in requests[:2]},
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.running) == 2
+    assert len(scheduler.skipped_waiting) == 0
+    assert len(scheduler.waiting) == 1
+    assert scheduler_output.total_num_scheduled_tokens == 2 * scheduler.block_size
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+
+def test_priority_scheduling_promotes_async_loads_behind_new_request():
+    vllm_config = create_vllm_config(
+        max_num_seqs=2,
+        max_num_batched_tokens=64,
+        kv_load_failure_policy="recompute",
+    )
+    vllm_config.scheduler_config.policy = "priority"
+    scheduler = create_scheduler(vllm_config)
+
+    num_external_computed_tokens = scheduler.block_size
+    loading_requests = [
+        create_request(num_tokens=2 * scheduler.block_size) for _ in range(2)
+    ]
+    for priority, request in enumerate(loading_requests, start=1):
+        request.priority = priority
+        scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens
+        for request in loading_requests
+    }
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.running) == 0
+    assert len(scheduler.skipped_waiting) == 2
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving={request.request_id for request in loading_requests},
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    new_request = create_request(num_tokens=2 * scheduler.block_size)
+    new_request.priority = 0
+    scheduler.add_request(request=new_request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert {request.request_id for request in scheduler.running} == {
+        request.request_id for request in loading_requests
+    }
+    assert new_request.status == RequestStatus.WAITING
+    assert len(scheduler.skipped_waiting) == 1
+    assert scheduler.skipped_waiting.peek_request().request_id == new_request.request_id
+    assert scheduler_output.total_num_scheduled_tokens == 2 * scheduler.block_size
+    assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
+
+
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [
