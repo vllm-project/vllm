@@ -814,21 +814,21 @@ static int mindiv_int4(int N, int div1, int div2) {
 // sharing with the default path.  Reproduce sweeps via
 // benchmarks/kernels/sweep_int4g_kernel.py (already exposes all 4 axes
 // through wvSplitK_int4g_sweep).
-#define WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,    \
-                                   _HAS_ZP)                                    \
-  {                                                                            \
-    dim3 block(_THRDS, _W);                                                    \
-    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, _W);                   \
-    if (K_in * N_in <= max_lds_len && M_in % _YTILE == 0)                      \
-      wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,   \
-                            _HAS_ZP><<<grid, block, 0, stream>>>(              \
-          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,    \
-          __wvPrGrp, CuCount);                                                 \
-    else                                                                       \
-      wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,       \
-                        _HAS_ZP><<<grid, block, 0, stream>>>(                  \
-          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,    \
-          __wvPrGrp, CuCount);                                                 \
+#define WVSPLITK_INT4G_LAUNCH_W_AC(_THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,  \
+                                   _HAS_ZP)                                  \
+  {                                                                          \
+    dim3 block(_THRDS, _W);                                                  \
+    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, _W);                 \
+    if (K_in * N_in <= max_lds_len && M_in % _YTILE == 0)                    \
+      wvSplitK_int4_hf_sml_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS, \
+                            _HAS_ZP><<<grid, block, 0, stream>>>(            \
+          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,  \
+          __wvPrGrp, CuCount);                                               \
+    else                                                                     \
+      wvSplitK_int4_hf_<fptype, _THRDS, _YTILE, _W, _AC, _UNRL, _N, _GS,     \
+                        _HAS_ZP><<<grid, block, 0, stream>>>(                \
+          K_in, M_in, Bx_in, By_in, wptr, aptr, sptr, zpptr, biasptr, cptr,  \
+          __wvPrGrp, CuCount);                                               \
   }
 
 // Backwards-compatible wrapper: existing call sites get WvPrGrp=16, AC=16.
@@ -880,16 +880,16 @@ static int mindiv_int4(int N, int div1, int div2) {
     else if (__N >= 2)                                                \
       WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                            \
     else if (is_gfx1x_int4() && __N == 1 && K_in == 4096)             \
-      /* Tuned for gfx1151 (Qwen3.5 W4A16 decode: GDN out_proj at      \
-         M=2048, K=4096, N=1).  AC=32 doubles per-thread global load   \
-         granularity; the K=4096 row has enough work to amortize the   \
-         wider load.  W stays at 16 (vs 32 in the bf16 K=2048 branch)  \
-         because int4 dequant inflates VGPR pressure -- AC=32 + W=32   \
-         spills.  Lifts kernel ~70% -> ~84% of LPDDR5X peak post-      \
-         overhead.  K<=2048 already at ~87% by default and untouched.  \
-         Verify per shape with                                         \
-         benchmarks/kernels/sweep_int4g_kernel.py. */                  \
-      WVSPLITK_INT4G_GS_W_AC(1, 4, 16, 32, __N, _HAS_ZP)               \
+      /* Tuned for gfx1151 (Qwen3.5 W4A16 decode: GDN out_proj at     \
+         M=2048, K=4096, N=1).  AC=32 doubles per-thread global load  \
+         granularity; the K=4096 row has enough work to amortize the  \
+         wider load.  W stays at 16 (vs 32 in the bf16 K=2048 branch) \
+         because int4 dequant inflates VGPR pressure -- AC=32 + W=32  \
+         spills.  Lifts kernel ~70% -> ~84% of LPDDR5X peak post-     \
+         overhead.  K<=2048 already at ~87% by default and untouched. \
+         Verify per shape with                                        \
+         benchmarks/kernels/sweep_int4g_kernel.py. */                 \
+      WVSPLITK_INT4G_GS_W_AC(1, 4, 16, 32, __N, _HAS_ZP)              \
     else /* N=1: YTILE=2 beats YTILE=1 across all CuCount values */   \
       WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                            \
   }
@@ -1186,18 +1186,30 @@ __global__ void moe_wvSplitK_int4_hf_(
                 memory-bound kernels. */                              \
     {                                                                 \
       if (is_gfx1x_int4() && K_in == 2048)                            \
-        /* gfx1151 K=2048 N=1 (Qwen3.5 MoE gate_up at M=1024,           \
-         * E=256): 4-axis sweep via                                     \
-         * benchmarks/kernels/sweep_int4g_moe_kernel.py finds           \
-         * (Y=4, U=4, W=32, AC=32) at 44.6 us vs the (Y=4, U=4,         \
-         * W=16, AC=16) default at 46.5 us -- ~1.04x.  Wider per-       \
-         * thread loads (AC=32) + max WG threads (W=32) amortize the    \
-         * per-row work the K=2048 case has plenty of.  Narrow guard:   \
-         * only swept at M~1024; other M at K=2048 may benefit too      \
-         * but were not measured. */                                    \
-        MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 32, 4, __N, _HAS_ZP)          \
-      else if (K_in >= 1024)                                           \
+        /* gfx1151 K=2048 N=1 (Qwen3.5 MoE gate_up at M=1024,         \
+         * E=256): 4-axis sweep via                                   \
+         * benchmarks/kernels/sweep_int4g_moe_kernel.py finds         \
+         * (Y=4, U=4, W=32, AC=32) at 44.6 us vs the (Y=4, U=4,       \
+         * W=16, AC=16) default at 46.5 us -- ~1.04x.  Wider per-     \
+         * thread loads (AC=32) + max WG threads (W=32) amortize the  \
+         * per-row work the K=2048 case has plenty of.  Narrow guard: \
+         * only swept at M~1024; other M at K=2048 may benefit too    \
+         * but were not measured. */                                  \
+        MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 32, 4, __N, _HAS_ZP)         \
+      else if (K_in >= 1024)                                          \
         MOE_WVSPLIT_INT4G_GS(4, 4, __N, _HAS_ZP)                      \
+      else if (is_gfx1x_int4() && K_in == 512)                        \
+        /* gfx1151 K=512 N=1 (Qwen3.5 MoE down-proj).  4-axis sweep   \
+         * via benchmarks/kernels/sweep_int4g_moe_kernel.py finds     \
+         * (Y=4, U=1, W=32, AC=8) at 28.1 us vs the LOW-VGPR pick     \
+         * (Y=4, U=2, W=16, AC=16) at 31.4 us -- ~1.12x at            \
+         * fuse_silu_mul=False; ~1.18x at fuse_silu_mul=True (the     \
+         * down+silu trace shape).  Pure-work %DRAM lifts ~62%        \
+         * -> ~78% post per-launch floor subtraction.  W=32 + AC=8    \
+         * keeps WG threads at 1024 (32 wv32) but the narrow per-     \
+         * iter loads avoid the (W=32, AC=32) VGPR-spill penalty the  \
+         * (W=32, AC=32) default below describes. */                  \
+        MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 8, 1, __N, _HAS_ZP)          \
       else if (is_gfx1x_int4())                                       \
         MOE_WVSPLIT_INT4G_GS(4, 2, __N, _HAS_ZP)                      \
       else                                                            \
@@ -1735,54 +1747,82 @@ void fused_moe_wvSplitK_int4_gemm_sweep(
   TORCH_CHECK(group_size == 32 || group_size == 128,
               "group_size must be 32 or 128 for the MoE sweep");
 
-// Macro-switch chains over the four runtime knobs.  Same pattern as
-// wvSplitK_int4g_sweep above; expand only what the kernel template
-// instantiations actually reach (gfx1x THRDS=32 only).  Defined at file
-// scope because the C preprocessor doesn't process #define directives
-// that appear inside another macro's argument (AT_DISPATCH_* is itself
-// a macro, so its lambda body would not see these defines).
-#define MOE_SWP_LAUNCH(_YT, _W, _AC, _UN, _N, _GS, _HASZP) \
-  MOE_WVSPLITK_INT4G_LAUNCH_W_AC(32, _YT, _W, _AC, _UN, _N, _GS, _HASZP)
+  // Macro-switch chains over the four runtime knobs.  Same pattern as
+  // wvSplitK_int4g_sweep above; expand only what the kernel template
+  // instantiations actually reach (gfx1x THRDS=32 only).  Defined at file
+  // scope because the C preprocessor doesn't process #define directives
+  // that appear inside another macro's argument (AT_DISPATCH_* is itself
+  // a macro, so its lambda body would not see these defines).
+  #define MOE_SWP_LAUNCH(_YT, _W, _AC, _UN, _N, _GS, _HASZP) \
+    MOE_WVSPLITK_INT4G_LAUNCH_W_AC(32, _YT, _W, _AC, _UN, _N, _GS, _HASZP)
 
-#define MOE_SWP_HASZP(_YT, _W, _AC, _UN, _N, _GS)                 \
-  if (has_zp) {                                                   \
-    MOE_SWP_LAUNCH(_YT, _W, _AC, _UN, _N, _GS, true)              \
-  } else {                                                        \
-    MOE_SWP_LAUNCH(_YT, _W, _AC, _UN, _N, _GS, false)             \
-  }
+  #define MOE_SWP_HASZP(_YT, _W, _AC, _UN, _N, _GS)     \
+    if (has_zp) {                                       \
+      MOE_SWP_LAUNCH(_YT, _W, _AC, _UN, _N, _GS, true)  \
+    } else {                                            \
+      MOE_SWP_LAUNCH(_YT, _W, _AC, _UN, _N, _GS, false) \
+    }
 
-#define MOE_SWP_N(_YT, _W, _AC, _UN, _GS)                              \
-  switch (N_in) {                                                      \
-    case 1: MOE_SWP_HASZP(_YT, _W, _AC, _UN, 1, _GS); break;           \
-    case 2: MOE_SWP_HASZP(_YT, _W, _AC, _UN, 2, _GS); break;           \
-    case 4: MOE_SWP_HASZP(_YT, _W, _AC, _UN, 4, _GS); break;           \
-    default: TORCH_CHECK(false, "Unsupported block_size_m=", N_in);    \
-  }
+  #define MOE_SWP_N(_YT, _W, _AC, _UN, _GS)                    \
+    switch (N_in) {                                            \
+      case 1:                                                  \
+        MOE_SWP_HASZP(_YT, _W, _AC, _UN, 1, _GS);              \
+        break;                                                 \
+      case 2:                                                  \
+        MOE_SWP_HASZP(_YT, _W, _AC, _UN, 2, _GS);              \
+        break;                                                 \
+      case 4:                                                  \
+        MOE_SWP_HASZP(_YT, _W, _AC, _UN, 4, _GS);              \
+        break;                                                 \
+      default:                                                 \
+        TORCH_CHECK(false, "Unsupported block_size_m=", N_in); \
+    }
 
-#define MOE_SWP_UN(_YT, _W, _AC, _GS)                            \
-  if      (unrl == 1) { MOE_SWP_N(_YT, _W, _AC, 1, _GS) }        \
-  else if (unrl == 2) { MOE_SWP_N(_YT, _W, _AC, 2, _GS) }        \
-  else if (unrl == 4) { MOE_SWP_N(_YT, _W, _AC, 4, _GS) }        \
-  else { TORCH_CHECK(false, "Unsupported unrl=", unrl); }
+  #define MOE_SWP_UN(_YT, _W, _AC, _GS)              \
+    if (unrl == 1) {                                 \
+      MOE_SWP_N(_YT, _W, _AC, 1, _GS)                \
+    } else if (unrl == 2) {                          \
+      MOE_SWP_N(_YT, _W, _AC, 2, _GS)                \
+    } else if (unrl == 4) {                          \
+      MOE_SWP_N(_YT, _W, _AC, 4, _GS)                \
+    } else {                                         \
+      TORCH_CHECK(false, "Unsupported unrl=", unrl); \
+    }
 
-#define MOE_SWP_YT(_W, _AC, _GS)                                 \
-  if      (ytile == 1) { MOE_SWP_UN(1, _W, _AC, _GS) }           \
-  else if (ytile == 2) { MOE_SWP_UN(2, _W, _AC, _GS) }           \
-  else if (ytile == 4) { MOE_SWP_UN(4, _W, _AC, _GS) }           \
-  else { TORCH_CHECK(false, "Unsupported ytile=", ytile); }
+  #define MOE_SWP_YT(_W, _AC, _GS)                     \
+    if (ytile == 1) {                                  \
+      MOE_SWP_UN(1, _W, _AC, _GS)                      \
+    } else if (ytile == 2) {                           \
+      MOE_SWP_UN(2, _W, _AC, _GS)                      \
+    } else if (ytile == 4) {                           \
+      MOE_SWP_UN(4, _W, _AC, _GS)                      \
+    } else {                                           \
+      TORCH_CHECK(false, "Unsupported ytile=", ytile); \
+    }
 
-#define MOE_SWP_W(_AC, _GS)                                      \
-  if      (wvprgrp ==  8) { MOE_SWP_YT( 8, _AC, _GS) }           \
-  else if (wvprgrp == 12) { MOE_SWP_YT(12, _AC, _GS) }           \
-  else if (wvprgrp == 16) { MOE_SWP_YT(16, _AC, _GS) }           \
-  else if (wvprgrp == 32) { MOE_SWP_YT(32, _AC, _GS) }           \
-  else { TORCH_CHECK(false, "Unsupported wvprgrp=", wvprgrp); }
+  #define MOE_SWP_W(_AC, _GS)                              \
+    if (wvprgrp == 8) {                                    \
+      MOE_SWP_YT(8, _AC, _GS)                              \
+    } else if (wvprgrp == 12) {                            \
+      MOE_SWP_YT(12, _AC, _GS)                             \
+    } else if (wvprgrp == 16) {                            \
+      MOE_SWP_YT(16, _AC, _GS)                             \
+    } else if (wvprgrp == 32) {                            \
+      MOE_SWP_YT(32, _AC, _GS)                             \
+    } else {                                               \
+      TORCH_CHECK(false, "Unsupported wvprgrp=", wvprgrp); \
+    }
 
-#define MOE_SWP_AC(_GS)                                          \
-  if      (achunk ==  8) { MOE_SWP_W( 8, _GS) }                  \
-  else if (achunk == 16) { MOE_SWP_W(16, _GS) }                  \
-  else if (achunk == 32) { MOE_SWP_W(32, _GS) }                  \
-  else { TORCH_CHECK(false, "Unsupported achunk=", achunk); }
+  #define MOE_SWP_AC(_GS)                                \
+    if (achunk == 8) {                                   \
+      MOE_SWP_W(8, _GS)                                  \
+    } else if (achunk == 16) {                           \
+      MOE_SWP_W(16, _GS)                                 \
+    } else if (achunk == 32) {                           \
+      MOE_SWP_W(32, _GS)                                 \
+    } else {                                             \
+      TORCH_CHECK(false, "Unsupported achunk=", achunk); \
+    }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(
       a.scalar_type(), "fused_moe_wvSplitK_int4_gemm_sweep", [&] {
@@ -1799,16 +1839,19 @@ void fused_moe_wvSplitK_int4_gemm_sweep(
         const int* stidptr =
             scattered ? sorted_token_ids.data_ptr<int32_t>() : nullptr;
 
-        if (group_size == 128) { MOE_SWP_AC(128) }
-        else                   { MOE_SWP_AC(32) }
+        if (group_size == 128) {
+          MOE_SWP_AC(128)
+        } else {
+          MOE_SWP_AC(32)
+        }
       });
 }
 
-#undef MOE_SWP_LAUNCH
-#undef MOE_SWP_HASZP
-#undef MOE_SWP_N
-#undef MOE_SWP_UN
-#undef MOE_SWP_YT
-#undef MOE_SWP_W
-#undef MOE_SWP_AC
+  #undef MOE_SWP_LAUNCH
+  #undef MOE_SWP_HASZP
+  #undef MOE_SWP_N
+  #undef MOE_SWP_UN
+  #undef MOE_SWP_YT
+  #undef MOE_SWP_W
+  #undef MOE_SWP_AC
 #endif  // VLLM_SKINNY_GEMM_SWEEP
