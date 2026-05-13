@@ -18,12 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-    BatchedHummingGroupedExperts,
-    HummingGroupedExperts,
-    HummingIndexedExperts,
-    get_humming_moe_gemm_type,
-)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -61,6 +55,13 @@ if current_platform.is_cuda():
         HummingWeightSchema,
     )
     from humming.utils.weight import quantize_weight
+
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        BatchedHummingGroupedExperts,
+        HummingGroupedExperts,
+        HummingIndexedExperts,
+        get_humming_moe_gemm_type,
+    )
 
 if TYPE_CHECKING:
     from humming.schema import (
