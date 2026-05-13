@@ -369,6 +369,8 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
+        self.is_custom_backend = self.attn_backend.get_name() == "CUSTOM"
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
@@ -469,6 +471,14 @@ class Attention(nn.Module, AttentionLayerBase):
             # check if query quantization is supported
             if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
+
+        if (
+            self.is_custom_backend
+            and self.use_direct_call
+            and output_shape is None
+            and not self.attn_backend.accept_output_buffer
+        ):
+            return unified_attention_without_output(query, key, value, self.layer_name)
 
         if output_shape is None:
             # Handle both 2D [num_tokens, hidden] and
@@ -756,6 +766,29 @@ def unified_attention_with_output(
         kv_cache,
         attn_metadata,
         output=output,
+        output_scale=output_scale,
+        output_block_scale=output_block_scale,
+    )
+
+
+@maybe_transfer_kv_layer
+def unified_attention_without_output(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: LayerNameType,
+    output_scale: torch.Tensor | None = None,
+    output_block_scale: torch.Tensor | None = None,
+) -> torch.Tensor:
+    layer_name = _resolve_layer_name(layer_name)
+    attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
+    return self.impl.forward(
+        self,
+        query,
+        key,
+        value,
+        kv_cache,
+        attn_metadata,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
