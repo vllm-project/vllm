@@ -637,18 +637,22 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
+            # Async KV loads have allocated GPU slots and should count against
+            # the active request cap until the transfer completes.
+            num_remote_kv_loading_reqs = sum(
+                1
+                for req in self.skipped_waiting
+                if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            )
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
-                # in `running` but still hold a model-runner request slot.
-                num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_running_reqs:
-                    break
-
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                was_waiting_for_remote_kvs = (
+                    request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                )
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -662,6 +666,25 @@ class Scheduler(SchedulerInterface):
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
                     continue
+
+                if was_waiting_for_remote_kvs:
+                    num_remote_kv_loading_reqs -= 1
+
+                if (
+                    not was_waiting_for_remote_kvs
+                    and len(self.running)
+                    + self.num_waiting_for_streaming_input
+                    + num_remote_kv_loading_reqs
+                    >= self.max_num_running_reqs
+                ):
+                    if (
+                        self.policy == SchedulingPolicy.PRIORITY
+                        and num_remote_kv_loading_reqs > 0
+                    ):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    break
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -950,6 +973,7 @@ class Scheduler(SchedulerInterface):
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+                    num_remote_kv_loading_reqs += 1
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
