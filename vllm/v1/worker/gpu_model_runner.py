@@ -858,6 +858,43 @@ class GPUModelRunner(
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
 
+    # ── dLLM plugin hooks ──────────────────────────────────────────
+    # No-op defaults that plugin subclasses (e.g. DllmGPUModelRunner)
+    # override to customize speculative/block sampling behavior.
+
+    def get_expand_idx_mapping_block_size(self, max_logits_per_req: int) -> int:
+        """Triton BLOCK_SIZE for expand_idx_mapping.
+
+        Default: num_speculative_steps + 1. Override to bound below by
+        max_logits_per_req for wide per-request logit rows.
+        """
+        return max(self.num_speculative_steps + 1, max_logits_per_req)
+
+    def get_pp_receive_max_sample_len(self) -> int:
+        """Column width for PP sampled_token_ids tensors."""
+        return self.num_speculative_steps + 1
+
+    def adapt_sampler_output_for_pp_broadcast(
+        self, sampler_output: "SamplerOutput",
+    ) -> "SamplerOutput":
+        """Adjust SamplerOutput before pp_broadcast (default: no-op)."""
+        return sampler_output
+
+    def should_run_speculator_proposal_phase(
+        self, input_batch: "InputBatch",
+    ) -> bool:
+        """Whether to run Eagle/speculator propose phase."""
+        return True
+
+    def before_execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        *,
+        dummy_run: bool,
+    ) -> None:
+        """Hook invoked at the start of execute_model."""
+        return None
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
@@ -3797,6 +3834,8 @@ class GPUModelRunner(
                 "State error: sample_tokens() must be called "
                 "after execute_model() returns None."
             )
+
+        self.before_execute_model(scheduler_output, dummy_run=False)
 
         if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()

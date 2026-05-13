@@ -521,7 +521,7 @@ class Scheduler(SchedulerInterface):
             token_budget -= num_new_tokens
             req_index += 1
 
-            # Speculative decode related.
+            # Speculative decode / dLLM block tokens.
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
@@ -529,11 +529,13 @@ class Scheduler(SchedulerInterface):
                     - request.num_tokens
                     - request.num_output_placeholders
                 )
-                if num_scheduled_spec_tokens > 0:
-                    spec_token_ids = request.spec_token_ids
-                    if len(spec_token_ids) > num_scheduled_spec_tokens:
-                        spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
-                    scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+                # Always include spec tokens if present. For dLLM block
+                # models, spec_token_ids carries the input block even when
+                # the scheduler computes num_scheduled_spec_tokens <= 0.
+                spec_token_ids = request.spec_token_ids
+                if num_scheduled_spec_tokens > 0 and len(spec_token_ids) > num_scheduled_spec_tokens:
+                    spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.

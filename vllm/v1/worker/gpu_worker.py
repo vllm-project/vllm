@@ -292,8 +292,14 @@ class Worker(WorkerBase):
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(self.device, num_ubatches)
 
-        # Construct the model runner
-        if self.use_v2_model_runner:
+        # Construct the model runner.
+        # Check for a custom model runner class (e.g. from a plugin worker).
+        custom_runner_cls = getattr(self, '_model_runner_cls', None)
+        if custom_runner_cls is not None:
+            self.model_runner: GPUModelRunner = custom_runner_cls(  # type: ignore
+                self.vllm_config, self.device
+            )
+        elif self.use_v2_model_runner:
             from vllm.v1.worker.gpu.model_runner import (
                 GPUModelRunner as GPUModelRunnerV2,
             )
