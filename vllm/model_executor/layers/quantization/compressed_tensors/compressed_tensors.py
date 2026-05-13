@@ -23,7 +23,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -42,11 +42,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensors24,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
-    CompressedTensorsW4A4MxFp4,
+    CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -192,7 +191,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return CompressedTensorsMoEMethod.get_moe_method(
                 self, layer, layer_name=prefix
             )
@@ -203,7 +202,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
         targeting 'Linear' needs to also match
-        FusedMoE modules.
+        RoutedExperts modules.
         """
         if (
             "Linear" not in self.target_scheme_map
@@ -624,8 +623,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         if self._is_nvfp4_format(weight_quant) and input_quant is None:
             return CompressedTensorsW4A16Fp4()
 
-        if self._is_mxfp4(weight_quant) and input_quant is None:
-            return CompressedTensorsW4A16Mxfp4()
+        if self._is_mxfp4(weight_quant):
+            return CompressedTensorsW4A4Mxfp4()
 
         if self._is_mxfp8(weight_quant):
             return CompressedTensorsW8A8Mxfp8()
