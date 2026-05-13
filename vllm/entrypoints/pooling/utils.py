@@ -168,7 +168,6 @@ def get_pooling_usage_payload(
 
 
 def build_pooling_bytes_streaming_response(
-    *,
     pooling_outputs: list[PoolingRequestOutput],
     request_id: str,
     created_time: int,
