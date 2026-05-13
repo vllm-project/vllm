@@ -1697,7 +1697,7 @@ class Qwen3VLForConditionalGeneration(
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"
         ):
-            assert self.language_model.start_layer >= len(
+            assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (
                 "start_layer should be greater than or equal to "
