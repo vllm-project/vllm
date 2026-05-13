@@ -117,7 +117,12 @@ class MiniMaxM2MoE(nn.Module):
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            params_dtype=torch.float32,
+            # Match HF reference (transformers/.../modeling_minimax_m2.py:
+            # `self.gate = nn.Linear(...)`): the gate runs in the model dtype
+            # (BF16/FP16). The FP32 sigmoid + bias-add + topk math is
+            # performed inside the expert-selection kernel (e.g.
+            # aiter::grouped_topk_kernel on ROCm; _C.topk_sigmoid on CUDA)
+            # which upcasts router_logits to FP32 internally before sigmoid.
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
@@ -131,8 +136,8 @@ class MiniMaxM2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states.to(torch.float32))
+        # router_logits: (num_tokens, n_experts) in model dtype.
+        router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
