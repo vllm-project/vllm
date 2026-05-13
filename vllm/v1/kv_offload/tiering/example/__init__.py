@@ -9,13 +9,11 @@ reference for writing new tiers and is useful for testing the
 TieringOffloadingManager without requiring actual storage or network backends.
 """
 
-from collections.abc import Collection, Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
-    JobId,
     JobMetadata,
     JobResult,
     SecondaryTierManager,
@@ -23,15 +21,6 @@ from vllm.v1.kv_offload.tiering.base import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-
-@dataclass
-class _JobMetadata:
-    """Internal metadata for tracking job details."""
-
-    job_id: JobId
-    keys: Collection[OffloadKey]
-    is_store: bool  # True for store jobs, False for load jobs
 
 
 class ExampleSecondaryTier(SecondaryTierManager):
@@ -84,7 +73,6 @@ class ExampleSecondaryTier(SecondaryTierManager):
             job_metadata: Job metadata including job_id, keys, and
                           spec for reading blocks from the primary tier.
         """
-        job_id = job_metadata.job_id
         keys = job_metadata.keys
         block_ids = job_metadata.block_ids
 
@@ -92,19 +80,18 @@ class ExampleSecondaryTier(SecondaryTierManager):
             f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
 
-        internal_job_metadata = _JobMetadata(job_id=job_id, keys=keys, is_store=True)
-
-        self._complete_store_job(internal_job_metadata)
+        for key in keys:
+            self.blocks[key] = True
+        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
     def submit_load(self, job_metadata: JobMetadata) -> None:
         """
-        Submit an async job to load blocks from this tier to primary tier.
+        Submit a job to load blocks from this tier to primary tier.
 
         Args:
             job_metadata: Job metadata including job_id, keys, and
                           spec for writing blocks into the primary tier.
         """
-        job_id = job_metadata.job_id
         keys = job_metadata.keys
         block_ids = job_metadata.block_ids
 
@@ -112,40 +99,23 @@ class ExampleSecondaryTier(SecondaryTierManager):
             f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
 
-        # Verify all blocks exist
         for key in keys:
             if key not in self.blocks:
                 return
 
-        # Create internal job metadata
-        internal_job_metadata = _JobMetadata(job_id=job_id, keys=keys, is_store=False)
-
-        self._complete_load_job(internal_job_metadata)
+        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
     def get_finished(self) -> Iterable[JobResult]:
         """
-        Poll for finished async jobs.
+        Poll for finished jobs.
 
         Returns:
             Iterable of JobResult objects for all jobs that have
             finished since the last call.
         """
-        # Return completed jobs
         result = self.completed_jobs
         self.completed_jobs = []
         return result
-
-    def _complete_store_job(self, job_metadata: _JobMetadata):
-        """Complete a store job by adding blocks to storage."""
-        for key in job_metadata.keys:
-            self.blocks[key] = True
-        # Return simplified JobResult (only job_id and success)
-        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
-
-    def _complete_load_job(self, job_metadata: _JobMetadata):
-        """Complete a load job."""
-        # Return simplified JobResult (only job_id and success)
-        self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
     @staticmethod
     def get_tier_type() -> str:
