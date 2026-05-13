@@ -40,9 +40,6 @@ def _format_graph_code_content(result: str) -> str:
         # Source: <eval_with_key>.107 from /path/to/file.py:123
         class MyClass...
 
-    The key insight is that the <eval_with_key> line may contain Python code
-    (like a class definition) after the metadata, which must be preserved.
-
     Args:
         result: The raw output from lazy_format_graph_code.
 
@@ -50,9 +47,10 @@ def _format_graph_code_content(result: str) -> str:
         The formatted content with headers converted to comments.
     """
     title_pattern = re.compile(r'^\s*={2,}\s*(.+?)\s*={2,}\s*$')
-    # Match <eval_with_key> lines, capturing metadata and optional code after
+    # Match <eval_with_key> lines, capturing metadata and optional code after.
+    # We use a non-greedy match for metadata up to the function name.
     eval_with_key_pattern = re.compile(
-        r'^(\s*<eval_with_key>\S+\s+from\s+\S+\s+in\s+\S+)\s+(class\s+.*)'
+        r'^(\s*<eval_with_key>.*? in \S+)(?:\s+(.*))?$'
     )
 
     lines = result.split('\n')
@@ -61,25 +59,19 @@ def _format_graph_code_content(result: str) -> str:
     for line in lines:
         if line.strip() == 'TRACED GRAPH':
             formatted_lines.append('# TRACED GRAPH')
-        elif title_pattern.match(line):
-            match = title_pattern.match(line)
-            if match:
-                title = match.group(1).strip()
-                formatted_lines.append(f'# {title}')
-            else:
-                formatted_lines.append(line)
+        elif (match := title_pattern.match(line)):
+            formatted_lines.append(f'# {match.group(1).strip()}')
+        elif (eval_match := eval_with_key_pattern.match(line)):
+            metadata = eval_match.group(1).strip()
+            code = eval_match.group(2)
+            formatted_lines.append(f'# Source: {metadata}')
+            if code and code.strip():
+                formatted_lines.append(code.strip())
+        elif re.match(r'^\s*<eval_with_key>', line):
+            # Fallback: entire line is metadata if no code found
+            formatted_lines.append(f'# Source: {line.strip()}')
         else:
-            eval_match = eval_with_key_pattern.match(line)
-            if eval_match:
-                metadata = eval_match.group(1).strip()
-                code = eval_match.group(2)
-                formatted_lines.append(f'# Source: {metadata}')
-                formatted_lines.append(code)
-            elif re.match(r'^\s*<eval_with_key>', line):
-                # Fallback: entire line is metadata if no code found
-                formatted_lines.append(f'# Source: {line.strip()}')
-            else:
-                formatted_lines.append(line)
+            formatted_lines.append(line)
 
     return '\n'.join(formatted_lines)
 
