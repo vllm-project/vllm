@@ -492,7 +492,13 @@ def batched_fused_marlin_moe(
     topk = 1
 
     # TODO(varun) : Choose a decent block size like in fused_marlin_moe
+    # Tune block_size_m based on expert capacity to reduce padding overhead.
     block_size_m = 64
+    for b_m in [8, 16, 32, 48, 64]:
+        if BATCH_TOKENS_MAX / b_m < 0.9:
+            block_size_m = b_m
+            break
+
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
 
