@@ -1500,9 +1500,28 @@ class GPUModelRunner(
 
         is_align = self.cache_config.mamba_cache_mode == "align"
         if is_align:
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            # PR #42574: skip the postprocess_mamba call entirely when no
+            # request can cross a mamba block boundary this step. In that
+            # regime we only need a non-blocking copy of num_accepted_tokens;
+            # the event.synchronize() in `_prepare_inputs` next iter absorbs
+            # the deferred wait.
+            copy_bufs = self._get_mamba_copy_bufs()
+            if mamba_utils.can_skip_mamba_postprocess(
+                scheduler_output,
+                self.input_batch,
+                self.requests,
+                copy_bufs.mamba_spec.block_size,
+                num_reqs,
             ):
+                self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                    self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+                )
+                assert self.num_accepted_tokens_event is not None
+                self.num_accepted_tokens_event.record()
+                return
+            # Fallthrough: blocking sync, then upstream's per-request populate
+            np_arr = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            for i, num_tokens in enumerate(np_arr):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
