@@ -1166,7 +1166,7 @@ setup(
     extras_require={
         # AMD Zen CPU optimizations via zentorch
         "zen": [
-            "zentorch-weekly==5.2.1.dev20260408"
+            "zentorch==5.2.1"
         ],  # Zentorch has weekly releases. This pulls the known-good version.
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],

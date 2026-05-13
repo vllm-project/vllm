@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib
+import importlib.metadata
 import json
 import types
 from importlib.util import find_spec
@@ -457,6 +457,11 @@ class TorchAOLinearMethod(LinearMethodBase):
         if w.act_quant_kwargs is None:
             # Weight-only Int8Tensor — fallback to F.linear.
             return
+        if w.act_quant_kwargs.granularity != PerRow():
+            logger.warning_once(
+                "zentorch will treat PerTensor granularity of activation"
+                " quantization as PerRow for DA8W8 fast path."
+            )
 
         # PerRow weight scale: torchao stores it as (N, 1); squeeze to (N,)
         # to match zentorch_dynamic_qlinear's expectation.

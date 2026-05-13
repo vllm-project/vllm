@@ -402,7 +402,6 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
 
 
 # Zen CPU dispatch unit tests.
-# TODO : unify fixture across test modules.
 
 
 def _make_linear_method():
