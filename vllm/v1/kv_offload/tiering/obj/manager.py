@@ -54,6 +54,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._base_addr: int = 0
         self._stride: int = 0
         self._prefix = f"{prefix}/" if prefix else ""
+        self._next_obj_dev_id: int = 0  # unique devId for each OBJ registration
 
         self._probe_connectivity()
 
@@ -103,7 +104,13 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             (self._base_addr + int(bid) * self._stride, self._stride, 0)
             for bid in block_ids
         ]
-        nixl_files = [(0, self._stride, 0, key) for key in obj_keys]
+        # The OBJ backend maps devId -> obj_key. All descriptors must have
+        # unique devIds or later registrations overwrite earlier ones.
+        dev_id_base = self._next_obj_dev_id
+        obj_keys_list = list(obj_keys)
+        self._next_obj_dev_id += len(obj_keys_list)
+        nixl_files = [(0, self._stride, dev_id, key)
+                      for dev_id, key in enumerate(obj_keys_list, dev_id_base)]
 
         xfer_desc = self._agent.get_xfer_descs(blocks_data, "DRAM")
         if xfer_desc is None:

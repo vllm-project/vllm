@@ -405,7 +405,7 @@ class TestObjTierE2EWithPrimary:
 
         # Wait for promotion to complete
         for _ in range(60):
-            manager._process_finished_jobs()
+            list(manager.take_events())
             time.sleep(0.1)
 
         # Blocks should now be back in primary
@@ -420,7 +420,7 @@ class TestObjTierE2EWithPrimary:
         primary_tier.complete_load(keys, _CTX)
 
     def test_cascade_promotion_roundtrip(self, setup_manager):
-        """Full roundtrip: store → cascade → evict → promote → data intact."""
+        """Full roundtrip: store -> cascade -> evict -> promote -> data intact."""
         from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 
         manager, primary_tier, obj_tier, cpu_tensor = setup_manager
@@ -456,7 +456,7 @@ class TestObjTierE2EWithPrimary:
         for k in keys:
             manager.lookup(k, _CTX)
         for _ in range(60):
-            manager._process_finished_jobs()
+            list(manager.take_events())
             time.sleep(0.1)
 
         assert all(manager.lookup(k, _CTX) is True for k in keys)
