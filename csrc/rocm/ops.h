@@ -58,6 +58,13 @@ torch::Tensor wvSplitK_int4g_hf_sweep(
     const int64_t CuCount, const int64_t group_size, const int64_t ytile,
     const int64_t unrl, const int64_t achunk, const int64_t wvprgrp);
 
+void fused_moe_wvSplitK_int4_gemm_sweep(
+    torch::Tensor a, torch::Tensor w, torch::Tensor scales, torch::Tensor c,
+    torch::Tensor expert_ids, int64_t block_size_m, int64_t CuCount,
+    int64_t group_size, torch::Tensor zero_points,
+    torch::Tensor sorted_token_ids, int64_t top_k, bool fuse_silu_mul,
+    int64_t ytile, int64_t unrl, int64_t achunk, int64_t wvprgrp);
+
 torch::Tensor wvSplitK_w8a8_sweep(const at::Tensor& in_a,
                                   const at::Tensor& in_b,
                                   const at::Tensor& in_w_scale,

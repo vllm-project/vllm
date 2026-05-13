@@ -2821,6 +2821,48 @@ def wvSplitK_int4g_hf_sweep(
     )
 
 
+def fused_moe_wvSplitK_int4_gemm_sweep(
+    a: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    c: torch.Tensor,
+    expert_ids: torch.Tensor,
+    block_size_m: int,
+    cu_count: int,
+    group_size: int,
+    ytile: int,
+    unrl: int,
+    achunk: int,
+    wvprgrp: int,
+    zero_points: torch.Tensor | None = None,
+    sorted_token_ids: torch.Tensor | None = None,
+    top_k: int = 1,
+    fuse_silu_mul: bool = False,
+) -> None:
+    if zero_points is None:
+        zero_points = torch.empty(0, dtype=scales.dtype, device=a.device)
+    if sorted_token_ids is None:
+        sorted_token_ids = torch.empty(0, dtype=torch.int32, device=a.device)
+    torch.ops._rocm_C.fused_moe_wvSplitK_int4_gemm_sweep(
+        a,
+        w,
+        scales,
+        c,
+        expert_ids,
+        block_size_m,
+        cu_count,
+        group_size,
+        zero_points,
+        sorted_token_ids,
+        top_k,
+        fuse_silu_mul,
+        ytile,
+        unrl,
+        achunk,
+        wvprgrp,
+    )
+
+
 def wvSplitKrc(
     a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
 ) -> torch.Tensor:
