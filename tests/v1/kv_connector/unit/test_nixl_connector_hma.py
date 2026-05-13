@@ -278,6 +278,83 @@ def test_apply_prefix_caching_mamba_hybrid(
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "local_physical_per_logical,remote_physical_per_logical,"
+    "local_block_ids,remote_block_ids,"
+    "expected_local,expected_remote",
+    [
+        # SSM prefix caching: remote has 3 placeholder + 1 real block,
+        # local has only the 1 real block. FA blocks are equal (no trim).
+        pytest.param(
+            10,
+            10,
+            [list(range(10)), [42]],
+            [list(range(10)), [40, 41, 42, 43]],
+            [list(range(10)), [42]],
+            [list(range(10)), [43]],
+            id="ssm_prefix_trim_only",
+        ),
+        # FA partial prefix cache hit with homogeneous TP: local has 4 FA
+        # blocks (prefix cached), remote has full 10. SSM equal (no trim).
+        pytest.param(
+            10,
+            10,
+            [list(range(6, 10)), [42]],
+            [list(range(10)), [42]],
+            [list(range(6, 10)), [42]],
+            [list(range(6, 10)), [42]],
+            id="fa_prefix_hit_homo_tp",
+        ),
+        # Both: FA partial prefix hit + SSM placeholder trim.
+        # local FA=[6..9] (4 blocks, prefix cached), remote FA=[0..9]
+        # local SSM=[99], remote SSM=[10, 20, 99] (2 placeholders + real)
+        pytest.param(
+            10,
+            10,
+            [[6, 7, 8, 9], [99]],
+            [list(range(10)), [10, 20, 99]],
+            [[6, 7, 8, 9], [99]],
+            [[6, 7, 8, 9], [99]],
+            id="fa_prefix_hit_and_ssm_trim",
+        ),
+    ],
+)
+def test_apply_prefix_caching_ssm_prefix_cache_hit(
+    local_physical_per_logical,
+    remote_physical_per_logical,
+    local_block_ids,
+    remote_block_ids,
+    expected_local,
+    expected_remote,
+):
+    """_apply_prefix_caching end-trims SSM remote blocks to match the single
+    local block (placeholders dropped) and end-trims FA remote blocks on
+    partial prefix cache hits when physical_per_logical matches.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = True
+    worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._group_spec_types = (FullAttentionSpec, MambaSpec)
+    worker.kv_cache_config = make_kv_cache_config(block_size=16, mamba_enabled=True)
+
+    aligned_local, aligned_remote = worker._apply_prefix_caching(
+        local_block_ids, remote_block_ids, remote_physical_per_logical
+    )
+
+    assert aligned_local == expected_local, (
+        f"Expected local {expected_local}, got {aligned_local}"
+    )
+    assert aligned_remote == expected_remote, (
+        f"Expected remote {expected_remote}, got {aligned_remote}"
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "local_physical_per_logical,remote_physical_per_logical,"
     "remote_fa_blocks,local_fa_blocks,ssm_blocks,"
     "correct_remote_fa,correct_local_fa",
     [
