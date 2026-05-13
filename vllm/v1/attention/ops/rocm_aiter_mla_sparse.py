@@ -1013,32 +1013,104 @@ def rocm_dequantize_blocked_k_cache(
     return result
 
 
-def _gather_referenced_cache_blocks(
+def _dequantize_referenced_tokens(
     quant_k_cache: torch.Tensor,
     indices_in_kvcache: torch.Tensor,
+    *,
+    head_dim: int,
+    nope_head_dim: int,
+    rope_head_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Gather used cache blocks and remap flattened token indices."""
-    block_size = quant_k_cache.shape[1]
-    valid_mask = indices_in_kvcache >= 0
-    valid_indices = indices_in_kvcache[valid_mask]
-    if valid_indices.numel() == 0:
-        return quant_k_cache[:1], indices_in_kvcache
+    """Dequantize only the tokens referenced by ``indices_in_kvcache``.
 
-    valid_block_indices = torch.div(
-        valid_indices,
-        block_size,
-        rounding_mode="floor",
-    )
-    block_indices = torch.unique(valid_block_indices, sorted=True)
-    compact_k_cache = quant_k_cache.index_select(0, block_indices.to(torch.long))
+    This is the CUDA/HIP-graph-safe replacement for the previous block-level
+    compaction path. The earlier implementation used boolean masking and
+    ``torch.unique`` to dedup referenced cache blocks; both produce
+    data-dependent output shapes which HIP/CUDA stream capture rejects with
+    ``hipErrorStreamCaptureUnsupported``.
 
-    compact_block_indices = torch.searchsorted(block_indices, valid_block_indices)
-    remapped_indices = indices_in_kvcache.clone()
-    remapped_valid_indices = compact_block_indices * block_size + (
-        valid_indices % block_size
+    Instead, gather and dequantize **per token slot** with bounded, fully
+    static shapes:
+
+    * ``indices_in_kvcache`` has a fixed shape determined by the captured
+      decode batch and topk, so the gather output ``(N, head_dim)`` is also
+      static.
+    * Tokens at sentinel ``-1`` slots are gathered from block 0 / slot 0 and
+      later masked out by ``rocm_ref_sparse_attn_decode``'s ``invalid_mask``.
+    * Memory: ``N * head_dim * 2`` bytes per cache (vs. the full pool's
+      ``num_total_blocks * block_size * head_dim * 2``), preserving the OOM
+      win that motivated the original compaction.
+
+    Returns a tuple of:
+
+    * ``gathered_kv``: shape ``(N, head_dim)``, ``bfloat16``, where
+      ``N == indices_in_kvcache.numel()``.
+    * ``remapped_indices``: same shape as ``indices_in_kvcache``; valid slots
+      hold their flat position in ``gathered_kv`` (``0..N-1``), invalid slots
+      keep ``-1`` so downstream masking still works.
+    """
+    fp8_dtype = current_platform.fp8_dtype()
+    tile_size = 64
+    num_tiles = nope_head_dim // tile_size
+    nope_rope_bytes = nope_head_dim + 2 * rope_head_dim
+
+    num_blocks, block_size, _ = quant_k_cache.shape
+
+    # Split the per-block storage into nope+rope and scales views without a
+    # data-dependent copy. Layout per block (after flattening) is:
+    #   [block_size * (nope+2r) bytes of nope+rope][block_size * 8 bytes of scales]
+    quant_flat = quant_k_cache.view(num_blocks, -1)
+    nope_rope_block = quant_flat[:, : block_size * nope_rope_bytes].view(
+        num_blocks, block_size, nope_rope_bytes
     )
-    remapped_indices[valid_mask] = remapped_valid_indices.to(remapped_indices.dtype)
-    return compact_k_cache, remapped_indices
+    scales_block = quant_flat[:, block_size * nope_rope_bytes :].view(
+        num_blocks, block_size, 8
+    )
+
+    # Map -1 sentinels to (block 0, slot 0) so the gather is well-defined; the
+    # corresponding output rows are masked out by the downstream attention via
+    # the remapped -1 entries.
+    flat_indices = indices_in_kvcache.reshape(-1)
+    safe_indices = torch.clamp_min(flat_indices, 0).to(torch.long)
+    block_idx = torch.div(safe_indices, block_size, rounding_mode="floor")
+    slot_idx = safe_indices % block_size
+
+    # Advanced indexing produces fixed-shape, contiguous outputs and is safe
+    # under graph capture (no data-dependent shapes).
+    selected_nope_rope = nope_rope_block[block_idx, slot_idx]  # (N, nope+2r)
+    selected_scales = scales_block[block_idx, slot_idx]  # (N, 8)
+
+    nope_part = selected_nope_rope[:, :nope_head_dim].view(fp8_dtype)
+    rope_part = selected_nope_rope[:, nope_head_dim:].view(torch.bfloat16)
+    scale_part = selected_scales[:, :num_tiles].view(torch.float8_e8m0fnu)
+
+    n_tokens = block_idx.shape[0]
+    gathered_kv = torch.empty(
+        (n_tokens, head_dim),
+        dtype=torch.bfloat16,
+        device=quant_k_cache.device,
+    )
+    gathered_kv[:, nope_head_dim:] = rope_part
+    for tile_idx in range(num_tiles):
+        cur_nope = nope_part[:, tile_idx * tile_size : (tile_idx + 1) * tile_size].to(
+            torch.bfloat16
+        )
+        cur_scales = scale_part[:, tile_idx].to(torch.bfloat16).unsqueeze(-1)
+        gathered_kv[:, tile_idx * tile_size : (tile_idx + 1) * tile_size] = (
+            cur_nope * cur_scales
+        )
+
+    # Remap each valid slot to its row in ``gathered_kv``; keep -1 for invalid.
+    arange_n = torch.arange(
+        n_tokens, device=indices_in_kvcache.device, dtype=indices_in_kvcache.dtype
+    )
+    flat_remapped = torch.where(
+        flat_indices >= 0,
+        arange_n,
+        torch.full_like(arange_n, -1),
+    )
+    remapped_indices = flat_remapped.view_as(indices_in_kvcache)
+    return gathered_kv, remapped_indices
 
 
 def rocm_ref_sparse_attn_decode(
@@ -1127,12 +1199,14 @@ def rocm_forward_decode_fallback(
     rope_head_dim: int,
     output: torch.Tensor,
 ) -> None:
-    swa_k_cache, swa_indices = _gather_referenced_cache_blocks(
+    # Per-token gather + dequant. This avoids materializing the full SWA / KV
+    # cache pool as bf16 (the OOM motivating #41962) **and** is safe under
+    # CUDA/HIP stream capture, since both the gather and the dequant operate
+    # on tensors with statically-known shapes (no boolean masking, no
+    # ``torch.unique``).
+    blocked_swa, swa_indices = _dequantize_referenced_tokens(
         swa_k_cache,
         swa_indices,
-    )
-    blocked_swa = rocm_dequantize_blocked_k_cache(
-        swa_k_cache,
         head_dim=head_dim,
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
@@ -1142,12 +1216,9 @@ def rocm_forward_decode_fallback(
     if not swa_only:
         assert kv_cache is not None
         assert topk_indices is not None
-        kv_cache, compact_topk_indices = _gather_referenced_cache_blocks(
+        blocked_extra, compact_topk_indices = _dequantize_referenced_tokens(
             kv_cache,
             topk_indices,
-        )
-        blocked_extra = rocm_dequantize_blocked_k_cache(
-            kv_cache,
             head_dim=head_dim,
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
