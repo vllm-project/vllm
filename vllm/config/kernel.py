@@ -153,8 +153,8 @@ class KernelConfig:
     - "marlin": Use Marlin kernels (weight-only quantization)
     - "humming": Use Humming Mixed Precision kernels
     - "triton_unfused": Use Triton unfused MoE kernels
-    - "aiter_mxfp4_bf16": Use AMD AITer CK W4A16 MoE kernels
-    - "aiter_mxfp4_fp8": Use AMD AITer Triton W4A8 MoE kernels
+    - "aiter_mxfp4_bf16": Use AMD AITER CK W4A16 MoE kernels
+    - "aiter_mxfp4_fp8": Use AMD AITER Triton W4A8 MoE kernels
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
