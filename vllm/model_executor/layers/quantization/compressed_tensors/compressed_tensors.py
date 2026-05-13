@@ -955,15 +955,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
             raise ValueError("A scheme must be defined for each layer")
         return scheme.apply_weights(layer, x, bias=bias)
 
-    def rms_norm_quantize_input(
-        self,
-        layer: torch.nn.Module,
-        norm: torch.nn.Module,
-        x: torch.Tensor,
-        residual: torch.Tensor | None,
-    ):
-        return layer.scheme.rms_norm_quantize_input(layer, norm, x, residual)
-
 
 class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
     """

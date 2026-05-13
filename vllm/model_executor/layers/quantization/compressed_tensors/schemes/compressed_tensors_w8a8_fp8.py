@@ -40,7 +40,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
-from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -197,43 +196,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             and self.activation_quant_key == kFp8StaticTensorSym
         ):
             layer.input_quant_key = kFp8StaticTensorSym
-
-    def rms_norm_quantize_input(
-        self,
-        layer: torch.nn.Module,
-        norm: torch.nn.Module,
-        x: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> tuple[QuantizedActivation, torch.Tensor]:
-        out_q = torch.empty(
-            x.shape, dtype=current_platform.fp8_dtype(), device=x.device
-        )
-        if residual is None:
-            torch.ops._C.rms_norm_static_fp8_quant(
-                out_q,
-                x,
-                norm.weight.data,
-                layer.input_scale,
-                norm.variance_epsilon,
-            )
-            residual = x
-        else:
-            torch.ops._C.fused_add_rms_norm_static_fp8_quant(
-                out_q,
-                x,
-                residual,
-                norm.weight.data,
-                layer.input_scale,
-                norm.variance_epsilon,
-            )
-        qa = QuantizedActivation(
-            data=out_q,
-            scale=layer.input_scale,
-            orig_dtype=x.dtype,
-            orig_shape=x.shape,
-            quant_key=kFp8StaticTensorSym,
-        )
-        return qa, residual
 
     def apply_weights(
         self,
