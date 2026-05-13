@@ -5215,6 +5215,54 @@ class GPUModelRunner(
                 logprobs, num_prompt_logprobs, tgt_token_ids
             )
 
+            # PROBE: dump the full chain for rows where tgt token == 2701
+            # (the failing token ' following'). This isolates the EXACT data
+            # that produced rank=5217/5218 in the assertion.
+            import os as _probe_os
+
+            if _probe_os.environ.get("VLLM_DEBUG_DUMP_HS", "") == "1":
+                import sys as _probe_sys
+
+                _tgt_cpu = tgt_token_ids.detach().cpu().tolist()
+                _ranks_cpu = ranks.detach().cpu().tolist()
+                for _i, _t in enumerate(_tgt_cpu):
+                    if _t != 2701:
+                        continue
+                    _row = logits[_i].detach()
+                    _row_cpu = _row.cpu().float()
+                    _tok_val = float(_row_cpu[2701].item())
+                    _row_max = float(_row_cpu.max().item())
+                    _row_argmax = int(_row_cpu.argmax().item())
+                    _row_lse = float(
+                        (_row_cpu - _row_cpu.max()).exp().sum().log().item() + _row_max
+                    )
+                    _row_sum = float(_row_cpu.sum().item())
+                    _logprob_calc = _tok_val - _row_lse
+                    _rank_calc = int((_row >= _row[2701]).sum().item())
+                    _near_mask = (_row - _row[2701]).abs() < 1e-6
+                    _near_idx = _near_mask.nonzero(as_tuple=False).flatten().tolist()
+                    _near_vals = [
+                        (int(_j), float(_row[_j].item())) for _j in _near_idx[:16]
+                    ]
+                    # Hidden state input to lm_head for this row
+                    _hs = prompt_hidden_states[_i].detach()
+                    _hs_cpu = _hs.cpu().float()
+                    _hs_norm = float(_hs_cpu.norm().item())
+                    _hs_sum = float(_hs_cpu.sum().item())
+                    _hs_first8 = _hs_cpu[:8].tolist()
+                    print(
+                        f"[VLLM_TARGET] req={req_id} chunk_row={_i} tgt=2701 "
+                        f"tok_val={_tok_val:.20g} max={_row_max:.20g} "
+                        f"argmax={_row_argmax} lse={_row_lse:.20g} "
+                        f"sum={_row_sum:.20g} logprob_calc={_logprob_calc:.20g} "
+                        f"rank_calc={_rank_calc} rank_kernel={_ranks_cpu[_i]} "
+                        f"near_count={len(_near_idx)} near={_near_vals} "
+                        f"hs_norm={_hs_norm:.20g} hs_sum={_hs_sum:.20g} "
+                        f"hs_first8={_hs_first8}",
+                        file=_probe_sys.stderr,
+                        flush=True,
+                    )
+
             # Transfer GPU->CPU async.
             chunk_slice = slice(start_idx, start_idx + num_logits)
             logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
