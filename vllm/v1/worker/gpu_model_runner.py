@@ -1482,10 +1482,31 @@ class GPUModelRunner(
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
 
         if self.cache_config.mamba_cache_mode == "align":
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+            # Defer the GPU->CPU sync of `num_accepted_tokens` when we can
+            # prove `postprocess_mamba` will be a no-op this step.
+            #
+            # `postprocess_mamba` only mutates state when a request crosses
+            # a mamba block boundary in this iteration:
+            #     aligned_new_computed_tokens >= num_tokens_running_state
+            # `num_accepted_tokens` is bounded by `num_speculative_tokens + 1`,
+            # which lets us evaluate the worst case from CPU-side state
+            # alone (num_computed / num_scheduled / num_draft / block_size)
+            # with no GPU sync. When the worst case can't cross a boundary,
+            # we issue an async device-to-host copy and let the existing
+            # `event.synchronize()` in `_prepare_inputs` (called after the
+            # draft-token forwards) absorb the wait; by that point the GPU
+            # has long since finished, so the wait is essentially free.
+            if self._can_skip_mamba_postprocess(num_reqs, scheduler_output):
+                self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                    self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+                )
+                assert self.num_accepted_tokens_event is not None
+                self.num_accepted_tokens_event.record()
+                return
+            # Slow path: at least one request may cross a boundary, so we
+            # need the values on CPU now for `postprocess_mamba`.
+            np_arr = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs] = np_arr
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1502,6 +1523,57 @@ class GPUModelRunner(
             )
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
+
+    def _can_skip_mamba_postprocess(
+        self, num_reqs: int, scheduler_output: "SchedulerOutput"
+    ) -> bool:
+        """Return True iff `postprocess_mamba` is provably a no-op this step.
+
+        `postprocess_mamba` only does work for a request when
+
+            aligned_new_computed_tokens >= num_tokens_running_state
+
+        where:
+
+            num_tokens_running_state = num_computed + num_scheduled - num_draft
+            new_num_computed_tokens  = num_tokens_running_state + num_accepted - 1
+            aligned                  = (new_num_computed_tokens // bs) * bs
+
+        We do not know `num_accepted` without a GPU->CPU sync, but it is
+        bounded by `num_speculative_tokens + 1` (the shape of
+        ``output_token_ids``). If even the worst-case value cannot push any
+        request across a block boundary, the function is provably a no-op
+        and we can defer the sync to the event already used by the async
+        ("non-align") path.
+
+        The check is per-request and uses only CPU-side state, so it adds
+        a small constant-time cost per scheduler step regardless of skip
+        rate.
+        """
+        block_size = (
+            self.cache_config.mamba_block_size or self.cache_config.block_size
+        )
+        if not block_size or block_size <= 0:
+            # Unknown / degenerate layout: stay on the safe slow path.
+            return False
+        max_num_accepted = self.num_spec_tokens + 1
+        num_scheduled = scheduler_output.num_scheduled_tokens
+        spec_decode = scheduler_output.scheduled_spec_decode_tokens
+        req_ids = self.input_batch.req_ids
+        for i in range(num_reqs):
+            req_id = req_ids[i]
+            req_state = self.requests[req_id]
+            n_running = (
+                req_state.num_computed_tokens
+                + num_scheduled[req_id]
+                - len(spec_decode.get(req_id, ()))
+            )
+            # Worst case: num_accepted == num_spec_tokens + 1 →
+            # new_num_computed grows by num_spec_tokens.
+            max_new = n_running + (max_num_accepted - 1)
+            if (max_new // block_size) * block_size >= n_running:
+                return False
+        return True
 
     def _update_streaming_request(
         self, req_id: str, new_req_data: NewRequestData
