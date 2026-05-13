@@ -608,7 +608,7 @@ class Scheduler(SchedulerInterface):
                     if (
                         self.ec_connector is not None
                         and request.mm_features
-                        and self.ec_connector.ensure_cache_available(
+                        and not self.ec_connector.ensure_cache_available(
                             request, num_computed_tokens
                         )
                     ):
