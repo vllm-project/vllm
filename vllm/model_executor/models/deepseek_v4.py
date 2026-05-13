@@ -35,6 +35,12 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mhc import (
+    HCHeadOp,
+    MHCFusedPostPreOp,
+    MHCPostOp,
+    MHCPreOp,
+)
 from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
@@ -1168,6 +1174,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             ),
             requires_grad=False,
         )
+        self.mhc_pre = MHCPreOp()
+        self.mhc_post = MHCPostOp()
+        self.mhc_fused_post_pre = MHCFusedPostPreOp()
 
     def hc_pre(
         self,
@@ -1176,7 +1185,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        post_mix, res_mix, layer_input = torch.ops.vllm.mhc_pre(
+        post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
             fn=hc_fn,
             hc_scale=hc_scale,
@@ -1196,9 +1205,9 @@ class DeepseekV4DecoderLayer(nn.Module):
         post: torch.Tensor,
         comb: torch.Tensor,
     ):
-        return torch.ops.vllm.mhc_post(x, residual, post, comb)
+        return self.mhc_post(x, residual, post, comb)
 
-    def forward(
+    def _forward_cuda(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
@@ -1214,7 +1223,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
             )
         else:
-            residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
+            residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
                 x,
                 residual,
                 post_mix,
@@ -1232,7 +1241,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn_norm(x)
         x = self.attn(positions, x, None)
 
-        residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
+        residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
             post_mix,
@@ -1250,6 +1259,48 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
+
+    def _forward_rocm(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        residual = x
+        x, post, comb = self.hc_pre(
+            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+        )
+        x = self.attn_norm(x)
+        x = self.attn(positions, x, None)
+        x = self.hc_post(x, residual, post, comb)
+
+        residual = x
+        x, post, comb = self.hc_pre(
+            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        )
+        x = self.ffn_norm(x)
+        x = self.ffn(x, input_ids)
+        x = self.hc_post(x, residual, post, comb)
+        return x, None, None, None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if current_platform.is_rocm():
+            return self._forward_rocm(
+                x, positions, input_ids, post_mix, res_mix, residual
+            )
+
+        return self._forward_cuda(x, positions, input_ids, post_mix, res_mix, residual)
 
 
 @support_torch_compile
@@ -1340,7 +1391,7 @@ class DeepseekV4Model(nn.Module):
             torch.empty(1, dtype=torch.float32),
             requires_grad=False,
         )
-
+        self.hc_head_op = HCHeadOp()
         # Pre-hc_head residual stream buffer for the MTP draft. Stable
         # address (outside the cudagraph pool) so the copy_ in forward()
         # refreshes it correctly across captured shapes.
@@ -1410,7 +1461,7 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        else:
+        if layer is not None and current_platform.is_cuda():
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
@@ -1420,7 +1471,7 @@ class DeepseekV4Model(nn.Module):
         num_tokens = hidden_states.shape[0]
         self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
-        hidden_states = hc_head(
+        hidden_states = self.hc_head_op(
             hidden_states,
             self.hc_head_fn,
             self.hc_head_scale,
@@ -1547,36 +1598,6 @@ class DeepseekV4Model(nn.Module):
     def finalize_mega_moe_weights(self) -> None:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer.ffn.finalize_mega_moe_weights()
-
-
-@torch.compile(backend=current_platform.simple_compile_backend)
-def hc_head(
-    hidden_states: torch.Tensor,
-    hc_fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    rms_norm_eps: float,
-    hc_eps: float,
-) -> torch.Tensor:
-    hc_mult, hidden_size = hidden_states.shape[-2:]
-    outer_shape = hidden_states.shape[:-2]
-    hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
-    num_tokens = hs_flat.shape[0]
-    out = torch.empty(
-        num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
-    )
-    torch.ops.vllm.hc_head_fused_kernel(
-        hs_flat,
-        hc_fn,
-        hc_scale,
-        hc_base,
-        out,
-        hidden_size,
-        rms_norm_eps,
-        hc_eps,
-        hc_mult,
-    )
-    return out.view(*outer_shape, hidden_size)
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
