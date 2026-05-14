@@ -252,6 +252,7 @@ class TurboQuantConfig:
             except ValueError:
                 non_index_layers.add(layer)
 
+        removed_shared_layers: list[tuple[int, int]] = []
         prev_layer_types = layer_types[:first_shared_layer]
         for shared_idx in range(first_shared_layer, min(num_layers, len(layer_types))):
             current_type = layer_types[shared_idx]
@@ -267,7 +268,20 @@ class TurboQuantConfig:
             if target_idx in skip_indices:
                 skip_indices.add(shared_idx)
             else:
-                skip_indices.discard(shared_idx)
+                if shared_idx in skip_indices:
+                    removed_shared_layers.append((shared_idx, target_idx))
+                    skip_indices.discard(shared_idx)
+
+        if removed_shared_layers:
+            logger.warning(
+                "Removed %d shared layer(s) from TurboQuant skip set because "
+                "their KV-sharing target layers are not skipped: %s",
+                len(removed_shared_layers),
+                ", ".join(
+                    f"{shared_idx}->target {target_idx}"
+                    for shared_idx, target_idx in removed_shared_layers
+                ),
+            )
 
         aligned = [str(idx) for idx in skip_indices] + list(non_index_layers)
         return _sort_skip_layers(aligned)
@@ -341,16 +355,6 @@ def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
         return [i for i, t in enumerate(attn_type_list) if t == 1]
 
     return []
-
-
-def _get_kv_sharing_target_indices(
-    model_config: ModelConfig,
-    target_attention_type: str | None = None,
-) -> set[int]:
-    target_fanout = _get_kv_sharing_target_fanout(
-        model_config, target_attention_type=target_attention_type
-    )
-    return set(target_fanout)
 
 
 def _get_kv_sharing_target_fanout(

@@ -869,11 +869,8 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
         # regarded as uniform.
         return True
     spec_types = {type(spec) for spec in kv_cache_spec.values()}
-    if (
-        TQFullAttentionSpec in spec_types
-        and FullAttentionSpec in spec_types
-        or TQSlidingWindowSpec in spec_types
-        and SlidingWindowSpec in spec_types
+    if (TQFullAttentionSpec in spec_types and FullAttentionSpec in spec_types) or (
+        TQSlidingWindowSpec in spec_types and SlidingWindowSpec in spec_types
     ):
         return False
     try:

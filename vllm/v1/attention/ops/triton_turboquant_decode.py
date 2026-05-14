@@ -164,6 +164,8 @@ def _tq_decode_stage1(
             query_pos = seq_len - 1
             kv_mask = kv_mask & ((query_pos - kv_offs) < SLIDING_WINDOW)
         if USE_MM_PREFIX:
+            # Multimodal prefix ranges remain visible even when they sit
+            # outside the sliding window.
             kv_mask = (kv_offs < split_end) & (kv_mask | mm_prefix_mask)
 
         has_valid_kv = tl.max(kv_mask.to(tl.int32), axis=0) > 0
@@ -217,8 +219,8 @@ def _tq_decode_stage1(
                     mask=kv_mask[:, None] & d_mask[None, :],
                     other=0,
                 ).to(tl.int32)
-                raw16 = mse_raw0 | (mse_raw1 << 8)
-                mse_idx = (raw16 >> mse_bit_shift[None, :]) & mse_mask
+                mse_raw16 = mse_raw0 | (mse_raw1 << 8)
+                mse_idx = (mse_raw16 >> mse_bit_shift[None, :]) & mse_mask
 
                 # Centroid gather + dot product
                 c_vals = tl.load(
@@ -280,8 +282,8 @@ def _tq_decode_stage1(
                     mask=kv_mask[:, None] & d_mask[None, :],
                     other=0,
                 ).to(tl.int32)
-                raw16 = val_raw0 | (val_raw1 << 8)
-                v_idx = ((raw16 >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
+                val_raw16 = val_raw0 | (val_raw1 << 8)
+                v_idx = ((val_raw16 >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
 
                 sc_bases = val_bases + VAL_DATA_BYTES
                 sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
