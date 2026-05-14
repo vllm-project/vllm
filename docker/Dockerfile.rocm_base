@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.2-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
 ARG TRITON_BRANCH="0f380657"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="96bfee12" # release/2.11 as of 5/13
@@ -104,28 +104,6 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
-# torch profiler hotfix for 7.2.2: rebuild CLR with https://github.com/ROCm/rocm-systems/pull/5062
-# will be removed once we move to ROCm 7.2.3
-RUN apt-get update && apt-get install -y rocm-llvm-dev
-RUN pip install CppHeaderParser
-RUN git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-systems /tmp/rocm-systems \
-    && cd /tmp/rocm-systems \
-    && git sparse-checkout init --cone \
-    && git sparse-checkout set projects/hip projects/clr \
-    && git checkout 35e8c7bf8911862e5389509800e65fdf125412b3 \
-    && export CLR_DIR=/tmp/rocm-systems/projects/clr \
-    && export HIP_DIR=/tmp/rocm-systems/projects/hip \
-    && mkdir -p $CLR_DIR/build && cd $CLR_DIR/build \
-    && cmake \
-        -DHIP_COMMON_DIR=$HIP_DIR \
-        -DCMAKE_PREFIX_PATH="/opt/rocm/" \
-        -DCLR_BUILD_HIP=ON \
-        -DCLR_BUILD_OCL=OFF \
-        -DHIP_PLATFORM=amd \
-        .. \
-    && make -j$(nproc) \
-    && make install \
-    && rm -rf /tmp/rocm-systems
 
 ###
 ### Triton Build
