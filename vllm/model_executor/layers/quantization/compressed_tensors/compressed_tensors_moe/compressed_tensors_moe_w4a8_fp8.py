@@ -53,11 +53,15 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
         from vllm.model_executor.layers.quantization.utils.quant_utils import (
             GroupShape,
+            kFp8DynamicTokenSym,
+            kInt4Static,
         )
 
         self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
             config=self.moe,
+            weight_key=kInt4Static,
+            activation_key=kFp8DynamicTokenSym,
         )
 
     def create_weights(

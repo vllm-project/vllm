@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static,
     kMxfp4Dynamic,
     kMxfp4Static,
     kNvfp4Dynamic,
@@ -1271,6 +1272,28 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         return mk.FusedMoEActivationFormat.Standard
 
     @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.in_dtype != torch.bfloat16:
+            return (
+                False,
+                f"kernel does not support {moe_config.in_dtype} input/output dtype",
+            )
+
+        return mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+
+    @staticmethod
     def _supports_current_device() -> bool:
         return cutlass_group_gemm_supported()
 
@@ -1283,7 +1306,11 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return weight_key is None and activation_key is None
+        SUPPORTED_W_A = [
+            (None, None),
+            (kInt4Static, kFp8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
