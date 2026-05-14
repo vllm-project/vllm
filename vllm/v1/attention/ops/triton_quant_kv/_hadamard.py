@@ -196,12 +196,21 @@ def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
 # Deterministic ±1 signs for Randomized Hadamard Transform.
 # RHT = H × D × x  (sign flip + Hadamard).  Breaks residual structure
 # in KV vectors, improving quantization quality.
-_RHT_SIGNS_CACHE: dict[tuple[int, int, str], torch.Tensor] = {}
+_RHT_SIGNS_CACHE: dict[tuple[int, int, str, torch.dtype], torch.Tensor] = {}
 
 
-def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor:
-    """Return a cached deterministic ±1 sign vector of length *d*."""
-    key = (d, round_idx, str(device))
+def _get_rht_signs(
+    d: int,
+    round_idx: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Return a cached deterministic ±1 sign vector of length *d*.
+
+    Cached per (d, round_idx, device, dtype).  Signs are ±1.0, exactly
+    representable in any IEEE float, so dtype conversion is lossless.
+    """
+    key = (d, round_idx, str(device), dtype)
     if key not in _RHT_SIGNS_CACHE:
         gen = torch.Generator(device="cpu")
         gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
@@ -209,7 +218,7 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
             2.0 * torch.bernoulli(torch.full((d,), 0.5, device="cpu"), generator=gen)
             - 1.0
         )
-        _RHT_SIGNS_CACHE[key] = signs.to(device)
+        _RHT_SIGNS_CACHE[key] = signs.to(device=device, dtype=dtype)
     return _RHT_SIGNS_CACHE[key]
 
 
@@ -217,10 +226,12 @@ def single_rht(x: torch.Tensor, inverse: bool = False) -> torch.Tensor:
     """Single Randomized Hadamard Transform: H × D₁ × x.
 
     Used by INT4 per-token-head quantization to gaussianize data
-    before asymmetric quantization.
+    before asymmetric quantization. Runs in ``x.dtype`` — no fp32
+    round-trip. The Triton MMA Hadamard kernel accumulates in fp32
+    internally regardless of input dtype.
     """
     d = x.shape[-1]
-    d1 = _get_rht_signs(d, 0, x.device)
+    d1 = _get_rht_signs(d, 0, x.device, x.dtype)
     if inverse:
         return fast_hadamard_transform(x) * d1
     else:
