@@ -1129,14 +1129,12 @@ def _apply_multidimensional_rope(
     sin_parts = torch.split(sin, split_sizes, dim=-1)
     output_parts = [
         _apply_rotary_pos_emb(
-            hidden_part,
-            cos_part,
-            sin_part,
+            hidden_states=hidden_parts[k],
+            cos=cos_parts[k],
+            sin=sin_parts[k],
             unsqueeze_dim=unsqueeze_dim,
         )
-        for hidden_part, cos_part, sin_part in zip(
-            hidden_parts, cos_parts, sin_parts, strict=True
-        )
+        for k in range(ndim)
     ]
     return torch.cat(output_parts, dim=-1)
 
