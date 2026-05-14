@@ -30,9 +30,6 @@ from vllm.v1.attention.backend import (
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.mla.sparse_mla_env import (
-    is_triton_sparse_mla_enabled_for_platform,
-)
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -246,19 +243,6 @@ def get_prefill_workspace_size(max_model_len: int):
 
 class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-
-    @classmethod
-    def get_cudagraph_support(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
-    ) -> AttentionCGSupport:
-        if (
-            getattr(kv_cache_spec, "model_version", None) == "deepseek_v4"
-            and is_triton_sparse_mla_enabled_for_platform()
-        ):
-            return AttentionCGSupport.NEVER
-        return cls._cudagraph_support
 
     def __init__(
         self,
