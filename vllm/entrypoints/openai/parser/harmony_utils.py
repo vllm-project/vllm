@@ -26,6 +26,42 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+
+def is_function_recipient(
+    recipient: str,
+    allowed_function_tool_names: frozenset[str] | None = None,
+) -> bool:
+    """Check whether *recipient* refers to a function tool call.
+
+    The optional *allowed_function_tool_names* parameter is used by the
+    Responses API to distinguish bare function-call recipients (missing the
+    ``functions.`` prefix) from MCP tool calls.  When provided, a bare
+    recipient is only treated as a function call if it appears in the set.
+    The Chat Completions path omits this parameter so that all bare
+    recipients are accepted as function calls (the heuristic fallback).
+    """
+    if not recipient:
+        return False
+    if recipient.startswith("<|"):
+        return False
+    if recipient.startswith("functions."):
+        return len(recipient) > len("functions.")
+    if recipient == "assistant":
+        return False
+    if recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    first_segment = recipient.split(".", 1)[0]
+    if first_segment in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    if allowed_function_tool_names is not None:
+        return recipient in allowed_function_tool_names
+    return True
+
+
+def extract_function_from_recipient(recipient: str) -> str:
+    return recipient.removeprefix("functions.")
+
+
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
     "medium": ReasoningEffort.MEDIUM,

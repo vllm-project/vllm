@@ -535,6 +535,12 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        assert isinstance(self.bad_words, list)
+        if any(not bad_word for bad_word in self.bad_words):
+            raise ValueError(
+                f"bad_words cannot contain an empty string. "
+                f"Got bad_words={self.bad_words}"
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -689,6 +695,14 @@ class SamplingParams(
                 raise VLLMValidationError(
                     f"Requested logprob_token_ids of length {n}, "
                     f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
+                    parameter="logprob_token_ids",
+                    value=n,
+                )
+            if self.logprobs is not None and self.logprobs != n:
+                raise VLLMValidationError(
+                    f"When both logprobs and logprob_token_ids are set, "
+                    f"logprobs must equal len(logprob_token_ids). Got "
+                    f"logprobs={self.logprobs}, len(logprob_token_ids)={n}.",
                     parameter="logprob_token_ids",
                     value=n,
                 )
