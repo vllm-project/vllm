@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -54,8 +57,8 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        """BF16 kernels do not support non-gated MoE"""
-        return False
+        """BF16 kernels support non-gated MoE via RELU2_NO_MUL."""
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -67,7 +70,8 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU]
+        """Supports SiLU (gated) and RELU^2 (non-gated) activations."""
+        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
     def _supports_routing_method(
@@ -127,6 +131,8 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         import flashinfer
 
+        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+
         return flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -141,4 +147,5 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routing_method_type=self.routing_method_type,
+            activation_type=activation_to_flashinfer_int(activation),
         )
