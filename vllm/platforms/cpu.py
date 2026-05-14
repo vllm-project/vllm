@@ -50,7 +50,7 @@ class CpuPlatform(Platform):
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
-            return [torch.bfloat16, torch.float32]
+            return [torch.bfloat16, torch.float32, torch.float16]
         elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
             "darwin"
         ):
