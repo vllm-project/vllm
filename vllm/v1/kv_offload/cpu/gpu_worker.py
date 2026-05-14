@@ -123,6 +123,14 @@ def compute_sub_block_ptrs(
 
 def pin_mmap_region(region: SharedOffloadRegion) -> None:
     """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    if not current_platform.is_cuda_alike():
+        logger.info(
+            "Skipping mmap host registration on %s; cudaHostRegister is only "
+            "available on CUDA/ROCm.",
+            current_platform.device_name,
+        )
+        return
+
     rank = region.rank
 
     base_ptr = region._base.data_ptr()

@@ -307,7 +307,7 @@ def test_tiering_offloading() -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
     extra_config: dict = {
         "cpu_bytes_to_use": 500 << 20,
-        "block_size": 48,
+        "block_size": CPU_BLOCK_SIZES,
         "spec_name": "TieringOffloadingSpec",
         "secondary_tiers": [{"type": "example"}],
     }
@@ -353,7 +353,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
     + fs secondary tier."""
     extra_config: dict = {
         "cpu_bytes_to_use": 1 << 30,
-        "block_size": 48,
+        "block_size": CPU_BLOCK_SIZES,
         "spec_name": "TieringOffloadingSpec",
         "secondary_tiers": [{"type": "fs", "root_dir": str(tmp_path)}],
     }

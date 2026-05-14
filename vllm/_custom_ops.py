@@ -2769,9 +2769,12 @@ def swap_blocks_batch(
         writing to the source. Defaults to False (STREAM ordering), which
         is always safe.
     """
-    torch.ops._C_cache_ops.swap_blocks_batch(
-        src_ptrs, dst_ptrs, sizes, is_src_access_order_any
-    )
+    if current_platform.is_xpu():
+        torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+    else:
+        torch.ops._C_cache_ops.swap_blocks_batch(
+            src_ptrs, dst_ptrs, sizes, is_src_access_order_any
+        )
 
 
 def convert_fp8(
