@@ -11,6 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
+from vllm.entrypoints.context_compression import apply_ace_eviction
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -247,9 +248,31 @@ class OpenAIServingRender:
             if error_check_ret is not None:
                 return error_check_ret
 
+            # ACE: compress old tool-result messages before tokenization when
+            # the conversation may exceed the model's context budget.
+            messages = list(request.messages)
+            if getattr(request, "context_compression", None) == "ace":
+                max_model_len = self.model_config.max_model_len
+                max_tokens = (
+                    getattr(request, "max_completion_tokens", None)
+                    or getattr(request, "max_tokens", None)
+                    or 0
+                )
+                budget_chars = (max_model_len - max_tokens) * 4
+                apply_ace_eviction(
+                    messages,  # type: ignore[arg-type]
+                    budget_chars=budget_chars,
+                    keep_recent=getattr(
+                        request, "context_compression_keep_recent", 2
+                    ),
+                    target_ratio=getattr(
+                        request, "context_compression_ratio", 0.4
+                    ),
+                )
+
             conversation, engine_inputs = await self.preprocess_chat(
                 request,
-                request.messages,
+                messages,
                 default_template=self.chat_template,
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=self.default_chat_template_kwargs,

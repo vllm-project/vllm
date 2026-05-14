@@ -399,6 +399,34 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
+    # Context compression (ACE)
+    context_compression: Literal["ace"] | None = Field(
+        default=None,
+        description=(
+            "Apply ACE (Attention-Weighted Context Eviction) compression to old "
+            "tool-result messages when context exceeds the model's budget. "
+            "Compresses by content importance rather than head/tail truncation. "
+            "Set to 'ace' to enable."
+        ),
+    )
+    context_compression_ratio: float = Field(
+        default=0.4,
+        ge=0.1,
+        le=1.0,
+        description=(
+            "Target fraction of lines to keep per compressed message "
+            "(default 0.4 = 40%). Only used when context_compression='ace'."
+        ),
+    )
+    context_compression_keep_recent: int = Field(
+        default=2,
+        ge=0,
+        description=(
+            "Number of most-recent tool messages to leave uncompressed. "
+            "Only used when context_compression='ace'."
+        ),
+    )
+
     # --8<-- [end:chat-completion-extra-params]
 
     @model_validator(mode="before")
