@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 from pathlib import Path
 
+import av
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -362,6 +364,82 @@ def test_pyav_dynamic_backend_loads_frames(
         assert frames.shape[0] > 0
         assert frames.shape[0] == len(metadata["frames_indices"])
         assert metadata["video_backend"] == "pyav_dynamic"
+
+
+def _synthesize_long_gop_video(
+    num_frames: int = 50,
+    fps: int = 30,
+    width: int = 64,
+    height: int = 64,
+) -> bytes:
+    """Encode an H.264 clip with one keyframe and green-channel = frame index.
+
+    The marker lets a test recover which frame the decoder actually returned,
+    independent of any metadata label.
+    """
+    buf = io.BytesIO()
+    with av.open(buf, mode="w", format="mp4") as container:
+        stream = container.add_stream("h264", rate=fps)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = "yuv420p"
+        stream.codec_context.gop_size = num_frames
+        stream.codec_context.max_b_frames = 0
+        stream.codec_context.options = {
+            "x264-params": (f"scenecut=0:keyint={num_frames}:min-keyint={num_frames}")
+        }
+        for i in range(num_frames):
+            img = np.zeros((height, width, 3), dtype=np.uint8)
+            img[:, :, 1] = i
+            frame = av.VideoFrame.from_ndarray(img, format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return buf.getvalue()
+
+
+def test_pyav_backend_returns_target_frames_not_keyframes():
+    """Regression test: PyAV must decode forward past the seek keyframe.
+
+    container.seek() snaps backward to the nearest keyframe. With a long GOP
+    (here: one keyframe at frame 0), a decoder that does not advance forward
+    to the target PTS collapses every sampled slot onto the keyframe. This
+    test encodes a per-frame marker on the green channel and verifies the
+    returned frames are distinct, ordered, and match the requested indices.
+    """
+    num_frames = 50
+    num_sampled = 4
+    height, width = 64, 64
+
+    video_bytes = _synthesize_long_gop_video(
+        num_frames=num_frames, width=width, height=height
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_bytes, num_frames=num_sampled, backend="pyav"
+    )
+    assert frames.shape == (num_sampled, height, width, 3)
+
+    requested = list(metadata["frames_indices"])
+    assert len(requested) == num_sampled
+
+    actual = [int(f[height // 2, width // 2, 1]) for f in frames]
+
+    assert len(set(actual)) == num_sampled, (
+        f"PyAV returned only {len(set(actual))} distinct frames for "
+        f"{num_sampled} requested indices: markers={actual}, "
+        f"requested={requested}. Keyframe-snap regression."
+    )
+
+    assert actual == sorted(actual), f"Returned frames out of order: markers={actual}"
+
+    for marker, want_idx in zip(actual, requested):
+        assert abs(marker - want_idx) <= 10, (
+            f"Frame mismatch: requested index {want_idx}, "
+            f"got marker {marker} (tolerance ±10)"
+        )
 
 
 @pytest.mark.parametrize(
