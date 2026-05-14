@@ -403,6 +403,30 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def _normalize_reasoning_content(cls, data: Any) -> Any:
+        """Normalize reasoning_content to reasoning.
+
+        Clients like litellm send reasoning content using the
+        deprecated reasoning_content field. Copy it to reasoning
+        so downstream code only needs to check one field.
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if (
+                msg.get("reasoning") is None
+                and msg.get("reasoning_content") is not None
+            ):
+                msg["reasoning"] = msg.pop("reasoning_content")
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _materialize_tool_calls_before(cls, data: Any) -> Any:
         """Eagerly convert tool_calls generators/iterators to lists.
 
