@@ -260,7 +260,7 @@ async def send_request(
     # Merge extra_body fields first so explicit payload keys take precedence
     if extra_body:
         for key, value in extra_body.items():
-            payload[key] = value
+            payload.setdefault(key, value)
 
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
@@ -917,10 +917,13 @@ def get_client_config(
     extra_body: dict = {}
     if args.extra_request_body:
         try:
-            extra_body.update(json.loads(args.extra_request_body))
-        except json.JSONDecodeError as e:
+            parsed_extra = json.loads(args.extra_request_body)
+            if not isinstance(parsed_extra, dict):
+                raise ValueError("The provided JSON must be an object.")
+            extra_body.update(parsed_extra)
+        except (json.JSONDecodeError, ValueError) as e:
             raise ValueError(
-                f"--extra-request-body is not valid JSON: {e}"
+                f"--extra-request-body is not valid JSON object: {e}"
             ) from e
 
     if args.disable_thinking:
