@@ -133,6 +133,19 @@ Priority is **1 = highest** (tried first).
 | 7 | `FLASHINFER_MLA_SPARSE`**\*** |
 | 8 | `FLASHMLA_SPARSE` |
 
+**Ampere/Hopper (SM 8.x-9.x):**
+
+| Priority | Backend |
+| -------- | ------- |
+| 1 | `FLASH_ATTN_MLA` |
+| 2 | `FLASHMLA` |
+| 3 | `FLASHINFER_MLA` |
+| 4 | `TRITON_MLA` |
+| 5 | `FLASH_ATTN_MLA_SPARSE` |
+| 6 | `FLASHMLA_SPARSE` |
+| 7 | `TRITON_MLA_SPARSE` |
+
+
 > **\*** For sparse MLA, FP8 KV cache always prefers `FLASHINFER_MLA_SPARSE`. With BF16 KV cache, `FLASHINFER_MLA_SPARSE` is preferred for low query-head counts (<= 16), while `FLASHMLA_SPARSE` is preferred otherwise.
 >
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
@@ -234,6 +247,7 @@ MLA decode backends are selected using the standard
 | `ROCM_AITER_TRITON_MLA` | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ❌ | ❌ | ❌ | Decoder | N/A |
 | `TOKENSPEED_MLA` | fp16, bf16 | `fp8`, `fp8_e4m3` | 32, 64 | Any | ❌ | ❌ | ❌ | ❌ | ✅ | Decoder | 10.x |
 | `TRITON_MLA` | fp16, bf16 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3` | %16 | Any | ❌ | ❌ | ❌ | ❌ | ✅ | Decoder | Any |
+| `TRITON_MLA_SPARSE` | fp16, bf16 | `auto`, `float16`, `bfloat16` | Any | Any | ❌ | ❌ | ✅ | ❌ | ❌ | Decoder | Any |
 | `XPU_MLA_SPARSE` | fp16, bf16 | `auto`, `float16`, `bfloat16` | Any | 576 | ❌ | ❌ | ✅ | ❌ | ❌ | Decoder | Any |
 
 ### DeepSeek V4 Decode Backends
