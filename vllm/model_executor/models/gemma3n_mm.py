@@ -421,7 +421,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
             self.multimodal_hidden_size,
             self.text_hidden_size,
             bias=False,
-            input_is_parallel=False,   # scatter the full-width input internally
+            input_is_parallel=False,  # scatter the full-width input internally
         )
 
         self.embedding_post_projection_norm = RMSNorm(
