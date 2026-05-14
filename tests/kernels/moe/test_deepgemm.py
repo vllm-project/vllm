@@ -21,9 +21,8 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEQuantConfig,
-    FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
+    mxfp4_fp8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -296,15 +295,11 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
         GroupShape,
     )
-    from vllm.platforms import current_platform
 
-    _fp8_dtype = current_platform.fp8_dtype()
-    _block_shape = GroupShape(128, 128)
-    quant_config = FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
-        _a2=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
-        _w1=FusedMoEQuantDesc("mxfp4", None, w1_s, None, None, None),
-        _w2=FusedMoEQuantDesc("mxfp4", None, w2_s, None, None, None),
+    quant_config = mxfp4_fp8_moe_quant_config(
+        block_shape=GroupShape(128, 128),
+        w1_scale=w1_s,
+        w2_scale=w2_s,
     )
     moe_config = make_dummy_moe_config()
 

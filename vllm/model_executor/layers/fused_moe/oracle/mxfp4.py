@@ -19,8 +19,8 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    FusedMoEQuantDesc,
     RoutingMethodType,
+    mxfp4_fp8_moe_quant_config,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
@@ -1442,13 +1442,13 @@ def make_mxfp4_moe_quant_config(
 
         # DeepGEMM FP4 uses FP8 per-token-group activation quantization
         # with block 128, matching the FP8 DeepGEMM path.
-        _fp8_dtype = current_platform.fp8_dtype()
         _block_shape = GroupShape(128, 128)
-        return FusedMoEQuantConfig(
-            _a1=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
-            _a2=FusedMoEQuantDesc(_fp8_dtype, _block_shape, None, None, None, None),
-            _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
-            _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+        return mxfp4_fp8_moe_quant_config(
+            block_shape=_block_shape,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,

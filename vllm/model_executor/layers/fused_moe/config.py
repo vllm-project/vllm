@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Union
 
@@ -15,7 +15,13 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
     OCP_MX_Scheme,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP4_DTYPE,
+    FP8_DTYPE,
+    MXFP_SCALE_DTYPE,
+    GroupShape,
+    QuantKey,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
@@ -167,10 +173,13 @@ def get_routing_method_type(
 
 
 @dataclass
-class FusedMoEQuantDesc:
+class _FusedMoEQuantDesc:
     """
     A quantization descriptor for fused MoE ops. This class can describe
     either activations or weights.
+
+    Note: this class is very similar to QuantKey. We should consider consolidating
+    these two classes.
     """
 
     # The quantized type of this parameters.  None means unquantized or
@@ -187,13 +196,92 @@ class FusedMoEQuantDesc:
     #               (i.e. per-token-per-group)
     shape: GroupShape | None = None
 
+    @staticmethod
+    def make(
+        quant_key: QuantKey | None, shape: GroupShape | None
+    ) -> "_FusedMoEQuantDesc":
+        """
+        Construct a _FusedMoEQuantDesc from an optional QuantKey.
+
+        Maps the QuantKey dtype and scale descriptor to the appropriate
+        _FusedMoEQuantDesc dtype (which can be a torch.dtype or a string
+        for special types like "nvfp4", "mxfp4", "int4") and group shape.
+
+        Unquantized dtypes (fp16, bf16, fp32) or quant_key is None are mapped to None.
+        """
+        from vllm.scalar_type import scalar_types
+
+        if quant_key is None:
+            return _FusedMoEQuantDesc(None, shape=shape)
+
+        assert shape is None
+
+        # Extract group shape from scale descriptor
+        group_shape = quant_key.scale.group_shape
+
+        # Determine the dtype mapping
+        quant_dtype = quant_key.dtype
+        scale_dtype = quant_key.scale.dtype
+        has_scale2 = quant_key.scale2 is not None
+
+        # Map special cases to string dtypes
+        dtype_result: torch.dtype | str | None
+
+        # Unquantized types (fp16, bf16, fp32) -> None
+        if quant_dtype in (torch.float16, torch.bfloat16, torch.float32):
+            dtype_result = None
+        # NVFP4: FP4_DTYPE with scale2 present and FP8 scale
+        elif quant_dtype == FP4_DTYPE and has_scale2:
+            dtype_result = "nvfp4"
+        # MXFP4/MXFP6/MXFP8: scale dtype is MXFP_SCALE_DTYPE (uint8)
+        elif scale_dtype == MXFP_SCALE_DTYPE:
+            if quant_dtype == FP4_DTYPE:
+                dtype_result = "mxfp4"
+            elif quant_dtype == FP8_DTYPE:
+                # MX FP8 formats - check group shape to distinguish
+                # Standard MXFP8 uses 32-element groups
+                dtype_result = "mxfp8"
+            else:
+                raise ValueError(
+                    f"Unsupported MXFP dtype: {quant_dtype} with scale dtype "
+                    f"{scale_dtype}"
+                )
+        # INT4: INT4_DTYPE scalar type
+        elif quant_dtype == scalar_types.uint4b8:
+            dtype_result = "int4"
+        # INT8: INT8_DTYPE scalar type
+        elif quant_dtype == scalar_types.uint8b128:
+            # Map to torch.int8 for standard int8 quantization
+            dtype_result = torch.int8
+        # FP8 quantization
+        elif quant_dtype == FP8_DTYPE:
+            dtype_result = quant_dtype
+        # torch.int8 (for non-scalar-type int8)
+        elif quant_dtype == torch.int8:
+            dtype_result = torch.int8
+        else:
+            raise ValueError(
+                f"Unable to map QuantKey dtype {quant_dtype} to "
+                "_FusedMoEQuantDesc dtype"
+            )
+
+        return _FusedMoEQuantDesc(dtype=dtype_result, shape=group_shape)
+
+
+@dataclass
+class _FusedMoERuntimeQuantDesc:
+    """
+    A quantization descriptor for fused MoE ops. This class can describe
+    either activations or weights.
+    """
+
     # Quantization scales.
     # TODO(bnell): maybe put PrecisionConfigs in subclass of QuantDesc?
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
     # Quantization alphas or gscales, used for nvfp4 types.
     # W4A8 FP8: used for per-channel scales
-    # TODO(bnell): put some of these in subclasses
+    # TODO: overlap with gemm_alpha/beta?
     alpha_or_gscale: torch.Tensor | None = None
 
     # Zero points for int4/int8 types
@@ -202,15 +290,130 @@ class FusedMoEQuantDesc:
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
 
+    is_scale_swizzled: bool = True
 
-# TODO(bnell): have subclasses for specific moe methods?
-# e.g. for specific arguments bias, precision, etc.
+    # MXFP4-specific TRTLLM parameters for SwiGLU activation clamping.
+    # These correspond to gemm1_alpha, gemm1_beta, gemm1_clamp_limit
+    # in TrtLlmMxfp4ExpertsBase.
+    gemm_alpha: float | None = None
+    gemm_beta: float | None = None
+    gemm_clamp_limit: float | None = None
+
+
 @dataclass
-class FusedMoEQuantConfig:
+class FusedMoERuntimeQuantConfig:
+    _a1_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+    _a2_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+    _w1_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+    _w2_w: _FusedMoERuntimeQuantDesc = field(default_factory=_FusedMoERuntimeQuantDesc)
+
+    @property
+    def a1_scale(self) -> torch.Tensor | None:
+        assert self._a1_w.scale is None or isinstance(self._a1_w.scale, torch.Tensor)
+        return self._a1_w.scale
+
+    @property
+    def a1_gscale(self) -> torch.Tensor | None:
+        return self._a1_w.alpha_or_gscale
+
+    # Activation properties
+    @property
+    def is_scale_swizzled(self) -> bool:
+        return self._a1_w.is_scale_swizzled
+
+    @property
+    def gemm1_alpha(self) -> float | None:
+        return self._a1_w.gemm_alpha
+
+    @property
+    def gemm1_beta(self) -> float | None:
+        return self._a1_w.gemm_beta
+
+    @property
+    def gemm1_clamp_limit(self) -> float | None:
+        return self._a1_w.gemm_clamp_limit
+
+    @property
+    def a2_scale(self) -> torch.Tensor | None:
+        assert self._a2_w.scale is None or isinstance(self._a2_w.scale, torch.Tensor)
+        return self._a2_w.scale
+
+    @property
+    def a2_gscale(self) -> torch.Tensor | None:
+        return self._a2_w.alpha_or_gscale
+
+    @property
+    def w1_scale(self) -> torch.Tensor | None:
+        assert self._w1_w.scale is None or isinstance(self._w1_w.scale, torch.Tensor)
+        return self._w1_w.scale
+
+    @property
+    def w1_zp(self) -> torch.Tensor | None:
+        return self._w1_w.zp
+
+    @property
+    def w1_bias(self) -> torch.Tensor | None:
+        return self._w1_w.bias
+
+    @property
+    def w1_precision(self) -> "PrecisionConfig | None":
+        assert self._w1_w.scale is None or isinstance(self._w1_w.scale, PrecisionConfig)
+        return self._w1_w.scale
+
+    @property
+    def g1_alphas(self) -> torch.Tensor | None:
+        return self._w1_w.alpha_or_gscale
+
+    @property
+    def w2_scale(self) -> torch.Tensor | None:
+        assert self._w2_w.scale is None or isinstance(self._w2_w.scale, torch.Tensor)
+        return self._w2_w.scale
+
+    @property
+    def w2_zp(self) -> torch.Tensor | None:
+        return self._w2_w.zp
+
+    @property
+    def w2_bias(self) -> torch.Tensor | None:
+        return self._w2_w.bias
+
+    @property
+    def w2_precision(self) -> "PrecisionConfig | None":
+        assert self._w2_w.scale is None or isinstance(self._w2_w.scale, PrecisionConfig)
+        return self._w2_w.scale
+
+    @property
+    def g2_alphas(self) -> torch.Tensor | None:
+        return self._w2_w.alpha_or_gscale
+
+    # TODO(bnell): get rid of the need for setters.
+    # This are needed because of the order in which the quant config
+    # and process_weights_after_loading are called. The runtime quant
+    # config should be created post-process_weights_after_loading.
+    def set_w1_scale(self, scale: torch.Tensor | None):
+        self._w1_w.scale = scale
+
+    def set_w1_bias(self, bias: torch.Tensor | None):
+        self._w1_w.bias = bias
+
+    def set_w2_scale(self, scale: torch.Tensor | None):
+        self._w2_w.scale = scale
+
+    def set_w2_bias(self, bias: torch.Tensor | None):
+        self._w2_w.bias = bias
+
+
+@dataclass
+class FusedMoEQuantConfig(FusedMoERuntimeQuantConfig):
     """
     The FusedMoEQuantConfig contains all the quantization parameters for
-    a single FusedMoEMethodBase operation.  It consists of four
-    FusedMoEQuantDescs, one for each activation and set of weights.
+    a single FusedMoEMethodBase operation.  It currently inherits from
+    FusedMoERuntimeQuantConfig (this inheritance is temporary and will be
+    removed in the future when the classes are fully separated) and adds
+    four _FusedMoEQuantDescs (_a1, _a2, _w1, _w2) that describe the
+    quantization dtype and group shape for each activation and weight.
+    The inherited FusedMoERuntimeQuantDescs (_a1_w, _a2_w, _w1_w, _w2_w) contain
+    the runtime quantization parameters (scales, zero points, biases, etc.).
 
     Each FusedMoEMethodBase must implement a get_fused_moe_quant_config
     method to construct a FusedMoEQuantConfig for use with that class.
@@ -235,31 +438,35 @@ class FusedMoEQuantConfig:
 
     Other notes:
     - PrecisionConfigs are specific to GPT OSS Triton.
-    - As a follow up it would probably make sense to subclass FusedMoEQuantDesc
+    - As a follow up it would probably make sense to subclass _FusedMoEQuantDesc
       or FusedMoEQuantConfig for particular FusedMoEMethodBase subclasses
       so that only the required quantization parameters are used/stored.
     """
 
-    # TODO(bnell) make sure a1_scales/a2_scales don't interfere with chunking
-    _a1: FusedMoEQuantDesc
-    _a2: FusedMoEQuantDesc
-    _w1: FusedMoEQuantDesc
-    _w2: FusedMoEQuantDesc
-    is_scale_swizzled: bool = True
-
-    # MXFP4-specific TRTLLM parameters for SwiGLU activation clamping.
-    # These correspond to gemm1_alpha, gemm1_beta, gemm1_clamp_limit
-    # in TrtLlmMxfp4ExpertsBase.
-    gemm1_alpha: float | None = None
-    gemm1_beta: float | None = None
-    gemm1_clamp_limit: float | None = None
+    _a1: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
+    _a2: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
+    _w1: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
+    _w2: _FusedMoEQuantDesc = field(default_factory=_FusedMoEQuantDesc)
 
     mx_alignment: int = 0
+    ocp_mx_scheme: str | None = None
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
         )
+
+        if isinstance(self.quant_dtype, str) or isinstance(
+            self.weight_quant_dtype, str
+        ):
+            ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+                self.quant_dtype, self.weight_quant_dtype
+            )
+
+            if ocp_mx_scheme is not None:
+                ocp_mx_scheme = ocp_mx_scheme.value
+
+            self.ocp_mx_scheme = ocp_mx_scheme
 
     #
     # Convenience accessors for various properties.
@@ -310,65 +517,104 @@ class FusedMoEQuantConfig:
 
     @property
     def a1_scale(self) -> torch.Tensor | None:
-        assert self._a1.scale is None or isinstance(self._a1.scale, torch.Tensor)
-        return self._a1.scale
+        assert self._a1_w.scale is None or isinstance(self._a1_w.scale, torch.Tensor)
+        return self._a1_w.scale
 
     @property
     def a1_gscale(self) -> torch.Tensor | None:
-        return self._a1.alpha_or_gscale
+        return self._a1_w.alpha_or_gscale
+
+    # Activation properties
+    @property
+    def is_scale_swizzled(self) -> bool:
+        return self._a1_w.is_scale_swizzled
+
+    @property
+    def gemm1_alpha(self) -> float | None:
+        return self._a1_w.gemm_alpha
+
+    @property
+    def gemm1_beta(self) -> float | None:
+        return self._a1_w.gemm_beta
+
+    @property
+    def gemm1_clamp_limit(self) -> float | None:
+        return self._a1_w.gemm_clamp_limit
 
     @property
     def a2_scale(self) -> torch.Tensor | None:
-        assert self._a2.scale is None or isinstance(self._a2.scale, torch.Tensor)
-        return self._a2.scale
+        assert self._a2_w.scale is None or isinstance(self._a2_w.scale, torch.Tensor)
+        return self._a2_w.scale
 
     @property
     def a2_gscale(self) -> torch.Tensor | None:
-        return self._a2.alpha_or_gscale
+        return self._a2_w.alpha_or_gscale
 
     @property
     def w1_scale(self) -> torch.Tensor | None:
-        assert self._w1.scale is None or isinstance(self._w1.scale, torch.Tensor)
-        return self._w1.scale
+        assert self._w1_w.scale is None or isinstance(self._w1_w.scale, torch.Tensor)
+        return self._w1_w.scale
 
     @property
     def w1_zp(self) -> torch.Tensor | None:
-        return self._w1.zp
+        return self._w1_w.zp
 
     @property
     def w1_bias(self) -> torch.Tensor | None:
-        return self._w1.bias
+        return self._w1_w.bias
 
     @property
     def w1_precision(self) -> "PrecisionConfig | None":
-        assert self._w1.scale is None or isinstance(self._w1.scale, PrecisionConfig)
-        return self._w1.scale
+        assert self._w1_w.scale is None or isinstance(self._w1_w.scale, PrecisionConfig)
+        return self._w1_w.scale
 
     @property
     def g1_alphas(self) -> torch.Tensor | None:
-        return self._w1.alpha_or_gscale
+        return self._w1_w.alpha_or_gscale
+
+    @property
+    def w1_group_shape(self) -> GroupShape | None:
+        return self._w1.shape
+
+    # TODO(bnell): get rid of the need to do this
+    def set_w1_scale(self, scale: torch.Tensor | None):
+        self._w1_w.scale = scale
+
+    # TODO(bnell): get rid of the need to do this
+    def set_w1_bias(self, bias: torch.Tensor | None):
+        self._w1_w.bias = bias
 
     @property
     def w2_scale(self) -> torch.Tensor | None:
-        assert self._w2.scale is None or isinstance(self._w2.scale, torch.Tensor)
-        return self._w2.scale
+        assert self._w2_w.scale is None or isinstance(self._w2_w.scale, torch.Tensor)
+        return self._w2_w.scale
 
     @property
     def w2_zp(self) -> torch.Tensor | None:
-        return self._w2.zp
+        return self._w2_w.zp
 
     @property
     def w2_bias(self) -> torch.Tensor | None:
-        return self._w2.bias
+        return self._w2_w.bias
 
     @property
     def w2_precision(self) -> "PrecisionConfig | None":
-        assert self._w2.scale is None or isinstance(self._w2.scale, PrecisionConfig)
-        return self._w2.scale
+        assert self._w2_w.scale is None or isinstance(self._w2_w.scale, PrecisionConfig)
+        return self._w2_w.scale
 
     @property
     def g2_alphas(self) -> torch.Tensor | None:
-        return self._w2.alpha_or_gscale
+        return self._w2_w.alpha_or_gscale
+
+    @property
+    def w2_group_shape(self) -> GroupShape | None:
+        return self._w2.shape
+
+    def set_w2_scale(self, scale: torch.Tensor | None):
+        self._w2_w.scale = scale
+
+    def set_w2_bias(self, bias: torch.Tensor | None):
+        self._w2_w.bias = bias
 
     @property
     def use_fp8_w8a8(self) -> bool:
@@ -393,25 +639,6 @@ class FusedMoEQuantConfig:
     @property
     def use_nvfp4_w4a16(self) -> bool:
         return self._a1.dtype is None and self._w1.dtype == "nvfp4"
-
-    @property
-    def ocp_mx_scheme(self) -> str | None:
-        if not hasattr(self, "_ocp_mx_scheme"):
-            if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
-                self._w1.dtype is not None and not isinstance(self._w1.dtype, str)
-            ):
-                self._ocp_mx_scheme = None
-            else:
-                ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
-                    self._a1.dtype, self._w1.dtype
-                )
-
-                if ocp_mx_scheme is not None:
-                    ocp_mx_scheme = ocp_mx_scheme.value
-
-                self._ocp_mx_scheme = ocp_mx_scheme
-
-        return self._ocp_mx_scheme
 
     @property
     def use_mxfp4_w4a16(self) -> bool:
@@ -565,18 +792,25 @@ class FusedMoEQuantConfig:
             quant_dtype, per_act_token_quant, per_out_ch_quant, block_shape
         )
         quant_config = FusedMoEQuantConfig(
-            _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
-            _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
-            _w1=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
+            _a1=_FusedMoEQuantDesc(quant_dtype, a_shape),
+            _a2=_FusedMoEQuantDesc(quant_dtype, a_shape),
+            _w1=_FusedMoEQuantDesc(weight_dtype, w_shape),
+            _w2=_FusedMoEQuantDesc(weight_dtype, w_shape),
+            _a1_w=_FusedMoERuntimeQuantDesc(
+                scale=a1_scale,
+                alpha_or_gscale=a1_gscale,
+                is_scale_swizzled=is_scale_swizzled,
+                gemm_alpha=gemm1_alpha,
+                gemm_beta=gemm1_beta,
+                gemm_clamp_limit=gemm1_clamp_limit,
             ),
-            _w2=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
+            _a2_w=_FusedMoERuntimeQuantDesc(scale=a2_scale, alpha_or_gscale=a2_gscale),
+            _w1_w=_FusedMoERuntimeQuantDesc(
+                scale=w1_scale, alpha_or_gscale=g1_alphas, zp=w1_zp, bias=w1_bias
             ),
-            is_scale_swizzled=is_scale_swizzled,
-            gemm1_alpha=gemm1_alpha,
-            gemm1_beta=gemm1_beta,
-            gemm1_clamp_limit=gemm1_clamp_limit,
+            _w2_w=_FusedMoERuntimeQuantDesc(
+                scale=w2_scale, alpha_or_gscale=g2_alphas, zp=w2_zp, bias=w2_bias
+            ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
         assert quant_config.per_out_ch_quant == per_out_ch_quant
@@ -675,10 +909,12 @@ def gptq_marlin_moe_quant_config(
         raise ValueError(f"Unsupported weight_bits: {weight_bits}")
 
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
-        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
-        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
-        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
+        _a1=_FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a2=_FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _w1=_FusedMoEQuantDesc(weight_dtype, w_shape),
+        _w2=_FusedMoEQuantDesc(weight_dtype, w_shape),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp, bias=w2_bias),
     )
 
 
@@ -695,13 +931,17 @@ def mxfp4_w4a16_moe_quant_config(
     Construct a quant config for unquantized activations and mxfp4 weights.
     """
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(),
-        _a2=FusedMoEQuantDesc(),
-        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
-        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
-        gemm1_clamp_limit=gemm1_clamp_limit,
+        _a1=_FusedMoEQuantDesc(),
+        _a2=_FusedMoEQuantDesc(),
+        _w1=_FusedMoEQuantDesc("mxfp4"),
+        _w2=_FusedMoEQuantDesc("mxfp4"),
+        _a1_w=_FusedMoERuntimeQuantDesc(
+            gemm_alpha=gemm1_alpha,
+            gemm_beta=gemm1_beta,
+            gemm_clamp_limit=gemm1_clamp_limit,
+        ),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
     )
 
 
@@ -723,15 +963,53 @@ def mxfp4_mxfp8_moe_quant_config(
     Construct a quant config for mxfp4 activations and mxfp4 weights.
     """
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc("mxfp8"),
-        _a2=FusedMoEQuantDesc("mxfp8"),
-        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
-        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
-        gemm1_clamp_limit=gemm1_clamp_limit,
+        _a1=_FusedMoEQuantDesc("mxfp8"),
+        _a2=_FusedMoEQuantDesc("mxfp8"),
+        _w1=_FusedMoEQuantDesc("mxfp4"),
+        _w2=_FusedMoEQuantDesc("mxfp4"),
+        _a1_w=_FusedMoERuntimeQuantDesc(
+            gemm_alpha=gemm1_alpha,
+            gemm_beta=gemm1_beta,
+            gemm_clamp_limit=gemm1_clamp_limit,
+            is_scale_swizzled=is_scale_swizzled,
+        ),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
         mx_alignment=mx_alignment,
-        is_scale_swizzled=is_scale_swizzled,
+    )
+
+
+def mxfp4_fp8_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    block_shape: GroupShape | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+    mx_alignment: int = 0,
+    is_scale_swizzled: bool = False,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for mxfp4 activations and mxfp4 weights.
+    """
+    return FusedMoEQuantConfig(
+        _a1=_FusedMoEQuantDesc(current_platform.fp8_dtype(), block_shape),
+        _a2=_FusedMoEQuantDesc(current_platform.fp8_dtype(), block_shape),
+        _w1=_FusedMoEQuantDesc("mxfp4"),
+        _w2=_FusedMoEQuantDesc("mxfp4"),
+        _a1_w=_FusedMoERuntimeQuantDesc(
+            gemm_alpha=gemm1_alpha,
+            gemm_beta=gemm1_beta,
+            gemm_clamp_limit=gemm1_clamp_limit,
+            is_scale_swizzled=is_scale_swizzled,
+        ),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
+        mx_alignment=mx_alignment,
     )
 
 
@@ -748,10 +1026,14 @@ def mxfp4_w4a8_moe_quant_config(
     Construct a quant config for fp8 activations and mxfp4 weights.
     """
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc("fp8", None, a1_scale, None, None, None),
-        _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
-        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
-        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+        _a1=_FusedMoEQuantDesc("fp8"),
+        _a2=_FusedMoEQuantDesc("fp8"),
+        _w1=_FusedMoEQuantDesc("mxfp4"),
+        _w2=_FusedMoEQuantDesc("mxfp4"),
+        _a1_w=_FusedMoERuntimeQuantDesc(scale=a1_scale),
+        _a2_w=_FusedMoERuntimeQuantDesc(scale=a2_scale),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, bias=w2_bias),
     )
 
 
@@ -872,10 +1154,12 @@ def int4_w4a16_moe_quant_config(
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp),
+        _a1=_FusedMoEQuantDesc(shape=group_shape),
+        _a2=_FusedMoEQuantDesc(shape=group_shape),
+        _w1=_FusedMoEQuantDesc("int4", group_shape),
+        _w2=_FusedMoEQuantDesc("int4", group_shape),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp),
     )
 
 
@@ -889,14 +1173,10 @@ def fp8_w8a16_moe_quant_config(
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(),
-        _a2=FusedMoEQuantDesc(),
-        _w1=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w1_scale, None, None
-        ),
-        _w2=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w2_scale, None, None
-        ),
+        _w1=_FusedMoEQuantDesc(current_platform.fp8_dtype(), group_shape),
+        _w2=_FusedMoEQuantDesc(current_platform.fp8_dtype(), group_shape),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale),
     )
 
 
@@ -912,10 +1192,12 @@ def int8_w8a16_moe_quant_config(
     """
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp),
+        _a1=_FusedMoEQuantDesc(shape=group_shape),
+        _a2=_FusedMoEQuantDesc(shape=group_shape),
+        _w1=_FusedMoEQuantDesc(torch.int8, group_shape),
+        _w2=_FusedMoEQuantDesc(torch.int8, group_shape),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp),
     )
 
 
@@ -973,10 +1255,12 @@ def awq_marlin_moe_quant_config(
         raise ValueError(f"Unsupported weight_bits: {weight_bits}")
 
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(dtype=None, shape=a_shape),
-        _a2=FusedMoEQuantDesc(dtype=None, shape=a_shape),
-        _w1=FusedMoEQuantDesc(weight_dtype, w_shape, w1_scale, None, w1_zp, w1_bias),
-        _w2=FusedMoEQuantDesc(weight_dtype, w_shape, w2_scale, None, w2_zp, w2_bias),
+        _a1=_FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _a2=_FusedMoEQuantDesc(dtype=None, shape=a_shape),
+        _w1=_FusedMoEQuantDesc(weight_dtype, shape=w_shape),
+        _w2=_FusedMoEQuantDesc(weight_dtype, shape=w_shape),
+        _w1_w=_FusedMoERuntimeQuantDesc(scale=w1_scale, zp=w1_zp, bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(scale=w2_scale, zp=w2_zp, bias=w2_bias),
     )
 
 
@@ -988,10 +1272,61 @@ def biased_moe_quant_config(
     Construct a quant config for unquantized activations with biases.
     """
     return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(),
-        _a2=FusedMoEQuantDesc(),
-        _w1=FusedMoEQuantDesc(bias=w1_bias),
-        _w2=FusedMoEQuantDesc(bias=w2_bias),
+        _w1_w=_FusedMoERuntimeQuantDesc(bias=w1_bias),
+        _w2_w=_FusedMoERuntimeQuantDesc(bias=w2_bias),
+    )
+
+
+def humming_moe_quant_config(
+    q_dtype: torch.dtype | str | None,
+    weight_dtype: torch.dtype | str | None,
+    weight_group_shape: GroupShape | None = None,
+    w13_scale: torch.Tensor | None = None,
+    w13_gscale: torch.Tensor | None = None,
+    w13_zp: torch.Tensor | None = None,
+    w13_bias: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    w2_gscale: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> FusedMoEQuantConfig:
+    if q_dtype is None:
+        a_quant_desc = _FusedMoEQuantDesc(dtype=None)
+    else:
+        shape = GroupShape(row=1, col=-1)
+        a_quant_desc = _FusedMoEQuantDesc(dtype=q_dtype, shape=shape)
+
+    w1_quant_desc = _FusedMoEQuantDesc(
+        dtype=weight_dtype,
+        shape=weight_group_shape,
+    )
+
+    w2_quant_desc = _FusedMoEQuantDesc(
+        dtype=weight_dtype,
+        shape=weight_group_shape,
+    )
+
+    w1_weight_desc = _FusedMoERuntimeQuantDesc(
+        scale=w13_scale,
+        alpha_or_gscale=w13_gscale,
+        zp=w13_zp,
+        bias=w13_bias,
+    )
+
+    w2_weight_desc = _FusedMoERuntimeQuantDesc(
+        scale=w2_scale,
+        alpha_or_gscale=w2_gscale,
+        zp=w2_zp,
+        bias=w2_bias,
+    )
+
+    return FusedMoEQuantConfig(
+        _a1=a_quant_desc,
+        _a2=a_quant_desc,
+        _w1=w1_quant_desc,
+        _w2=w2_quant_desc,
+        _w1_w=w1_weight_desc,
+        _w2_w=w2_weight_desc,
     )
 
 

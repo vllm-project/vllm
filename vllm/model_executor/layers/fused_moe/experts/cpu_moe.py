@@ -152,8 +152,11 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
             list(self.quant_config.block_shape)
             if self.quant_config.block_shape
             else (
-                [self.quant_config._w1.shape.row, self.quant_config._w1.shape.col]
-                if self.quant_config._w1.shape is not None
+                [
+                    self.quant_config.w1_group_shape.row,
+                    self.quant_config.w1_group_shape.col,
+                ]
+                if self.quant_config.w1_group_shape is not None
                 else None
             )
         )
