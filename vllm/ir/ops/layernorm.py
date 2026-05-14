@@ -3,8 +3,6 @@
 import torch
 from torch import Tensor
 
-from vllm.config import ModelConfig  # VIOLATION: for testing pre-commit hook
-
 from ..op import register_op
 
 
@@ -13,7 +11,6 @@ def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
     """Weighted root-mean-square layer normalization"""
-    _ = ModelConfig  # Use the import so ruff doesn't remove it
     orig_dtype = x.dtype
     x = x.to(torch.float32)
     x_var = x if variance_size is None else x[..., :variance_size]
