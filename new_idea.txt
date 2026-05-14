@@ -1,0 +1,394 @@
+Title: Position Re-normalizing KV Cache Transfer
+
+Main Idea: Treat KV as coordinate-bound state and allow position shifting (Δ) during transfer so cached prefixes can be reused at different absolute offsets (RoPE).
+Basically, Enable reuse of cached KV for the same token sequence at a different absolute offset (by RoPE renormalization during transfer/import). 
+Existing systems either (i) disaggregate prefill/decode and optimize KV transfer overhead, or (ii) reuse KV only when the prefix matches exactly; 
+none treat KV as position-transformable state enabling reuse under offset shifts in RoPE models.
+
+Benefits: 
+  - Reuse the same KV prefix even when it appears later in a conversation / longer context
+  - More flexible decode migration / scheduling because absolute token indices no longer “pin” KV
+
+Implement:
+  - custom KVConnector that: 
+    * On save/export (prefill side): writes KV as usual, plus metadata {pos_base, rope_theta, layout}.
+    * On load/import (decode side): applies a fast GPU kernel that rotates K by 𝑅(Δ) (and any needed layout transform) before placing into the paged KV buffers.
+
+  - Needed changes: 
+    % bind_connector_metadata(...): compute Δ per request/sequence.
+    % register_kv_caches(...): grab pointers to paged KV tensors.
+    % wait_for_layer_load(layer): correctness barrier if your Δ-rotation is async.
+    % wait_for_save(): ensure exports don’t race KV reuse.
+
+Measure: Constructs prompts where prefix appears at different offsets
+  - prefill tokens recomputed
+  - e2e latency
+  - TTFT
+  - correctness
+
+Plan: 
+  1. Add metadata plumbing 
+     - Extend connector metadata to carry: pos_base_src, pos_base_dst, delta, rope_params
+     - Make the decode side compute Δ from “where this prefix will sit” vs “where it was computed.”
+  2. Implement Δ-rotation kernel
+     - Kernel that applies RoPE rotation to K only (that’s the direct positional anchoring).
+     - We can discuss whether V needs adjustment—usually not directly for RoPE, but there are caveats.
+  3. Integrate into load path
+     - Load KV blocks into a staging tensor (or directly into paged KV if layout matches)
+     - Apply Δ-rotation
+     - Mark layer as “loaded”
+  4. One minimal correctness test
+     - Single request, fixed seed, greedy decode: baseline vs disaggregated+renorm match.
+  5. One minimal novelty benchmark
+     - Prefix reused at different offsets → show prefill compute saved + TTFT reduction.
+
+
+Title: Inline KV Transform During Transfer
+Main idea: Hide work during KV transfer, such as quantizing, compressing, and pruning.
+  - quantize KV (fp16→int8 or fp8-like)
+  - compress (e.g., per-block delta/entropy coding)
+  - prune heads / layers selectively (policy-driven)
+
+Benefits: 
+  - reduce network bytes or GPU memory footprints
+  - Turn “KV movement” into a place to do useful work.
+
+Implement: 
+  - custom KVConnector that: 
+    * Prefill side: pack/quantize/compress while exporting
+    * Decode side: decompress/dequantize while importing into paged KV buffers
+
+  - CUDA extension or Triton kernel for quant/dequant (fast)
+  - policy hook: per-layer / per-head decisions
+
+Measure: 
+  - baseline transfer vs. quantized transfer
+  - TTFT + decode throughput
+
+
+Title: Demand-paged KV Transfer
+Core idea: transfer KV layer-by-layer or window-by-window, begin decoding while deeper layers’ KV is still in flight
+
+Benefits: 
+  - Overlap compute with transfer
+  - Reduce tail latency when only a subset is needed (e.g., short decode bursts)
+
+Implement: 
+  - On decode: start compute and call wait_for_layer_load(layer) inside attention only when that layer’s KV is required.
+  - On prefill: export can be pipelined per layer.
+
+Measure: 
+  - TTFT reduction with overlapping early-layer decode compute with late-layer KV arrival.
+  - timeline trace of the overlap
+
+
+$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+0) Define the pipeline you’re optimizing (so you don’t boil the ocean)
+
+Baseline architecture (start simple):
+
+Node A (Prefill): tokenize → embed → run attention/FFN for prompt tokens → produce KV cache
+
+Node B (Decode): receive KV cache → run iterative decode steps
+
+Two immediate “degrees of freedom” you can explore:
+
+Where the first token is generated (on A vs B)
+
+What you ship across the wire (full KV vs compressed/delta/paged/quantized)
+
+Your cluster is perfect for work that’s mostly about the boundary between prefill and decode.
+
+1) Build a minimal but rigorous measurement harness (Week 1–2)
+
+You need repeatable numbers before ideas.
+
+Workloads (3 is enough)
+
+Pick three that stress different parts of the pipeline:
+
+Long-prompt / short-output
+
+ex: 8k–32k prompt, 16–64 output tokens
+
+stresses prefill compute + KV volume
+
+Short-prompt / long-output
+
+ex: 128–512 prompt, 1k–4k output
+
+stresses decode iteration + scheduling
+
+RAG-style (even if synthetic at first)
+
+prompt = user query + retrieved context (variable length), output moderate
+
+stresses dynamic prompt expansion and potential multi-stage prefill
+
+Metrics (must-have)
+
+Capture these per request:
+
+TTFT (time-to-first-token)
+
+TPOT (time per output token) or tokens/sec during decode
+
+End-to-end latency distribution (p50/p95/p99)
+
+Bytes transferred A→B per request and per token
+
+GPU utilization (SM%, mem BW%, H2D/D2H, PCIe/NVLink if any)
+
+CPU utilization and NIC throughput
+
+Queueing time in each stage (prefill queue, transfer wait, decode queue)
+
+Instrumentation
+
+Add timestamps at: request recv → prefill start/end → transfer start/end → decode start → first token → done
+
+Use Nsight Systems (GPU timeline) + simple counters (bytes, serialize time)
+
+If using gRPC, record per-call payload sizes and serialization time
+
+Deliverable: a script that runs a grid over (prompt length, output length, concurrency) and emits a single CSV.
+
+2) Establish baselines that isolate what hurts (Week 2–3)
+
+Run these four baselines (they’re diagnostic):
+
+Monolithic single-node vLLM (everything on one GPU)
+This is the “upper bound” for latency.
+
+Disaggregated with “dumb” KV transfer (full precision, blocking send)
+This tells you the raw penalty of disaggregation.
+
+Disaggregated but co-located (simulate network = localhost / shared memory)
+Even if you can’t truly share GPU mem, simulate the effect of “zero network” to separate:
+
+network overhead vs
+
+software overhead (serialization, copies, scheduling)
+
+Network-only microbench
+Measure pure throughput/latency for sending N bytes A→B (no GPU), and also sending GPU-produced buffers (GPU→CPU→NIC).
+This reveals if you’re dominated by:
+
+copies/pinning
+
+serialization
+
+gRPC overhead
+
+NIC bandwidth/latency
+
+Deliverable: a “roofline” style plot:
+
+required KV bandwidth vs achieved bandwidth
+
+where time goes (prefill compute vs transfer vs decode compute)
+
+3) Turn the baselines into 3–5 testable hypotheses (Week 3)
+
+You want hypotheses that are:
+
+measurable on 2 GPUs
+
+implementable inside/around vLLM
+
+plausibly publishable
+
+Here are the best candidates for your setup.
+
+Hypothesis A — “KV transfer is dominated by copies + packing, not raw network”
+
+Why plausible: GPU KV typically must be staged through host memory; naive code does extra copies and format conversions.
+
+Investigations:
+
+profile: GPU→CPU copy time, CPU packing time, gRPC serialize time
+
+try: pinned buffers, fewer copies, larger batched sends, zero-copy-ish gRPC (where possible), different RPC transport (grpc vs tcp)
+
+Success metric: reduce prefill_end → decode_start gap.
+
+Hypothesis B — “KV precision/format is overkill for transport”
+
+KV cache is big. If you can reduce bytes without tanking quality, you win.
+
+Variants to test (in increasing ambition):
+
+KV quantization for transport only (e.g., FP16→INT8/FP8-like with per-head scales)
+
+Layer skipping / selective KV (send only subset of layers early, stream rest)
+
+Chunked KV paging (send the parts decode needs first)
+
+Success metric: lower TTFT and/or higher throughput at same p95.
+
+Hypothesis C — “First-token placement matters more than people assume”
+
+If the first token is generated on the decode node, you might avoid a critical stall.
+
+Two designs:
+
+Prefill produces KV and immediately ships; decode generates token 1
+
+Prefill generates token 1 and ships KV + token 1
+
+Measure TTFT difference and pipeline bubbles.
+
+Success metric: lower TTFT at moderate concurrency.
+
+Hypothesis D — “Overlapping KV transfer with compute can eliminate the disaggregation bubble”
+
+Even with the same bytes, if you overlap:
+
+late-stage prefill compute with early-stage KV transfer
+
+early decode compute with tail KV arrival
+
+you can reduce end-to-end latency.
+
+Mechanisms:
+
+stream KV per layer or per block (don’t wait for entire KV)
+
+decode begins once it has “enough” KV for early layers (or vice versa)
+
+Success metric: reduce idle time on decode GPU between requests.
+
+Hypothesis E — “RAG changes the optimal split point”
+
+RAG creates a two-phase prompt:
+
+user query (short)
+
+retrieved context (variable, sometimes large)
+
+You can explore:
+
+prefill query on A, fetch docs while transferring partial KV, then “extend prefill” without restarting everything
+
+cache prompt prefixes (system prompt, templates) across requests
+
+Success metric: TTFT stability under variable context sizes.
+
+4) Prioritize an execution path (what to work on first)
+
+Given your 2-node setup, the highest ROI sequence is:
+
+Phase 1 (Weeks 1–4): Measurement + bottleneck proof
+
+Build harness + baselines
+
+Produce an evidence-backed statement like:
+
+“Disaggregation overhead is X%, with Y% from KV staging copies and Z% from serialization”
+
+This alone becomes the backbone of your eventual paper.
+
+Phase 2 (Weeks 5–10): “No-regret” optimizations (should be publishable if done well)
+
+Pick 1–2:
+
+copy-elimination + pinned buffers + better batching
+
+overlap transfer with compute (layer/block streaming)
+
+These are systems classics: they’re defensible and measurable.
+
+Phase 3 (Weeks 11–18): One “signature” contribution
+
+Choose one big idea:
+
+transport-time KV quantization (plus accuracy eval)
+
+streaming/paging KV with an algorithmic policy
+
+first-token relocation + scheduling policy
+
+RAG-aware split point + prefix caching
+
+This is your “main theorem” contribution.
+
+Phase 4 (Weeks 19–24): Stress + generality
+
+multiple models (at least 2 sizes)
+
+multiple sequence lengths and concurrency
+
+p95/p99 under load
+
+ablations showing why your method works
+
+5) What to implement concretely in/around vLLM (so it’s real)
+
+Even if vLLM doesn’t ship exactly what you need out-of-the-box, you can structure the work as:
+
+A wrapper service around vLLM on each node:
+
+Prefill service returns a handle + streams KV
+
+Decode service accepts KV stream and produces tokens
+
+A KV “carrier format” you control:
+
+defines layout, chunking, compression
+
+has explicit counters for bytes/copies/time
+
+A scheduling policy module:
+
+when to start sending
+
+chunk size
+
+which layers first
+
+when decode is allowed to begin
+
+This keeps your work modular and paper-friendly.
+
+6) The outputs you should aim to produce (paper-shaped artifacts)
+
+You want to end up with:
+
+A breakdown figure: time split into prefill compute / KV staging / serialization / network / decode
+
+A bandwidth vs required plot: KV bytes per request vs achievable throughput
+
+A TTFT vs prompt length plot (monolithic vs disagg baseline vs your method)
+
+A p95 latency under concurrency plot
+
+If you do quantization: quality impact (simple eval like pass@1 on a small suite or perplexity deltas)
+
+7) If you want a single “default best bet” topic
+
+If you need one direction that’s highly likely to produce results on 2 GPUs:
+
+“Streaming KV with overlap + copy/serialization elimination”
+
+Why it’s a good bet:
+
+doesn’t require new model training
+
+measurable improvements even on small clusters
+
+clean story: “turn disaggregation from ‘stall then decode’ into a pipeline”
+
+Then, optionally, add:
+
+transport-time KV quantization as the second punch if needed.
+
+If you tell me:
+
+the model(s) you’re using (e.g., Llama 7B/13B, context length),
+
+your interconnect (1/10/25/100GbE?),
+
+and whether you already have a working prefill/decode split,
+
+…I can map this into a very concrete “Week 1–6” task list with specific experiments and expected failure modes (e.g., where vLLM will fight you, what to instrument first, and which code paths tend to cause hidden copies).
