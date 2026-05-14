@@ -780,7 +780,7 @@ class OffloadingConnectorScheduler:
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
 
         # If all tracked requests are finished, flush all pending store
-        # jobs - there won't be a future scheduler step to trigger their
+        # jobs - there might not be a future scheduler step to trigger their
         # completion.
         if self._req_status and all(
             rs.req.is_finished() for rs in self._req_status.values()
