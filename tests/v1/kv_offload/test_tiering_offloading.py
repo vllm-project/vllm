@@ -68,7 +68,9 @@ class TestExampleSecondaryTier:
         """Test basic store and lookup operations."""
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTier(
-            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view
+            vllm_config=_MOCK_VLLM_CONFIG,
+            primary_kv_view=mock_view,
+            tier_type="example",
         )
 
         # Initially empty
@@ -102,10 +104,14 @@ class TestTieringOffloadingManager:
 
         # Create secondary tiers with the primary view
         self.secondary_tier1 = ExampleSecondaryTier(
-            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view
+            vllm_config=_MOCK_VLLM_CONFIG,
+            primary_kv_view=mock_view,
+            tier_type="example",
         )
         self.secondary_tier2 = ExampleSecondaryTier(
-            vllm_config=_MOCK_VLLM_CONFIG, primary_kv_view=mock_view
+            vllm_config=_MOCK_VLLM_CONFIG,
+            primary_kv_view=mock_view,
+            tier_type="example",
         )
 
         # Create tiered manager

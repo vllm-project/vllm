@@ -36,17 +36,20 @@ class ExampleSecondaryTier(SecondaryTierManager):
         self,
         vllm_config: "VllmConfig",
         primary_kv_view: memoryview,
+        tier_type: str,
         capacity: int | None = None,
     ):
         """
         Initialize the example secondary tier.
 
         Args:
-            vllm_config: Global vLLM configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             capacity: Maximum number of blocks to store. None means unlimited.
         """
-        super().__init__(vllm_config, primary_kv_view)
+        super().__init__(
+            vllm_config=vllm_config,
+            primary_kv_view=primary_kv_view,
+            tier_type=tier_type,
+        )
 
         self.capacity = capacity
 
@@ -126,10 +129,6 @@ class ExampleSecondaryTier(SecondaryTierManager):
         result = self.completed_jobs
         self.completed_jobs = []
         return result
-
-    @staticmethod
-    def get_tier_type() -> str:
-        return "example"
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""

@@ -14,15 +14,15 @@ class SecondaryTierFactory:
     _registry: dict[str, Callable[[], type[SecondaryTierManager]]] = {}
 
     @classmethod
-    def register_tier(cls, name: str, module_path: str, class_name: str) -> None:
-        if name in cls._registry:
-            raise ValueError(f"Tier '{name}' is already registered.")
+    def register_tier(cls, tier_type: str, module_path: str, class_name: str) -> None:
+        if tier_type in cls._registry:
+            raise ValueError(f"Tier '{tier_type}' is already registered.")
 
         def loader() -> type[SecondaryTierManager]:
             module = importlib.import_module(module_path)
             return getattr(module, class_name)
 
-        cls._registry[name] = loader
+        cls._registry[tier_type] = loader
 
     @classmethod
     def create_secondary_tier(
@@ -45,7 +45,10 @@ class SecondaryTierFactory:
 
         tier_cls = cls._registry[tier_type]()
         return tier_cls(
-            vllm_config=vllm_config, primary_kv_view=primary_kv_view, **config
+            vllm_config=vllm_config,
+            primary_kv_view=primary_kv_view,
+            tier_type=tier_type,
+            **config,
         )
 
 
