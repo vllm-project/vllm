@@ -52,11 +52,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        assert kv_cache_config is not None
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
@@ -105,12 +104,19 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         pass
 
     def wait_for_save(self):
-        assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.prepare_store_kv(self._connector_metadata)
+        # Store deferral is handled in get_finished(), which always runs even
+        # when wait_for_save() is skipped (e.g. kv_connector_no_forward).
+        pass
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
+
+        # Defer store jobs to the next step's start_kv_transfers. Done here
+        # (rather than wait_for_save) so stores are queued even on steps where
+        # wait_for_save is skipped.
+        self.connector_worker.prepare_store_kv(self._connector_metadata)
+
         return self.connector_worker.get_finished(finished_req_ids)
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
@@ -163,6 +169,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable[KVCacheEvent]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
+
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        return "HND"
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
