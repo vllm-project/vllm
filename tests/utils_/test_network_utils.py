@@ -29,6 +29,21 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                     s3.bind(("localhost", get_open_port()))
 
 
+def test_get_open_port_above_upper_bound_falls_back_to_os_assigned(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A start port above 65535 must not crash with a raw ``OverflowError``
+    from ``socket.bind``."""
+    monkeypatch.setenv("VLLM_PORT", "65536")
+
+    port = get_open_port()
+    assert 0 < port <= 65535
+
+    ports = get_open_ports_list(count=2, start_port=65536)
+    assert len(ports) == 2
+    assert all(0 < p <= 65535 for p in ports)
+
+
 def test_get_open_ports_list_with_vllm_port(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_PORT", "5678")

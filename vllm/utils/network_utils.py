@@ -175,6 +175,11 @@ def get_open_ports_list(count: int = 5, start_port: int | None = None) -> list[i
     each returned port so the batch is guaranteed unique. Ports falling
     inside the DP master reserved range are skipped.
     """
+    reserved_port_range = range(0)
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
+
     ports: list[int] = []
     next_port = start_port if start_port is not None else envs.VLLM_PORT
     while len(ports) < count:
@@ -183,11 +188,8 @@ def get_open_ports_list(count: int = 5, start_port: int | None = None) -> list[i
             max_attempts=1000 if next_port is not None else None,
         )
         next_port = port + 1
-        if "VLLM_DP_MASTER_PORT" in os.environ:
-            dp_master_port = envs.VLLM_DP_MASTER_PORT
-            reserved_port_range = range(dp_master_port, dp_master_port + 10)
-            if port in reserved_port_range:
-                continue
+        if port in reserved_port_range:
+            continue
         ports.append(port)
     return ports
 
@@ -200,7 +202,10 @@ def _get_open_port(
     port = start_port
     if port is not None:
         attempts = 0
-        while True:
+        # stop scanning once port is outside valid TCP port range (otherwise
+        # socket.bind raises a raw OverflowError). fall through to the
+        # OS-assigned path.
+        while port <= 65535:
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
@@ -214,6 +219,11 @@ def _get_open_port(
                     f"Could not find open port after {max_attempts} "
                     f"attempts starting from port {start_port}"
                 )
+        logger.warning(
+            "Port scan starting from %d exhausted the TCP port range."
+            "Falling back to an OS-assigned port",
+            start_port,
+        )
     # try ipv4
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
