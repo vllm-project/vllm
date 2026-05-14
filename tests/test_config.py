@@ -1286,6 +1286,24 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def test_draft_sample_method_probabilistic_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        draft_sample_method="probabilistic",
+    )
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_draft_sample_method_gumbel_is_rejected():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            draft_sample_method="gumbel",
+        )
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
