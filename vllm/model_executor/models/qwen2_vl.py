@@ -625,7 +625,7 @@ class Qwen2VisionTransformer(nn.Module):
     def rot_pos_emb(
         self, grid_thw: list[list[int]]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
+        max_grid_size = max((max(h, w) for _, h, w in grid_thw), default=0)
         pos_ids = [
             self.rot_pos_ids(h, w, self.spatial_merge_size)
             if t == 1
