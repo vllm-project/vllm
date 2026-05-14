@@ -1233,6 +1233,15 @@ def accumulate_gathered_sparse_mla_attention_chunk(
     )
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=3),
+    ],
+    key=["num_candidates"],
+)
 @triton.jit
 def _accumulate_indexed_attention_chunk_kernel(
     q_ptr,
@@ -1372,10 +1381,19 @@ def accumulate_indexed_sparse_mla_attention_chunk(
         candidate_offset,
         scale,
         BLOCK_D=block_d,
-        num_warps=8,
+        # num_warps / num_stages supplied by @triton.autotune above.
     )
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=3),
+    ],
+    key=["num_candidates"],
+)
 @triton.jit
 def _accumulate_fp8ds_global_slots_attention_chunk_kernel(
     q_ptr,
@@ -1557,7 +1575,7 @@ def accumulate_fp8ds_global_slots_sparse_mla_attention_chunk(
         candidate_offset,
         scale,
         BLOCK_D=block_d,
-        num_warps=8,
+        # num_warps / num_stages supplied by @triton.autotune above.
     )
 
 
@@ -1767,6 +1785,15 @@ def accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead(
     )
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=2),
+        triton.Config({}, num_warps=4, num_stages=3),
+        triton.Config({}, num_warps=8, num_stages=2),
+        triton.Config({}, num_warps=8, num_stages=3),
+    ],
+    key=["num_candidates"],
+)
 @triton.jit
 def _accumulate_fp8ds_paged_attention_chunk_kernel(
     q_ptr,
@@ -1951,7 +1978,7 @@ def accumulate_fp8ds_paged_sparse_mla_attention_chunk(
         candidate_offset,
         scale,
         BLOCK_D=block_d,
-        num_warps=8,
+        # num_warps / num_stages supplied by @triton.autotune above.
     )
 
 
