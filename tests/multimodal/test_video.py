@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import io
 from pathlib import Path
 
-import av
 import numpy as np
 import numpy.typing as npt
 import pytest
@@ -15,7 +13,7 @@ from vllm.multimodal.video import (
     VideoLoader,
 )
 
-from .utils import create_video_from_image
+from .utils import create_long_gop_video, create_video_from_image
 
 pytestmark = pytest.mark.cpu_test
 
@@ -366,39 +364,6 @@ def test_pyav_dynamic_backend_loads_frames(
         assert metadata["video_backend"] == "pyav_dynamic"
 
 
-def _synthesize_long_gop_video(
-    num_frames: int = 50,
-    fps: int = 30,
-    width: int = 64,
-    height: int = 64,
-) -> bytes:
-    """Encode an H.264 clip with one keyframe and green-channel = frame index.
-
-    The marker lets a test recover which frame the decoder actually returned,
-    independent of any metadata label.
-    """
-    buf = io.BytesIO()
-    with av.open(buf, mode="w", format="mp4") as container:
-        stream = container.add_stream("h264", rate=fps)
-        stream.width = width
-        stream.height = height
-        stream.pix_fmt = "yuv420p"
-        stream.codec_context.gop_size = num_frames
-        stream.codec_context.max_b_frames = 0
-        stream.codec_context.options = {
-            "x264-params": (f"scenecut=0:keyint={num_frames}:min-keyint={num_frames}")
-        }
-        for i in range(num_frames):
-            img = np.zeros((height, width, 3), dtype=np.uint8)
-            img[:, :, 1] = i
-            frame = av.VideoFrame.from_ndarray(img, format="rgb24")
-            for packet in stream.encode(frame):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    return buf.getvalue()
-
-
 def test_pyav_backend_returns_target_frames_not_keyframes():
     """Regression test: PyAV must decode forward past the seek keyframe.
 
@@ -412,7 +377,7 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
     num_sampled = 4
     height, width = 64, 64
 
-    video_bytes = _synthesize_long_gop_video(
+    video_bytes = create_long_gop_video(
         num_frames=num_frames, width=width, height=height
     )
 
