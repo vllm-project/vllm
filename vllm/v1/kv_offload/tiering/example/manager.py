@@ -124,8 +124,3 @@ class ExampleSecondaryTier(SecondaryTierManager):
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""
         return len(self.blocks)
-
-    def clear(self):
-        """Clear all blocks and jobs (for testing)."""
-        self.blocks.clear()
-        self.completed_jobs.clear()
