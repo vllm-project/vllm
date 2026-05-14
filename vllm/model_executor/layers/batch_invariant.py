@@ -969,6 +969,14 @@ def enable_batch_invariant_mode():
     if current_platform.is_cuda():
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
 
+    if current_platform.is_xpu():
+        # oneMKL is not batch-invariant — override mm/addmm/matmul/linear
+        # with the Triton descriptor-persistent kernel (uses 2D block I/O).
+        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "XPU")
+        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "XPU")
+        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "XPU")
+        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "XPU")
+
     dispatch_keys = ["CUDA"]
     if current_platform.is_xpu():
         dispatch_keys.append("XPU")
@@ -993,7 +1001,8 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
         reduced_precision_val
     )
-    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
+    if current_platform.is_cuda():
+        torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
 def override_envs_for_invariance():
