@@ -1423,10 +1423,16 @@ class FusedMoE(PluggableLayer):
                     experts_shard = loaded_weight.unsqueeze(0)
                     start = expert_id
 
-                # Unified loading logic for fused and non-fused experts
+                # Unified loading logic for fused and non-fused experts.
+                # Use param.weight_loader rather than self.weight_loader so
+                # any wrapping installed on the parameter (e.g. the layerwise
+                # reload's online_process_loader, which buffers loads until a
+                # full layer is ready) is preserved. self.weight_loader is the
+                # raw class method and bypasses such wrappers.
+                weight_loader = getattr(param, "weight_loader", self.weight_loader)
                 loaded_experts = experts_shard.unbind()
                 for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
-                    success = self.weight_loader(
+                    success = weight_loader(
                         param=param,
                         loaded_weight=loaded_expert,
                         weight_name=weight_name,
@@ -1597,7 +1603,7 @@ class FusedMoE(PluggableLayer):
             else ""
         )
 
-        return [
+        per_expert_entries = [
             # (param_name, weight_name, expert_id, shard_id)
             (
                 f"experts.{base_layer}w13_"
@@ -1614,6 +1620,19 @@ class FusedMoE(PluggableLayer):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
+
+        fused_entries = [
+            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
+            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 1, "w3"),
+            (
+                f"experts.{base_layer}w2_weight",
+                f"experts.{ckpt_down_proj_name}",
+                0,
+                "w2",
+            ),
+        ]
+
+        return per_expert_entries + fused_entries
 
     @property
     def hidden_size(self) -> int:

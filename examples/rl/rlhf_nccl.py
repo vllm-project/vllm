@@ -69,62 +69,20 @@ class TrainModel:
     def get_master_address_and_port(self):
         return self.master_address, self.port
 
-    def _unpacked_weights(self):
-        """Yield (name, tensor) pairs, unpacking fused MoE to per-expert layout.
-
-        HF's Qwen3MoeExperts (and other recent HF MoE impls) packs
-        all experts into two fused 3-D tensors per layer:
-          experts.gate_up_proj  shape (E, 2*I, H)
-          experts.down_proj     shape (E, H, I)
-        vLLM's Qwen3MoE load_weights still expects the older
-        per-expert HF layout (experts.<i>.gate_proj.weight,
-        experts.<i>.up_proj.weight, experts.<i>.down_proj.weight),
-        so we un-fuse on the fly. Split order matches HF's forward:
-          gate, up = linear(x, gate_up_proj[i]).chunk(2, dim=-1)
-        → rows [:I] of gate_up_proj[i] are gate, rows [I:] are up.
-        """
-        params = self.model.state_dict()
-        for name in list(params.keys()):
-            param = params.pop(name)
+    def _materialized_weights(self):
+        """Yield (name, tensor) pairs, gathering DTensors to full tensors."""
+        for name, param in self.model.state_dict().items():
             if isinstance(param, DTensor):
-                tensor = param.full_tensor().detach().contiguous()
+                yield name, param.full_tensor().detach().contiguous()
             else:
-                tensor = param.detach().contiguous()
-            del param
-
-            if name.endswith(".experts.gate_up_proj") and tensor.dim() == 3:
-                prefix = name[: -len(".gate_up_proj")]
-                num_experts, two_inter, _ = tensor.shape
-                inter = two_inter // 2
-                for i in range(num_experts):
-                    expert = tensor[i]
-                    yield (
-                        f"{prefix}.{i}.gate_proj.weight",
-                        expert[:inter].contiguous(),
-                    )
-                    yield (
-                        f"{prefix}.{i}.up_proj.weight",
-                        expert[inter:].contiguous(),
-                    )
-                del tensor
-            elif name.endswith(".experts.down_proj") and tensor.dim() == 3:
-                prefix = name[: -len(".down_proj")]
-                num_experts = tensor.shape[0]
-                for i in range(num_experts):
-                    yield (
-                        f"{prefix}.{i}.down_proj.weight",
-                        tensor[i].contiguous(),
-                    )
-                del tensor
-            else:
-                yield name, tensor
+                yield name, param.detach().contiguous()
 
     def get_weight_metadata(self):
         """Return weight names, dtypes, and shapes for weight transfer."""
         names = []
         dtype_names = []
         shapes = []
-        for name, tensor in self._unpacked_weights():
+        for name, tensor in self._materialized_weights():
             names.append(name)
             dtype_names.append(str(tensor.dtype).split(".")[-1])
             shapes.append(list(tensor.shape))
@@ -147,7 +105,7 @@ class TrainModel:
             packed=packed,
         )
         NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self._unpacked_weights(),
+            iterator=self._materialized_weights(),
             trainer_args=trainer_args,
         )
 
