@@ -44,7 +44,7 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with /v1 (e.g. /health).
+        2. The request path doesn't start with /v1 or /v2 (e.g. /health).
     """
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
@@ -80,7 +80,7 @@ class AuthenticationMiddleware:
         url_path = URL(scope=scope).path.removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if url_path.startswith(("/v1", "/v2")) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
