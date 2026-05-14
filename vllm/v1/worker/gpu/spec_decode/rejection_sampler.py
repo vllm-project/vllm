@@ -12,11 +12,8 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
-from vllm.v1.worker.gpu.spec_decode.probabilistic_rejection_sampler_utils import (
-    probabilistic_rejection_sample,
-)
-from vllm.v1.worker.gpu.spec_decode.synthetic_rejection_sampler_utils import (
-    synthetic_rejection_sample,
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    rejection_sample,
 )
 
 
@@ -101,59 +98,42 @@ class RejectionSampler:
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
     ) -> SamplerOutput:
-        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        if self.rejection_sample_method == "standard":
-            pos = input_batch.positions[input_batch.logits_indices]
-            processed_logits = self.sampler.apply_sampling_params(
-                logits,
-                input_batch.expanded_idx_mapping,
-                input_batch.idx_mapping_np,
-                pos,
-                draft_sampled,
-                input_batch.expanded_local_pos,
-            )
-            sampled, num_sampled = probabilistic_rejection_sample(
-                processed_logits,
-                draft_logits,
-                draft_sampled,
-                input_batch.cu_num_logits,
-                pos,
-                input_batch.idx_mapping,
-                input_batch.expanded_idx_mapping,
-                input_batch.expanded_local_pos,
-                self.sampler.sampling_states.temperature.gpu,
-                self.sampler.sampling_states.seeds.gpu,
-                self.num_speculative_steps,
-            )
-            logprobs_tensors = self._get_logprobs_tensors(
-                input_batch,
-                sampled,
-                num_sampled,
-                processed_logits
-                if self.sampler.logprobs_mode == "processed_logprobs"
-                else logits,
-            )
-        elif self.rejection_sample_method == "synthetic":
-            sampler_output = self.sampler(logits, input_batch)
-            logprobs_tensors = sampler_output.logprobs_tensors
-            sampled, num_sampled = synthetic_rejection_sample(
-                sampler_output.sampled_token_ids.view(-1),
-                draft_sampled,
-                input_batch.cu_num_logits,
-                input_batch.positions[input_batch.logits_indices],
-                input_batch.idx_mapping,
-                self.sampler.sampling_states.seeds.gpu,
-                self.synthetic_conditional_rates,
-                self.num_speculative_steps,
-            )
-        else:
-            raise ValueError(
-                f"Unknown rejection sample method: {self.rejection_sample_method}"
-            )
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        pos = input_batch.positions[input_batch.logits_indices]
+        processed_logits = self.sampler.apply_sampling_params(
+            logits,
+            input_batch.expanded_idx_mapping,
+            input_batch.idx_mapping_np,
+            pos,
+            draft_sampled,
+            input_batch.expanded_local_pos,
+        )
+        sampled, num_sampled = rejection_sample(
+            processed_logits,
+            draft_logits,
+            draft_sampled,
+            input_batch.cu_num_logits,
+            pos,
+            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
+            self.sampler.sampling_states.temperature.gpu,
+            self.sampler.sampling_states.seeds.gpu,
+            self.num_speculative_steps,
+            self.synthetic_conditional_rates,
+        )
+        logprobs_tensors = self._get_logprobs_tensors(
+            input_batch,
+            sampled,
+            num_sampled,
+            processed_logits
+            if self.sampler.logprobs_mode == "processed_logprobs"
+            else logits,
+        )
 
         return SamplerOutput(
             sampled_token_ids=sampled,
