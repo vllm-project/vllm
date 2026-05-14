@@ -56,6 +56,8 @@ void shm_send_tensor_list(int64_t handle,
 
 std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src);
 
+// SGL CPU kernels
+
 at::Tensor weight_packed_linear(at::Tensor& mat1, at::Tensor& mat2,
                                 const std::optional<at::Tensor>& bias,
                                 bool is_vnni);
@@ -65,21 +67,32 @@ at::Tensor convert_weight_packed(at::Tensor& weight);
 at::Tensor fused_experts_cpu(
     at::Tensor& hidden_states, at::Tensor& w1, at::Tensor& w2,
     at::Tensor& topk_weights, at::Tensor& topk_ids, bool inplace,
-    bool use_int8_w8a8, bool use_fp8_w8a16,
-    const std::optional<at::Tensor>& w1_scale,
+    int64_t moe_comp_method, const std::optional<at::Tensor>& w1_scale,
     const std::optional<at::Tensor>& w2_scale,
-    const std::optional<std::vector<int64_t>> block_size,
-    const std::optional<at::Tensor>& a1_scale,
-    const std::optional<at::Tensor>& a2_scale, bool is_vnni);
+    const std::optional<at::Tensor>& w1_zero,
+    const std::optional<at::Tensor>& w2_zero,
+    const std::optional<std::vector<int64_t>> block_size, bool is_vnni);
 
 at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+// Adapted from sglang: FP8 W8A16 kernel
+at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
+                             at::Tensor& scales2,
+                             std::vector<int64_t> block_size,
+                             const std::optional<at::Tensor>& bias,
+                             at::ScalarType out_dtype, bool is_vnni);
+
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
-    at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
+    at::Tensor qweight,  // awq: (*, K, N / 8)  ||  gptq: (*, K / 8, N) , int32
+    at::Tensor qzeros,   // awq: (*, K / group_size, N / 8) ||  gptq: (*, K /
+                         // group_size, N / 8) , int32
+    at::Tensor scales,   // awq: (*, K / group_size, N) ||  gptq: (*, K /
+                         // group_size, N) , bfloat16
+    int64_t quant_method_4bit);
 
 at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
                               at::Tensor& w_scales,
@@ -101,7 +114,9 @@ void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 torch::Tensor& key_cache,
                                 torch::Tensor& value_cache,
                                 const torch::Tensor& slot_mapping,
-                                const std::string& isa);
+                                const std::string& isa, const double k_scale,
+                                const double v_scale,
+                                const std::string& kv_cache_dtype);
 
 void cpu_attention_with_kv_cache(
     const torch::Tensor& query, const torch::Tensor& key_cache,
@@ -112,7 +127,8 @@ void cpu_attention_with_kv_cache(
     const int64_t sliding_window_left, const int64_t sliding_window_right,
     const torch::Tensor& block_table, const double softcap,
     const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux);
+    const std::optional<torch::Tensor>& s_aux, const double k_scale,
+    const double v_scale, const std::string& kv_cache_dtype);
 
 // Note: just for avoiding importing errors
 void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
@@ -263,12 +279,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "rotary_embedding(Tensor positions, Tensor! query,"
       "                 Tensor!? key, int head_size,"
-      "                 Tensor cos_sin_cache, bool is_neox) -> ()");
+      "                 Tensor cos_sin_cache, bool is_neox, int "
+      "rope_dim_offset=0, bool inverse=False) -> ()");
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
-#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
-    defined(__powerpc64__)
+#if defined(__AVX512F__) || defined(__AVX2__) || \
+    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -349,10 +366,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("convert_weight_packed(Tensor! weight) -> Tensor");
   ops.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);
   ops.def(
-      "fused_experts_cpu(Tensor! hidden_states, Tensor w1, Tensor w2, Tensor "
-      "topk_weights, Tensor topk_ids, bool inplace, bool use_int8_w8a8, bool "
-      "use_fp8_w8a16, Tensor? w1_scale, Tensor? w2_scale, SymInt[]? "
-      "block_size, Tensor? a1_scale, Tensor? a2_scale, bool is_vnni) -> "
+      "fused_experts_cpu(Tensor hidden_states, Tensor w1, Tensor w2, Tensor "
+      "topk_weights, Tensor topk_ids, bool "
+      "inplace, int moe_comp_method, Tensor? w1_scale, Tensor? w2_scale, "
+      "Tensor? w1_zero, Tensor? w2_zero, int[]? block_size, bool is_vnni) -> "
       "Tensor");
   ops.impl("fused_experts_cpu", torch::kCPU, &fused_experts_cpu);
   ops.def(
@@ -363,8 +380,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Adapted from sglang: INT4 W4A8 kernels
   ops.def(
-      "convert_weight_packed_scale_zp(Tensor qweight, Tensor qzeros, "
-      "Tensor scales) -> (Tensor, Tensor, Tensor)");
+      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
+      "scales, int quant_method_4bit) -> (Tensor, "
+      "Tensor, Tensor)");
   ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
            &convert_weight_packed_scale_zp);
 
@@ -372,6 +390,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
       "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
   ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
+
+  // Adapted from sglang: FP8 W8A16 kernel
+  ops.def(
+      "fp8_scaled_mm_cpu(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!) "
+      "scales2, SymInt[] block_size, Tensor? bias, ScalarType out_dtype, "
+      "bool is_vnni) -> Tensor");
+  ops.impl("fp8_scaled_mm_cpu", torch::kCPU, &fp8_scaled_mm_cpu);
 #endif
 
   // CPU attention kernels
@@ -383,15 +408,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
-      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
-      "isa) -> ()",
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str isa, "
+      "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
+      "()",
       &cpu_attn_reshape_and_cache);
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, "
+      "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
+      "()",
       &cpu_attention_with_kv_cache);
 
   // placeholders

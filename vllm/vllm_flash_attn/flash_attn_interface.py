@@ -387,6 +387,7 @@ def flash_attn_varlen_func(
             num_splits=num_splits,
             return_lse=return_softmax_lse,
             out=out,
+            learnable_sink=s_aux,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

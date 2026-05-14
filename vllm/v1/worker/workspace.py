@@ -100,32 +100,90 @@ class WorkspaceManager:
         Returns:
             List of tensor views into the workspace buffer, one per shape/dtype pair.
         """
+        actual_bytes, offsets, total_bytes = self._compute_layout(shapes_and_dtypes)
+        workspace = self._ensure_workspace_size(total_bytes)
+        return self._slice(workspace, shapes_and_dtypes, actual_bytes, offsets)
+
+    def try_get_simultaneous(
+        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
+    ) -> list[torch.Tensor] | None:
+        """Like get_simultaneous, but return None when growth would be needed
+        on a locked workspace instead of raising.
+
+        Callers use this when they have a correct (slower) fallback path and
+        want to opportunistically use pre-allocated workspace whenever it
+        already fits. A locked workspace that is already large enough is
+        still returned normally — only the locked-and-undersized case yields
+        None.
+        """
+        actual_bytes, offsets, total_bytes = self._compute_layout(shapes_and_dtypes)
+        if self._locked:
+            ubatch_id = dbo_current_ubatch_id()
+            current = self._current_workspaces[ubatch_id]
+            if self._workspace_size_bytes(current) < total_bytes:
+                return None
+            return self._slice(current, shapes_and_dtypes, actual_bytes, offsets)
+        workspace = self._ensure_workspace_size(total_bytes)
+        return self._slice(workspace, shapes_and_dtypes, actual_bytes, offsets)
+
+    def reserve(self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]) -> None:
+        """Pre-allocate workspace large enough for these shapes on every
+        ubatch slot.
+
+        Use this at init time (before `lock_workspace()`) so the lock
+        snapshots a workspace large enough for steady-state use on every
+        ubatch — not just the one whose forward happens to be active
+        during reservation. Safe to call repeatedly; idempotent.
+
+        Distinct from `get_simultaneous` which only grows the current
+        ubatch (to avoid orphaning sibling ubatches' outstanding views
+        mid-run).
+        """
+        total_bytes = self._compute_layout(shapes_and_dtypes)[2]
+        for ubatch_id in range(self._num_ubatches):
+            self._ensure_workspace_size(total_bytes, ubatch_id=ubatch_id)
+
+    @staticmethod
+    def _compute_layout(
+        shapes_and_dtypes: tuple[tuple[tuple[int, ...], torch.dtype], ...],
+    ) -> tuple[list[int], list[int], int]:
+        """Compute byte sizes, aligned offsets, and total bytes in one pass."""
         actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
         aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
-        total_bytes = sum(aligned_bytes)
-
-        # Calculate cumulative offsets using itertools.accumulate
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
+        total_bytes = sum(aligned_bytes)
+        return actual_bytes, offsets, total_bytes
 
-        current_workspace = self._ensure_workspace_size(total_bytes)
-
+    @staticmethod
+    def _slice(
+        workspace: torch.Tensor,
+        shapes_and_dtypes: tuple[tuple[tuple[int, ...], torch.dtype], ...],
+        actual_bytes: list[int],
+        offsets: list[int],
+    ) -> list[torch.Tensor]:
         return [
-            current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
+            workspace[offsets[i] : offsets[i] + actual_bytes[i]]
             .view(shapes_and_dtypes[i][1])
             .reshape(shapes_and_dtypes[i][0])
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
-        """Ensure workspace is allocated and large enough, return current workspace.
+    def _ensure_workspace_size(
+        self, required_bytes: int, ubatch_id: int | None = None
+    ) -> torch.Tensor:
+        """Ensure workspace is allocated and large enough, return that workspace.
 
         Args:
             required_bytes: The number of bytes required.
+            ubatch_id: Which ubatch slot to size. Defaults to the current
+                ubatch (`dbo_current_ubatch_id()`); pass an explicit id
+                from `reserve` to size sibling slots.
 
         Returns:
-            The current workspace tensor.
+            The workspace tensor for the selected ubatch.
         """
-        ubatch_id = dbo_current_ubatch_id()
+        if ubatch_id is None:
+            ubatch_id = dbo_current_ubatch_id()
         current_workspace = self._current_workspaces[ubatch_id]
         current_size = self._workspace_size_bytes(current_workspace)
 
@@ -161,35 +219,32 @@ class WorkspaceManager:
                     "Workspace growth is not allowed after locking."
                 )
 
-            for ubatch_id in range(self._num_ubatches):
-                current_workspace = self._current_workspaces[ubatch_id]
-                if (
-                    current_workspace is None
-                    or self._workspace_size_bytes(current_workspace) < required_bytes
-                ):
-                    # Delete old tensor before allocating new one to avoid
-                    # memory spike from resize_(). resize_() allocates new
-                    # memory before freeing old, which can cause OOM.
-                    # Must clear the list reference first since local var
-                    # is just a copy of the reference.
-                    self._current_workspaces[ubatch_id] = None
-                    del current_workspace
-                    self._current_workspaces[ubatch_id] = torch.empty(
-                        (required_bytes,), dtype=torch.uint8, device=self._device
-                    )
+            # Only resize the requesting ubatch's workspace.  Other
+            # ubatches resize lazily on their next get_simultaneous call.
+            # Resizing all ubatches here would orphan the other ubatch's
+            # old tensor when it still holds views into it (DBO leak).
+            self._current_workspaces[ubatch_id] = None
+            del current_workspace
+            # Release the freed segment back to CUDA so the caching
+            # allocator can reuse the GPU memory for the larger
+            # allocation below. Without this, each resize may leave a
+            # dead segment in reserved memory which can cause higher peak
+            # memory usage.
+            torch.accelerator.empty_cache()
+            self._current_workspaces[ubatch_id] = torch.empty(
+                (required_bytes,), dtype=torch.uint8, device=self._device
+            )
+            current_workspace = self._current_workspaces[ubatch_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
                 logger.info(
                     "[WORKSPACE DEBUG] Resized workspace from '%s': %.2f MB -> "
-                    "%.2f MB (%d ubatches, total memory %.2f MB)",
+                    "%.2f MB (ubatch %d)",
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
-                    self._num_ubatches,
-                    required_bytes * self._num_ubatches / _MB,
+                    ubatch_id,
                 )
-
-            current_workspace = self._current_workspaces[dbo_current_ubatch_id()]
 
         return current_workspace
 
