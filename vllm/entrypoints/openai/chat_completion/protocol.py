@@ -418,11 +418,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            if (
-                msg.get("reasoning") is None
-                and msg.get("reasoning_content") is not None
-            ):
-                msg["reasoning"] = msg.pop("reasoning_content")
+            reasoning_content = msg.pop("reasoning_content", None)
+            if reasoning_content is not None and msg.get("reasoning") is None:
+                msg["reasoning"] = reasoning_content
         return data
 
     @model_validator(mode="before")

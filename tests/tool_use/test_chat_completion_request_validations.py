@@ -100,7 +100,7 @@ def test_reasoning_takes_precedence_over_reasoning_content():
     )
     assistant_msg = request.messages[1]
     assert assistant_msg.get("reasoning") == "from reasoning field"
-    assert assistant_msg.get("reasoning_content") == "from reasoning_content field"
+    assert "reasoning_content" not in assistant_msg
 
 
 def test_no_reasoning_fields_unchanged():
