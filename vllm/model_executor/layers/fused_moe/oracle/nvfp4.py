@@ -497,11 +497,15 @@ def make_nvfp4_moe_quant_config(
     # The expert's process_weights_after_loading will fuse activation
     # scales in-place. Since the quant config references the same tensor
     # as the registered parameter, EPLB rearrangement stays in sync.
+    # Clamp scales from below at the smallest normal float32 before inverting.
+    # Some checkpoints (e.g. Qwen3.5-122B) have denormal (~0) input_scale for
+    # dead experts, causing 1/scale = Inf → NaN in the FP4 quantization kernel.
+    _tiny = torch.finfo(torch.float32).tiny
     return nvfp4_moe_quant_config(
         g1_alphas=w13_scale_2,
         g2_alphas=w2_scale_2,
-        a1_gscale=(1.0 / a13_scale),
-        a2_gscale=(1.0 / a2_scale),
+        a1_gscale=(1.0 / a13_scale.clamp(min=_tiny)),
+        a2_gscale=(1.0 / a2_scale.clamp(min=_tiny)),
         w1_scale=w13_scale,
         w2_scale=w2_scale,
         # NOTE(rob): this is a hack until the MoE kernels
