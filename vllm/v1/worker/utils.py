@@ -515,10 +515,10 @@ def bind_kv_cache(
         if isinstance(kv_cache, (list, tuple)) and len(kv_cache) == 2:
             attn_layer = forward_context[layer_name]
             mla_cache, indexer_cache = kv_cache
-            attn_layer.kv_cache = [mla_cache]
+            attn_layer.kv_cache = mla_cache
             indexer = getattr(attn_layer, "indexer", None)
             if indexer is not None:
-                indexer.kv_cache = [indexer_cache]
+                indexer.kv_cache = indexer_cache
             continue
         forward_context[layer_name].kv_cache = kv_cache
 
