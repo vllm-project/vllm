@@ -785,10 +785,15 @@ class HfRunner:
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
         use_cache: bool = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
-            prompts, images=images, videos=videos, audios=audios
+            prompts,
+            images=images,
+            videos=videos,
+            audios=audios,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         all_logprobs: list[list[dict[int, float]]] = []
