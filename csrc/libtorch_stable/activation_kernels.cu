@@ -263,8 +263,8 @@ void silu_and_mul(torch::stable::Tensor& out,    // [..., d]
                                 true, false, 0.0f);
 }
 
-void silu_and_mul_clamp(torch::Tensor& out,    // [..., d]
-                        torch::Tensor& input,  // [..., 2 * d]
+void silu_and_mul_clamp(torch::stable::Tensor& out,    // [..., d]
+                        torch::stable::Tensor& input,  // [..., 2 * d]
                         double limit) {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
                                 true, true, (float)limit);
