@@ -45,11 +45,13 @@ class AttentionType(str, Enum):
     """Attention between dec. Q and enc. K/V for encoder-decoder."""
 
 
+@dataclass(frozen=True)
 class MultipleOf:
-    base: int
+    """Marker for a kernel block size that must be any positive multiple of
+    ``base``. Frozen dataclass so that it has __eq__ and __hash__.
+    """
 
-    def __init__(self, base: int):
-        self.base = base
+    base: int
 
 
 class AttentionBackend(ABC):
