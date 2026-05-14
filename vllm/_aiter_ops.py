@@ -419,6 +419,9 @@ def check_aiter_fused_qk_rmsnorm() -> bool:
     Supports both the new private name ``_fused_qk_rmsnorm``
     (AITER >= PR #2958) and the old public name ``fused_qk_rmsnorm``
     (AITER >= PR #2442).
+
+    TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
+    AITER stabilizes the API.
     """
     global _AITER_HAS_FUSED_QK_RMSNORM
     if _AITER_HAS_FUSED_QK_RMSNORM is None:
@@ -1050,6 +1053,8 @@ def _fused_mla_dual_rms_norm_impl(
             k_eps=x2_epsilon,
         )
 
+    # TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
+    # AITER stabilizes the API.
     if hasattr(aiter_ops, "fused_qk_rmsnorm"):
         return aiter_ops.fused_qk_rmsnorm(
             q=x1,
