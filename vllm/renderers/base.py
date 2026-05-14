@@ -398,12 +398,50 @@ class BaseRenderer(ABC, Generic[_T]):
         return self.render_messages(messages, params)
 
     # Step 2: Tokenize prompts if necessary
+    def _wants_offsets(
+        self,
+        tokenizer,
+        prompt: "TextPrompt",
+        params: "TokenizeParams",
+    ) -> bool:
+        """Return True if the request asks for token offsets AND the
+        tokenizer can provide them AND no multimodal data is present."""
+        return (
+            params.return_token_offsets
+            and getattr(tokenizer, "is_fast", False)
+            and not prompt.get("multi_modal_data")
+            and not prompt.get("multi_modal_uuids")
+        )
+
+    @staticmethod
+    def _tokens_prompt_with_offsets(
+        encoding,
+        prompt: "TextPrompt",
+    ) -> "TokensPrompt":
+        """Build a TokensPrompt from a BatchEncoding that has both
+        `input_ids` and `offset_mapping` populated."""
+        return TokensPrompt(
+            prompt_token_ids=list(encoding["input_ids"]),
+            prompt_token_offsets=[
+                (int(s), int(e)) for s, e in encoding["offset_mapping"]
+            ],
+            **prompt,
+        )
+
     def _tokenize_prompt(
         self,
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
+        if self._wants_offsets(tokenizer, prompt, params):
+            encoding = tokenizer(
+                prompt["prompt"],
+                **params.get_encode_kwargs(),
+                return_offsets_mapping=True,  # type: ignore[call-arg]
+            )
+            return self._tokens_prompt_with_offsets(encoding, prompt)
+
         prompt_token_ids = tokenizer.encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),

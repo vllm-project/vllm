@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm.renderers.params import TokenizeParams
 
 
@@ -30,3 +32,58 @@ def test_tokens_input_supports_offsets_field():
     from vllm.inputs.engine import TokensInput
 
     assert "prompt_token_offsets" in TokensInput.__annotations__
+
+
+@pytest.fixture
+def fast_tokenizer():
+    """gpt2 has a Fast tokenizer available; use it to test the offsets
+    happy path."""
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained("openai-community/gpt2", use_fast=True)
+
+
+def _make_base_renderer_with(tokenizer):
+    """Build a minimal BaseRenderer subclass that exposes the tokenizer
+    so we can call `_tokenize_prompt` directly. BaseRenderer is
+    abstract because of `render_messages`; we just need a stub."""
+    from vllm.renderers.base import BaseRenderer
+
+    class _StubRenderer(BaseRenderer):
+        def __init__(self, tok):
+            # Bypass BaseRenderer.__init__ — we don't need a VllmConfig.
+            self.tokenizer = tok
+            self._async_tokenizer = None
+            self._executor = None
+            self.mm_processor = None
+
+        def get_tokenizer(self):
+            return self.tokenizer
+
+        def render_messages(self, messages, params):  # pragma: no cover
+            raise NotImplementedError
+
+    return _StubRenderer(tokenizer)
+
+
+class TestTokenizePromptOffsets:
+    def test_fast_tokenizer_with_flag_returns_offsets(self, fast_tokenizer):
+        from vllm.renderers.params import TokenizeParams
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello, world."}
+
+        result = renderer._tokenize_prompt(prompt, params)
+
+        assert "prompt_token_ids" in result
+        assert "prompt_token_offsets" in result
+        offsets = result["prompt_token_offsets"]
+        assert offsets is not None
+        # Length must match the token sequence.
+        assert len(offsets) == len(result["prompt_token_ids"])
+        # Each offset is (int, int) with start <= end <= len(text).
+        text_len = len("Hello, world.")
+        for s, e in offsets:
+            assert isinstance(s, int) and isinstance(e, int)
+            assert 0 <= s <= e <= text_len
