@@ -24,7 +24,8 @@ Example configuration:
     "eviction_policy": "lru",
     "secondary_tiers": [
         {
-            "type": "example"
+            "type": "example",
+            "capacity": 1000
         }
     ]
 }

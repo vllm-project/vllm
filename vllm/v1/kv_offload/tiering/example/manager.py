@@ -36,6 +36,7 @@ class ExampleSecondaryTier(SecondaryTierManager):
         self,
         vllm_config: "VllmConfig",
         primary_kv_view: memoryview,
+        capacity: int | None = None,
     ):
         """
         Initialize the example secondary tier.
@@ -43,8 +44,11 @@ class ExampleSecondaryTier(SecondaryTierManager):
         Args:
             vllm_config: Global vLLM configuration.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+            capacity: Maximum number of blocks to store. None means unlimited.
         """
         super().__init__(vllm_config, primary_kv_view)
+
+        self.capacity = capacity
 
         # key -> True (only care about presence)
         self.blocks: dict[OffloadKey, bool] = {}
@@ -79,6 +83,12 @@ class ExampleSecondaryTier(SecondaryTierManager):
         assert len(keys) == len(block_ids), (
             f"Length mismatch: {len(keys)} keys but {len(block_ids)} block_ids"
         )
+
+        if self.capacity is not None and len(self.blocks) + len(keys) > self.capacity:
+            self.completed_jobs.append(
+                JobResult(job_id=job_metadata.job_id, success=False)
+            )
+            return
 
         for key in keys:
             self.blocks[key] = True
