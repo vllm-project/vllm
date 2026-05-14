@@ -2310,6 +2310,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
 
+            prefill_backend = prefill_metadata.prefill_backend
+            if (
+                getattr(prefill_backend, "requires_v_padding", False)
+                and context_output.shape[-1] != self.v_head_dim
+            ):
+                context_output = context_output[..., : self.v_head_dim]
+                suffix_output = suffix_output[..., : self.v_head_dim]
+
             output = output.view(-1, self.num_heads, self.v_head_dim)
             merge_attn_states(
                 output=output,
@@ -2321,6 +2329,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             )
         else:
             assert isinstance(output_prefill, torch.Tensor)
+            if output_prefill.shape[-1] != self.v_head_dim:
+                output_prefill = output_prefill[..., : self.v_head_dim]
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)
 
