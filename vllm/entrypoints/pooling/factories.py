@@ -134,7 +134,7 @@ def register_pooling_api_routers(
         app.include_router(score_router)
 
 
-def init_pooling_state(
+async def init_pooling_state(
     engine_client: "EngineClient",
     state: "State",
     args: "Namespace",
@@ -144,6 +144,8 @@ def init_pooling_state(
     model_config = engine_client.model_config
     if model_config is None:
         return
+
+    is_tracing_enabled = await engine_client.is_tracing_enabled()
 
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.tasks import POOLING_TASKS
@@ -170,6 +172,7 @@ def init_pooling_state(
                 supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template_config=chat_template_config,
+                is_tracing_enabled=is_tracing_enabled,
             )
         )
         if any(t in supported_tasks for t in POOLING_TASKS)
@@ -181,6 +184,7 @@ def init_pooling_state(
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template_config=chat_template_config,
+            is_tracing_enabled=is_tracing_enabled,
         )
         if pooling_task == "embed"
         else None
@@ -191,6 +195,7 @@ def init_pooling_state(
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template_config=chat_template_config,
+            is_tracing_enabled=is_tracing_enabled,
         )
         if pooling_task == "classify"
         else None
@@ -202,6 +207,7 @@ def init_pooling_state(
             supported_tasks=supported_tasks,
             request_logger=request_logger,
             chat_template_config=chat_template_config,
+            is_tracing_enabled=is_tracing_enabled,
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True
             ),

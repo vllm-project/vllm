@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import Executor
 from http import HTTPStatus
+from time import time_ns
 from typing import ClassVar
 
 import torch
 from fastapi import Request
 from fastapi.responses import Response
-from starlette.datastructures import Headers
 
 from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import VllmConfig
@@ -25,9 +25,15 @@ from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.tracing import (
+    SpanAttributes,
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,
+)
+from vllm.tracing.otel import (
+    get_span_context,
+    get_status_error,
+    init_otel_trace_provider,
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async, merge_async_iterators
@@ -48,6 +54,7 @@ class PoolingServingBase(ABC):
         chat_template_config: ChatTemplateConfig,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        is_tracing_enabled: bool = False,
     ):
         self.engine_client = engine_client
         self.models = models
@@ -69,17 +76,125 @@ class PoolingServingBase(ABC):
             self._postprocessing, executor=self._executor
         )
 
+        # Observability
+        self.is_tracing_enabled = is_tracing_enabled
+        if self.is_tracing_enabled:
+            from opentelemetry.trace.propagation.tracecontext import (
+                TraceContextTextMapPropagator,
+            )
+
+            otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            assert otlp_endpoint is not None
+
+            api_process_count = getattr(engine_client, "api_process_count", 1)
+            api_process_rank = getattr(engine_client, "_api_process_rank", 0)
+            process_title = f"APIServer_{api_process_rank}"
+
+            self.propagator = TraceContextTextMapPropagator()
+
+            # service.name -> otel.scope.name
+            self.request_trace_provider = init_otel_trace_provider(
+                otlp_endpoint, extra_attributes={"service.name": "vllm.request"}
+            )
+
+            self.entrypoint_trace_provider = init_otel_trace_provider(
+                otlp_endpoint,
+                extra_attributes={
+                    "service.name": "vllm.entrypoint",
+                    "vllm.process_kind": "entrypoint",
+                    "vllm.process_count": api_process_count,
+                    "vllm.process_name": process_title,
+                },
+            )
+
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        io_processor = self.get_io_processor(request)
-        ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing_async(io_processor, ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
+        if not self.is_tracing_enabled:
+            io_processor = self.get_io_processor(request)
+            trace_headers = await self._get_trace_headers(raw_request)
+            ctx = await self._init_ctx(
+                io_processor, request, raw_request, trace_headers
+            )
+            await self._preprocessing_async(io_processor, ctx)
+            await self._prepare_generators(ctx)
+            await self._collect_batch(ctx)
+            return await self._postprocessing_async(io_processor, ctx)
+        else:
+            arrival_time = time_ns()
+
+            trace_headers = await self._get_trace_headers(raw_request)
+            request_tracer = self.request_trace_provider.get_tracer("vllm.request")
+            entrypoint_tracer = self.entrypoint_trace_provider.get_tracer(
+                "vllm.entrypoint"
+            )
+
+            trace_context = self.propagator.extract(trace_headers)
+            request_span = request_tracer.start_span(
+                "vllm.request", context=trace_context, start_time=arrival_time
+            )
+            request_span_context = get_span_context(request_span)
+
+            try:
+                # preprocessing
+                preprocessing_span = entrypoint_tracer.start_span(
+                    "vllm.entrypoint.preprocessing",
+                    context=request_span_context,
+                    start_time=arrival_time,
+                )
+
+                io_processor = self.get_io_processor(request)
+                ctx = await self._init_ctx(
+                    io_processor, request, raw_request, trace_headers
+                )
+                await self._preprocessing_async(io_processor, ctx)
+                preprocessing_finished = time_ns()
+                preprocessing_span.end(preprocessing_finished)
+
+                # engine_call
+                engine_call_span = entrypoint_tracer.start_span(
+                    "vllm.entrypoint.engine_call",
+                    context=request_span_context,
+                    start_time=preprocessing_finished,
+                )
+
+                await self._prepare_generators(ctx)
+                await self._collect_batch(ctx)
+                engine_call_finished = time_ns()
+                engine_call_span.end(engine_call_finished)
+
+                # postprocessing
+                postprocessing_span = entrypoint_tracer.start_span(
+                    "vllm.entrypoint.postprocessing",
+                    context=request_span_context,
+                    start_time=engine_call_finished,
+                )
+
+                response = await self._postprocessing_async(io_processor, ctx)
+                postprocessing_finished = time_ns()
+                if self.is_tracing_enabled:
+                    postprocessing_span.end(postprocessing_finished)
+
+                request_span.set_attributes(
+                    {
+                        SpanAttributes.GEN_AI_LATENCY_PREPROCESSING: preprocessing_finished
+                        - arrival_time,
+                        SpanAttributes.GEN_AI_LATENCY_ENGINE_CALL: engine_call_finished
+                        - preprocessing_finished,
+                        SpanAttributes.GEN_AI_LATENCY_POSTPROCESSING: postprocessing_finished
+                        - engine_call_finished,
+                    }
+                )
+
+                return response
+            except Exception as e:
+                request_span.set_status(get_status_error())
+                request_span.record_exception(e)
+                raise e
+            finally:
+                request_span.end()
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
@@ -103,6 +218,7 @@ class PoolingServingBase(ABC):
         io_processor: PoolingIOProcessor,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
+        trace_headers: Mapping[str, str] | None = None,
     ):
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
@@ -111,10 +227,10 @@ class PoolingServingBase(ABC):
         pooling_params = io_processor.create_pooling_params(request)
         ctx = PoolingServeContext(
             request=request,
-            raw_request=raw_request,
             model_name=model_name,
             pooling_params=pooling_params,
             request_id=request_id,
+            trace_headers=trace_headers,
         )
 
         self._validate_request(ctx)
@@ -129,12 +245,6 @@ class PoolingServingBase(ABC):
             raise ValueError("Engine prompts not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        trace_headers = (
-            None
-            if ctx.raw_request is None
-            else await self._get_trace_headers(ctx.raw_request.headers)
-        )
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
@@ -170,7 +280,7 @@ class PoolingServingBase(ABC):
                 params,
                 prompt_request_id,
                 lora_request=ctx.lora_request,
-                trace_headers=trace_headers,
+                trace_headers=ctx.trace_headers,
                 priority=getattr(ctx.request, "priority", 0),
             )
 
@@ -263,11 +373,14 @@ class PoolingServingBase(ABC):
 
     async def _get_trace_headers(
         self,
-        headers: Headers,
+        raw_request: Request | None = None,
     ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        if raw_request is None:
+            return None
 
-        if is_tracing_enabled:
+        headers = raw_request.headers
+
+        if self.is_tracing_enabled:
             return extract_trace_headers(headers)
 
         if contains_trace_headers(headers):

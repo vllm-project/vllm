@@ -32,7 +32,10 @@ try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
+        NonRecordingSpan,
         SpanKind,  # noqa: F401
+        Status,
+        StatusCode,
         Tracer,
         set_tracer_provider,
     )
@@ -51,6 +54,7 @@ except ImportError:
     inject = None  # type: ignore
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
+    NonRecordingSpan = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
@@ -263,3 +267,36 @@ def propagate_trace_to_env():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = original_value
+
+
+def init_otel_trace_provider(
+    otlp_traces_endpoint: str,
+    extra_attributes: dict[str, str] | None = None,
+):
+    if not _IS_OTEL_AVAILABLE:
+        return None
+
+    # Store the endpoint in environment so child processes can inherit it
+    os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
+
+    resource_attrs = {"vllm.process_id": str(os.getpid())}
+    if extra_attributes:
+        resource_attrs.update(extra_attributes)
+    resource = Resource.create(resource_attrs)
+
+    trace_provider = TracerProvider(resource=resource)
+    span_exporter = get_span_exporter(otlp_traces_endpoint)
+    trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+    set_tracer_provider(trace_provider)
+
+    atexit.register(trace_provider.shutdown)
+
+    return trace_provider
+
+
+def get_span_context(span):
+    return trace.set_span_in_context(NonRecordingSpan(span.get_span_context()))
+
+
+def get_status_error():
+    return Status(StatusCode.ERROR)

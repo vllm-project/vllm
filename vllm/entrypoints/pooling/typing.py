@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeAlias, TypeVar
 
-from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
@@ -69,7 +68,6 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     request: PoolingRequestT
-    raw_request: Request | None = None
     model_name: str
     request_id: str
     pooling_params: PoolingParams | list[PoolingParams]
@@ -82,6 +80,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
         None
     )
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
+
+    # for Observability
+    trace_headers: Mapping[str, str] | None
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence[EngineInput] | None = None
