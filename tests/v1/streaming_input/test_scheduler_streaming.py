@@ -53,6 +53,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
@@ -168,6 +169,33 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.prompt_token_ids == [1, 2, 3, 4, 5, 6]
         assert session._all_token_ids == [1, 2, 3, 4, 5, 6]
         assert session.sampling_params.max_tokens == 10
+        assert session.status == RequestStatus.WAITING
+
+    def test_update_request_as_session_clears_async_spec_state(self):
+        scheduler = create_scheduler()
+
+        session = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[1, 2, 3],
+        )
+        session.append_output_token_ids([10, 11])
+        session.num_computed_tokens = 4
+        session.spec_token_ids = [101, 102, 103]
+        session.num_output_placeholders = 4
+
+        new_request = DummyRequest(
+            request_id="session",
+            prompt_token_ids=[4, 5],
+        )
+        update = StreamingUpdate.from_request(new_request)
+
+        scheduler._update_request_as_session(session, update)
+
+        assert session._all_token_ids == [1, 2, 3, 10, 4, 5]
+        assert session.prompt_token_ids == [1, 2, 3, 10, 4, 5]
+        assert session.spec_token_ids == []
+        assert session.num_output_placeholders == 0
+        assert session.allow_async_spec_reuse is False
         assert session.status == RequestStatus.WAITING
 
     def test_update_request_as_session_with_multimodal(self):
