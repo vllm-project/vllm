@@ -42,6 +42,7 @@ class SingleTypeKVCacheManager(ABC):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         max_admission_blocks_per_request: int | None = None,
+        use_eagle: bool = False,
     ) -> None:
         """
         Initializes the SingleTypeKVCacheManager.
@@ -55,6 +56,12 @@ class SingleTypeKVCacheManager(ABC):
                 chunked-local); `None` (the default) means no cap, which is
                 correct for full-attention-style specs that hold every
                 block until the request finishes.
+            use_eagle: True iff speculative decoding is enabled at engine init
+                (forwarded from KVCacheCoordinator). Combined with the env var
+                VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT to gate the same-step
+                ghost-block defer. Subclasses may override
+                `_ghost_block_guard_enabled` directly (MambaManager does so to
+                keep its always-on guard from PR #29387).
         """
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
@@ -80,6 +87,20 @@ class SingleTypeKVCacheManager(ABC):
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
+
+        # Same-step ghost-block defer guard (PR #42359 / #29387).
+        # When enabled, `cache_blocks` records full blocks committed during the
+        # current scheduling step and `get_num_blocks_to_allocate` defers any
+        # request whose prefix-hit tail is one of those blocks (because the
+        # GPU has not written its KV yet). Default policy: gated on env var
+        # AND `use_eagle`. MambaManager overrides this to True (always-on) in
+        # its own `__init__` after calling super().
+        from vllm import envs
+
+        self._ghost_block_guard_enabled: bool = (
+            envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT and use_eagle
+        )
+        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -115,6 +136,18 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The number of blocks to allocate.
         """
+
+        # Same-step ghost-block defer guard.
+        # If the prefix-hit tail is a block another request committed earlier
+        # in this scheduling step, its KV is not yet written on the GPU.
+        # Returning an impossible block count makes allocate_slots return None,
+        # so the scheduler defers this request to the next step.
+        if (
+            self._ghost_block_guard_enabled
+            and len(new_computed_blocks) > 0
+            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
+        ):
+            return self.block_pool.num_gpu_blocks + 1
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         if apply_admission_cap and self._max_admission_blocks_per_request is not None:
@@ -300,6 +333,17 @@ class SingleTypeKVCacheManager(ABC):
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
+        # Same-step ghost-block defer guard: record full blocks committed
+        # this step so subsequent requests in the same step can be deferred
+        # (see `get_num_blocks_to_allocate`).
+        if self._ghost_block_guard_enabled:
+            for block in self.req_to_blocks[request.request_id][
+                num_cached_blocks:num_full_blocks
+            ]:
+                if block.is_null or block.block_hash is None:
+                    continue
+                self.cached_blocks_this_step.add(block.block_hash)
+
     def free(self, request_id: str) -> None:
         """
         Free the blocks for the request.
@@ -439,60 +483,13 @@ class SingleTypeKVCacheManager(ABC):
         return 0
 
     def new_step_starts(self) -> None:
-        # do nothing by default
-        return None
+        # Same-step ghost-block defer guard: clear the per-step tracking set.
+        # No-op when the guard is disabled.
+        if self._ghost_block_guard_enabled:
+            self.cached_blocks_this_step.clear()
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        # Track block hashes committed to the cache in the current scheduling
-        # step so we can defer requests that would otherwise read KV blocks
-        # that the GPU has not yet written (same-step ghost block race).
-        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
-
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        num_cached_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens)
-        num_cached_after = self.num_cached_block.get(request.request_id, 0)
-        for block in self.req_to_blocks[request.request_id][
-            num_cached_before:num_cached_after
-        ]:
-            if block.is_null or block.block_hash is None:
-                continue
-            self.cached_blocks_this_step.add(block.block_hash)
-
-    def new_step_starts(self) -> None:
-        self.cached_blocks_this_step.clear()
-
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-    ) -> int:
-        if (
-            len(new_computed_blocks) > 0
-            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
-        ):
-            # A block at the tail of the prefix hit was committed by another
-            # request in the current scheduling step; the GPU has not written
-            # its KV yet. Return an impossible block count so the scheduler
-            # skips this request and retries in the next step (same pattern
-            # used by MambaManager, see PR #29387).
-            return self.block_pool.num_gpu_blocks + 1
-        return super().get_num_blocks_to_allocate(
-            request_id,
-            num_tokens,
-            new_computed_blocks,
-            total_computed_tokens,
-            num_tokens_main_model,
-            apply_admission_cap=apply_admission_cap,
-        )
-
     @classmethod
     def find_longest_cache_hit(
         cls,
@@ -845,7 +842,10 @@ class MambaManager(SingleTypeKVCacheManager):
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
         super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # Mamba's state-space K/V cannot tolerate same-step prefix-cache hits
+        # on not-yet-written blocks regardless of speculative decoding (see
+        # PR #29387). Override the base-class env-gated default with always-on.
+        self._ghost_block_guard_enabled = True
         self.mamba_cache_mode = kv_cache_spec.mamba_cache_mode
         self.num_speculative_blocks: int = kv_cache_spec.num_speculative_blocks
         if self.mamba_cache_mode == "align":
@@ -949,15 +949,9 @@ class MambaManager(SingleTypeKVCacheManager):
         apply_admission_cap: bool = False,
     ) -> int:
         assert isinstance(self.kv_cache_spec, MambaSpec)
-        if (
-            len(new_computed_blocks) > 0
-            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
-        ):
-            # Mamba can't rely on blocks generated by other requests in the current step
-            # To put it in the next step, we return num_gpu_blocks + 1 so
-            # that kv_cache_manager will think there is no enough blocks to allocate now
-            # and don't schedule it in the current step.
-            return self.block_pool.num_gpu_blocks + 1
+        # NOTE: same-step ghost-block defer is handled in the base class.
+        # MambaManager.__init__ sets `_ghost_block_guard_enabled = True`,
+        # so the base early-returns before this method body runs.
         if self.mamba_cache_mode != "align":
             # Allocate extra `num_speculative_blocks` blocks for
             # speculative decoding (MTP/EAGLE) with linear attention.
@@ -1098,22 +1092,6 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return num_computed_tokens - 1
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
-        num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens)
-        num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
-        if num_cached_blocks_after > num_cached_blocks_before:
-            for block in self.req_to_blocks[request.request_id][
-                num_cached_blocks_before:num_cached_blocks_after
-            ]:
-                if block.is_null:
-                    continue
-                assert block.block_hash is not None
-                self.cached_blocks_this_step.add(block.block_hash)
-
-    def new_step_starts(self) -> None:
-        self.cached_blocks_this_step.clear()
-
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
@@ -1205,6 +1183,7 @@ def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_num_batched_tokens: int,
     max_model_len: int,
+    use_eagle: bool = False,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
     manager_class = spec_manager_map[type(kv_cache_spec)]
@@ -1218,5 +1197,10 @@ def get_manager_for_kv_cache_spec(
                 max_model_len=max_model_len,
             )
         )
+    # `use_eagle` is accepted by the base SingleTypeKVCacheManager and gates
+    # the same-step ghost-block defer in combination with the env var
+    # VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT (PR #42359). MambaManager
+    # overrides the gate to always-on in its own __init__ (PR #29387).
+    kwargs["use_eagle"] = use_eagle
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager

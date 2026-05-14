@@ -73,6 +73,10 @@ class KVCacheCoordinator(ABC):
                 kv_cache_group_id=i,
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
+                # Forward spec-decode bit so FullAttentionManager can combine
+                # it with VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT to decide
+                # whether to defer same-step ghost-block hits (PR #42359).
+                use_eagle=use_eagle,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
