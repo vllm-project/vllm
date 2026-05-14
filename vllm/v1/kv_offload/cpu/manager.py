@@ -95,7 +95,11 @@ class CPUOffloadingManager(OffloadingManager):
     # --- OffloadingManager interface ---
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        if self.counts is not None:
+        block = self._policy.get(key)
+        if self.counts is not None and block is None:
+            # Only track blocks not yet stored: stored blocks are already past
+            # the threshold decision and would otherwise pollute the bounded
+            # tracker with entries that serve no purpose.
             if key in self.counts:
                 self.counts.move_to_end(key)
                 self.counts[key] += 1
@@ -103,7 +107,6 @@ class CPUOffloadingManager(OffloadingManager):
                 if len(self.counts) >= self.max_tracker_size:
                     self.counts.popitem(last=False)
                 self.counts[key] = 1
-        block = self._policy.get(key)
         if block is None:
             return False
         if not block.is_ready:
@@ -222,6 +225,12 @@ class CPUOffloadingManager(OffloadingManager):
                     removed=False,
                 )
             )
+
+    def request_finished(self, req_context: ReqContext) -> None:
+        # counts only holds keys for blocks not yet stored (lookup skips stored
+        # blocks), so there is no per-request state to clean up here. The
+        # LRU-bounded tracker evicts stale sub-threshold entries automatically.
+        pass
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:

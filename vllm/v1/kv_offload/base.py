@@ -209,6 +209,15 @@ class OffloadingManager(ABC):
         """
         return
 
+    def request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called by the scheduler when a request has finished.
+
+        Args:
+            req_context: the context object for the finished request.
+        """
+        return
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         """
         Take the offloading events from the manager.
