@@ -5,10 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -29,9 +26,15 @@ def rms_norm_input_quant(
     norm: torch.nn.Module,
     x: torch.Tensor,
     residual: torch.Tensor | None,
-    linear: torch.nn.Module,
+    linear: torch.nn.Module | None = None,
+    *,
+    prev_linear: torch.nn.Module | None = None,
 ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
-    if residual is not None and get_tensor_model_parallel_world_size() > 1:
+    if (
+        prev_linear is not None
+        and getattr(prev_linear, "tp_size", 1) > 1
+        and not getattr(prev_linear, "reduce_results", True)
+    ):
         x = tensor_model_parallel_all_reduce(x)
 
     quant_key = getattr(linear, "input_quant_key", None)

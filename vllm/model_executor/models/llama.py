@@ -329,6 +329,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.self_attn.qkv_proj,
+            prev_linear=self.mlp.down_proj,
         )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
@@ -337,6 +338,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.mlp.gate_up_proj,
+            prev_linear=self.self_attn.o_proj,
         )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -431,12 +433,21 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
 
+        last_local_down_proj = self.layers[self.end_layer - 1].mlp.down_proj
+
         if not get_pp_group().is_last_rank:
+            # TODO: with reduce_results=False on down_proj, hidden_states is the
+            # per-rank partial sum. For PP+TP, AR before crossing PP boundaries.
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states, _ = rms_norm_input_quant(
+            self.norm,
+            hidden_states,
+            residual,
+            prev_linear=last_local_down_proj,
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

@@ -229,6 +229,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.self_attn.qkv_proj,
+            prev_linear=self.mlp.down_proj,
         )
         hidden_states = self.self_attn(
             positions=positions,
@@ -240,6 +241,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states,
             residual,
             self.mlp.gate_up_proj,
+            prev_linear=self.self_attn.o_proj,
         )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
