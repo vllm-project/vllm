@@ -360,7 +360,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
             return
 
@@ -497,7 +497,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),
             input_global_scale2=getattr(layer, "w2_input_global_scale", None),
             is_k_full=self.is_k_full,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
+            routing_tables=layer._expert_routing_tables(),
         )
 
     def get_fused_moe_quant_config(
