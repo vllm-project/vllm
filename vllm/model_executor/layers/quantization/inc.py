@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -429,7 +430,23 @@ class INCConfig(QuantizationConfig):
             raise NotImplementedError(
                 "INC W4A16 on XPU only supports symmetric quantization for now."
             )
+
         if isinstance(layer, (LinearBase, ParallelLMHead)):
+            is_ark_available, ark_error, _, _ = get_ark_state()
+            if is_ark_available:
+                return INCARKLinearMethod(
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    sym=sym,
+                )
+
+            logger.debug(
+                "ARK backend is unavailable for layer %s; "
+                "falling back to the default XPU INC path. Error: %s",
+                prefix,
+                ark_error or "unknown error",
+            )
+
             return INCXPULinearMethod(
                 weight_bits=weight_bits,
                 group_size=group_size,
@@ -455,6 +472,21 @@ class INCConfig(QuantizationConfig):
                 "INC W4A16 on CPU only supports symmetric quantization for now."
             )
         if isinstance(layer, (LinearBase, ParallelLMHead)):
+            is_ark_available, ark_error, _, _ = get_ark_state()
+            if is_ark_available:
+                return INCARKLinearMethod(
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    sym=sym,
+                )
+
+            logger.debug(
+                "ARK backend is unavailable for layer %s; "
+                "falling back to the default CPU INC path. Error: %s",
+                prefix,
+                ark_error or "unknown error",
+            )
+
             return self.apply_gptq_quant_layer(layer, prefix)
         return None
 
@@ -465,6 +497,7 @@ class INCConfig(QuantizationConfig):
                     layer_name == prefix or layer_name == f"model.{prefix}"
                 ) and self.extra_config[layer_name].get("bits", 16) >= 16:
                     return UnquantizedLinearMethod()
+
         if current_platform.is_xpu():
             return self.apply_xpu_w4a16_quant_layer(layer, prefix)
         is_gptq = "gptq" in self.packing_format or "gptq" in self.backend
@@ -493,24 +526,76 @@ class INCConfig(QuantizationConfig):
         return None
 
 
-class INCXPULinearMethod(LinearMethodBase):
-    """XPU linear method for INC w4a16 GPTQ quantization (symmetric only).
-
-    Repacks GPTQ weights from [in_packed, out] to oneDNN [out, in_packed]
-    layout and calls torch.ops._xpu_C.int4_gemm_w4a16.
-
-    GPTQ format: qweight [in_packed, out] with sequential nibble order.
-
-    Note: Asymmetric quantization (sym=false) is not for now.
-
-    FIXME(yiliu30): Refine the implementation to reuse XPUwNa16LinearKernel.
-    """
-
+class INCXPULinearBase(LinearMethodBase):
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.sym = sym
         self.pack_factor = 32 // weight_bits
+
+    def _create_inc_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        params_dtype: torch.dtype,
+        weight_loader: Any,
+        group_size: int,
+        pack_factor: int,
+    ) -> None:
+        output_size_per_partition = sum(output_partition_sizes)
+        scales_and_zp_size = input_size_per_partition // group_size
+
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // pack_factor,
+                output_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        scales = GroupQuantScaleParameter(
+            data=torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
+
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition // pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("scales", scales)
+        layer.register_parameter("qzeros", qzeros)
+
+        g_idx = RowvLLMParameter(
+            data=torch.tensor(
+                [i // group_size for i in range(input_size_per_partition)],
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("g_idx", g_idx)
 
     def create_weights(
         self,
@@ -522,64 +607,55 @@ class INCXPULinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        del output_size  # Unused.
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        scales_and_zp_size = input_size_per_partition // self.group_size
-
-        # GPTQ: qweight [in // pack_factor, out] packed along input dim
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=0,
-            packed_factor=self.pack_factor,
-            weight_loader=weight_loader,
-        )
-        # scales: [num_groups, out] params_dtype
-        scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            input_dim=0,
-            output_dim=1,
-            weight_loader=weight_loader,
-        )
-        # qzeros: [num_groups, out // pack_factor] int32
-        qzeros = PackedvLLMParameter(
-            data=torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition // self.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.pack_factor,
-            weight_loader=weight_loader,
+        self._create_inc_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            params_dtype=params_dtype,
+            weight_loader=extra_weight_attrs.get("weight_loader"),
+            group_size=self.group_size,
+            pack_factor=self.pack_factor,
         )
 
-        layer.register_parameter("qweight", qweight)
-        layer.register_parameter("scales", scales)
-        layer.register_parameter("qzeros", qzeros)
 
-        # GPTQ checkpoints may include g_idx for activation reordering.
-        # Register it so the weight loader doesn't error on unexpected keys.
-        g_idx = RowvLLMParameter(
-            data=torch.tensor(
-                [i // self.group_size for i in range(input_size_per_partition)],
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("g_idx", g_idx)
+@lru_cache(maxsize=1)
+def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
+    """Return ARK availability, error details, cached instance, and QuantLinear."""
+    try:
+        import auto_round_kernel
+        from auto_round_kernel.qlinear import QuantLinear
+
+        logger.info("Successfully imported auto_round_kernel.")
+    except ImportError as error:
+        return False, str(error), None, None
+
+    ark_loader = getattr(auto_round_kernel, "_ark_instance", None)
+    if not callable(ark_loader):
+        return False, "auto_round_kernel does not expose _ark_instance().", None, None
+
+    try:
+        ark_instance = ark_loader()
+    except Exception as error:
+        return False, str(error), None, None
+
+    if ark_instance is None:
+        return False, "auto_round_kernel._ark_instance() returned None.", None, None
+
+    return True, None, ark_instance, QuantLinear
+
+
+class INCXPULinearMethod(INCXPULinearBase):
+    """XPU linear method for INC w4a16 GPTQ quantization (symmetric only).
+
+    Repacks GPTQ weights from [in_packed, out] to oneDNN [out, in_packed]
+    layout and calls torch.ops._xpu_C.int4_gemm_w4a16.
+
+    GPTQ format: qweight [in_packed, out] with sequential nibble order.
+
+    Note: Asymmetric quantization (sym=false) is not for now.
+
+    FIXME(yiliu30): Refine the implementation to reuse XPUwNa16LinearKernel.
+    """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack GPTQ weights into kernel-ready NT layout."""
@@ -624,3 +700,104 @@ class INCXPULinearMethod(LinearMethodBase):
             None,  # g_idx not needed: desc_act is always False for INC models
         )
         return out.reshape(out_shape)
+
+
+class INCARKLinearMethod(INCXPULinearBase):
+    """XPU & CPU w4a16 linear method for INC quantization utilizing the ARK backend.
+
+    See: https://github.com/intel/auto-round/blob/main/auto_round_extension/ark/README.md
+
+    Repacks GPTQ/INC weights into ARK's layout.
+    """
+
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
+
+        is_available, error_str, _, quant_linear_cls = get_ark_state()
+        if not is_available or quant_linear_cls is None:
+            reason = error_str or "unknown error"
+            raise ImportError(f"Failed to import auto_round_kernel. {reason}")
+
+        self.QuantLinear = quant_linear_cls
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+        layer.in_features = input_size_per_partition
+        layer.out_features = sum(output_partition_sizes)
+        layer.params_dtype = params_dtype
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(layer, "input_size_per_partition"):
+            in_features = layer.input_size_per_partition
+        elif hasattr(layer, "input_size"):
+            in_features = layer.input_size
+        else:
+            raise AttributeError("Cannot determine in_features for layer.")
+
+        if hasattr(layer, "output_partition_sizes"):
+            out_features = sum(layer.output_partition_sizes)
+        elif hasattr(layer, "output_size_per_partition"):
+            out_features = layer.output_size_per_partition
+        elif hasattr(layer, "output_size"):
+            out_features = layer.output_size
+        else:
+            out_features = layer.scales.shape[-1]
+
+        ark_linear = self.QuantLinear(
+            bits=self.weight_bits,
+            group_size=self.group_size,
+            sym=self.sym,
+            in_features=in_features,
+            out_features=out_features,
+            bias=layer.bias is not None,
+            weight_dtype=layer.params_dtype,
+        )
+
+        ark_linear.to(layer.qweight.device)
+
+        with torch.no_grad():
+            ark_linear.qweight.copy_(layer.qweight.detach())
+
+            if hasattr(layer, "qzeros") and layer.qzeros is not None:
+                ark_linear.qzeros.copy_(layer.qzeros.detach())
+            else:
+                ark_linear.qzeros = None
+
+            ark_linear.scales.copy_(layer.scales.detach())
+
+            if hasattr(layer, "bias") and layer.bias is not None:
+                ark_linear.bias.copy_(layer.bias.detach())
+
+        ark_linear.post_init()
+
+        layer.ark_linear = ark_linear
+
+        del layer.qweight
+        if hasattr(layer, "qzeros"):
+            del layer.qzeros
+        del layer.scales
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return layer.ark_linear.forward(x)
