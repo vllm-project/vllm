@@ -4983,14 +4983,23 @@ class GPUModelRunner(
                 # Resolve the MoE model, unwrapping VLM wrappers if needed.
                 # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
                 # actual MoE language model but don't implement
-                # MixtureOfExperts themselves.
-                moe_candidate = self.model
-                if not is_mixture_of_experts(moe_candidate) and isinstance(
-                    moe_candidate, SupportsMultiModal
-                ):
-                    moe_candidate = moe_candidate.get_language_model()
-                if is_mixture_of_experts(moe_candidate):
-                    self._moe_model = moe_candidate
+                # MixtureOfExperts themselves. Only attempt the unwrap when
+                # EPLB is enabled, since `get_language_model()` may raise
+                # NotImplementedError for VLMs whose language module does not
+                # expose `embed_input_ids` (e.g. NemotronParse).
+                if self.parallel_config.enable_eplb:
+                    moe_candidate: nn.Module | None = self.model
+                    if not is_mixture_of_experts(moe_candidate) and isinstance(
+                        moe_candidate, SupportsMultiModal
+                    ):
+                        try:
+                            moe_candidate = moe_candidate.get_language_model()
+                        except NotImplementedError:
+                            moe_candidate = None
+                    if moe_candidate is not None and is_mixture_of_experts(
+                        moe_candidate
+                    ):
+                        self._moe_model = moe_candidate
 
                 if (
                     self._moe_model is not None
