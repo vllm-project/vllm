@@ -621,9 +621,15 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Detect If Mixed Precision
         if self._is_nvfp4_format(weight_quant):
-            return CompressedTensorsW4A4Fp4(
-                use_a16=input_quant is None or not self._is_nvfp4_format(input_quant)
-            )
+            if input_quant is None:
+                return CompressedTensorsW4A4Fp4(use_a16=True)
+
+            if not self._is_nvfp4_format(input_quant):
+                raise ValueError(
+                    "Only NVFP4 format supported for weights "
+                    "quantized with NVFP4 format."
+                )
+            return CompressedTensorsW4A4Fp4()
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A4Mxfp4()
