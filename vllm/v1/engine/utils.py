@@ -23,7 +23,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_ports_list,
+    get_open_zmq_ipc_path,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -36,6 +40,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
+MULTI_API_SERVER_ZMQ_PORT_OFFSET = 1000
 
 
 class CoreEngineState(Enum):
@@ -978,16 +983,40 @@ def get_engine_zmq_addresses(
     if parallel_config.enable_elastic_ep:
         client_local_only = False
 
-    return EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-    )
+    if client_local_only:
+        return EngineZmqAddresses(
+            inputs=[
+                get_engine_client_zmq_addr(client_local_only, host)
+                for _ in range(num_api_servers)
+            ],
+            outputs=[
+                get_engine_client_zmq_addr(client_local_only, host)
+                for _ in range(num_api_servers)
+            ],
+        )
+    else:
+        # pre-allocate TCP ports up front for the multi-api-server case;
+        # `get_open_port` observes a port as free but does not reserve it, so
+        # independent calls can hand the same port to multiple servers.
+        start_port = (
+            envs.VLLM_PORT + MULTI_API_SERVER_ZMQ_PORT_OFFSET
+            if envs.VLLM_PORT is not None
+            else None
+        )
+        pool = get_open_ports_list(2 * num_api_servers, start_port=start_port)
+        input_ports = pool[:num_api_servers]
+        output_ports = pool[num_api_servers:]
+
+        return EngineZmqAddresses(
+            inputs=[
+                get_engine_client_zmq_addr(client_local_only, host, port=p)
+                for p in input_ports
+            ],
+            outputs=[
+                get_engine_client_zmq_addr(client_local_only, host, port=p)
+                for p in output_ports
+            ],
+        )
 
 
 @contextlib.contextmanager

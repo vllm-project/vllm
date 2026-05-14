@@ -166,25 +166,30 @@ def get_open_port() -> int:
     return _get_open_port()
 
 
-def get_open_ports_list(count: int = 5) -> list[int]:
+def get_open_ports_list(count: int = 5, start_port: int | None = None) -> list[int]:
     """Get a list of unique open ports.
 
-    When VLLM_PORT is set, scans upward from that port, advancing
-    the start position after each find so every port is unique.
+    When ``start_port`` is provided (``VLLM_PORT`` is set as a fallback),
+    scans upward from that port. Otherwise the first port is OS-assigned and
+    subsequent ports scan upward from it. The scan position advances after
+    each returned port so the batch is guaranteed unique. Ports falling
+    inside the DP master reserved range are skipped.
     """
-    ports_set = set[int]()
-    if envs.VLLM_PORT is not None:
-        next_port = envs.VLLM_PORT
-        for _ in range(count):
-            port = _get_open_port(start_port=next_port, max_attempts=1000)
-            ports_set.add(port)
-            next_port = port + 1
-        return list(ports_set)
-    else:
-        while len(ports_set) < count:
-            ports_set.add(get_open_port())
-
-    return list(ports_set)
+    ports: list[int] = []
+    next_port = start_port if start_port is not None else envs.VLLM_PORT
+    while len(ports) < count:
+        port = _get_open_port(
+            start_port=next_port,
+            max_attempts=1000 if next_port is not None else None,
+        )
+        next_port = port + 1
+        if "VLLM_DP_MASTER_PORT" in os.environ:
+            dp_master_port = envs.VLLM_DP_MASTER_PORT
+            reserved_port_range = range(dp_master_port, dp_master_port + 10)
+            if port in reserved_port_range:
+                continue
+        ports.append(port)
+    return ports
 
 
 def _get_open_port(
