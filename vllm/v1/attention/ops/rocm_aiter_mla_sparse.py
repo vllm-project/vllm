@@ -9,11 +9,14 @@ import torch
 import torch.nn.functional as F
 
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+
+logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942
@@ -381,8 +384,19 @@ def rocm_fp8_paged_mqa_logits(
     batch_size, next_n, heads, head_dim = q_fp8.shape
     num_blocks, block_size, _, _ = kv_cache_fp8.shape
 
-    if rocm_aiter_ops.is_enabled():
+    # AITER's paged MQA logits kernel requires heads >= 16. For smaller head
+    # counts (e.g. heads=8 with TP=8 on a 64-head model like GLM-5), fall back
+    # to the PyTorch reference. Upstream: https://github.com/ROCm/aiter/issues/2563
+    if rocm_aiter_ops.is_enabled() and heads >= 16:
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
+    elif rocm_aiter_ops.is_enabled():
+        logger.warning_once(
+            "AITER paged MQA logits kernel does not support %d heads "
+            "(requires >= 16). Falling back to PyTorch reference. "
+            "See https://github.com/ROCm/aiter/issues/2563",
+            heads,
+            scope="local",
+        )
 
     if aiter_paged_mqa_logits_module is not None:
         if _ON_GFX942:
@@ -528,9 +542,21 @@ def rocm_fp8_mqa_logits(
     # path after aiter merge this kernel into main
     from vllm._aiter_ops import rocm_aiter_ops
 
+    heads = q.shape[1]
     aiter_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled():
+    # AITER's MQA logits kernel requires heads >= 16; fall back to the PyTorch
+    # reference for smaller head counts.
+    # Upstream: https://github.com/ROCm/aiter/issues/2563
+    if rocm_aiter_ops.is_enabled() and heads >= 16:
         aiter_mqa_logits_module = mqa_logits_module()
+    elif rocm_aiter_ops.is_enabled():
+        logger.warning_once(
+            "AITER MQA logits kernel does not support %d heads "
+            "(requires >= 16). Falling back to PyTorch reference. "
+            "See https://github.com/ROCm/aiter/issues/2563",
+            heads,
+            scope="local",
+        )
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
