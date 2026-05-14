@@ -1945,14 +1945,14 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in HumanEvalDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = HumanEvalDataset
-            args.hf_split = "test"
+            args.hf_split = args.hf_split if args.hf_split else "test"
         elif (
             args.dataset_path in GSM8KDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in GSM8KDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = GSM8KDataset
-            args.hf_subset = "main"
-            args.hf_split = "test"
+            args.hf_subset = args.hf_subset if args.hf_subset else "main"
+            args.hf_split = args.hf_split if args.hf_split else "test"
         elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
@@ -3142,7 +3142,7 @@ class MTBenchDataset(HuggingFaceDataset):
 
 class HumanEvalDataset(HuggingFaceDataset):
     """
-    MT-Bench Dataset.
+    HumanEvalDataset Dataset.
     https://huggingface.co/datasets/openai/openai_humaneval
 
     We create a single turn dataset for HumanEval.
@@ -3163,7 +3163,7 @@ class HumanEvalDataset(HuggingFaceDataset):
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
 
@@ -3223,7 +3223,7 @@ class GSM8KDataset(HuggingFaceDataset):
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
 
