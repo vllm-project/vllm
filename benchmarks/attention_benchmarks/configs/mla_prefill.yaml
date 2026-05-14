@@ -3,6 +3,7 @@
 # Compares all available MLA prefill backends:
 #   FA backends:  fa2, fa3, fa4 (FlashAttention versions)
 #   Non-FA:       flashinfer, cudnn, trtllm (Blackwell-only, require flashinfer)
+#   CuTe DSL:     tokenspeed (Blackwell + R1 dims, requires tokenspeed_mla)
 #
 # Uses cutlass_mla as the decode backend for impl construction
 # (only the prefill path is exercised).
@@ -120,6 +121,7 @@ prefill_backends:
   - flashinfer
   - cudnn
   - trtllm
+  - tokenspeed
 
 device: "cuda:0"
 repeats: 20
