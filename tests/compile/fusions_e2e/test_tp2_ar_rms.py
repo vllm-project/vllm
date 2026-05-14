@@ -79,6 +79,19 @@ def test_tp2_ar_rms_fp8_fusions(
         # This is why config forces +quant_fp8 by default
         pytest.skip("native QuantFP8 matching not supported for group quant")
 
+    # Llama-4-Scout-17B FP8 + TP=2 warmup peaks at ~75 GiB on the 80 GiB H100
+    # CI agent (only ~5 GiB free for cudagraph capture). The same case passes
+    # on B200; rely on the B200 variant of this test for coverage.
+    if (
+        "Llama-4-Scout" in model_name
+        and "fp8" in model_name.lower()
+        and not is_blackwell()
+    ):
+        pytest.skip(
+            "OOM on H100 80GB (TP=2 FP8 17B model exceeds GPU memory budget); "
+            "covered by the B200 variant of this test."
+        )
+
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"

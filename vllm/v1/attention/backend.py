@@ -812,6 +812,20 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_qk_norm_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
+        This is used by the QkNormRopeKvCachePattern to only fuse the QKNorm ops
+        with the RoPE ops and the KV cache update for implementations that support it.
+        """
+        return False
+
+    def set_fused_kv_cache_layout(self):
+        """Called by the fusion pass after confirming this layer will use
+        the fused kernel. Backends that need to adjust their KV cache read
+        path (e.g. permute strides) should override this."""
+        pass
+
     def fused_rope_kvcache_supported(self):
         """
         Does this attention implementation support RoPE+KVCache fusion.
@@ -819,6 +833,29 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the KV cache update for implementations that support it.
         """
         return False
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_qk_norm_rope_kvcache_supported` returns True, this method
+        will be called by the fused custom op. Applies QK-norm + RoPE and
+        writes K/V to the KV cache. Results are written to the pre-allocated
+        q_out and k_out tensors; V is split from QKV at the graph level.
+        """
+        raise NotImplementedError
 
     def do_rope_and_kv_cache_update(
         self,

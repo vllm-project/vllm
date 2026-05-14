@@ -1705,6 +1705,19 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         mm_parser.parse_video(str_content, uuid)
         modality = "video"
+    elif part_type == "file":
+        # OpenAI's `file` content type (file_id refs and inline file_data) is
+        # not yet supported by vLLM's chat completions pipeline. Raise a
+        # ValueError so the API returns 400 Bad Request rather than 501 Not
+        # Implemented; this signals a client-side problem (unsupported input)
+        # and avoids tripping schemathesis "Server error" checks on otherwise
+        # valid OpenAI requests.
+        raise ValueError(
+            "Content part type 'file' is not supported by vLLM. Please use "
+            "'text' or one of the supported multimodal types (image_url, "
+            "audio_url, video_url, input_audio, image_pil, image_embeds, "
+            "audio_embeds)."
+        )
     elif part_type == "tool_reference":
         # Tool references are not multimodal data — they reference deferred
         # tools and are passed through as-is for the chat template to expand.
