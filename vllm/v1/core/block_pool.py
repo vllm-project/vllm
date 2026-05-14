@@ -409,12 +409,29 @@ class BlockPool:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
+        Duplicates (same physical block object appearing more than once) are
+        collapsed so that ``ref_cnt`` is decremented exactly once per unique
+        block.  This can happen when sliding-window attention reuses a
+        physical block within one request and the caller's list still
+        contains stale references to the same object.
+
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
+        # Deduplicate by identity (same physical block object), preserving
+        # first-seen order for eviction priority.  Duplicates arise when
+        # sliding-window attention reuses a physical block within one
+        # request and the block ID appears more than once in the caller's
+        # list (see https://github.com/vllm-project/vllm/issues/42571).
+        seen: set[int] = set()
+        blocks_list: list[KVCacheBlock] = []
+        for block in ordered_blocks:
+            block_obj_id = id(block)
+            if block_obj_id not in seen:
+                seen.add(block_obj_id)
+                blocks_list.append(block)
+
         for block in blocks_list:
             block.ref_cnt -= 1
         self.free_block_queue.append_n(
