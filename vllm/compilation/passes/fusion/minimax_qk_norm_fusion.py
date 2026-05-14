@@ -26,11 +26,14 @@ is_applicable_for_range: only fires for compile_range.end <= max_decode_tokens
 so that large prefill batches fall through to the original forward_qk (= main).
 """
 
+import contextlib
+
 import torch
 import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -39,6 +42,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
@@ -46,10 +50,30 @@ from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 
-MAX_TOKEN_NUM = 2048
+# Backend selection for the fused op:
+#   "cuda" -> torch.ops._C.minimax_allreduce_rms_qk (NVIDIA TensorRT-LLM port),
+#            uses an in-tree Lamport workspace.
+#   "rocm" -> AITER's CustomAllreduce.custom_fused_qknorm_ar (ROCm/aiter#3163),
+#            uses AITER's own IPC buffers. Gated on VLLM_ROCM_USE_AITER and
+#            validated against the loaded aiter build at pass init.
+_BACKEND: str | None = None
+if current_platform.is_cuda() and hasattr(
+    torch.ops._C, "minimax_allreduce_rms_qk"
+):
+    _BACKEND = "cuda"
+elif current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+    _BACKEND = "rocm"
+
+# Largest token count the fused kernel can handle. The CUDA in-tree kernel
+# accepts up to 2048; the AITER ROCm/aiter#3163 kernel is currently capped at
+# `kMaxBlocks = 80` (csrc/include/custom_all_reduce.cuh). The pass uses this
+# as its `is_applicable_for_range` ceiling and as the compile-range endpoint
+# in `vllm/config/vllm.py` so cudagraphs above the ceiling fall through to
+# the unfused `MiniMaxText01RMSNormTP.forward_qk` chain.
+MAX_TOKEN_NUM = 80 if _BACKEND == "rocm" else 2048
 
 _MINIMAX_QK_NORM_FUSED_OP = None
-if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
+if _BACKEND is not None:
 
     def _minimax_qk_norm_fused(
         qkv: torch.Tensor,
@@ -62,28 +86,43 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
         eps: float,
         max_tokens: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm.distributed.parallel_state import get_tp_group
-        from vllm.model_executor.layers.mamba.lamport_workspace import (
-            get_allreduce_workspace,
-        )
+        if _BACKEND == "cuda":
+            from vllm.distributed.parallel_state import get_tp_group
+            from vllm.model_executor.layers.mamba.lamport_workspace import (
+                get_allreduce_workspace,
+            )
 
-        workspace = get_allreduce_workspace(
-            rank=rank,
-            world_size=nranks,
-            max_tokens=max_tokens,
-            process_group=get_tp_group().cpu_group,
+            workspace = get_allreduce_workspace(
+                rank=rank,
+                world_size=nranks,
+                max_tokens=max_tokens,
+                process_group=get_tp_group().cpu_group,
+            )
+            return torch.ops._C.minimax_allreduce_rms_qk(
+                qkv,
+                norm_weight_q,
+                norm_weight_k,
+                workspace,
+                q_size,
+                kv_size,
+                rank,
+                nranks,
+                eps,
+            )
+        # ROCm: route through AITER's custom_all_reduce instance, which the
+        # MiniMaxQKNormPass has already initialized for this TP group. Raise
+        # rather than `assert` so the check survives `python -O`; rank, nranks
+        # and max_tokens are unused on this path (workspace lives in aiter).
+        ca = rocm_aiter_ops.get_aiter_allreduce()
+        if ca is None or not hasattr(ca, "custom_fused_qknorm_ar"):
+            raise RuntimeError(
+                "MiniMaxQKNormPass ROCm path requires aiter with "
+                "CustomAllreduce.custom_fused_qknorm_ar (ROCm/aiter#3163)."
+            )
+        q_out, k_out, _v_out = ca.custom_fused_qknorm_ar(
+            qkv, norm_weight_q, norm_weight_k, eps
         )
-        return torch.ops._C.minimax_allreduce_rms_qk(
-            qkv,
-            norm_weight_q,
-            norm_weight_k,
-            workspace,
-            q_size,
-            kv_size,
-            rank,
-            nranks,
-            eps,
-        )
+        return q_out, k_out
 
     def _minimax_qk_norm_fused_fake(
         qkv: torch.Tensor,
@@ -237,7 +276,9 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
 
         if _MINIMAX_QK_NORM_FUSED_OP is None:
             logger.warning_once(
-                "minimax_allreduce_rms_qk op not found, MiniMaxQKNormPass disabled."
+                "MiniMaxQKNormPass disabled: no backend available "
+                "(CUDA op `minimax_allreduce_rms_qk` not built, and AITER "
+                "either disabled via VLLM_ROCM_USE_AITER=0 or not installed)."
             )
             return
 
@@ -283,18 +324,56 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
         )
 
         tp_rank = get_tensor_model_parallel_rank()
-        # Allocate Lamport workspace first.
         from vllm.distributed.parallel_state import get_tp_group
-        from vllm.model_executor.layers.mamba.lamport_workspace import (
-            get_allreduce_workspace,
-        )
 
-        get_allreduce_workspace(
-            rank=tp_rank,
-            world_size=tp_world,
-            max_tokens=self.max_token_num,
-            process_group=get_tp_group().cpu_group,
-        )
+        if _BACKEND == "cuda":
+            # Allocate the Lamport workspace consumed by
+            # torch.ops._C.minimax_allreduce_rms_qk.
+            from vllm.model_executor.layers.mamba.lamport_workspace import (
+                get_allreduce_workspace,
+            )
+
+            get_allreduce_workspace(
+                rank=tp_rank,
+                world_size=tp_world,
+                max_tokens=self.max_token_num,
+                process_group=get_tp_group().cpu_group,
+            )
+        else:
+            # ROCm: the AITER fused kernel needs a custom-allreduce-backed
+            # device communicator. Honour `disable_custom_all_reduce` and
+            # silently fall back to the unfused path if vLLM didn't set one
+            # up (mirrors RocmAiterAllReduceFusionPass's precedent).
+            device_comm = get_tp_group().device_communicator
+            if device_comm is None or getattr(device_comm, "ca_comm", None) is None:
+                logger.warning_once(
+                    "MiniMaxQKNormPass disabled on ROCm: custom_all_reduce "
+                    "is not available (either disable_custom_all_reduce=True "
+                    "or the device communicator is missing)."
+                )
+                return
+            # Idempotent across passes/layers; the underlying
+            # initialize_aiter_allreduce is a no-op if already constructed.
+            preexisting = rocm_aiter_ops.get_aiter_allreduce() is not None
+            rocm_aiter_ops.initialize_aiter_allreduce(
+                get_tp_group().cpu_group, self.device
+            )
+            # Track whether *we* are the owner of the AITER CustomAllreduce so
+            # __del__ only tears it down when this pass instance constructed
+            # it (avoids ripping the CA out from under a sibling fusion pass).
+            self._owns_aiter_ca = not preexisting
+            ca = rocm_aiter_ops.get_aiter_allreduce()
+            if ca is None or not hasattr(ca, "custom_fused_qknorm_ar"):
+                logger.warning_once(
+                    "MiniMaxQKNormPass disabled on ROCm: aiter "
+                    "CustomAllreduce.custom_fused_qknorm_ar is unavailable "
+                    "(requires aiter built from ROCm/aiter#3163 or later)."
+                )
+                if self._owns_aiter_ca:
+                    with contextlib.suppress(Exception):
+                        rocm_aiter_ops.destroy_aiter_allreduce()
+                    self._owns_aiter_ca = False
+                return
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="minimax_qk_norm_pass"
@@ -338,3 +417,16 @@ class MiniMaxQKNormPass(VllmPatternMatcherPass):
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, MiniMaxQKNormPattern)
+
+    def __del__(self) -> None:
+        # Only tear down the AITER CustomAllreduce if *this* pass instance
+        # constructed it; otherwise a sibling pass (e.g.
+        # RocmAiterAllReduceFusionPass) still owns and uses it.
+        if (
+            getattr(self, "disabled", True)
+            or _BACKEND != "rocm"
+            or not getattr(self, "_owns_aiter_ca", False)
+        ):
+            return
+        with contextlib.suppress(Exception):
+            rocm_aiter_ops.destroy_aiter_allreduce()

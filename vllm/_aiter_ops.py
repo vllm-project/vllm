@@ -60,6 +60,13 @@ class AiterCustomAllreduceProto(Protocol):
         registered: bool = False,
         use_1stage: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def custom_fused_qknorm_ar(
+        self,
+        qkv_in: torch.Tensor,
+        q_w: torch.Tensor,
+        k_w: torch.Tensor,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: ...
     def should_custom_ar(self, inp: torch.Tensor) -> bool: ...
 
 
@@ -1441,6 +1448,11 @@ class rocm_aiter_ops:
     def initialize_aiter_allreduce(
         cls, group: ProcessGroup, device: torch.device
     ) -> None:
+        # Idempotent: subsequent callers (e.g. multiple fusion passes
+        # initialising on the same TP group) re-use the existing instance to
+        # avoid leaking the previous CustomAllreduce's IPC handles.
+        if cls._CUSTOM_ALL_REDUCE is not None:
+            return
         try:
             from aiter.dist.device_communicators.custom_all_reduce import (
                 CustomAllreduce as AiterCustomAllreduce,

@@ -196,7 +196,10 @@ If these conditions are set, the fusion is enabled automatically for optimizatio
 !!! info
     This is a MiniMax-specific compile pass. It is currently only enabled when all of the following hold:
     the model architecture is `MiniMaxM2ForCausalLM`, tensor parallelism is enabled (`tp_size > 1`),
-    and the CUDA custom op `minimax_allreduce_rms_qk` is available. It is not enabled by default at any
+    and a fused backend is available on the current platform — either the CUDA custom op
+    `minimax_allreduce_rms_qk`, or, on ROCm, AITER's `CustomAllreduce.custom_fused_qknorm_ar`
+    (requires `VLLM_ROCM_USE_AITER=1` and an aiter build that contains
+    [ROCm/aiter#3163](https://github.com/ROCm/aiter/pull/3163)). It is not enabled by default at any
     optimization level.
 
 **What it fuses.** Fuses the MiniMax M2 Q/K normalization path that performs an all-reduce over the
@@ -218,7 +221,8 @@ vllm serve MiniMaxAI/MiniMax-M2.5 \
 
 - Pass: [`vllm/compilation/passes/fusion/minimax_qk_norm_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/minimax_qk_norm_fusion.py)
 - CUDA op: [`csrc/minimax_reduce_rms_kernel.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/minimax_reduce_rms_kernel.cu) (`minimax_allreduce_rms_qk`)
-- Workspace helper: [`vllm/model_executor/layers/mamba/lamport_workspace.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/lamport_workspace.py)
+- CUDA workspace helper: [`vllm/model_executor/layers/mamba/lamport_workspace.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/lamport_workspace.py)
+- ROCm op: AITER's `CustomAllreduce.custom_fused_qknorm_ar`, routed via [`rocm_aiter_ops`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (no in-tree workspace; aiter manages its own IPC buffers)
 
 ### Sequence Parallelism (`enable_sp`)
 
