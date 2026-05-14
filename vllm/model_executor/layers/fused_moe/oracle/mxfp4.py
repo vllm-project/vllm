@@ -932,8 +932,6 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm._aiter_ops import rocm_aiter_ops
-
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
@@ -1314,44 +1312,30 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         e, n, k = w13_weight.shape
 
-        w13_weight.view(torch.uint8).copy_(
-            w13_weight.data.view(torch.uint8)
-            .view(e, n // 2, 2, k)
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .view(e, n, k)
-        )
-        w13_weight_scale.data = (
-            w13_weight_scale.data.view(e, n // 2, 2, -1)
-            .permute(0, 2, 1, 3)
-            .contiguous()
-            .view(e, n, -1)
-        )
+        # No de-interleave: standard _load_w13 already produces
+        # [gate_all, up_all] layout.  Use aiter-native shuffle functions
+        # (matching aiter/ops/flydsl/test_flydsl_moe_a4w4.py pattern).
+        from aiter.ops.shuffle import shuffle_weight as _shuf_w
+        from aiter.utility.fp4_utils import e8m0_shuffle as _e8m0_shuf
 
-        w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
-        w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
-
-        w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
-        shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
-            num_experts,
-            True,
+        # w13 (gate+up, stage1): shuffle_weight with layout (16,16)
+        w13_weight = torch.nn.Parameter(
+            _shuf_w(w13_weight.data.view(torch.float4_e2m1fn_x2), (16, 16)),
+            requires_grad=False,
+        )
+        shuffled_w13_scale = _e8m0_shuf(
+            w13_weight_scale.view(-1, w13_weight_scale.shape[-1])
         )
 
-        w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
-        shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-            w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
-            num_experts,
-            False,
+        # w2 (down-proj, stage2): same shuffle as w13 for a4w4 fp4x2
+        # (tuning script uses shuffle_weight((16,16)) + e8m0_shuffle for both)
+        w2_weight = torch.nn.Parameter(
+            _shuf_w(w2_weight.data.view(torch.float4_e2m1fn_x2), (16, 16)),
+            requires_grad=False,
         )
-
-        if w13_bias is not None:
-            w13_bias = (
-                w13_bias.data.view(-1, n // 2, 2)
-                .permute(0, 2, 1)
-                .contiguous()
-                .view(-1, n)
-            )
+        shuffled_w2_scale = _e8m0_shuf(
+            w2_weight_scale.view(-1, w2_weight_scale.shape[-1])
+        )
 
         return (
             w13_weight,
