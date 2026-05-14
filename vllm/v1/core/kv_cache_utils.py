@@ -12,6 +12,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NewType, TypeAlias, cast, overload
 
+import torch
+
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -19,7 +21,9 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -1006,43 +1010,168 @@ def is_kv_cache_page_size_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool
     return len(page_sizes) == 1
 
 
+def _bytes_per_token(spec: AttentionSpec) -> int:
+    """Bytes per token for an AttentionSpec."""
+    full = spec.real_page_size_bytes
+    if spec.kv_quant_mode.is_per_token_head:
+        full += 2 * spec.block_size * spec.num_kv_heads * get_dtype_size(torch.float32)
+    assert full % spec.block_size == 0
+    return full // spec.block_size
+
+
+def _kernel_blocks_from_specs(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> tuple[int | MultipleOf, ...]:
+    """Single kernel-block-size tuple for the whole model.
+
+    vLLM picks one attention backend per process, so every ``AttentionSpec``
+    has the same ``supported_kernel_block_sizes`` (populated at spec-creation
+    time by the layer that knows its backend). Pull it from any attention
+    spec that has it set; the answer is identical across layers.
+    """
+    for spec in kv_cache_spec.values():
+        if isinstance(spec, AttentionSpec) and spec.supported_kernel_block_sizes:
+            return spec.supported_kernel_block_sizes
+    return ()
+
+
+def _kernel_block_size_supported(
+    supported_size: int | MultipleOf,
+    block_size: int,
+) -> bool:
+    if isinstance(supported_size, int):
+        return block_size == supported_size
+    if isinstance(supported_size, MultipleOf):
+        return block_size % supported_size.base == 0
+    raise ValueError(f"Unknown supported kernel block size: {supported_size}")
+
+
+def _largest_supported_kernel_block_that_fits(
+    supported_sizes: tuple[int | MultipleOf, ...],
+    max_block_size: int,
+) -> int | None:
+    candidates: list[int] = []
+    for supported_size in supported_sizes:
+        if isinstance(supported_size, int):
+            candidate = supported_size
+        elif isinstance(supported_size, MultipleOf):
+            candidate = (max_block_size // supported_size.base) * supported_size.base
+        else:
+            raise ValueError(f"Unknown supported kernel block size: {supported_size}")
+        if candidate > 0 and candidate <= max_block_size:
+            candidates.append(candidate)
+    return max(candidates, default=None)
+
+
+def _minimal_page_bytes_for(
+    spec: KVCacheSpec, kernel_blocks: tuple[int | MultipleOf, ...]
+) -> int:
+    """Smallest page (bytes) the spec can produce.
+
+    AttentionSpec: smallest int kernel block × per_token.
+    MambaSpec: its unpadded page.
+    """
+    if isinstance(spec, AttentionSpec):
+        min_block = min(s if isinstance(s, int) else s.base for s in kernel_blocks)
+        return _bytes_per_token(spec) * min_block
+    if isinstance(spec, MambaSpec):
+        return sum(
+            math.prod(shape) * get_dtype_size(dtype)
+            for shape, dtype in zip(spec.shapes, spec.dtypes)
+        )
+    return spec.page_size_bytes
+
+
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
-    """
-    Unify the page size of the given KVCacheSpec. If the page size of all layers
-    are the same, return the original KVCacheSpec. If not same, unify the page
-    size by increasing the block size of layers with smaller page size. Raise
-    NotImplementedError if failed to unify the page size.
+    """Pad / scale each spec so they share one page_size_bytes target.
 
-    Args:
-        kv_cache_spec: The KVCacheSpec of each attention layer in the model
-
-    Returns:
-        The updated KVCacheSpec with the same page_size_bytes.
+    Target = ``max(max(spec.page_size_bytes), max(spec.minimal_page_bytes))``.
+    The minimal-page floor lets every spec stay at a kernel-supported
+    block_size — if all current pages are smaller than some spec's
+    smallest realizable page, primary scales up so the target reaches it.
+    AttentionSpecs scale via block_size or fall back to padding via
+    ``page_size_padded``; MambaSpec is pad-only.
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     if len(page_sizes) <= 1:
-        # All layers have the same page size, no need to unify.
         return kv_cache_spec
 
-    max_page_size = max(page_sizes)
-    new_kv_cache_spec = {}
+    # All attention layers in a vLLM model share one backend, so the supported
+    # kernel block sizes are the same for every ``AttentionSpec``. Pull the
+    # tuple once from any populated spec and reuse for every layer below.
+    kernel_blocks = _kernel_blocks_from_specs(kv_cache_spec)
+
+    max_page_bytes = max(s.page_size_bytes for s in kv_cache_spec.values())
+    minimal_page_bytes_required = max(
+        _minimal_page_bytes_for(s, kernel_blocks) for s in kv_cache_spec.values()
+    )
+    floor = max(max_page_bytes, minimal_page_bytes_required)
+
+    # Round up to a multiple of primary.natural_page_bytes so primary
+    # always clean-scales (block_size grows to target/per_token) instead
+    # of falling to padding. Padding primary wastes memory — primary
+    # is the densest spec and dominates the total KV footprint.
+    scalable = [s for s in kv_cache_spec.values() if isinstance(s, AttentionSpec)]
+    if scalable:
+        primary = min(scalable, key=_bytes_per_token)
+        primary_natural = _bytes_per_token(primary) * primary.block_size
+        target = ((floor + primary_natural - 1) // primary_natural) * primary_natural
+    else:
+        target = floor
+
+    new_kv_cache_spec: dict[str, KVCacheSpec] = {}
     for layer_name, layer_spec in kv_cache_spec.items():
-        if layer_spec.page_size_bytes == max_page_size:
-            new_kv_cache_spec[layer_name] = layer_spec
-        else:
-            layer_page_size = layer_spec.page_size_bytes
-            if max_page_size % layer_page_size != 0:
-                raise NotImplementedError(
-                    "The page size of the layer is not divisible by the "
-                    "maximum page size. Cannot unify by adjusting block_size."
-                )
-            ratio = max_page_size // layer_page_size
-            new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
+        if isinstance(layer_spec, AttentionSpec):
+            per_token = _bytes_per_token(layer_spec)
+            # Try clean block_size scaling first; preserve original block_size
+            # as a divisor.
+            if target % per_token == 0:
+                new_block = target // per_token
+                if new_block % layer_spec.block_size == 0:
+                    new_spec = replace(
+                        layer_spec,
+                        block_size=new_block,
+                        page_size_padded=None,
+                    )
+                    assert new_spec.page_size_bytes == target
+                    new_kv_cache_spec[layer_name] = new_spec
+                    continue
+            # Padding fallback. block_size must remain kernel-supported,
+            # else the runner's strided view + kernel split is out of bounds.
+            assert kernel_blocks, (
+                f"{layer_name}: no supported_kernel_block_sizes available for "
+                "page-size unification padding fallback"
+            )
+            assert any(
+                _kernel_block_size_supported(s, layer_spec.block_size)
+                for s in kernel_blocks
+            ), f"{layer_name}: block_size={layer_spec.block_size} unsupported by kernel"
+            pad_block = layer_spec.block_size
+            largest_supported_block = _largest_supported_kernel_block_that_fits(
+                kernel_blocks,
+                target // per_token,
+            )
+            if largest_supported_block is not None:
+                pad_block = max(pad_block, largest_supported_block)
+            new_spec = replace(
+                layer_spec, block_size=pad_block, page_size_padded=target
+            )
+            assert new_spec.page_size_bytes == target
             new_kv_cache_spec[layer_name] = new_spec
+        elif isinstance(layer_spec, MambaSpec):
+            if layer_spec.page_size_bytes == target:
+                new_kv_cache_spec[layer_name] = layer_spec
+            else:
+                padded_mamba = replace(layer_spec, page_size_padded=target)
+                assert padded_mamba.page_size_bytes == target
+                new_kv_cache_spec[layer_name] = padded_mamba
+        else:
+            raise NotImplementedError(
+                f"Cannot unify spec_type={type(layer_spec).__name__} "
+                f"for layer {layer_name!r}"
+            )
     return new_kv_cache_spec
 
 
@@ -1393,6 +1522,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     kv_quant_mode=spec.kv_quant_mode,
                     sliding_window=spec.sliding_window,
                     page_size_padded=spec.page_size_padded,
+                    supported_kernel_block_sizes=spec.supported_kernel_block_sizes,
                 )
             elif isinstance(spec, ChunkedLocalAttentionSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
@@ -1402,6 +1532,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     dtype=spec.dtype,
                     attention_chunk_size=spec.attention_chunk_size,
                     page_size_padded=spec.page_size_padded,
+                    supported_kernel_block_sizes=spec.supported_kernel_block_sizes,
                 )
 
     if not (

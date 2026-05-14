@@ -91,6 +91,22 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
     )
 
 
+def _smallest_kernel_block(
+    attn_backend: "type[AttentionBackend]", fallback: int
+) -> int:
+    """Smallest int kernel block size the backend supports."""
+    from vllm.v1.attention.backend import MultipleOf
+
+    sizes = attn_backend.get_supported_kernel_block_sizes()
+    ints = [s for s in sizes if isinstance(s, int)]
+    if ints:
+        return min(ints)
+    multiples = [s.base for s in sizes if isinstance(s, MultipleOf)]
+    if multiples:
+        return min(multiples)
+    return fallback
+
+
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
     """Sets default quantization scales for the layer."""
     if register_buffer:
@@ -564,18 +580,29 @@ class Attention(nn.Module, AttentionLayerBase):
         # Should not be called for enc-dec or encoder-only attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
+        # Backend's supported kernel block sizes — carry on the spec so the
+        # page-size unification pass can read it without needing to look the
+        # layer up in ``static_forward_context`` (which doesn't exist in the
+        # engine-core process when running under MultiprocExecutor).
+        kernel_blocks = tuple(self.attn_backend.get_supported_kernel_block_sizes())
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
             )
+            # SW chooses its own block_size (starts at the backend's smallest
+            # kernel-supported size) so the user's ``--block-size`` only
+            # constrains primary attention. ``unify_kv_cache_spec_page_size``
+            # decides the final value via clean-scale or padding.
+            sw_block_size = _smallest_kernel_block(self.attn_backend, block_size)
             return SlidingWindowSpec(
-                block_size=block_size,
+                block_size=sw_block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
+                supported_kernel_block_sizes=kernel_blocks,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):
             from vllm.model_executor.layers.quantization.turboquant.config import (
@@ -593,6 +620,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 tq_slot_size=tq_config.slot_size_aligned,
+                supported_kernel_block_sizes=kernel_blocks,
             )
         else:
             return FullAttentionSpec(
@@ -602,6 +630,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                supported_kernel_block_sizes=kernel_blocks,
             )
 
 
