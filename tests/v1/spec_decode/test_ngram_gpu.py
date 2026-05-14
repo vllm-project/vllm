@@ -62,7 +62,10 @@ def _make_vllm_config(
         max_model_len=max_model_len,
         enforce_eager=True,
     )
-    scheduler_config = SchedulerConfig(max_num_seqs=max_num_seqs)
+    scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs,
+        max_model_len=max_model_len,
+    )
     speculative_config = SpeculativeConfig(
         method="ngram_gpu",
         prompt_lookup_min=min_n,
