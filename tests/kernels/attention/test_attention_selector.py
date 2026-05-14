@@ -514,3 +514,45 @@ def test_non_causal_autoselect_backend():
             kv_cache_dtype=None,
         )
         assert backend.supports_non_causal()
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    [
+        "fp8_e5m2",
+        "fp8_ds_mla",
+        "fp8_inc",
+        "nvfp4",
+        "fp8_per_token_head",
+        "int8_per_token_head",
+    ],
+)
+def test_flash_attn_rejects_unhandled_kv_cache_dtypes(
+    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+):
+    """FlashAttentionBackend must not claim support for kv_cache dtypes that
+    get_fp8_dtype_for_flashattn() cannot handle.
+
+    supports_kv_cache_dtype() previously returned True for any
+    is_quantized_kv_cache() type when fp8 was available on the hardware, causing
+    the engine to select FLASH_ATTN and then crash when it encountered an
+    unrecognized dtype string.
+    """
+    import vllm.v1.attention.backends.flash_attn as fa_mod
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    monkeypatch.setattr(fa_mod, "flash_attn_supports_fp8", lambda: True)
+    assert not FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_flash_attn_accepts_handled_fp8_variants(
+    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+):
+    """FlashAttentionBackend must accept the two fp8 dtypes it can actually
+    handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""
+    import vllm.v1.attention.backends.flash_attn as fa_mod
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    monkeypatch.setattr(fa_mod, "flash_attn_supports_fp8", lambda: True)
+    assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)

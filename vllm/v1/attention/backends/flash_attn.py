@@ -192,7 +192,11 @@ class FlashAttentionBackend(AttentionBackend):
         if kv_cache_dtype is None:
             return True
         if is_quantized_kv_cache(kv_cache_dtype):
-            return flash_attn_supports_fp8()
+            try:
+                cls.get_fp8_dtype_for_flashattn(kv_cache_dtype)
+                return flash_attn_supports_fp8()
+            except ValueError:
+                return False
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
     @classmethod
