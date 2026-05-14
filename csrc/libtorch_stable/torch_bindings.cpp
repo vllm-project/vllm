@@ -436,6 +436,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
+  ops.impl("silu_and_mul_with_clamp", TORCH_BOX(&silu_and_mul_clamp));
+  ops.impl("silu_and_mul_per_block_quant",
+    TORCH_BOX(&silu_and_mul_per_block_quant));
+
 
   // INT8 quantization kernels
   ops.impl("static_scaled_int8_quant", TORCH_BOX(&static_scaled_int8_quant));
