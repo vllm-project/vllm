@@ -15,6 +15,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
+- [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
 
 ## Method Selection at a Glance
 
@@ -30,10 +31,21 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
+| Custom Proposer | Varies | Varies | Bring your own proposer class (experimental). |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
+
+## Custom Proposer Backend (Experimental)
+
+You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
+Your custom class must accept a `VllmConfig` upon instantiation and implement a `propose` method.
+
+**Example configuration:**
+
+- `speculative_config.method = "custom_class"`
+- `speculative_config.model = "your_module.YourCustomProposerClass"`
 
 ## `--speculative-config` schema
 
