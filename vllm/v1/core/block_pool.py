@@ -424,8 +424,29 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
+        # Deduplicate by object identity to prevent double-free when
+        # sliding-window attention reuses a block within one request.
+        seen: set[int] = set()
+        blocks_list: list[KVCacheBlock] = []
+        num_duplicates = 0
+        for block in ordered_blocks:
+            block_obj_id = id(block)
+            if block_obj_id not in seen:
+                seen.add(block_obj_id)
+                blocks_list.append(block)
+            else:
+                num_duplicates += 1
+        if num_duplicates > 0:
+            logger.warning(
+                "free_blocks() received %d duplicate block(s) "
+                "(total=%d, unique=%d). This indicates a caller-side "
+                "bug — the same KVCacheBlock appeared multiple times "
+                "in the input.",
+                num_duplicates,
+                len(blocks_list) + num_duplicates,
+                len(blocks_list),
+            )
+
         for block in blocks_list:
             block.ref_cnt -= 1
         self.free_block_queue.append_n(
