@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -522,9 +523,39 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         self.vllm_block_size = vllm_config.cache_config.block_size
 
+        # Readonly flag file path: when this file exists, KV cache writes
+        # (STORE operations) are disabled while reads (RETRIEVE) still work.
+        # This allows dynamic switching at runtime without restarting.
+        # Usage:
+        #   Enable readonly:  touch /tmp/lmcache_readonly
+        #   Disable readonly: rm /tmp/lmcache_readonly
+        self._readonly_flag_file = os.environ.get(
+            "LMCACHE_READONLY_FLAG_FILE", "/tmp/lmcache_readonly"
+        )
+        self._static_readonly = bool(os.environ.get("LMCACHE_READONLY", False))
+
     @property
     def role(self) -> KVConnectorRole:
         return self._role
+
+    def _is_readonly(self) -> bool:
+        """Check whether KV cache is currently in readonly mode.
+
+        Readonly mode prevents any KV cache writes (STORE operations)
+        while still allowing reads (RETRIEVE). This is useful for
+        scenarios like stress testing where you don't want test traffic
+        to overwrite the existing cached KV data in the shared pool.
+
+        Dynamic switching (no service restart required):
+            Enable readonly:  ``touch /tmp/lmcache_readonly``
+            Disable readonly: ``rm /tmp/lmcache_readonly``
+
+        Returns:
+            bool: True if KV cache is in readonly mode.
+        """
+        if self._static_readonly:
+            return True
+        return os.path.exists(self._readonly_flag_file)
 
     # ==============================
     # Worker-side methods
@@ -637,6 +668,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # Don't do save in readonly mode
+        if self._is_readonly():
+            return
+
         # In MLA scenario, only the first rank of the pipeline group
         # needs to save the KV cache.
         if (
@@ -1047,6 +1082,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
+        is_readonly = self._is_readonly()
         blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         for new_request in scheduler_output.scheduled_new_reqs:
@@ -1054,6 +1090,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+
+            # Skip STORE in readonly mode
+            if is_readonly:
+                continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker, blocks_per_chunk, self.vllm_block_size
@@ -1066,6 +1106,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
+        is_readonly = self._is_readonly()
         blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -1081,6 +1122,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             # stay consistent with _process_new_requests.
             num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+
+            # Skip STORE in readonly mode
+            if is_readonly:
+                continue
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
                 request_tracker, blocks_per_chunk, self.vllm_block_size

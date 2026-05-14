@@ -680,6 +680,19 @@ class LMCacheConnectorV1Impl:
 
         self.force_skip_save = bool(os.environ.get("LMCACHE_FORCE_SKIP_SAVE", False))
 
+        # Readonly flag file path: when this file exists, KV cache writes are
+        # disabled (only reads are allowed). This allows dynamic switching at
+        # runtime without restarting the service.
+        # Usage:
+        #   Enable readonly:  touch /tmp/lmcache_readonly
+        #   Disable readonly: rm /tmp/lmcache_readonly
+        # Alternatively, set env var LMCACHE_READONLY=1 at startup for a
+        # static readonly mode.
+        self._readonly_flag_file = os.environ.get(
+            "LMCACHE_READONLY_FLAG_FILE", "/tmp/lmcache_readonly"
+        )
+        self._static_readonly = bool(os.environ.get("LMCACHE_READONLY", False))
+
         self._requests_priority: dict[str, int] = {}
 
         # TODO(baoloongmao): Internal api server & plugin framework support
@@ -713,6 +726,31 @@ class LMCacheConnectorV1Impl:
             VLLM_VERSION,
             getattr(self.lmcache_engine, "metadata", None),
         )
+
+    def _is_readonly(self) -> bool:
+        """Check whether KV cache is currently in readonly mode.
+
+        Readonly mode prevents any KV cache writes (saves) while still
+        allowing reads (loads). This is useful for scenarios like stress
+        testing where you don't want test traffic to overwrite the existing
+        cached KV data.
+
+        The readonly state is determined by (in priority order):
+        1. Static readonly: ``LMCACHE_READONLY=1`` env var set at startup.
+        2. Dynamic readonly: the flag file (default ``/tmp/lmcache_readonly``)
+           exists on disk. The file path can be customised via the
+           ``LMCACHE_READONLY_FLAG_FILE`` env var.
+
+        Dynamic switching (no service restart required):
+            Enable readonly:  ``touch /tmp/lmcache_readonly``
+            Disable readonly: ``rm /tmp/lmcache_readonly``
+
+        Returns:
+            bool: True if KV cache is in readonly mode, False otherwise.
+        """
+        if self._static_readonly:
+            return True
+        return os.path.exists(self._readonly_flag_file)
 
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
@@ -953,6 +991,10 @@ class LMCacheConnectorV1Impl:
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
+
+        if self._is_readonly():
+            # Don't do save in readonly mode
+            return
         if self._parent._connector_metadata is None:
             logger.warning(
                 "In connector.save_kv_layer, but the connector metadata is None"
@@ -1042,6 +1084,10 @@ class LMCacheConnectorV1Impl:
 
         if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
+            return
+
+        if self._is_readonly():
+            # Don't do save in readonly mode
             return
 
         if self.use_layerwise:
@@ -1306,7 +1352,16 @@ class LMCacheConnectorV1Impl:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
+        is_readonly = self._is_readonly()
+        if is_readonly:
+            logger.info(
+                "KV cache is in readonly mode, skipping all KV cache saves. "
+                "To disable readonly mode, remove the flag file: %s",
+                self._readonly_flag_file,
+            )
+        force_skip_save = (
+            self.kv_role == "kv_consumer" or self.force_skip_save or is_readonly
+        )
 
         meta = LMCacheConnectorMetadata()
 
