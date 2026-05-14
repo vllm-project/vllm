@@ -254,6 +254,16 @@ class ModelConfig:
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
+    enable_return_embed: bool = False
+    """Allow generative requests to opt in to a mean-pooled prompt embedding via
+    `SamplingParams.extra_args["return_embed"] = True`. The pooled vector
+    is shipped alongside generation in `kv_transfer_params["embed"]`.
+
+    When `False` (default), per-request `return_embed` is silently
+    ignored — no aux store is allocated, so there is zero overhead.
+
+    Limitation: Safe for single-turn / stateless workloads (RAG indexing, scoring,
+    batch completion, system-prompt sharing across opt-in requests)."""
     served_model_name: str | list[str] | None = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the

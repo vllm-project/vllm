@@ -422,6 +422,7 @@ class EngineArgs:
     convert: ConvertOption = ModelConfig.convert
     skip_tokenizer_init: bool = ModelConfig.skip_tokenizer_init
     enable_prompt_embeds: bool = ModelConfig.enable_prompt_embeds
+    enable_return_embed: bool = ModelConfig.enable_return_embed
     tokenizer_mode: TokenizerMode | str = ModelConfig.tokenizer_mode
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
@@ -815,6 +816,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--enable-prompt-embeds", **model_kwargs["enable_prompt_embeds"]
+        )
+        model_group.add_argument(
+            "--enable-return-embed", **model_kwargs["enable_return_embed"]
         )
         model_group.add_argument(
             "--served-model-name", **model_kwargs["served_model_name"]
@@ -1546,6 +1550,7 @@ class EngineArgs:
             disable_cascade_attn=self.disable_cascade_attn,
             skip_tokenizer_init=self.skip_tokenizer_init,
             enable_prompt_embeds=self.enable_prompt_embeds,
+            enable_return_embed=self.enable_return_embed,
             served_model_name=self.served_model_name,
             language_model_only=self.language_model_only,
             limit_mm_per_prompt=self.limit_mm_per_prompt,

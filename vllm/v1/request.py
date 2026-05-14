@@ -100,6 +100,10 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # Whether to mean-pool prompt hidden states and return them
+        self.return_embed: bool = False
+        # Mean-pooled prompt hidden states; populated by the runner the
+        self.embed: torch.Tensor | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -114,6 +118,9 @@ class Request:
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
+                )
+                self.return_embed = bool(
+                    sampling_params.extra_args.get("return_embed", False)
                 )
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")

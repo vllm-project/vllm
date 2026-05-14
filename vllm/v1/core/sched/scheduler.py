@@ -1253,6 +1253,7 @@ class Scheduler(SchedulerInterface):
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
+        aux_pooled_output = model_runner_output.aux_pooled_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
@@ -1344,6 +1345,12 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # Stash any newly-arrived prompt-pooled embedding
+            if aux_pooled_output is not None:
+                pooled = aux_pooled_output.get(req_id)
+                if pooled is not None:
+                    request.embed = pooled
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -1386,6 +1393,10 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params = self._free_request(request)
+                    if request.embed is not None:
+                        if kv_transfer_params is None:
+                            kv_transfer_params = {}
+                        kv_transfer_params["embed"] = request.embed.tolist()
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
