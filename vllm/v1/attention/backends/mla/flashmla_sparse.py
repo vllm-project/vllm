@@ -15,6 +15,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -879,3 +881,164 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
 
         return attn_out, None
+
+
+def build_c128a_topk_metadata(
+    positions: torch.Tensor,
+    compress_ratio: int,
+    num_decode_tokens: int,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    slot_mapping: torch.Tensor,
+    global_decode_buffer: torch.Tensor,
+    decode_lens_buffer: torch.Tensor,
+    prefill_buffer: torch.Tensor,
+    max_compressed_tokens: int = 8192,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Single kernel for all C128A tokens (decode + prefill).
+
+    Decode tokens: position → block_table lookup → global slot ids + topk_lens.
+    Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
+
+    Writes into pre-allocated buffers for CUDA graph address stability.
+    Returns slices of the buffers.
+    """
+    num_tokens = positions.shape[0]
+    num_prefill_tokens = num_tokens - num_decode_tokens
+
+    global_decode = global_decode_buffer[:num_decode_tokens]
+    decode_lens = decode_lens_buffer[:num_decode_tokens]
+    prefill_local = prefill_buffer[:num_prefill_tokens]
+
+    if num_tokens == 0:
+        return global_decode, decode_lens, prefill_local
+
+    BLOCK_SIZE = 1024
+
+    # Compute the smallest BLOCK_SIZE-aligned width that covers every
+    # in-flight token's num_compressed. When ``max_model_len`` is much
+    # larger than the actual prompts (e.g. 1M cap with 2K inputs) the
+    # original ``range(0, max_compressed_tokens, BLOCK_SIZE)`` iterated
+    # over a tail that always wrote ``-1`` for shorter contexts. Capping
+    # the inner loop at ``effective_topk`` cuts those dead iterations.
+    #
+    # This builder runs OUTSIDE the CUDA-graph-captured forward pass, so
+    # ``effective_topk`` may vary freely per call. To keep downstream
+    # (which reads the full ``max_compressed_tokens`` buffer width inside
+    # the captured forward) correct, we pre-fill the active slice with
+    # ``-1`` so the kernel-skipped tail is treated as "invalid" by the
+    # sentinel checks in the sparse MLA accumulate kernels.
+    if num_decode_tokens > 0:
+        global_decode_buffer[:num_decode_tokens].fill_(-1)
+        decode_lens_buffer[:num_decode_tokens].zero_()
+    if num_prefill_tokens > 0:
+        prefill_buffer[:num_prefill_tokens].fill_(-1)
+
+    max_pos = int(positions.max().item())
+    max_num_compressed = min(
+        max((max_pos + 1) // compress_ratio, 0),
+        max_compressed_tokens,
+    )
+    effective_topk_arg = min(
+        max_compressed_tokens,
+        cdiv(max_num_compressed, BLOCK_SIZE) * BLOCK_SIZE,
+    )
+    if effective_topk_arg == 0:
+        # Nothing to write; the fill_(-1) above already produced the
+        # correct "all-invalid" buffer state.
+        return global_decode, decode_lens, prefill_local
+
+    _build_c128a_topk_metadata_kernel[(num_tokens,)](
+        global_decode_buffer,
+        global_decode_buffer.stride(0),
+        decode_lens_buffer,
+        prefill_buffer,
+        prefill_buffer.stride(0),
+        positions,
+        compress_ratio,
+        effective_topk_arg,
+        num_decode_tokens,
+        token_to_req_indices,
+        block_table,
+        block_table.stride(0),
+        block_size,
+        slot_mapping,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    return global_decode, decode_lens, prefill_local
+
+
+@triton.jit
+def _build_c128a_topk_metadata_kernel(
+    # Decode outputs
+    global_decode_ptr,
+    global_decode_stride,
+    decode_lens_ptr,
+    # Prefill output
+    prefill_local_ptr,
+    prefill_local_stride,
+    # Inputs
+    positions_ptr,
+    compress_ratio,
+    effective_topk,
+    num_decode_tokens,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    slot_mapping_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # ``effective_topk`` is the BLOCK_SIZE-aligned cap that covers every
+    # in-flight token's ``num_compressed`` (computed by the Python
+    # builder). The caller pre-fills the active buffer slice with ``-1``
+    # so entries in ``[effective_topk, max_compressed_tokens)`` remain
+    # ``-1`` (the sentinel the downstream sparse MLA accumulate kernels
+    # use to skip invalid candidates).
+    token_idx = tl.program_id(0)
+    position = tl.load(positions_ptr + token_idx)
+    num_compressed = (position + 1) // compress_ratio
+    num_compressed = tl.minimum(num_compressed, effective_topk)
+    is_decode = token_idx < num_decode_tokens
+
+    if is_decode:
+        # --- Decode: block-table lookup → global slot ids + count ---
+        is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
+        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+        count = tl.zeros((), dtype=tl.int32)
+        for i in range(0, effective_topk, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < effective_topk
+            is_valid = offset < num_compressed
+
+            block_indices = offset // block_size
+            block_numbers = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_indices,
+                mask=mask & is_valid,
+            )
+            block_offsets = offset % block_size
+            slot_ids = block_numbers * block_size + block_offsets
+            slot_ids = tl.where(is_valid, slot_ids, -1)
+            tl.store(
+                global_decode_ptr + token_idx * global_decode_stride + offset,
+                slot_ids,
+                mask=mask,
+            )
+            count += tl.sum(is_valid.to(tl.int32), axis=0)
+
+        tl.store(
+            decode_lens_ptr + token_idx,
+            tl.where(is_valid_token, count, 0),
+        )
+    else:
+        # --- Prefill: write local indices ---
+        pfx_idx = token_idx - num_decode_tokens
+        for i in range(0, effective_topk, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < effective_topk
+            tl.store(
+                prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
+                tl.where(offset < num_compressed, offset, -1),
+                mask=mask,
+            )
