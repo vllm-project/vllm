@@ -1051,10 +1051,25 @@ def test_expand_batch_to_tokens_cpu_replace_from_to():
 
 
 def test_expand_batch_to_tokens_cpu_empty_batch():
-    """An empty batch must yield an empty tensor, not crash the kernel."""
+    """An empty batch must return initialised memory.
+
+    Two cases:
+      - ``num_tokens == 0``: an empty output.
+      - ``num_tokens > 0``: an output filled with ``replace_to`` (never
+        uninitialised ``x.new_empty``).
+    """
     x = torch.empty(0, dtype=torch.int64, device=_CPU)
     cu_num_tokens = torch.empty(0, dtype=torch.int64, device=_CPU)
-    out = expand_batch_to_tokens(x, cu_num_tokens, num_tokens=0)
-    assert out.numel() == 0
-    assert out.dtype == torch.int64
-    assert out.device.type == "cpu"
+
+    out_empty = expand_batch_to_tokens(x, cu_num_tokens, num_tokens=0)
+    assert out_empty.numel() == 0
+    assert out_empty.dtype == torch.int64
+    assert out_empty.device.type == "cpu"
+
+    out_padded = expand_batch_to_tokens(
+        x, cu_num_tokens, num_tokens=3, replace_from=0, replace_to=7
+    )
+    assert out_padded.numel() == 3
+    torch.testing.assert_close(
+        out_padded, torch.tensor([7, 7, 7], dtype=torch.int64, device=_CPU)
+    )

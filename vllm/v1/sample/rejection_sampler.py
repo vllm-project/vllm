@@ -600,8 +600,6 @@ def expand_batch_to_tokens(
     # on the first stochastic-sampling request. Use ``torch.repeat_interleave``
     # — which matches the kernel's documented semantics exactly — on CPU.
     if x.device.type == "cpu":
-        if batch_size == 0:
-            return x.new_empty(num_tokens)
         counts = cu_num_tokens.clone()
         counts[1:] -= cu_num_tokens[:-1]
         x_ = x
@@ -614,7 +612,9 @@ def expand_batch_to_tokens(
         expanded_x = torch.repeat_interleave(x_, counts.to(torch.long))
         # Pad or truncate if the caller requested ``num_tokens`` that doesn't
         # match the last cumulative count (mirrors the kernel path, which is
-        # bounded by ``MAX_NUM_TOKENS``).
+        # bounded by ``MAX_NUM_TOKENS``). The pad fills with ``replace_to``
+        # so that an empty ``x`` plus ``num_tokens > 0`` returns initialised
+        # memory rather than garbage.
         if expanded_x.numel() < num_tokens:
             pad = x.new_empty(num_tokens - expanded_x.numel())
             pad.fill_(replace_to)
