@@ -396,7 +396,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             backend=self.wna16_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=None,  # self.marlin_input_dtype,  # XXXXXXXXXXXXX
+            input_dtype=None,
             w13=layer.w13_weight_packed,
             w2=layer.w2_weight_packed,
             w13_scale=layer.w13_weight_scale,
