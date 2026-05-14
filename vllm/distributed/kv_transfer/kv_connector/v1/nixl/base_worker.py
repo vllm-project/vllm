@@ -1959,6 +1959,11 @@ class NixlBaseConnectorWorker:
             except queue.Empty:
                 break
 
+        assert not self._last_failed_recv_reqs, (
+            "_last_failed_recv_reqs not consumed; "
+            "get_request_ids_with_load_errors() was not called after "
+            "the previous get_finished()"
+        )
         self._last_failed_recv_reqs = failed_recv_reqs
 
         # Add failed requests to done_recving for scheduler tracking
@@ -2360,9 +2365,13 @@ class NixlBaseConnectorWorker:
         """
         Return and clear the set of request IDs whose KV load failed.
 
-        The failed IDs are staged by get_finished() (which drains
-        _failed_recv_reqs) and consumed here.
+        Must be called after get_finished(), which drains _failed_recv_reqs
+        and stages the IDs in _last_failed_recv_reqs.
         """
+        assert self._failed_recv_reqs.empty(), (
+            "get_request_ids_with_load_errors() must be called after "
+            "get_finished(), which drains _failed_recv_reqs"
+        )
         result = self._last_failed_recv_reqs
         self._last_failed_recv_reqs = set()
         return result
