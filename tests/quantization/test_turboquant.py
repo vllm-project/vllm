@@ -251,9 +251,14 @@ class TestTurboQuantConfig:
             hf_text_config=SimpleNamespace(num_hidden_layers=num_layers),
         )
 
-    def test_boundary_skip_layers_basic(self):
+    def test_boundary_skip_layers_default_dense_uses_all_layers(self):
         mc = self._dense_model_config(32)
         layers = TurboQuantConfig.get_boundary_skip_layers(mc)
+        assert layers == []
+
+    def test_boundary_skip_layers_explicit_guard(self):
+        mc = self._dense_model_config(32)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc, 2)
         assert layers == ["0", "1", "30", "31"]
 
     def test_boundary_skip_layers_zero(self):
@@ -262,7 +267,7 @@ class TestTurboQuantConfig:
 
     def test_boundary_skip_layers_small_model(self):
         mc = self._dense_model_config(4)
-        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc, 2)
         assert layers == ["0", "1", "2", "3"]
 
     def test_boundary_skip_layers_cap_at_half(self):
