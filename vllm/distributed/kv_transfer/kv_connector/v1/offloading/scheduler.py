@@ -138,7 +138,10 @@ class RequestOffloadState:
         self.group_states = tuple(
             RequestGroupState() for _ in self.config.kv_group_configs
         )
-        self.req_context = ReqContext(kv_transfer_params=self.req.kv_transfer_params)
+        self.req_context = ReqContext(
+            req_id=self.req.request_id,
+            kv_transfer_params=self.req.kv_transfer_params,
+        )
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
