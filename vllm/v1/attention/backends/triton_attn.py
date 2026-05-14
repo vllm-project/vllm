@@ -30,7 +30,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
+)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -138,9 +141,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
-        self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
+        # Compatible with models with non-uniform per-layer head counts.
+        self.num_heads_q = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
