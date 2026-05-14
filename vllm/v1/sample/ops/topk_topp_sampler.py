@@ -22,18 +22,19 @@ logger = init_logger(__name__)
 _FLASHINFER_MIN_VERSION = "0.2.3"
 
 
-def flashinfer_sampler_supported(logprobs_mode: LogprobsMode) -> bool:
+def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
     Returns False (with appropriate logging) when ``VLLM_USE_FLASHINFER_SAMPLER``
-    is 0, when ``logprobs_mode`` requires the post-top-k/top-p logits/logprobs
-    (which FlashInfer doesn't expose), when the platform isn't CUDA, when the
-    GPU's compute capability is unsupported, or when the installed flashinfer
-    is missing or too old. Raises ``RuntimeError`` if the user explicitly opted
-    in via the env var but FlashInfer is unavailable.
+    is 0, when the platform isn't CUDA, when the GPU's compute capability is
+    unsupported, or when the installed flashinfer is missing or too old. Raises
+    ``RuntimeError`` if the user explicitly opted in via the env var but
+    FlashInfer is unavailable.
+
+    Note: callers must additionally ensure ``logprobs_mode`` doesn't require
+    post-top-k/top-p logits/logprobs for any request whose logprobs will be
+    returned in this step, since FlashInfer doesn't expose those.
     """
-    if logprobs_mode in ("processed_logits", "processed_logprobs"):
-        return False
     if not current_platform.is_cuda():
         return False
     if not envs.VLLM_USE_FLASHINFER_SAMPLER:
@@ -93,10 +94,14 @@ class TopKTopPSampler(nn.Module):
         super().__init__()
         self.logprobs_mode = logprobs_mode
         if current_platform.is_cuda():
+            # FlashInfer doesn't expose post-top-k/top-p logits/logprobs,
+            # so it can't be used when the configured mode requires them.
+            can_use_flashinfer = (
+                logprobs_mode not in ("processed_logits", "processed_logprobs")
+                and flashinfer_sampler_supported()
+            )
             self.forward = (
-                self.forward_cuda
-                if flashinfer_sampler_supported(logprobs_mode)
-                else self.forward_native
+                self.forward_cuda if can_use_flashinfer else self.forward_native
             )
         elif current_platform.is_cpu():
             arch = current_platform.get_cpu_architecture()

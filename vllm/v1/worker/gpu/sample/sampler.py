@@ -47,7 +47,7 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.num_speculative_tokens = num_speculative_tokens
-        self.use_flashinfer = flashinfer_sampler_supported(logprobs_mode)
+        self.use_flashinfer = flashinfer_sampler_supported()
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -80,6 +80,13 @@ class Sampler:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
+
+        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
+        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
+            idx_mapping_np
+        )
+        return_logprobs = max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0
+
         sampled, processed_logits = self.sample(
             logits,
             expanded_idx_mapping,
@@ -87,13 +94,10 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            return_logprobs=return_logprobs,
         )
 
-        max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        max_per_req_token_ids = self.logprob_token_ids_state.max_num_token_ids(
-            idx_mapping_np
-        )
-        if max_num_logprobs != NO_LOGPROBS or max_per_req_token_ids > 0:
+        if return_logprobs:
             if self.logprobs_mode == "processed_logprobs":
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
@@ -185,9 +189,12 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # FlashInfer only handles the sample step, has no greedy mode, and
         # can't honor per-request seeds -- fall back to gumbel otherwise.
+        # Also fall back when this step needs to return post-top-k/top-p
+        # logprobs to a request, since FlashInfer doesn't expose those.
         top_k: torch.Tensor | None = None
         top_p: torch.Tensor | None = None
         use_flashinfer = self.use_flashinfer
@@ -197,6 +204,10 @@ class Sampler:
             )
             if (
                 (top_k is None and top_p is None)
+                or (
+                    return_logprobs
+                    and self.logprobs_mode in ("processed_logits", "processed_logprobs")
+                )
                 or self.sampling_states.any_greedy(idx_mapping_np)
                 or self.sampling_states.any_explicit_seed(idx_mapping_np)
             ):
