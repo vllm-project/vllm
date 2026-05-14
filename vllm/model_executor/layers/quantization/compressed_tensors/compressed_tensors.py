@@ -626,8 +626,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
             if not self._is_nvfp4_format(input_quant):
                 raise ValueError(
-                    "Only NVFP4 format supported for weights "
-                    "quantized with NVFP4 format."
+                    "For NVFP4 weights, input quantization must also be NVFP4 format, ",
+                    "None for NVFP4A16",
                 )
             return CompressedTensorsW4A4Fp4()
 
