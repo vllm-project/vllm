@@ -14,7 +14,10 @@ from tests.utils import RemoteOpenAIServer
 MODEL_NAME = "TitanML/tiny-mixtral"
 GEN_ENDPOINT = "/inference/v1/generate"
 
-# tiny-mixtral config: 8 local experts, top-2 routing, 2 hidden layers
+# tiny-mixtral config: 8 local experts, top-2 routing, 2 hidden layers.
+# The published config has sliding_window=4096, which produces
+# SlidingWindowSpec kv-cache groups; RoutedExpertsManager requires a
+# FullAttentionSpec group, so we override sliding_window=null below.
 NUM_LOCAL_EXPERTS = 8
 NUM_EXPERTS_PER_TOK = 2
 NUM_HIDDEN_LAYERS = 2
@@ -29,6 +32,8 @@ def server():
         "32",
         "--enforce-eager",
         "--enable-return-routed-experts",
+        "--hf-overrides",
+        '{"sliding_window": null}',
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
