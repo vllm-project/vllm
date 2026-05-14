@@ -362,7 +362,7 @@ class FreeKVCacheBlockQueue:
         assert first_block is not None, (
             "next_free_block of fake_free_list_head should always exist"
         )
-        
+
         # Add inter-connections between consecutive blocks
         prev_block = self.fake_free_list_head
         for block in blocks:

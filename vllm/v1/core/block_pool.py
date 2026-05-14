@@ -413,17 +413,17 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Identify blocks with hash (LRU cache) and blocks without hash (will never match in APC)
+        # Identify blocks with hash (LRU cache) and without it (will never match in APC)
         blocks_with_hash = []
         blocks_without_hash = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
                 if block.block_hash is None:
-                    blocks_without_hash.append(block)                    
+                    blocks_without_hash.append(block)
                 else:
                     blocks_with_hash.append(block)
-        
+
         # Allow immediate reallocation of blocks without hash
         self.free_block_queue.prepend_n(blocks_without_hash)
         # Append to LRU queue blocks for potential reuse
