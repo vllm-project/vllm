@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import numpy as np
+
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -25,6 +27,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsReader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
@@ -47,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -252,6 +257,43 @@ class Scheduler(SchedulerInterface):
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
+
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
+                "enable_return_routed_experts does not support context parallelism "
+                "(dcp_world_size > 1 or pcp_world_size > 1)"
+            )
+
+            self.routed_experts_reader = RoutedExpertsReader.create()
+
+            assert len(kv_cache_config.kv_cache_groups) > 0, (
+                "enable_return_routed_experts requires at least one kv cache group"
+            )
+            # Find the attention group for routed experts indexing.
+            self.routed_experts_attn_gid = 0
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+                if isinstance(group.kv_cache_spec, AttentionSpec):
+                    self.routed_experts_attn_gid = gid
+                    break
+            min_block_size = min(
+                [
+                    group.kv_cache_spec.block_size
+                    for group in kv_cache_config.kv_cache_groups
+                ]
+            )
+            num_groups = len(kv_cache_config.kv_cache_groups)
+            self.max_num_kv_tokens = (
+                kv_cache_config.num_blocks // num_groups
+            ) * min_block_size
+            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+            pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+            if pcp_size * dcp_size > 1:
+                self.max_num_kv_tokens *= pcp_size * dcp_size
+
+            self.routed_experts_reader.attach_buffer(
+                max_num_kv_tokens=self.max_num_kv_tokens,
+                vllm_config=self.vllm_config,
+            )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1371,15 +1413,11 @@ class Scheduler(SchedulerInterface):
                     request.resumable = False
                     stopped = True
 
-            # Get routing data from ModelRunnerOutput (via worker D2H pipeline)
             routed_experts = None
-            if (
-                model_runner_output.routed_experts_dict is not None
-                and req_id in model_runner_output.routed_experts_dict
-            ):
-                routed_experts = model_runner_output.routed_experts_dict[req_id]
             finish_reason = None
             if stopped:
+                routed_experts = self._get_routed_experts(request)
+
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
@@ -1553,6 +1591,31 @@ class Scheduler(SchedulerInterface):
 
         self._enqueue_waiting_request(request)
         return False
+
+    def _get_routed_experts(self, request: Request) -> np.ndarray | None:
+        if not self.vllm_config.model_config.enable_return_routed_experts:
+            return None
+
+        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
+        num_tokens = request.num_tokens - 1
+
+        # compute slot mapping using attention group's block_size
+        block_ids_array = np.array(block_ids, dtype=np.int32)
+        num_blocks = len(block_ids)
+        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
+        block_size = attn_group.kv_cache_spec.block_size
+
+        # generate block offsets
+        block_offsets = np.arange(0, block_size)
+
+        # compute slot mapping: slot = block_id * block_size + offset
+        slot_mapping = (
+            block_offsets.reshape((1, block_size))
+            + block_ids_array.reshape((num_blocks, 1)) * block_size
+        ).flatten()[:num_tokens]
+
+        return self.routed_experts_reader.get_routed_experts(indices=slot_mapping)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
