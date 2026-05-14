@@ -1371,6 +1371,20 @@ def get_tp_group() -> GroupCoordinator:
     return _TP
 
 
+_TPA_GQA_MODE: bool = False
+
+
+def is_tpa_gqa_mode() -> bool:
+    """Return True iff TPA<TP is active (attention TP smaller than full TP).
+
+    Attention backends consult this to skip the pre-attention DCP
+    Q-all-gather: under TPA<TP the queries are already sized for the
+    attention TP group, and ``dcp_combine`` reduce-scatters heads from
+    H/TPA → H/TP for ``o_proj``.
+    """
+    return _TPA_GQA_MODE
+
+
 _DCP: GroupCoordinator | None = None
 
 
@@ -1961,6 +1975,10 @@ def initialize_model_parallel(
         )
     dcp_size_for_attn = full_tp_size // attn_tp_size
     attn_tp_rank = full_tp_rank // dcp_size_for_attn
+
+    global _TPA_GQA_MODE
+    _TPA_GQA_MODE = attn_tp_size > 1 and attn_tp_size < full_tp_size
+
     init_layer_parallel_resolver(
         full_tp_size=full_tp_size,
         full_tp_rank=full_tp_rank,
@@ -2110,6 +2128,12 @@ def destroy_model_parallel():
     if _EPLB:
         _EPLB.destroy()
     _EPLB = None
+
+    global _TPA_GQA_MODE
+    _TPA_GQA_MODE = False
+    from vllm.distributed.layer_parallel_config import clear_layer_parallel_resolver
+
+    clear_layer_parallel_resolver()
 
 
 def destroy_distributed_environment():

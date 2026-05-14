@@ -1060,6 +1060,16 @@ class QKVParallelLinear(ColumnParallelLinear):
         }
         return shard_size_mapping.get(loaded_shard_id)
 
+    def split_qkv(
+        self, qkv: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split a fused-QKV tensor into ``(q, k, v)`` using this layer's
+        per-rank Q/K/V sizes."""
+        q_size = self.num_heads * self.head_size
+        k_size = self.num_kv_heads * self.head_size
+        v_size = self.num_kv_heads * self.v_head_size
+        return qkv.split([q_size, k_size, v_size], dim=-1)
+
     def _load_fused_module_from_checkpoint(
         self, param: BasevLLMParameter, loaded_weight: torch.Tensor
     ):
