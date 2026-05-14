@@ -196,6 +196,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             and self.activation_quant_key == kFp8StaticTensorSym
         ):
             layer.input_quant_key = kFp8StaticTensorSym
+            layer.fused_ar_max_token_num = (
+                get_current_vllm_config().scheduler_config.max_num_batched_tokens
+            )
 
     def apply_weights(
         self,
