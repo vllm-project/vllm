@@ -729,6 +729,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
 
     engine = LLM(
         model=MODEL,
+        device="cpu",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
