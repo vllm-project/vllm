@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from collections.abc import Iterable
 
 import torch
@@ -12,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.llama import LlamaConfig
@@ -37,10 +37,12 @@ class EagleMistralDecoderLayer(MistralDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
     ) -> None:
-        super().__init__(vllm_config, prefix=prefix, config=config)
+        draft_quant_config = get_draft_quant_config(vllm_config)
+        if draft_quant_config is not vllm_config.quant_config:
+            vllm_config = copy.copy(vllm_config)
+            vllm_config.quant_config = draft_quant_config
 
-    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
-        return get_draft_quant_config(vllm_config)
+        super().__init__(vllm_config, prefix=prefix, config=config)
 
 
 @support_torch_compile
