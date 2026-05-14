@@ -415,11 +415,9 @@ class PyAVVideoBackendMixin:
                 decoder = container.decode(video=0)
             chosen = None
             for frame in decoder:
-                if frame.pts is None:
-                    continue
-                chosen = frame
-                last_pts = frame.pts
-                if frame.pts >= pts:
+                if frame.pts is not None and frame.pts >= pts:
+                    chosen = frame
+                    last_pts = frame.pts
                     break
             if chosen is not None:
                 frames_list.append(chosen.to_ndarray(format="rgb24"))
