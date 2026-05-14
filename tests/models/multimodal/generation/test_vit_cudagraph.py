@@ -78,6 +78,18 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
+    "qwen2_vl": VitCudagraphTestConfig(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
+        ),
+        needs_video_metadata=False,
+        marks=[pytest.mark.core_model],
+    ),
 }
 
 
