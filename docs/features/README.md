@@ -56,7 +56,11 @@ th:not(:first-child) {
 
 \* Chunked prefill and prefix caching are only applicable to last-token or all pooling with causal attention.  
 <sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.  
+| [prompt-embeds](prompt_embeds.md) | ✅ | ✅ | ✅ | ✅<sup>†</sup> | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ✅ | ❔ | ❔ | ✅ |
 
+\* Chunked prefill and prefix caching are only applicable to last-token or all pooling with causal attention.  
+<sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.  
+<sup>†</sup> Only Prompt-Embedding+MTP has been tested.
 ### Feature x Hardware
 
 | Feature | Volta | Turing | Ampere | Ada | Hopper | CPU | AMD | Intel GPU |
