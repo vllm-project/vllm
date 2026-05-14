@@ -354,7 +354,18 @@ def sparse_attn_indexer(
         batch_size = padded_q_quant_decode_tokens.shape[0]
         next_n = padded_q_quant_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
-        seq_lens = decode_metadata.seq_lens[:batch_size]
+        # ``.contiguous()`` was originally required because the
+        # ``DeepseekV32IndexerMetadataBuilder`` allocated
+        # ``decode_seq_lens_buffer`` as a 2D ``(max_num_seqs, next_n)``
+        # tensor, and a ``[:num_decodes, :max_decode_len]`` slice was
+        # non-contiguous when ``max_decode_len < next_n`` under V2 model
+        # runner cudagraph capture. Reported by aabbccddwasd in PR #41834
+        # comment 4450901180. Upstream PR #42135 (ee58665aa) since
+        # unified the buffer to 1D ``(max_num_batched_tokens,)``, so the
+        # slice is now always contiguous and this call is a no-op pointer
+        # return. Kept as a defensive belt against future regressions in
+        # the metadata builder's buffer shape.
+        seq_lens = decode_metadata.seq_lens[:batch_size].contiguous()
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
         # the downstream topk kernels accept both 1D and 2D.
