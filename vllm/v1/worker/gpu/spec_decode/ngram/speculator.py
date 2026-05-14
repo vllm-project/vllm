@@ -200,6 +200,7 @@ class NgramGPUSpeculator:
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert self.req_states is not None, (
             "NgramGPUSpeculator.req_states was not injected by the model "
