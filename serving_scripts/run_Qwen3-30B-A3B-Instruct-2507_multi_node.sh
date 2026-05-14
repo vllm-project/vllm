@@ -508,7 +508,7 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
-
+  
 echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
 if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
@@ -516,18 +516,40 @@ if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   SERVER_STEP_PID=""
 fi
 
+echo "Stopping Ray background srun steps before copying Nsight reports..."
+
+if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
+  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
+  wait "${HEAD_RAY_PID}" 2>/dev/null || true
+fi
+HEAD_RAY_PID=""
+
+for pid in ${WORKER_RAY_PIDS}; do
+  if kill -0 "${pid}" 2>/dev/null; then
+    kill -TERM "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  fi
+done
+WORKER_RAY_PIDS=""
+
+echo "Waiting briefly for Ray/Nsight files to flush..."
+sleep 10
+
 echo "Copying Ray worker Nsight reports..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 
 copy_ray_nsight_from_node() {
   local NODE="$1"
+  echo "Copying Ray worker Nsight reports from ${NODE}"
+
   srun \
-    --nodelist "${NODE}" \
     --overlap \
+    --nodelist "${NODE}" \
     --nodes=1 \
     --ntasks=1 \
     --ntasks-per-node=1 \
     --cpus-per-task=1 \
+    --mem=1G \
     bash -lc "
       mkdir -p '${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}'
       if [ -d /tmp/ray/session_latest/logs/nsight ]; then
