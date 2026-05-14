@@ -102,7 +102,14 @@ class RayDistributedExecutor(Executor):
         meaning that it allows PP size batches to be executed concurrently.
         """
         pp_size = self.parallel_config.pipeline_parallel_size
-        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
+        if self.scheduler_config.async_scheduling:
+            if pp_size <= 1:
+                return 2
+            if envs.VLLM_USE_V2_MODEL_RUNNER:
+                # So that we can overlap scheduling of per-request decode steps
+                # which are scheduled at a pp_size cadence.
+                return pp_size + 1
+        return pp_size
 
     def shutdown(self) -> None:
         if logger:

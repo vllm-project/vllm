@@ -91,6 +91,7 @@ class PPHandler:
         slot = self.slots[self.slot_index]
         if slot is not None:
             self.main_stream.wait_event(slot.event)
+            self.slots[self.slot_index] = None
         return slot
 
     def receive(self, input_batch: InputBatch, req_states: RequestState) -> bool:
