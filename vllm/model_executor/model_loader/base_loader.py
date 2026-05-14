@@ -70,7 +70,6 @@ class BaseModelLoader(ABC):
                 logger.debug_once(
                     "Peak GPU memory after loading weights: %s GiB",
                     format_gib(peak_memory),
-                    scope="local",
                 )
 
             # Process weights into kernel format. Note that when using online

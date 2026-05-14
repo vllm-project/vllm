@@ -157,7 +157,6 @@ class ShardedStateLoader(BaseModelLoader):
         logger.info_once(
             "Loading weights took %.2f seconds",
             counter_after_loading_weights - counter_before_loading_weights,
-            scope="local",
         )
         if state_dict:
             raise ValueError(f"Missing keys {tuple(state_dict)} in loaded state!")

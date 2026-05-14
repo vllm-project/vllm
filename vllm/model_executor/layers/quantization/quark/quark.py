@@ -114,7 +114,7 @@ class QuarkConfig(QuantizationConfig):
         :param hf_to_vllm_mapper: maps from hf model structure (the assumed
             structure of the qconfig) to vllm model structure
         """
-        quant_config_with_hf_to_vllm_mapper = {}
+        quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
             if isinstance(v, list):

@@ -61,10 +61,6 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
-    if envs.VLLM_BATCH_INVARIANT:
-        return rms_norm_batch_invariant(
-            x + residual, weight, variance_epsilon
-        ), x + residual
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -80,7 +76,7 @@ def poly_norm(
     from vllm import _custom_ops as ops
 
     out = torch.empty_like(x)
-    ops.poly_norm(
+    ops.poly_norm(  # type: ignore[attr-defined]
         out,
         x,
         weight,

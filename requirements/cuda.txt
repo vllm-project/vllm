@@ -1,7 +1,7 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.65.0 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
 torch==2.11.0

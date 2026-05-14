@@ -173,14 +173,14 @@ def backend_to_kernel_cls(
         return [TritonOrCutlassExperts]
 
     elif backend == Fp8MoeBackend.BATCHED_VLLM_CUTLASS:
-        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
             CutlassBatchedExpertsFp8,
         )
 
         return [CutlassBatchedExpertsFp8]
 
     elif backend == Fp8MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsFp8,
         )
 
@@ -266,7 +266,7 @@ def select_fp8_moe_backend(
                 k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
@@ -337,12 +337,10 @@ def select_fp8_moe_backend(
                     )
 
                     if supported:
-                        logger.info_once(_make_log_backend(backend), scope="local")
+                        logger.info_once(_make_log_backend(backend))
                         return backend, k_cls
                     else:
-                        logger.debug_once(
-                            _make_log_unsupported(backend, reason), scope="local"
-                        )
+                        logger.debug_once(_make_log_unsupported(backend, reason))
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
@@ -396,10 +394,10 @@ def select_fp8_moe_backend(
                 activation_format,
             )
             if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
+                logger.info_once(_make_log_backend(backend))
                 return backend, k_cls
             else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                logger.debug_once(_make_log_unsupported(backend, reason))
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
@@ -472,7 +470,7 @@ def convert_to_fp8_moe_kernel_format(
             is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
         )
     elif fp8_backend == Fp8MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             prepare_fp8_moe_layer_for_xpu,
         )
 
@@ -580,7 +578,7 @@ def make_fp8_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:

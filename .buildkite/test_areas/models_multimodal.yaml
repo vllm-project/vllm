@@ -28,6 +28,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   mirror:
     amd:
       device: mi325_1

@@ -418,7 +418,7 @@ def move_from_buffer(
             w[dst].copy_(w[src], non_blocking=True)
 
 
-async def transfer_layer(
+def transfer_layer(
     old_layer_indices: torch.Tensor,
     new_layer_indices: torch.Tensor,
     expert_weights: Sequence[torch.Tensor],

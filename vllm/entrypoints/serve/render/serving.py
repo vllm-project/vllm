@@ -55,9 +55,8 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tool_parsers import ToolParser
-from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
@@ -566,7 +565,9 @@ class OpenAIServingRender:
         if reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
             request = reasoning_parser(
-                tokenizer, model_config=self.model_config
+                tokenizer,
+                model_config=self.model_config,
+                chat_template_kwargs=chat_params.chat_template_kwargs,
             ).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if
@@ -580,7 +581,7 @@ class OpenAIServingRender:
             tool_choice = getattr(request, "tool_choice", "none")
             tokenizer = renderer.get_tokenizer()
             is_mistral_grammar_eligible = (
-                issubclass(tool_parser, MistralToolParser)
+                is_mistral_tool_parser(tool_parser)
                 and is_mistral_tokenizer(tokenizer)
                 and tokenizer.supports_grammar
             )

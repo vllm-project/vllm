@@ -38,8 +38,11 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
-    create_moe_runner,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
+    MoERunnerInterface,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -177,8 +180,7 @@ def determine_expert_placement_strategy(
             return "linear"
         if (
             moe_parallel_config.use_all2all_kernels
-            and not moe_parallel_config.use_deepep_ll_kernels
-            and not moe_parallel_config.use_nixl_ep_kernels
+            and not moe_parallel_config.needs_round_robin_routing_tables
         ):
             logger.warning(
                 "Round-robin expert placement currently only supports "
@@ -586,7 +588,7 @@ class FusedMoE(PluggableLayer):
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        self.runner = create_moe_runner(
+        self.runner: MoERunnerInterface = MoERunner(
             layer_name=self.layer_name,
             moe_config=self.moe_config,
             router=self.router,
@@ -684,8 +686,7 @@ class FusedMoE(PluggableLayer):
         # Currently routing_tables only needed for round-robin expert placement
         # with DeepEP-ll or NIXL EP all2all backends.
         if self.expert_placement_strategy != "round_robin" or (
-            not self.moe_parallel_config.use_deepep_ll_kernels
-            and not self.moe_parallel_config.use_nixl_ep_kernels
+            not self.moe_parallel_config.needs_round_robin_routing_tables
         ):
             return None
 
@@ -1096,7 +1097,11 @@ class FusedMoE(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "gpt_oss_mxfp4":
+        quant_config_name = self.quant_config and self.quant_config.get_name()
+        if quant_config_name == "humming":
+            assert hasattr(self.quant_method, "weight_schema")
+            quant_config_name = self.quant_method.weight_schema.quant_method
+        if quant_config_name == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
@@ -1613,6 +1618,25 @@ class FusedMoE(PluggableLayer):
         )
 
         return s
+
+
+# This is a temporary forwarding method which will be removed/modified layer.
+def fused_moe_make_expert_params_mapping(
+    model: torch.nn.Module,
+    ckpt_gate_proj_name: str,
+    ckpt_down_proj_name: str,
+    ckpt_up_proj_name: str,
+    num_experts: int,
+    num_redundant_experts: int = 0,
+) -> list[tuple[str, str, int, str]]:
+    return FusedMoE.make_expert_params_mapping(
+        model,
+        ckpt_gate_proj_name,
+        ckpt_down_proj_name,
+        ckpt_up_proj_name,
+        num_experts,
+        num_redundant_experts,
+    )
 
 
 # Mark the FusedMoE weight_loader as supporting MoE-specific parameters

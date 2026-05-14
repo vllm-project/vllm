@@ -226,7 +226,9 @@ class BaseRenderer(ABC, Generic[_T]):
             model_config = self.model_config
             mm_config = model_config.get_multimodal_config()
             processor = self.mm_processor
-            mm_limits = processor.info.allowed_mm_limits
+            mm_limits = {
+                k: v for k, v in processor.info.allowed_mm_limits.items() if v > 0
+            }
 
             try:
                 logger.debug("Warming up multi-modal processing...")

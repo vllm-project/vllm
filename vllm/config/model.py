@@ -953,8 +953,12 @@ class ModelConfig:
                 "mxfp4",
                 "gpt_oss_mxfp4",
                 "cpu_awq",
+                "humming",
                 "gguf",
             ]
+            # if the user specifies humming, we should always use humming
+            if self.quantization == "humming":
+                overrides = ["humming"] + overrides
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
             ]
@@ -1197,22 +1201,9 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @cached_property
+    @property
     def is_mm_prefix_lm(self) -> bool:
-        """Whether to use bidirectional attention for mm positions."""
-        if hasattr(self.hf_config, "is_mm_prefix_lm"):
-            return bool(self.hf_config.is_mm_prefix_lm)
-        # fallback to list of known models
-        MM_PREFIX_LM_MODELS = (
-            "bagel",
-            "gemma3",
-            "molmo2",
-            "paligemma",
-            "umm",
-        )
-        if not hasattr(self.hf_config, "model_type"):
-            return False
-        return self.hf_config.model_type in MM_PREFIX_LM_MODELS
+        return self.model_arch_config.is_mm_prefix_lm
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size

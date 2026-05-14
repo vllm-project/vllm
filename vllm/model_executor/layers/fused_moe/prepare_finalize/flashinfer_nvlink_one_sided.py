@@ -4,6 +4,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
+from vllm.distributed.device_communicators.base_device_communicator import (
+    All2AllManagerBase,
+)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -11,11 +14,15 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def get_local_sizes():
-    return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+    dp_metadata = get_forward_context().dp_metadata
+    assert dp_metadata is not None
+    return dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
 class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """FlashInfer implementation using the Moe AlltoAll kernel."""
+
+    all2all_manager: All2AllManagerBase
 
     def __init__(
         self,
@@ -32,8 +39,12 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         self.hidden_size = hidden_size
         self.num_dispatchers_ = num_dispatchers
 
-        self.all2all_manager = get_ep_group().device_communicator.all2all_manager
-        self.all2all_manager.initialize(
+        device_communicator = get_ep_group().device_communicator
+        assert device_communicator is not None
+        all2all_manager = device_communicator.all2all_manager
+        assert all2all_manager is not None
+        self.all2all_manager = all2all_manager
+        self.all2all_manager.initialize(  # type: ignore[attr-defined]
             max_num_tokens=self.max_num_tokens,
             top_k=self.top_k,
             num_experts=self.num_experts,
@@ -97,7 +108,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
-        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(
+        assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
+        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
@@ -131,7 +143,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        assert self.all2all_manager.moe_alltoall is not None
+        assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
 
         ep_size = self.all2all_manager.world_size
         hidden_size = fused_expert_output.shape[-1]
@@ -139,7 +151,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             ep_size, self.runtime_max_tokens_per_rank, hidden_size
         )
 
-        combined_output = self.all2all_manager.moe_alltoall.combine(
+        combined_output = self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
             payload=fused_expert_output,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )

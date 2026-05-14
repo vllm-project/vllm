@@ -132,9 +132,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         )
 
         if scales is None:
+            assert len(res) == 3
             a1q, topk_weights, topk_ids = res
             a1q_scale = None
         else:
+            assert len(res) == 4
             a1q, topk_weights, topk_ids, scales = res
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 
@@ -217,9 +219,11 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         )
 
         if scales is None:
+            assert len(res) == 2
             a1q, router_logits = res
             a1q_scale = None
         else:
+            assert len(res) == 3
             a1q, router_logits, scales = res
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 
