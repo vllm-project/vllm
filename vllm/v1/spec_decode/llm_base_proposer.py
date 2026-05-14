@@ -219,7 +219,12 @@ class SpecDecodeBaseProposer:
             (self.max_num_tokens, self.inputs_embeds_size),
             dtype=self.dtype,
             device=device,
-        )
+if self.supports_mm_inputs or self.supports_prompt_embeds:
+    self.inputs_embeds = torch.zeros(
+        (self.max_num_tokens, self.inputs_embeds_size),
+        dtype=self.dtype,
+        device=device,
+    )
 
         self.backup_next_token_ids = CpuGpuBuffer(
             self.max_batch_size,
