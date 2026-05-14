@@ -135,6 +135,23 @@ class TrtLlmNvFp4ExpertsBase:
     def supports_chunking(self) -> bool:
         return False
 
+    def max_num_tokens_per_call(self) -> int:
+        import os
+
+        override = os.environ.get("VLLM_TEST_MOE_CHUNK_SIZE")
+        if override is not None:
+            return int(override)
+
+        MAX_GRID_Y = 65535
+        MAX_TILE_TOKENS_DIM = 128
+
+        def calc_max_supported_tokens(top_k: int, num_experts: int) -> int:
+            return (
+                num_experts + (MAX_GRID_Y - num_experts + 1) * MAX_TILE_TOKENS_DIM - 1
+            ) // top_k
+
+        return calc_max_supported_tokens(self.topk, self.moe_config.num_experts)
+
     def supports_expert_map(self) -> bool:
         return False
 
