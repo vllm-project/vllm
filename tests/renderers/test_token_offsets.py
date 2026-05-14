@@ -144,3 +144,40 @@ class TestTokenizePromptOffsets:
         result = renderer._tokenize_prompt(prompt, params)
 
         assert "prompt_token_offsets" not in result
+
+    @pytest.mark.asyncio
+    async def test_async_tokenize_prompt_returns_offsets(self, fast_tokenizer):
+        """The async path must produce the same shape of result as the
+        sync path."""
+        from vllm.renderers.params import TokenizeParams
+        from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        # AsyncMicrobatchTokenizer needs a running loop; pytest-asyncio
+        # provides one. Inject a fresh async tokenizer.
+        renderer._async_tokenizer = AsyncMicrobatchTokenizer(fast_tokenizer)
+
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello, world."}
+
+        result = await renderer._tokenize_prompt_async(prompt, params)
+
+        assert "prompt_token_offsets" in result
+        offsets = result["prompt_token_offsets"]
+        assert offsets is not None
+        assert len(offsets) == len(result["prompt_token_ids"])
+
+    @pytest.mark.asyncio
+    async def test_async_tokenize_prompt_default_no_offsets(self, fast_tokenizer):
+        from vllm.renderers.params import TokenizeParams
+        from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        renderer._async_tokenizer = AsyncMicrobatchTokenizer(fast_tokenizer)
+
+        params = TokenizeParams(max_total_tokens=None)  # flag default False
+        prompt = {"prompt": "Hello, world."}
+
+        result = await renderer._tokenize_prompt_async(prompt, params)
+
+        assert "prompt_token_offsets" not in result

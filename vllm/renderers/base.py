@@ -455,6 +455,18 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_async_tokenizer()
+        # `_wants_offsets` checks `tokenizer.is_fast`; the async wrapper
+        # forwards the attribute via its inner tokenizer reference.
+        if self._wants_offsets(
+            getattr(tokenizer, "tokenizer", tokenizer), prompt, params
+        ):
+            encoding = await tokenizer(
+                prompt["prompt"],
+                **params.get_encode_kwargs(),
+                return_offsets_mapping=True,
+            )
+            return self._tokens_prompt_with_offsets(encoding, prompt)
+
         prompt_token_ids = await tokenizer.encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
