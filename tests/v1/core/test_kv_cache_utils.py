@@ -1885,6 +1885,50 @@ def test_tq_native_mixed_kv_cache_uses_hybrid_page_groups():
     )
 
 
+def test_tq_native_full_mixed_uses_uniform_type_per_layer_tensors():
+    model_config = ModelConfig(max_model_len=32)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    native_full = new_kv_cache_spec(num_kv_heads=8, head_size=128)
+    tq_full = new_tq_full_attention_spec(
+        num_kv_heads=8,
+        head_size=128,
+        tq_slot_size=134,
+    )
+    kv_cache_specs = {
+        "layer_0": native_full,
+        "layer_1": native_full,
+        "layer_2": tq_full,
+        "layer_3": tq_full,
+        "layer_4": tq_full,
+        "layer_5": tq_full,
+    }
+
+    assert not kv_cache_utils._is_tq_native_mixed_kv_cache_spec(kv_cache_specs)
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
+    assert uniform_spec is not None
+
+    num_blocks = 8
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        [kv_cache_specs],
+        [uniform_spec.page_size_bytes * num_blocks],
+    )[0]
+
+    assert len(kv_cache_config.kv_cache_groups) == 1
+    assert isinstance(
+        kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+        UniformTypeKVCacheSpecs,
+    )
+
+    tensor_sizes = {
+        tensor.shared_by[0]: tensor.size for tensor in kv_cache_config.kv_cache_tensors
+    }
+    assert tensor_sizes["layer_0"] == native_full.page_size_bytes * num_blocks
+    assert tensor_sizes["layer_2"] == tq_full.page_size_bytes * num_blocks
+    assert tensor_sizes["layer_2"] < tensor_sizes["layer_0"]
+
+
 def test_tq_native_mixed_path_does_not_match_all_tq_or_native():
     all_tq_specs = {
         "layer_1": new_tq_full_attention_spec(tq_slot_size=8),
@@ -1980,15 +2024,19 @@ def test_generate_uniform_type_kv_cache_specs():
     uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
     assert uniform_spec is None
 
-    # TQ specs subclass native specs for scheduling semantics, but their
-    # physical KV layout is different and must not be merged as uniform native.
+    # Full-attention TQ/native specs have the same scheduling semantics and can
+    # use UniformTypeKVCacheSpecs to keep per-layer physical page sizes.
     kv_cache_specs = {
         "layer_1": new_tq_full_attention_spec(),
         "layer_2": new_kv_cache_spec(),
     }
     uniform_spec = UniformTypeKVCacheSpecs.from_specs(kv_cache_specs)
-    assert uniform_spec is None
+    assert uniform_spec == UniformTypeKVCacheSpecs(
+        block_size=16, kv_cache_specs=kv_cache_specs
+    )
 
+    # Keep mixed TQ/native sliding-window specs on the explicit mixed path until
+    # the sliding-window physical-layout interaction is validated separately.
     kv_cache_specs = {
         "layer_1": new_tq_sliding_window_spec(sliding_window=1),
         "layer_2": new_sliding_window_spec(sliding_window=1),

@@ -723,12 +723,11 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             # Different block sizes, not uniform.
             return False
         spec_types = {type(spec) for spec in kv_cache_specs.values()}
-        tq_spec_types = {TQFullAttentionSpec, TQSlidingWindowSpec}
-        native_attention_spec_types = {FullAttentionSpec, SlidingWindowSpec}
-        if spec_types & tq_spec_types and spec_types & native_attention_spec_types:
-            # TQ specs subclass the native attention specs for scheduling
-            # semantics, but they use a different physical KV layout. Do not
-            # let isinstance() merge TQ and native specs into one uniform group.
+        if TQSlidingWindowSpec in spec_types and SlidingWindowSpec in spec_types:
+            # TQ sliding specs subclass native sliding specs for scheduling
+            # semantics, but they use a different physical KV layout. Keep this
+            # layout on the mixed TQ/native path instead of letting isinstance()
+            # merge them into one uniform group.
             return False
         one_spec = next(iter(kv_cache_specs.values()))
         # NOTE: Check subclasses before parent classes since isinstance()
