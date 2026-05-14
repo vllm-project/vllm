@@ -1222,6 +1222,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
     list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
     message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+
+    # DeepSeek V4 fused RMSNorm + router GEMV - same arch gating as DSV3.
+    set(DSV4_NORM_ROUTER_GEMM_SRC
+      "csrc/moe/dsv4_norm_router_gemm_entry.cu"
+      "csrc/moe/dsv4_norm_router_gemm_kernel.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV4_NORM_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${DSV4_NORM_ROUTER_GEMM_SRC}")
+    message(STATUS "Building DSV4 norm+router GEMV kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
   else()
     message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
                    " (requires SM90+ and CUDA >= 12.0)")
