@@ -24,6 +24,7 @@ from pydantic import ConfigDict, Field, model_validator
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
@@ -63,6 +64,8 @@ else:
     KVCacheConfig = Any
 
 logger = init_logger(__name__)
+
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
 
 
 class OptimizationLevel(IntEnum):
@@ -488,6 +491,48 @@ class VllmConfig:
         ):
             return self.speculative_config.num_speculative_tokens
         return 0
+
+    @property
+    def use_v2_model_runner(self) -> bool:
+        use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        if use_v2_model_runner is not None:
+            return use_v2_model_runner
+
+        if not self._is_default_v2_model_runner_model():
+            return False
+
+        if not HAS_TRITON:
+            logger.warning_once(
+                "Model runner v2 requires Triton; using the v1 model runner instead."
+            )
+            return False
+
+        unsupported = self._get_v2_model_runner_unsupported_features()
+        if unsupported:
+            logger.warning_once(
+                "Model runner v2 does not yet support %s; using the v1 model "
+                "runner instead.",
+                ", ".join(unsupported),
+            )
+            return False
+
+        return True
+
+    def _is_default_v2_model_runner_model(self) -> bool:
+        model_config = self.model_config
+        if model_config is None:
+            return False
+
+        if model_config.runner_type != "generate":
+            return False
+
+        architectures = getattr(model_config, "architectures", [])
+        if not any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        ):
+            return False
+
+        return not model_config.is_moe and not model_config.is_quantized
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1233,7 +1278,7 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        if envs.VLLM_USE_V2_MODEL_RUNNER:
+        if self.use_v2_model_runner:
             self._validate_v2_model_runner()
 
         # Re-compute compile ranges after platform-specific config updates
@@ -1908,34 +1953,71 @@ class VllmConfig:
             f"kernel_config={self.kernel_config!r}"
         )
 
-    def _validate_v2_model_runner(self) -> None:
-        """Check for features not yet supported by the V2 model runner."""
+    def _get_v2_model_runner_unsupported_features(self) -> list[str]:
+        """Collect features not yet supported by the V2 model runner."""
         unsupported: list[str] = []
+        model_config = self.model_config
+        speculative_config = self.speculative_config
 
-        if self.model_config is not None and self.model_config.has_inner_state:
+        if model_config is not None and model_config.has_inner_state:
             unsupported.append("hybrid/mamba models")
 
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            unsupported.append("stock torch.compile")
+
         if (
-            self.speculative_config is not None
-            and self.speculative_config.method not in ("eagle", "eagle3", "mtp")
+            self.compilation_config.pass_config.enable_sp
+            and self.parallel_config.tensor_parallel_size > 1
         ):
-            unsupported.append(f"speculative method '{self.speculative_config.method}'")
+            unsupported.append("sequence parallelism")
+
+        if speculative_config is not None:
+            # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
+            if speculative_config.method in ("ngram", "ngram_gpu"):
+                unsupported.append("ngram/ngram_gpu speculative decoding")
+            elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
+                unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            if (
+                speculative_config.method == "eagle3"
+                and self.parallel_config.pipeline_parallel_size > 1
+            ):
+                unsupported.append("EAGLE3 with pipeline parallelism")
+
+        if self.reasoning_config is not None:
+            # TODO: add reasoning budget enforcement to ModelRunnerV2.
+            unsupported.append("reasoning budget enforcement")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
 
-        if (
-            self.model_config is not None
-            and self.model_config.enable_return_routed_experts
-        ):
+        if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
             unsupported.append("routed experts capture")
 
-        if self.model_config is not None and self.model_config.logits_processors:
+        has_logitsproc_plugins = False
+        if model_config is not None:
+            from importlib.metadata import entry_points
+
+            has_logitsproc_plugins = bool(entry_points(group="vllm.logits_processors"))
+
+        if model_config is not None and (
+            model_config.logits_processors or has_logitsproc_plugins
+        ):
             unsupported.append("custom logits processors")
+
+        if model_config is not None and model_config.enable_prompt_embeds:
+            unsupported.append("prompt embeds")
+
+        if (
+            model_config is not None
+            and model_config.runner_type == "generate"
+            and model_config.logprobs_mode in ("raw_logits", "processed_logits")
+        ):
+            unsupported.append(f"logprobs mode '{model_config.logprobs_mode}'")
 
         if self.cache_config.kv_sharing_fast_prefill:
             # Will be added by https://github.com/vllm-project/vllm/pull/35045
@@ -1945,6 +2027,14 @@ class VllmConfig:
             # Will be added by https://github.com/vllm-project/vllm/pull/38390
             unsupported.append("EC transfer")
 
+        return unsupported
+
+    def _validate_v2_model_runner(self) -> None:
+        """Check for features not yet supported by the V2 model runner."""
+        if not HAS_TRITON:
+            raise ValueError("VLLM_USE_V2_MODEL_RUNNER requires Triton.")
+
+        unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
                 "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
