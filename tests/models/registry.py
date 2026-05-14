@@ -1334,7 +1334,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
-        "Skywork/Skywork-R1V-38B", trust_remote_code=True
+        "Skywork/Skywork-R1V-38B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "SkyworkChatModel.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
+            )
+        },
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
@@ -1379,7 +1388,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",

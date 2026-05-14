@@ -1,13 +1,12 @@
 #pragma once
 
-#include <torch/all.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <cuda_runtime.h>
-#include <cuda_fp16.h>
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+
 #include <iostream>
-#include "../marlin/marlin_dtypes.cuh"
+
+#include "quantization/marlin/marlin_dtypes.cuh"
 using marlin::MarlinScalarType2;
 
 namespace allspark {
