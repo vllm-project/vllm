@@ -281,6 +281,8 @@ class MoERunner(MoERunnerInterface):
             blockers.append("shared experts are enabled")
         if self.enable_dbo:
             blockers.append("DBO is enabled")
+        if not self._quant_method.supports_unwrapped_forward:
+            blockers.append(f"{self._quant_method.method_name} is not supported")
         moe_parallel_config = self.moe_config.moe_parallel_config
         if moe_parallel_config.dp_size > 1 and moe_parallel_config.use_ep:
             blockers.append("native DP+EP is enabled")

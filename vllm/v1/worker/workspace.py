@@ -116,20 +116,6 @@ class WorkspaceManager:
             for i in range(len(shapes_and_dtypes))
         ]
 
-    def get_graph_local_tensors(
-        self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
-    ) -> list[torch.Tensor]:
-        """Allocate independent tensors for graph-local temporaries.
-
-        These tensors intentionally do not share the reusable uint8 workspace.
-        Use this when workspace views would expose undesirable slice/view aliasing
-        to torch.compile.
-        """
-        return [
-            torch.empty(shape, dtype=dtype, device=self._device)
-            for shape, dtype in shapes_and_dtypes
-        ]
-
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
 

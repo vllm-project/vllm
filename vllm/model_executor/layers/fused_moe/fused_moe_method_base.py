@@ -148,6 +148,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
 
     @property
+    def supports_unwrapped_forward(self) -> bool:
+        """Whether this method supports direct, unwrapped FusedMoE calls."""
+        return False
+
+    @property
     def supports_eplb(self) -> bool:
         return False
 
