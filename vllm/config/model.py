@@ -546,6 +546,29 @@ class ModelConfig:
             architectures, self.runner_type, self.convert
         )
 
+        # Align runner_type with an explicit converter. Each entry in
+        # `_RUNNER_CONVERTS` maps a converter to its target runner (e.g.
+        # `embed`/`classify` -> pooling). If the user passed `--convert` but
+        # left `--runner` on auto, infer the intended runner here; otherwise
+        # `pooler_config` never gets initialized below and adapter wrapping
+        # later crashes on `assert pooler_config is not None`. Inconsistent
+        # explicit pairs fail fast with a clear error.
+        if self.convert_type != "none":
+            target_runner = next(
+                r
+                for r, converts in _RUNNER_CONVERTS.items()
+                if self.convert_type in converts
+            )
+            if target_runner != self.runner_type:
+                if self.runner == "auto":
+                    self.runner_type = target_runner
+                else:
+                    raise ValueError(
+                        f"`--convert {self.convert_type}` is only valid with "
+                        f"`--runner {target_runner}`, but `--runner "
+                        f"{self.runner_type}` was specified."
+                    )
+
         if self.runner_type == "generate" and not is_generative_model:
             generate_converts = _RUNNER_CONVERTS["generate"]
             if self.convert_type not in generate_converts:

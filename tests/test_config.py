@@ -334,6 +334,36 @@ def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
     assert config.convert_type == expected_convert_type
 
 
+@pytest.mark.parametrize(
+    ("model_id", "convert", "expected_runner_type", "expected_convert_type"),
+    [
+        ("distilbert/distilgpt2", "embed", "pooling", "embed"),
+        ("distilbert/distilgpt2", "classify", "pooling", "classify"),
+    ],
+)
+def test_convert_implies_pooling_runner(
+    model_id, convert, expected_runner_type, expected_convert_type
+):
+    """`--convert embed|classify` on a generative model must promote
+    `--runner` from auto to pooling; otherwise `pooler_config` is never
+    initialized and adapter wrapping later crashes. Regression test for
+    https://github.com/vllm-project/vllm/issues/42480
+    """
+    config = ModelConfig(model_id, convert=convert)
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+    assert config.pooler_config is not None
+
+
+def test_convert_runner_conflict():
+    """An explicit `--runner generate` combined with a pooling converter is
+    a real inconsistency, not a configuration we should silently rewrite.
+    """
+    with pytest.raises(ValueError, match="--convert embed"):
+        ModelConfig("distilbert/distilgpt2", runner="generate", convert="embed")
+
+
 MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
     ("mistralai/Mistral-7B-v0.1", 4096),
