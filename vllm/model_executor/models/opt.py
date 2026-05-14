@@ -106,8 +106,8 @@ class OPTAttention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            scale=self.scaling,
-            vllm_config=vllm_config,
+            self.scaling,
+            vllm_config,
             prefix=f"{prefix}.attn",
         )
 

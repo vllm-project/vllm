@@ -95,8 +95,8 @@ class GPT2Attention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            scale=self.scale,
-            vllm_config=vllm_config,
+            self.scale,
+            vllm_config,
             prefix=f"{prefix}.attn",
         )
 

@@ -390,14 +390,14 @@ class Gemma3nAttention(nn.Module):
         )
 
         self.attn = Attention(
-            num_heads=self.num_heads,
-            head_size=self.head_dim,
-            scale=1.0,
+            self.num_heads,
+            self.head_dim,
+            1.0,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
             per_layer_sliding_window=self.sliding_window,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             prefix=f"{prefix}.attn",
-            vllm_config=vllm_config,
         )
 
     def forward(

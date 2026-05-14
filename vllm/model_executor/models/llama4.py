@@ -252,20 +252,25 @@ class Llama4Attention(nn.Module):
         )
 
         use_chunked_local_attn = not self.nope and config.attention_chunk_size
-        attn_cls = ChunkedLocalAttention if use_chunked_local_attn else Attention
-        self.attn = attn_cls(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.attn",
-            **(
-                {"attention_chunk_size": config.attention_chunk_size}
-                if use_chunked_local_attn
-                else {}
-            ),
-        )
+        if use_chunked_local_attn:
+            self.attn = ChunkedLocalAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                config.attention_chunk_size,
+                vllm_config,
+                num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                vllm_config,
+                num_kv_heads=self.num_kv_heads,
+                prefix=f"{prefix}.attn",
+            )
 
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)

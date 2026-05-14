@@ -100,7 +100,7 @@ class GPTNeoXAttention(nn.Module):
             self.num_heads,
             self.head_size,
             scaling,
-            vllm_config=vllm_config,
+            vllm_config,
             prefix=f"{prefix}.attn",
         )
 

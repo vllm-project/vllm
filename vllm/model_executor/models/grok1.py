@@ -307,8 +307,8 @@ class Grok1Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
             logits_soft_cap=attn_logits_soft_cap,
             prefix=f"{prefix}.attn",
         )

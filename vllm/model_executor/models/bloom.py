@@ -130,8 +130,8 @@ class BloomAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             scaling,
+            vllm_config,
             alibi_slopes=alibi_slopes,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

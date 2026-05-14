@@ -182,8 +182,8 @@ class BaiChuanAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 scaling,
+                vllm_config,
                 alibi_slopes=alibi_slopes,
-                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
         else:
@@ -197,7 +197,7 @@ class BaiChuanAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.scaling,
-                vllm_config=vllm_config,
+                vllm_config,
                 prefix=f"{prefix}.attn",
             )
 

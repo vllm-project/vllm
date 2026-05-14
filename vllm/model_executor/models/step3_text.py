@@ -203,8 +203,8 @@ class Step3TextAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             scaling,
-            self.num_kv_heads,
-            vllm_config=vllm_config,
+            vllm_config,
+            num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
         )
 

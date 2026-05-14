@@ -119,7 +119,7 @@ class ModernBertAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
-            vllm_config=vllm_config,
+            vllm_config,
             prefix=f"{layer_id}.attn",
             per_layer_sliding_window=sliding_window,
         )

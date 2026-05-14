@@ -189,8 +189,8 @@ class Exaone4Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
             per_layer_sliding_window=self.sliding_window,
             prefix=f"{prefix}.attn",
         )

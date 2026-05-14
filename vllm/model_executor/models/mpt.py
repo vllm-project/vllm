@@ -124,9 +124,9 @@ class MPTAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             scaling,
+            vllm_config,
             alibi_slopes=alibi_slopes,
             num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

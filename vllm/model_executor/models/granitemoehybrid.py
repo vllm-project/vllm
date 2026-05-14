@@ -281,8 +281,8 @@ class GraniteMoeHybridAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.attention_multiplier,
+            vllm_config,
             num_kv_heads=self.num_key_value_heads,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

@@ -204,11 +204,11 @@ class Param2MoEAttention(nn.Module):
         )
 
         self.attn = Attention(
-            num_heads=self.num_local_heads,
-            head_size=self.head_dim,
-            scale=self.scaling,
+            self.num_local_heads,
+            self.head_dim,
+            self.scaling,
+            vllm_config,
             num_kv_heads=self.num_local_kv_heads,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

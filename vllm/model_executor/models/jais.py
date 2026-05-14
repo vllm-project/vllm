@@ -129,9 +129,9 @@ class JAISAttention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            scale=self.scale,
+            self.scale,
+            vllm_config,
             alibi_slopes=alibi_slopes,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

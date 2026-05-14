@@ -622,11 +622,11 @@ class Moondream3Attention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
-            num_heads=self.num_heads_per_partition,
-            head_size=self.head_dim,
-            scale=self.scaling,
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads_per_partition,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 

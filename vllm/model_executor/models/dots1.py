@@ -250,8 +250,8 @@ class Dots1Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)

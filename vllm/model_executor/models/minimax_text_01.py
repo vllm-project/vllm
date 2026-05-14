@@ -245,8 +245,8 @@ class MiniMaxText01Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
         self.rotary_emb = get_rope(

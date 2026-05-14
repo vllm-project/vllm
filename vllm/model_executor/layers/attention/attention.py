@@ -190,10 +190,10 @@ class Attention(nn.Module, AttentionLayerBase):
         num_heads: int,
         head_size: int,
         scale: float,
+        vllm_config: VllmConfig,
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         use_alibi_sqrt: bool | None = None,
-        vllm_config: VllmConfig | None = None,
         logits_soft_cap: float | None = None,
         per_layer_sliding_window: int | None = None,
         prefix: str = "",
@@ -208,12 +208,10 @@ class Attention(nn.Module, AttentionLayerBase):
         `self.kv_cache`.
         """
         super().__init__()
-        cache_config = vllm_config.cache_config if vllm_config is not None else None
-        model_config = vllm_config.model_config if vllm_config is not None else None
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
-        compilation_config = (
-            vllm_config.compilation_config if vllm_config is not None else None
-        )
+        cache_config = vllm_config.cache_config
+        model_config = vllm_config.model_config
+        quant_config = vllm_config.quant_config
+        compilation_config = vllm_config.compilation_config
 
         sliding_window: int | None
         if per_layer_sliding_window is not None:
@@ -344,7 +342,6 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
         if self.attn_backend.get_name() == "FLEX_ATTENTION":
-            assert vllm_config is not None
             block_m = vllm_config.attention_config.flex_attn_block_m
             block_n = vllm_config.attention_config.flex_attn_block_n
 
@@ -390,7 +387,6 @@ class Attention(nn.Module, AttentionLayerBase):
         # and let torch.compile handle them.
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        assert compilation_config is not None
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self

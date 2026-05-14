@@ -661,9 +661,9 @@ class OlmoHybridAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
             prefix=f"{prefix}.attn",
-            vllm_config=vllm_config,
         )
 
         rope_parameters = getattr(self.config, "rope_parameters", None)

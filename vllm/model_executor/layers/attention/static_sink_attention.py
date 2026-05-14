@@ -124,17 +124,13 @@ class StaticSinkAttention(Attention, CustomOp):
         head_size: int,
         scale: float,
         sink_len: int,
+        vllm_config: VllmConfig,
         attn_backend: type[AttentionBackend] | None = None,
-        vllm_config: VllmConfig | None = None,
         **kwargs,
     ):
         dtype = torch.get_default_dtype()
 
-        cache_config = vllm_config.cache_config if vllm_config is not None else None
-        if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
-        else:
-            kv_cache_dtype = "auto"
+        kv_cache_dtype = vllm_config.cache_config.cache_dtype
 
         if attn_backend is not None:
             underlying_attn_backend = attn_backend
@@ -145,11 +141,11 @@ class StaticSinkAttention(Attention, CustomOp):
             sink_len=sink_len,
         )
         Attention.__init__(
-            self=self,
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            vllm_config=vllm_config,
+            self,
+            num_heads,
+            head_size,
+            scale,
+            vllm_config,
             attn_backend=attn_backend,
             **kwargs,
         )

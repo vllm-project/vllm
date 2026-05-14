@@ -123,15 +123,15 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
 
         # Register layer metadata for the fusion pass via MLAAttention
         self.mla_attn = MLAAttention(
-            num_heads=self.num_heads,
-            scale=self.scale,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            v_head_dim=self.v_head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            kv_b_proj=self.kv_b_proj,
-            vllm_config=vllm_config,
+            self.num_heads,
+            self.scale,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            self.kv_b_proj,
+            vllm_config,
             prefix=prefix,
             attn_backend=attn_backend.get_class(),
         )

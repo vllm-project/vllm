@@ -174,8 +174,8 @@ class FalconAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.inv_norm_factor,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
-                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
         elif self.use_alibi:
@@ -190,18 +190,18 @@ class FalconAttention(nn.Module):
                 self.num_heads,
                 self.head_dim,
                 self.inv_norm_factor,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
                 alibi_slopes=alibi_slopes,
-                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
         else:
             self.attn = Attention(
                 self.num_heads,
                 self.head_dim,
-                scale=self.inv_norm_factor,
+                self.inv_norm_factor,
+                vllm_config,
                 num_kv_heads=self.num_kv_heads,
-                vllm_config=vllm_config,
                 prefix=f"{prefix}.attn",
             )
 

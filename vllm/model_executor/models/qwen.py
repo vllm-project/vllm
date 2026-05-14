@@ -130,7 +130,7 @@ class QWenAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
-            vllm_config=vllm_config,
+            vllm_config,
             prefix=f"{prefix}.attn",
         )
 

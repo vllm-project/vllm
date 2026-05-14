@@ -339,7 +339,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         kv_b_proj: ColumnParallelLinear,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
         attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
@@ -347,8 +347,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         **extra_impl_args,
     ):
         super().__init__()
-        cache_config = vllm_config.cache_config if vllm_config is not None else None
-        quant_config = vllm_config.quant_config if vllm_config is not None else None
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
 
         self.num_heads = num_heads
         self.scale = scale
@@ -461,7 +461,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
-        assert vllm_config is not None
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")

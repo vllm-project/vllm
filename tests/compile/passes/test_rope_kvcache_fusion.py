@@ -79,11 +79,11 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
         # Register layer metadata for the fusion pass via Attention.
         self.attn = Attention(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=1.0 / head_size**0.5,
+            num_heads,
+            head_size,
+            1.0 / head_size**0.5,
+            vllm_config,
             num_kv_heads=num_kv_heads,
-            vllm_config=vllm_config,
             prefix=prefix,
             attn_backend=attn_backend.get_class(),
         )

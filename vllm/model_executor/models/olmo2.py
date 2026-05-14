@@ -135,10 +135,10 @@ class Olmo2Attention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
-            vllm_config=vllm_config,
         )
 
         # Rotary embeddings. Rope scaling is only applied on full attention layers.

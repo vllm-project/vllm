@@ -188,7 +188,7 @@ class Zamba2Attention(nn.Module):
                     self.num_attention_heads,
                     self.attention_head_dim,
                     self.scale,
-                    vllm_config=vllm_config,
+                    vllm_config,
                     prefix=f"{prefix}.attn.{j}",
                 )
                 j += 1

@@ -97,15 +97,15 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
 
         # Create MLAAttention
         self.mla_attn = MLAAttention(
-            num_heads=num_heads,
-            scale=1.0 / (self.qk_head_dim**0.5),
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            q_lora_rank=None,
-            kv_lora_rank=kv_lora_rank,
-            kv_b_proj=kv_b_proj,
-            vllm_config=vllm_config,
+            num_heads,
+            1.0 / (self.qk_head_dim**0.5),
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            v_head_dim,
+            None,
+            kv_lora_rank,
+            kv_b_proj,
+            vllm_config,
             prefix="model.layers.0.self_attn.attn",
         )
         self.mla_attn._k_scale = self.mla_attn._k_scale.to(device)

@@ -60,7 +60,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         mla_modules: MLAModules,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
         skip_topk: bool = False,
     ) -> None:
@@ -97,16 +97,16 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
         self.mla_attn = MLAAttention(
-            num_heads=self.num_heads,
-            scale=scale,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            v_head_dim=self.v_head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            vllm_config=vllm_config,
+            self.num_heads,
+            scale,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            self.kv_b_proj,
+            vllm_config,
             prefix=f"{prefix}.attn",
-            kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
         )

@@ -102,9 +102,9 @@ class GPTBigCodeAttention(nn.Module):
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
-            scale=self.scale,
+            self.scale,
+            vllm_config,
             num_kv_heads=self.num_kv_heads,
-            vllm_config=vllm_config,
             prefix=f"{prefix}.attn",
         )
 
