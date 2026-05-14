@@ -14,11 +14,11 @@ reason about temporal order.
 """
 
 import math
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn.functional as F
 from PIL import Image as PILImage
@@ -893,9 +893,7 @@ class Gemma4ClippableReplicatedLinear(ReplicatedLinear):
         hidden_states = super().forward(hidden_states)
 
         if self.use_clipped_linears:
-            hidden_states = torch.clamp(
-                hidden_states, self.output_min, self.output_max
-            )
+            hidden_states = torch.clamp(hidden_states, self.output_min, self.output_max)
 
         return hidden_states
 
@@ -936,9 +934,7 @@ class Gemma4VisionPatchEmbedder(nn.Module):
         one_hot = one_hot.permute(0, 2, 1, 3).to(self.position_embedding_table)
         position_embeddings = one_hot @ self.position_embedding_table
         position_embeddings = position_embeddings.sum(dim=1)
-        return torch.where(
-            padding_positions.unsqueeze(-1), 0.0, position_embeddings
-        )
+        return torch.where(padding_positions.unsqueeze(-1), 0.0, position_embeddings)
 
     def forward(
         self,
@@ -1061,8 +1057,7 @@ class Gemma4VisionRotaryEmbedding(nn.Module):
         inv_freq = 1.0 / (
             base
             ** (
-                torch.arange(0, spatial_dim, 2, dtype=torch.int64).float()
-                / spatial_dim
+                torch.arange(0, spatial_dim, 2, dtype=torch.int64).float() / spatial_dim
             )
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
@@ -1224,9 +1219,7 @@ class Gemma4VisionAttention(nn.Module):
 
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.v_norm = RMSNorm(
-            self.head_dim, eps=config.rms_norm_eps, has_weight=False
-        )
+        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
     def forward(
         self,
@@ -1542,7 +1535,7 @@ class Gemma4ForConditionalGeneration(
             "model.audio_tower.": "audio_tower.",
             "lm_head.": "language_model.lm_head.",
             "model": "language_model.model",
-        }
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
