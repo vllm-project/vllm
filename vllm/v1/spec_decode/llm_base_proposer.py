@@ -550,6 +550,13 @@ class SpecDecodeBaseProposer:
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.hidden_states[:batch_size] = hidden_states
+
+            # Wait for the `input_ids` write to finish on device before constructing
+            # attention metadata or launching downstream kernels. Synchronizing the
+            # current stream blocks the CPU minimally, avoiding an expensive
+            # global torch.accelerator.synchronize().
+            torch.accelerator.current_stream().synchronize()
+
             if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
