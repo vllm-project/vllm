@@ -341,6 +341,12 @@ class IPCWeightTransferEngine(
         dtype_names: list[str] = []
         shapes: list[list[int]] = []
         ipc_handles: list[dict[str, tuple]] = []
+        # Hold strong refs to every contiguous copy until the send + post-send
+        # sync completes. reduce_tensor's returned args do NOT keep storage
+        # alive, and non-contiguous inputs allocate fresh storage in
+        # .contiguous() that would otherwise be GC'd before the consumer opens
+        # the IPC handle.
+        weight_refs: list[torch.Tensor] = []
 
         for name, tensor in iterator:
             names.append(name)
@@ -348,6 +354,7 @@ class IPCWeightTransferEngine(
             shapes.append(list(tensor.shape))
 
             weight = tensor.detach().contiguous()
+            weight_refs.append(weight)
             _, ipc_args = reduce_tensor(weight)
             ipc_handles.append({gpu_uuid: ipc_args})
 
