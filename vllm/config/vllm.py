@@ -65,7 +65,13 @@ else:
 
 logger = init_logger(__name__)
 
-DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset({"Qwen3ForCausalLM"})
+DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
+    {
+        "Qwen3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Qwen2MoeForCausalLM",
+    }
+)
 
 
 class OptimizationLevel(IntEnum):
@@ -526,13 +532,13 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        architectures = getattr(model_config, "architectures", [])
-        if not any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
-        ):
+        if model_config.is_quantized:
             return False
 
-        return not model_config.is_moe and not model_config.is_quantized
+        architectures = getattr(model_config, "architectures", [])
+        return any(
+            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        )
 
     @property
     def needs_dp_coordinator(self) -> bool:
