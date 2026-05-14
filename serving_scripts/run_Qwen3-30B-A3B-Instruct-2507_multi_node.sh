@@ -445,6 +445,9 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
   VLLM_TRACE_FLAGS+=(
     --ray-workers-use-nsight
     --enable-layerwise-nvtx-tracing
+    --enable-mfu-metrics
+    --kv-cache-metrics
+    --kv-cache-metrics-sample 1.0
     --enable-logging-iteration-details
   )
 fi
@@ -508,7 +511,7 @@ HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
   HEAD_NODE_IP="${HEAD_NODE_IP}" \
   GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
   RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
-  
+
 echo "Workload finished. Stopping vLLM/Nsight server process cleanly..."
 if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
   kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
@@ -533,7 +536,7 @@ done
 WORKER_RAY_PIDS=""
 
 echo "Waiting briefly for Ray/Nsight files to flush..."
-sleep 10
+sleep 200
 
 echo "Copying Ray worker Nsight reports..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
