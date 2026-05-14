@@ -7,6 +7,14 @@ import os
 os.environ.setdefault("VLLM_DEBUG_DUMP_HS", "1")
 # PROBE: required for cuBLAS deterministic mode to be honored by PyTorch
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+# PROBE: enable sub-op deterministic check in Qwen3 layer 0 forward.
+# Each pure sub-op (qkv_proj, q_norm, k_norm, rotary_emb, o_proj,
+# input_layernorm, post_attention_layernorm, mlp) is called twice with
+# cloned input; max diff is logged when non-zero. The op with non-zero
+# diff is the non-deterministic source. self.attn (the attention call)
+# is skipped because it mutates KV cache, but can be deduced by
+# elimination if all other ops are deterministic yet layer output diverges.
+os.environ.setdefault("VLLM_DET_CHECK", "1")
 
 from itertools import repeat  # noqa: E402
 from typing import Any  # noqa: E402

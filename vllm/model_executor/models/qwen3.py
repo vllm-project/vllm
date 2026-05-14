@@ -56,6 +56,36 @@ from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe
 logger = init_logger(__name__)
 
 
+# PROBE: determinism check helper. Calls fn(*args) twice with cloned tensor
+# args and prints max abs diff between the two outputs. Used to find which
+# sub-op of the first transformer layer has non-deterministic output.
+def _det_check_call(name: str, fn, *args):
+    import os as _os
+
+    if _os.environ.get("VLLM_DET_CHECK", "") != "1":
+        return fn(*args)
+    cloned = tuple(a.clone() if isinstance(a, torch.Tensor) else a for a in args)
+    out_a = fn(*args)
+    out_b = fn(*cloned)
+    if isinstance(out_a, tuple):
+        diffs = []
+        for ta, tb in zip(out_a, out_b):
+            if isinstance(ta, torch.Tensor) and isinstance(tb, torch.Tensor):
+                diffs.append((ta - tb).abs().max().item())
+        diff = max(diffs) if diffs else 0.0
+    else:
+        diff = (out_a - out_b).abs().max().item()
+    if diff != 0:
+        import sys as _sys
+
+        print(
+            f"[DET_CHECK] {name} max_diff={diff:.3e}",
+            file=_sys.stderr,
+            flush=True,
+        )
+    return out_a
+
+
 class Qwen3Attention(nn.Module):
     def __init__(
         self,
@@ -147,18 +177,41 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
+        # PROBE: only run det check on layer 0 (the first divergence point).
+        _det = (
+            getattr(self, "_probe_layer_idx", -1) == 0
+            and __import__("os").environ.get("VLLM_DET_CHECK", "") == "1"
+        )
+        if _det:
+            qkv, _ = _det_check_call("qkv_proj", self.qkv_proj, hidden_states)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
+        if _det:
+            q_by_head = _det_check_call("q_norm", self.q_norm, q_by_head)
+        else:
+            q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
+        if _det:
+            k_by_head = _det_check_call("k_norm", self.k_norm, k_by_head)
+        else:
+            k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
+        if _det:
+            q, k = _det_check_call("rotary_emb", self.rotary_emb, positions, q, k)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+        # NOTE: self.attn mutates KV cache, so we don't double-call it.
+        # If all other sub-ops are deterministic but the layer output still
+        # diverges across configs, attention is the culprit by elimination.
         attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        if _det:
+            output, _ = _det_check_call("o_proj", self.o_proj, attn_output)
+        else:
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -212,6 +265,9 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # PROBE: layer index for selective det check (only layer 0)
+        self._probe_layer_idx = extract_layer_index(prefix)
+        self.self_attn._probe_layer_idx = self._probe_layer_idx
 
     def forward(
         self,
@@ -219,20 +275,51 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        import os as _os
+
+        _det = (
+            self._probe_layer_idx == 0 and _os.environ.get("VLLM_DET_CHECK", "") == "1"
+        )
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            if _det:
+                hidden_states = _det_check_call(
+                    "input_layernorm", self.input_layernorm, hidden_states
+                )
+            else:
+                hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            if _det:
+                hidden_states, residual = _det_check_call(
+                    "input_layernorm_w_residual",
+                    self.input_layernorm,
+                    hidden_states,
+                    residual,
+                )
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if _det:
+            hidden_states, residual = _det_check_call(
+                "post_attention_layernorm",
+                self.post_attention_layernorm,
+                hidden_states,
+                residual,
+            )
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+        if _det:
+            hidden_states = _det_check_call("mlp", self.mlp, hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
