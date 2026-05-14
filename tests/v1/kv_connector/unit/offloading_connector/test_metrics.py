@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OFFLOAD_CACHE_USAGE_KEY,
     OffloadingConnectorStats,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
@@ -149,3 +152,41 @@ def test_reset():
     # After reset, stats should be empty
     assert offload_connector_stats.is_empty()
     assert len(offload_connector_stats.data) == 0
+
+
+def test_reduce_offload_usage_uses_max():
+    stats = OffloadingConnectorStats()
+    stats.record_offload_usage(0.2)
+    stats.record_offload_usage(0.7)
+    stats.record_offload_usage(0.4)
+
+    reduced = stats.reduce()
+
+    assert reduced[OFFLOAD_CACHE_USAGE_KEY] == 0.7
+
+
+def test_aggregate_merges_offload_usage_samples():
+    stats1 = OffloadingConnectorStats()
+    stats1.record_offload_usage(0.1)
+    stats1.record_offload_usage(0.3)
+
+    stats2 = OffloadingConnectorStats()
+    stats2.record_offload_usage(0.8)
+
+    merged = stats1.aggregate(stats2)
+
+    assert merged is stats1
+    assert stats1.data[OFFLOAD_CACHE_USAGE_KEY] == [0.1, 0.3, 0.8]
+
+
+def test_scheduler_get_kv_connector_stats_includes_offload_usage():
+    connector = OffloadingConnector.__new__(OffloadingConnector)
+    connector.connector_worker = None
+    connector.connector_scheduler = SimpleNamespace(
+        manager=SimpleNamespace(offload_cache_usage_fraction=lambda: 0.42)
+    )
+
+    stats = connector.get_kv_connector_stats()
+
+    assert isinstance(stats, OffloadingConnectorStats)
+    assert stats.data[OFFLOAD_CACHE_USAGE_KEY] == [0.42]

@@ -223,6 +223,12 @@ class CPUOffloadingManager(OffloadingManager):
                 )
             )
 
+    def offload_cache_usage_fraction(self) -> float | None:
+        if self._num_blocks == 0:
+            return 0.0
+        in_use = self._num_blocks - self._get_num_free_blocks()
+        return in_use / self._num_blocks
+
     def take_events(self) -> Iterable[OffloadingEvent]:
         if self.events is not None:
             yield from self.events

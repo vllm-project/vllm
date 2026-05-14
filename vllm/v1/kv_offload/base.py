@@ -218,6 +218,14 @@ class OffloadingManager(ABC):
         """
         return ()
 
+    def offload_cache_usage_fraction(self) -> float | None:
+        """
+        Return the fraction of the offload store's block pool currently in use
+        (0.0 = empty, 1.0 = full), or None if this manager does not expose
+        utilization (e.g. an unbounded remote-storage backend).
+        """
+        return None
+
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
         return

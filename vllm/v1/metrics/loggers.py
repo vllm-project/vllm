@@ -526,6 +526,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        gauge_kv_offload_cache_usage = self._gauge_cls(
+            name="vllm:kv_offload_cache_usage_perc",
+            documentation=(
+                "KV offload store usage. 1 means 100 percent of the "
+                "connector offload block pool is in use. 0 when no offload."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_offload_cache_usage = create_metric_per_engine(
+            gauge_kv_offload_cache_usage, per_engine_labelvalues
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1079,6 +1092,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_kv_offload_cache_usage[engine_idx].set(
+                scheduler_stats.kv_offload_cache_usage
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

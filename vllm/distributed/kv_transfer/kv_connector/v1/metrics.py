@@ -14,6 +14,11 @@ PromMetricT = TypeVar("PromMetricT", bound=PromMetric)
 
 logger = init_logger(__name__)
 
+# Key used in KVConnectorStats.data to carry offload-store utilization samples
+# (list[float], 0.0-1.0). Stored alongside transfer-op metrics so it flows
+# through the same aggregation pipeline without extra API surface.
+OFFLOAD_CACHE_USAGE_KEY = "offload_cache_usage_perc"
+
 
 @dataclass
 class KVConnectorStats:
