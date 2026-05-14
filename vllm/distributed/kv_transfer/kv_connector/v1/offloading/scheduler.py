@@ -223,7 +223,9 @@ class OffloadingConnectorScheduler:
 
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
-        self._job_reset_counter: int = 0
+        # Threshold value for stale jobs. All job ids >= _stale_job_threshold are
+        # active jobs.
+        self._stale_job_threshold: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
 
         # block_id -> pending store job_ids. Used to track jobs that needs
@@ -803,11 +805,11 @@ class OffloadingConnectorScheduler:
             meta = OffloadingWorkerMetadata()
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
-            if job_id < self._job_reset_counter:
+            if job_id < self._stale_job_threshold:
                 logger.debug(
                     "Skipping stale completed job %d (pre-reset counter: %d)",
                     job_id,
-                    self._job_reset_counter,
+                    self._stale_job_threshold,
                 )
                 continue
             job_status = self._jobs[job_id]
@@ -901,10 +903,10 @@ class OffloadingConnectorScheduler:
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
         # Discard jobs and save job_counter to be able to discard worker responses
-        self._job_reset_counter = self._job_counter
+        self._stale_job_threshold = self._job_counter
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
-        
+
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.
         if self._blocks_being_loaded is not None:

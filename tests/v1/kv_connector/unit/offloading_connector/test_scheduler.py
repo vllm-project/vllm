@@ -989,7 +989,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
 
     # Job reset counter must equal the job counter so that completions for
     # pre-reset jobs arriving from workers are silently discarded.
-    assert runner.connector_scheduler._job_reset_counter == job_counter_before_reset
+    assert runner.connector_scheduler._stale_job_threshold == job_counter_before_reset
 
     # next_stored_block_idx must be reset to 0 for every active request so
     # that post-reset stores restart from block 0.

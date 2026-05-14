@@ -224,7 +224,7 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
     def reset_cache(self) -> None:
-        # Clear ALL blocks unconditionally. The scheduler's _job_reset_counter
+        # Clear ALL blocks unconditionally. The scheduler's _stale_job_threshold
         # guarantees that complete_load / complete_store are never called for
         # pre-reset jobs, so no lazy cleanup is needed. The scheduler also
         # flushes in-flight load job IDs to the workers before any new stores
