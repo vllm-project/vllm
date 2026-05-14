@@ -1262,9 +1262,15 @@ def test_eplb_num_redundant_experts_auto_computation(
     """
     from vllm.config.parallel import ParallelConfig
 
-    with patch(
-        "vllm.config.parallel.current_platform.is_cuda_alike",
-        return_value=True,
+    with (
+        patch(
+            "vllm.config.parallel.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.config.parallel.current_platform.device_count",
+            return_value=tp_size * dp_size,
+        ),
     ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=tp_size,
@@ -1297,12 +1303,16 @@ def test_eplb_num_redundant_experts_disabled():
     """Test that num_redundant_experts defaults to 0 when EPLB is disabled."""
     from vllm.config.parallel import ParallelConfig
 
-    parallel_config = ParallelConfig(
-        tensor_parallel_size=2,
-        data_parallel_size=1,
-        enable_expert_parallel=False,
-        enable_eplb=False,
-    )
+    with patch(
+        "vllm.config.parallel.current_platform.device_count",
+        return_value=2,
+    ):
+        parallel_config = ParallelConfig(
+            tensor_parallel_size=2,
+            data_parallel_size=1,
+            enable_expert_parallel=False,
+            enable_eplb=False,
+        )
     # num_redundant_experts should be None before computation
     assert parallel_config.eplb_config.num_redundant_experts is None
 
@@ -1317,9 +1327,15 @@ def test_eplb_num_redundant_experts_explicit_value_preserved():
     """Test that explicitly set num_redundant_experts is not overwritten."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig
 
-    with patch(
-        "vllm.config.parallel.current_platform.is_cuda_alike",
-        return_value=True,
+    with (
+        patch(
+            "vllm.config.parallel.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.config.parallel.current_platform.device_count",
+            return_value=8,
+        ),
     ):
         parallel_config = ParallelConfig(
             tensor_parallel_size=4,
