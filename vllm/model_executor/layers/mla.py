@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from vllm.forward_context import get_forward_context
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
@@ -125,9 +126,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             attn_metadata = attn_metadata[self.mla_attn.layer_name]
         indexer_kv_cache = getattr(self.indexer, "kv_cache", None)
         if indexer_kv_cache is not None:
-            kv_cache = indexer_kv_cache[forward_context.virtual_engine]
+            kv_cache = indexer_kv_cache
         else:
-            kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+            kv_cache = self.mla_attn.kv_cache
         return kv_cache, attn_metadata
 
     def forward(
