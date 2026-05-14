@@ -338,12 +338,17 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     act_in = tl.load(act_in_ptrs)
     mul_in = tl.load(act_in_ptrs + N_2)
 
-    # silu & mul
-    act_in = act_in.to(tl.float32)
-    mul_in = mul_in.to(tl.float32)
+    # silu & mul — match C++ silu_and_mul: clamp in fp32 then store back to the
+    # input dtype, run silu in fp32 then narrow, and do the mul at input
+    # precision so HAS_CLAMP True/False share the same multiplication path.
     if HAS_CLAMP:
-        mul_in = tl.clamp(mul_in, -clamp_limit, clamp_limit)
-        act_in = tl.minimum(act_in, clamp_limit)
+        act_in = tl.minimum(act_in.to(tl.float32), clamp_limit).to(
+            y_ptr.dtype.element_ty
+        )
+        mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
+            y_ptr.dtype.element_ty
+        )
+    act_in = act_in.to(tl.float32)
     one_f32 = tl.cast(1, tl.float32)
     silu_out = (act_in / (one_f32 + tl.exp(-act_in))).to(y_ptr.dtype.element_ty)
     y = (silu_out * mul_in).to(tl.float32)
