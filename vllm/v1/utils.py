@@ -330,6 +330,12 @@ class APIServerProcessManager:
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown API server processes with configurable timeout"""
+        if self._address_pipes is not None:
+            for pipe in self._address_pipes:
+                with contextlib.suppress(Exception):
+                    pipe.close()
+            self._address_pipes = None
+
         if self._finalizer.detach() is not None:
             shutdown(self.processes, timeout=timeout)
 
