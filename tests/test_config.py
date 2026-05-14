@@ -934,6 +934,28 @@ def test_vllm_config_defaults_are_none():
                 assert getattr(config.compilation_config, k) is None
 
 
+def _make_return_routed_experts_config(is_moe: bool) -> VllmConfig:
+    config = object.__new__(VllmConfig)
+    config.model_config = SimpleNamespace(
+        enable_return_routed_experts=True,
+        is_moe=is_moe,
+    )
+    return config
+
+
+def test_validate_return_routed_experts_rejects_dense_models():
+    config = _make_return_routed_experts_config(is_moe=False)
+
+    with pytest.raises(ValueError, match="requires a MoE model"):
+        config._validate_return_routed_experts()
+
+
+def test_validate_return_routed_experts_allows_moe_models():
+    config = _make_return_routed_experts_config(is_moe=True)
+
+    config._validate_return_routed_experts()
+
+
 @pytest.mark.parametrize(
     ("model_id", "compilation_config", "optimization_level"),
     [
