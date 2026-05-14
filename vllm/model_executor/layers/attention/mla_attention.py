@@ -2310,12 +2310,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale
                 )
 
-            prefill_backend = prefill_metadata.prefill_backend
-            if (
-                getattr(prefill_backend, "requires_v_padding", False)
-                and context_output.shape[-1] != self.v_head_dim
-            ):
+            if context_output.shape[-1] != self.v_head_dim:
                 context_output = context_output[..., : self.v_head_dim]
+            if suffix_output.shape[-1] != self.v_head_dim:
                 suffix_output = suffix_output[..., : self.v_head_dim]
 
             output = output.view(-1, self.num_heads, self.v_head_dim)
