@@ -15,6 +15,7 @@
     "performance_tp1":       ["cohere-ubuntu-cw-h100-1-model-efficiency"],
     "performance_tp2":       ["cohere-ubuntu-cw-h100-2-model-efficiency"],
     "performance_tp4":       ["cohere-ubuntu-cw-h100-4-model-efficiency"],
+    "thinking_budget":       ["cohere-ubuntu-cw-h100-4-model-efficiency"],
     "speculative_decoding":  ["cohere-ubuntu-cw-h100-4-model-efficiency"],
     "vision":                ["cohere-ubuntu-cw-h100-2-model-efficiency"]
   },
@@ -32,6 +33,7 @@
     "performance_tp1":       ["cohere-ubuntu-cw-gb200-1-model-efficiency"],
     "performance_tp2":       ["cohere-ubuntu-cw-gb200-2-model-efficiency"],
     "performance_tp4":       ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
+    "thinking_budget":       ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
     "speculative_decoding":  ["cohere-ubuntu-cw-gb200-4-model-efficiency"],
     "vision":                ["cohere-ubuntu-cw-gb200-2-model-efficiency"]
   },
@@ -49,6 +51,7 @@
     "performance_tp2":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
     "performance_tp4":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
     "performance_tp8":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
+    "thinking_budget":       ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
     "speculative_decoding":  ["cohere-ubuntu-oke-mi300-8-model-efficiency"],
     "vision":                ["cohere-ubuntu-oke-mi300-8-model-efficiency"]
   },
@@ -70,6 +73,7 @@
     "performance_tp1":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
     "performance_tp2":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
     "performance_tp4":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
+    "thinking_budget":       ["cohere-ubuntu-gke-b200-8-model-efficiency"],
     "speculative_decoding":  ["cohere-ubuntu-gke-b200-8-model-efficiency"],
     "vision":                ["cohere-ubuntu-gke-b200-8-model-efficiency"]
   }

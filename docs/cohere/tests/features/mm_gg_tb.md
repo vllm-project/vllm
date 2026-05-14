@@ -65,7 +65,7 @@ reporting branch.
 Primary test: [`tests/cohere/test_guided_generation_vision_spec_async.py`](../../../../tests/cohere/test_guided_generation_vision_spec_async.py)
 CI entry: `run_guided_generation()` in
 [`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh)
-Dispatcher: `guided_generation` test group, expanded from `GG_TB`.
+Dispatcher: `guided_generation` test group, expanded from `GG`.
 Runner map: [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json)
 
 ### Setup

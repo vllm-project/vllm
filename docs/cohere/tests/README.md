@@ -3,7 +3,7 @@
 ## TL;DR
 
 - we have entry workflows [build-and-test](https://github.com/cohere-ai/vllm-cohere/actions/workflows/build-and-test.yaml) (feature tests), [build-and-eval](https://github.com/cohere-ai/vllm-cohere/actions/workflows/build-and-eval.yaml) (`lm_eval` / `bee_eval`), and [build-and-bench](https://github.com/cohere-ai/vllm-cohere/actions/workflows/build-and-bench.yaml) (perf benchmarks) to build docker images against a commit and run tests with those images
-- the testing groups are: `cpu`, `fast_check`, `model_arch`, `quantization` (expands to `quantization_32bit_logits`), `GG_TB` (expands to `guided_generation`, `bee_sample_tb_check`), `lm_eval`, `bee_eval`, `performance`, `speculative_decoding`, `vision` (details below)
+- the testing groups are: `cpu`, `fast_check`, `model_arch`, `quantization` (expands to `quantization_32bit_logits`), `GG` (expands to `guided_generation`), `thinking_budget` (expands to `thinking_budget`, `bee_sample_tb_check`), `lm_eval`, `bee_eval`, `performance`, `speculative_decoding`, `vision` (details below)
 - `fast_check` and `all` also trigger CPU tests in parallel on a `ubuntu-latest` runner
 - CPU tests also run automatically on every PR to `cohere` via `pr-cpu-tests.yaml`
 - to kick off tests, you can use the GitHub Actions UI -> `build-and-test` / `build-and-eval` / `build-and-bench` -> new workflow, or use `gh cli`
@@ -20,7 +20,7 @@ gh workflow run build-and-eval.yaml --ref <sha> -f evaluations=bee_eval -f model
 # Run perf benchmarks; optional :tpN on models the same way
 gh workflow run build-and-bench.yaml --ref <sha> -f benchmarks=perf_100 -f models=command-r7b_fp8:tp1
 
-# Run feature tests (fast_check, GG_TB, speculative_decoding, etc.)
+# Run feature tests (fast_check, GG, thinking_budget, speculative_decoding, etc.)
 gh workflow run build-and-test.yaml --ref <sha> -f features=all
 
 # Run on AMD GPU
@@ -169,9 +169,10 @@ compatibility.
 | `fast_check` | ~1h | Core functionality tests run on every PR. Includes V1 core tests, basic correctness, entrypoints. |
 | `lm_eval` | ~15m | Run GSM8K, NIAH, metabench, RULER against Command R7B (default). Configurable via `TP_SIZE` and `MODELS`. |
 | `bee_eval` | ~3h | Run bee eval tasks against multiple models. Includes lm_eval for long context tests. Configurable via `TP_SIZE` and `MODELS`. |
-| `GG_TB` | ~20m | Guided generation and thinking budget regression bucket. Expands into `guided_generation`, `bee_sample_tb_check`. |
-| ↳ `guided_generation` | ~10m | *(internal group, use `GG_TB` or `all`)* Guided generation tests with Command 4 and Command A models (TP=4). |
-| ↳ `bee_sample_tb_check` | ~10m | *(internal group, use `GG_TB` or `all`)* Bee samples with per-task thinking budgets enabled on C5 (TP=1). Validates that `thinking_token_budget` produces passing scores. |
+| `GG` | ~10m | Guided generation regression bucket. Expands into `guided_generation`. |
+| ↳ `guided_generation` | ~10m | *(internal group, use `GG` or `all`)* Guided generation tests with Command 4 and Command A models (TP=4). |
+| `thinking_budget` | ~20m | Thinking budget regression bucket. Expands into `thinking_budget`, `bee_sample_tb_check`. |
+| ↳ `bee_sample_tb_check` | ~10m | *(internal group, use `thinking_budget` or `all`)* Bee samples with per-task thinking budgets enabled on C5 (TP=1). Validates that `thinking_token_budget` produces passing scores. |
 | `speculative_decoding` | ~15m | EAGLE speculative decoding tests, validates mean acceptance length metrics. |
 | `performance` | ~1.5h | Serving benchmarks for CR7B (TP=1) or Command A (TP=2+). Configurable via `TP_SIZE` and `MODELS`. |
 | `vision` | ~10m | Vision model tests with Command-A Vision, verifies multi-image input handling. |

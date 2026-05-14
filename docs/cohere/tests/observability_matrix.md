@@ -52,13 +52,16 @@ This matrix is part of a three-layer documentation structure:
 
 - 4.1.1 `test_bee_task` with `ENABLE_THINKING_BUDGET=1` (c5-3a30t_fp8)
 
-#### 4.2 Guided Generation — Text (BLS)
+#### 4.2 Thinking Budget — SD/non-SD (BLS)
 
-- 4.2.1 `test_guided_generation --suite merged` non-SD (c5-3a30t_fp8, JSON + tools + long-context with thinking)
-- 4.2.2 `test_guided_generation_melody` SD (c5-3a30t_fp8 + eagle)
-- 4.2.3 `test_guided_generation_tools_melody` SD (c5-3a30t_fp8 + eagle)
-- 4.2.4 `test_thinking_budget` SD (c5-3a30t_fp8 + eagle)
-- 4.2.5 `test_thinking_budget` non-SD (c5-3a30t_fp8)
+- 4.2.1 `test_thinking_budget` non-SD (c5-3a30t_fp8)
+- 4.2.2 `test_thinking_budget` SD (c5-3a30t_fp8 + eagle)
+
+#### 4.3 Guided Generation — Text (BLS)
+
+- 4.3.1 `test_guided_generation --suite merged` non-SD (c5-3a30t_fp8, JSON + tools + long-context with thinking)
+- 4.3.2 `test_guided_generation_melody` SD (c5-3a30t_fp8 + eagle)
+- 4.3.3 `test_guided_generation_tools_melody` SD (c5-3a30t_fp8 + eagle)
 
 ### 5. Speculative Decoding
 

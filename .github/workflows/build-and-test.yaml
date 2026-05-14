@@ -33,13 +33,14 @@ on:
         required: false
         type: choice
         default: 'all'
-        description: 'Feature tests to run (all excludes fast_check). cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+        description: 'Feature tests to run (all excludes fast_check). cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora. quantization expands into quantization_32bit_logits. thinking_budget expands into thinking_budget, bee_sample_tb_check.'
         options:
           - cpu_check
           - fast_check
           - model_arch
           - quantization
-          - GG_TB
+          - GG
+          - thinking_budget
           - speculative_decoding
           - vision
           - all
@@ -77,7 +78,7 @@ on:
         required: false
         type: string
         default: 'all'
-        description: 'Feature tests to run (none, cpu_check, fast_check, model_arch, quantization, GG_TB, speculative_decoding, vision, all). Note: all excludes fast_check. cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. GG_TB expands into guided_generation, bee_sample_tb_check.'
+        description: 'Feature tests to run (none, cpu_check, fast_check, model_arch, quantization, GG, thinking_budget, speculative_decoding, vision, all). Note: all excludes fast_check. cpu_check and all trigger cpu tests. model_arch expands into model_arch_reward, model_arch_c5_3a30t. quantization expands into quantization_32bit_logits. thinking_budget expands into thinking_budget, bee_sample_tb_check.'
       hardware_profiles_override:
         required: false
         type: string

@@ -11,7 +11,8 @@ set -euo pipefail
 # Usage:  ./download_checkpoints.sh <test_group> [models]
 #         where <test_group> ∈ {cpu, fast_check, model_arch, lm_eval,
 #                               bee_eval, performance, guided_generation,
-#                               speculative_decoding, vision, models}
+#                               thinking_budget, speculative_decoding,
+#                               vision, models}
 #         models is optional, comma-separated list (default: "command-r7b,command-a")
 #         - Used by eval and performance to download specific model checkpoints
 #         - Use test_group="models" to download only the models specified in MODELS for all tasks
@@ -230,6 +231,12 @@ download_guided_generation () {
     done
 }
 
+download_thinking_budget () {
+    echo "==> Downloading checkpoints for thinking budget tests"
+    download_model_if_missing "c5-3a30t_fp8"
+    download_model_if_missing "c5-3a30t_eagle_bf16"
+}
+
 download_speculative_decoding () {
     echo "==> Downloading target checkpoints for speculative decoding"
     download_model_if_missing "command-a_fp8"
@@ -287,6 +294,7 @@ download_models () {
     # Download all models needed by the all test groups
     download_eval
     download_vision
+    download_thinking_budget
     download_speculative_decoding
     download_guided_generation
     download_model_arch_reward_assets
@@ -311,12 +319,13 @@ run_downloads () {
         bee_eval)          download_eval              ;;
         performance)       download_performance       ;;
         guided_generation) download_guided_generation ;;
+        thinking_budget)   download_thinking_budget   ;;
         speculative_decoding) download_speculative_decoding ;;
         vision)            download_vision            ;;
         models)            download_models            ;;
         *)
             echo "Unknown group '${TEST_GROUP}'"
-            echo "Valid groups: cpu, fast_check, model_arch, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, bee_sample_tb_check, quantization, quantization_32bit_logits, lm_eval, bee_eval, performance, guided_generation, speculative_decoding, vision, models"
+            echo "Valid groups: cpu, fast_check, model_arch, model_arch_reward, model_arch_c5_3a30t, model_arch_c5_lora, bee_sample_tb_check, quantization, quantization_32bit_logits, lm_eval, bee_eval, performance, guided_generation, thinking_budget, speculative_decoding, vision, models"
             exit 1
             ;;
     esac

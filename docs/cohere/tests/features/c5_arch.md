@@ -132,7 +132,7 @@ Primary test: [`tests/cohere/test_bee_samples.py`](../../../../tests/cohere/test
 Eval checker: [`tests/cohere/bee_eval_checker.py`](../../../../tests/cohere/bee_eval_checker.py)
 CI entry: `run_bee_sample_tb_check()` in
 [`tests/cohere/scripts/run_tests.sh` L614](../../../../tests/cohere/scripts/run_tests.sh)
-Dispatcher: `bee_sample_tb_check` test group, expanded from `GG_TB`.
+Dispatcher: `bee_sample_tb_check` test group, expanded from `thinking_budget`.
 Runner map: [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json)
 
 ### Setup

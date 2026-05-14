@@ -135,8 +135,11 @@ function setMatrixOutput({ core, inputs }) {
   if (features === "quantization" || features === "all") {
     featureTests.push("quantization_32bit_logits");
   }
-  if (features === "GG_TB" || features === "all") {
+  if (features === "GG" || features === "all") {
     featureTests.push("guided_generation");
+  }
+  if (features === "thinking_budget" || features === "all") {
+    featureTests.push("thinking_budget");
     featureTests.push("bee_sample_tb_check");
   }
   if (features === "speculative_decoding" || features === "all") {
