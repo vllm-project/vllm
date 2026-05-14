@@ -592,6 +592,47 @@ class TestTurboQuantConfig:
 
         assert torch.equal(out, torch.full_like(query, 3))
 
+    def test_prefill_without_flash_uses_causal_sdpa_fast_path(self, monkeypatch):
+        impl = _make_turboquant_prefill_impl_stub()
+        impl._can_use_flash_attn = False
+
+        def fail_masked_sdpa(*args, **kwargs):
+            raise AssertionError("unmasked first-chunk prefill must not build a mask")
+
+        monkeypatch.setattr(
+            impl,
+            "_sdpa_with_causal_and_sliding_mask",
+            fail_masked_sdpa,
+        )
+        monkeypatch.setattr(
+            impl,
+            "_sdpa_causal_prefill",
+            lambda query, key, value: torch.full_like(query, 4),
+        )
+
+        query = torch.zeros(3, 1, 2)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 3], dtype=torch.int32),
+            seq_lens=torch.tensor([3], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([3], dtype=torch.int32),
+            block_table=torch.tensor([[1]], dtype=torch.int32),
+            max_query_len=3,
+            max_seq_len=3,
+        )
+
+        out = impl._prefill_attention(
+            query,
+            torch.zeros_like(query),
+            torch.zeros_like(query),
+            torch.empty(0),
+            metadata,
+            torch.empty(0),
+            torch.empty(0),
+        )
+
+        assert torch.equal(out, torch.full_like(query, 4))
+
     def test_large_continuation_without_flash_uses_decode_chunks(self, monkeypatch):
         from vllm.v1.attention.backends import turboquant_attn
 
@@ -813,7 +854,9 @@ class TestTurboQuantConfig:
             2,
             2,
         )
+        assert calls[0]["mm_prefix_range"].is_contiguous()
         assert calls[1]["mm_prefix_range"].shape == (1, 2, 2)
+        assert calls[1]["mm_prefix_range"].is_contiguous()
         assert torch.equal(calls[0]["mm_prefix_range"][0], mm_prefix_range_tensor[0])
 
     def test_kv_shared_prefill_without_flash_uses_decode_chunks(self, monkeypatch):

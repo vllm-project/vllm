@@ -560,6 +560,25 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         )
         return out[0].transpose(0, 1)
 
+    def _sdpa_causal_prefill(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> torch.Tensor:
+        q_t = query.transpose(0, 1).unsqueeze(0)
+        k_t = key.transpose(0, 1).unsqueeze(0)
+        v_t = value.transpose(0, 1).unsqueeze(0)
+        out = F.scaled_dot_product_attention(
+            q_t,
+            k_t,
+            v_t,
+            is_causal=True,
+            scale=self.scale,
+            enable_gqa=(key.shape[1] < query.shape[1]),
+        )
+        return out[0].transpose(0, 1)
+
     def _decode_prefill_from_cache(
         self,
         query: torch.Tensor,
@@ -592,8 +611,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             synth_block_table = block_table.expand(chunk_len, -1)
             mm_prefix_range = None
             if mm_prefix_ranges is not None:
-                mm_prefix_range = mm_prefix_ranges.unsqueeze(0).expand(
-                    chunk_len, -1, -1
+                mm_prefix_range = (
+                    mm_prefix_ranges.unsqueeze(0).expand(chunk_len, -1, -1).contiguous()
                 )
 
             mid_o_buf = output_buf = lse_buf = None
@@ -962,7 +981,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 )
             elif q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
-                if self._needs_sliding_window_mask(seq_len):
+                if self._needs_sliding_window_mask(seq_len) or (
+                    mm_prefix_ranges is not None
+                ):
                     out = self._sdpa_with_causal_and_sliding_mask(
                         q_seq,
                         k_seq,
@@ -970,7 +991,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         query_start_pos=0,
                         mm_prefix_ranges=mm_prefix_ranges,
                     )
-                elif self._can_use_flash_attn and mm_prefix_ranges is None:
+                elif self._can_use_flash_attn:
                     # Assign to slice to avoid gpu/cpu sync.
                     self._cu_2[1:2] = q_len
                     cu = self._cu_2
@@ -984,13 +1005,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         max_seqlen_k=q_len,
                     )
                 else:
-                    out = self._sdpa_with_causal_and_sliding_mask(
-                        q_seq,
-                        k_seq,
-                        v_seq,
-                        query_start_pos=0,
-                        mm_prefix_ranges=mm_prefix_ranges,
-                    )
+                    out = self._sdpa_causal_prefill(q_seq, k_seq, v_seq)
             else:
                 # Continuation chunk: tokens already stored to TQ cache
                 # by do_kv_cache_update. Use decode kernel directly to
