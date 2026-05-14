@@ -167,6 +167,13 @@ class TokenizeParams:
     add_special_tokens: bool = True
     """Whether to add special tokens."""
 
+    return_token_offsets: bool = False
+    """If true, request the tokenizer to return char-level (start, end)
+    offsets per token. Honored only when the tokenizer is Fast
+    (Rust-backed) AND the prompt has source text AND no multimodal data
+    is present. Otherwise silently ignored (TokensPrompt's
+    prompt_token_offsets remains unset)."""
+
     needs_detokenization: bool = False
     """
     Whether the tokenized prompt needs to contain the original text.
