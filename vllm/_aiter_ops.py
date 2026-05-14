@@ -414,17 +414,29 @@ _AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
 
 
 def check_aiter_fused_qk_rmsnorm() -> bool:
-    """Check if aiter provides fused_qk_rmsnorm (requires AITer >= PR #2442)."""
+    """Check if aiter provides fused_qk_rmsnorm.
+
+    Supports both the new private name ``_fused_qk_rmsnorm``
+    (AITER >= PR #2958) and the old public name ``fused_qk_rmsnorm``
+    (AITER >= PR #2442).
+    """
     global _AITER_HAS_FUSED_QK_RMSNORM
     if _AITER_HAS_FUSED_QK_RMSNORM is None:
         try:
             from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
-                fused_qk_rmsnorm,
+                _fused_qk_rmsnorm,
             )
 
             _AITER_HAS_FUSED_QK_RMSNORM = True
         except (ImportError, ModuleNotFoundError, AttributeError):
-            _AITER_HAS_FUSED_QK_RMSNORM = False
+            try:
+                from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
+                    fused_qk_rmsnorm,
+                )
+
+                _AITER_HAS_FUSED_QK_RMSNORM = True
+            except (ImportError, ModuleNotFoundError, AttributeError):
+                _AITER_HAS_FUSED_QK_RMSNORM = False
     return _AITER_HAS_FUSED_QK_RMSNORM
 
 
@@ -1018,22 +1030,42 @@ def _fused_mla_dual_rms_norm_impl(
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     try:
-        from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+        from aiter.ops.fused_qk_norm_rope_cache_quant import (
+            _fused_qk_rmsnorm,
+        )
+
+        return _fused_qk_rmsnorm(
+            q_out=None,
+            q=x1,
+            q_weight=x1_weight,
+            q_eps=x1_epsilon,
+            k_out=None,
+            k=x2,
+            k_weight=x2_weight,
+            k_eps=x2_epsilon,
+        )
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+    try:
+        from aiter.ops.fused_qk_norm_rope_cache_quant import (
+            fused_qk_rmsnorm,
+        )
+
+        return fused_qk_rmsnorm(
+            q=x1,
+            q_weight=x1_weight,
+            q_eps=x1_epsilon,
+            k=x2,
+            k_weight=x2_weight,
+            k_eps=x2_epsilon,
+        )
     except (ImportError, ModuleNotFoundError) as exc:
         raise ImportError(
-            "fused_qk_rmsnorm requires a newer AITer version "
-            "(>= PR #2442). Please upgrade aiter or disable the "
+            "fused_qk_rmsnorm requires AITer >= PR #2442. "
+            "Please upgrade aiter or disable the "
             "fuse_mla_dual_rms_norm pass."
         ) from exc
-
-    return fused_qk_rmsnorm(
-        q=x1,
-        q_weight=x1_weight,
-        q_eps=x1_epsilon,
-        k=x2,
-        k_weight=x2_weight,
-        k_eps=x2_epsilon,
-    )
 
 
 def _fused_mla_dual_rms_norm_fake(
