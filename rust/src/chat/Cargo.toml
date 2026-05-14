@@ -4,9 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-test-util = []
-
 [dependencies]
 anyhow.workspace = true
 asynk-strim-attr.workspace = true
@@ -28,73 +25,21 @@ uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-text.workspace = true
+vllm-tool-parser.workspace = true
 winnow.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
-criterion.workspace = true
 expect-test.workspace = true
-openai-protocol.workspace = true
 rmp-serde.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
-tool-parser.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
 zeromq.workspace = true
-
-[[bench]]
-name = "deepseek_v3_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "deepseek_v31_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "deepseek_v32_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "qwen3_coder_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "qwen3_xml_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "llama3_json_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "minimax_m2_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "glm45_moe_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "kimi_k2_tool_parser"
-harness = false
-required-features = ["test-util"]
-
-[[bench]]
-name = "gemma4_tool_parser"
-harness = false
-required-features = ["test-util"]
 
 [lints]
 workspace = true

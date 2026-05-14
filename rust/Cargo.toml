@@ -8,6 +8,7 @@ members = [
     "src/metrics",
     "src/server",
     "src/text",
+    "src/tool-parser",
 ]
 resolver = "3"
 
@@ -102,6 +103,7 @@ vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
+vllm-tool-parser = { path = "src/tool-parser" }
 winnow = "1.0.2"
 zeromq = { version = "0.6.0", default-features = false, features = [
     "tokio-runtime",

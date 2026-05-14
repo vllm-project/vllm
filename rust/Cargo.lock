@@ -5485,14 +5485,12 @@ dependencies = [
  "asynk-strim-attr",
  "bytes",
  "clap",
- "criterion",
  "easy-ext",
  "expect-test",
  "futures",
  "minijinja",
  "minijinja-contrib",
  "openai-harmony",
- "openai-protocol",
  "rmp-serde",
  "serde",
  "serde-json-fmt",
@@ -5503,7 +5501,6 @@ dependencies = [
  "thiserror 2.0.18",
  "thiserror-ext",
  "tokio",
- "tool-parser",
  "tracing",
  "tracing-subscriber",
  "trait-set",
@@ -5511,6 +5508,7 @@ dependencies = [
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-text",
+ "vllm-tool-parser",
  "winnow",
  "zeromq",
 ]
@@ -5696,6 +5694,22 @@ dependencies = [
  "trait-set",
  "vllm-engine-core-client",
  "vllm-llm",
+]
+
+[[package]]
+name = "vllm-tool-parser"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "expect-test",
+ "futures",
+ "openai-protocol",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tool-parser",
+ "winnow",
 ]
 
 [[package]]

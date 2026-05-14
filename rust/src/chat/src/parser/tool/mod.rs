@@ -1,41 +1,16 @@
-//! Streaming tool parsers for chat completions.
-//!
-//! This module owns the tool parser registration and selection boundary for
-//! `vllm-chat`.
+//! Tool parser registration and selection boundary for `vllm-chat`.
 
-mod deepseek_dsml;
-mod deepseek_json;
-mod gemma4;
-mod glm_xml;
-mod json;
-mod kimi_k2;
-mod minimax_m2;
-mod parameters;
-mod qwen_coder;
-#[cfg(any(test, feature = "test-util"))]
-pub mod test_utils;
-mod utils;
-
-use std::collections::{BTreeMap, btree_map};
 use std::sync::LazyLock;
 
-use thiserror::Error;
-use thiserror_ext::Macro;
+pub use vllm_tool_parser::{
+    DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
+    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, HermesToolParser, KimiK2ToolParser,
+    Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser, Qwen3CoderToolParser,
+    Qwen3XmlToolParser, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError,
+};
 
 use crate::parser::ParserFactory;
-use crate::request::{ChatRequest, ChatTool};
-
-/// Result alias for tool parser operations.
-pub type Result<T> = std::result::Result<T, ToolParserError>;
-
-pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
-pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
-pub use gemma4::Gemma4ToolParser;
-pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub use json::{HermesToolParser, Llama3JsonToolParser, MistralToolParser, Qwen3XmlToolParser};
-pub use kimi_k2::KimiK2ToolParser;
-pub use minimax_m2::MinimaxM2ToolParser;
-pub use qwen_coder::Qwen3CoderToolParser;
+use crate::request::ChatTool;
 
 /// Canonical public names for registered tool parsers.
 pub mod names {
@@ -56,114 +31,8 @@ pub mod names {
     pub const QWEN3_XML: &str = "qwen3_xml";
 }
 
-/// One tool-call update emitted while parsing assistant text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolCallDelta {
-    /// Stable parser-local tool index for this call within one assistant turn.
-    pub tool_index: usize,
-    /// Function name, present on the first update for one tool call.
-    pub name: Option<String>,
-    /// Arguments text contributed by this update.
-    pub arguments: String,
-}
-
-/// Result of advancing tool parsing with one assistant-text input.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolParseResult {
-    /// Plain assistant text that is not part of any tool call.
-    pub normal_text: String,
-    /// Tool-call updates extracted from this input.
-    pub calls: Vec<ToolCallDelta>,
-}
-
-impl ToolParseResult {
-    /// Append another parser result onto this one.
-    ///
-    /// Note that this does not attempt to merge multiple deltas for the same
-    /// tool call into one complete item. Call `coalesce_calls()` after if
-    /// that behavior is desired.
-    pub(crate) fn append(&mut self, mut other: Self) {
-        self.normal_text.push_str(&other.normal_text);
-        self.calls.append(&mut other.calls);
-    }
-
-    /// Merge multiple deltas for the same tool call into one complete item.
-    ///
-    /// This is primarily used by the default `parse_complete()` implementation,
-    /// which delegates through the incremental parser lifecycle and then
-    /// needs to collapse streaming-style argument fragments into one final
-    /// tool call.
-    pub(crate) fn coalesce_calls(mut self) -> Self {
-        let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
-        let mut order = Vec::new();
-
-        for call in self.calls {
-            match merged.entry(call.tool_index) {
-                btree_map::Entry::Vacant(entry) => {
-                    order.push(call.tool_index);
-                    entry.insert(call);
-                }
-                btree_map::Entry::Occupied(mut entry) => {
-                    let existing = entry.get_mut();
-                    if existing.name.is_none() {
-                        existing.name = call.name;
-                    }
-                    existing.arguments.push_str(&call.arguments);
-                }
-            }
-        }
-
-        self.calls =
-            order.into_iter().filter_map(|tool_index| merged.remove(&tool_index)).collect();
-        self
-    }
-}
-
-/// Incremental parser that extracts tool calls from assistant output.
-pub trait ToolParser: Send {
-    /// Construct a boxed parser instance for one request stream.
-    fn create(tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
-    where
-        Self: Sized + 'static;
-
-    /// Adjust request-level settings before rendering and decoding start.
-    ///
-    /// Parsers may use this hook to request decode behavior that matches their
-    /// output protocol, such as retaining special tokens in streamed text.
-    fn adjust_request(&self, _request: &mut ChatRequest) -> Result<()> {
-        Ok(())
-    }
-
-    /// Feed one decoded text delta into the parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult>;
-
-    /// Flush any buffered partial state at end of stream.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        Ok(ToolParseResult::default())
-    }
-
-    /// Parse complete tool calls from final output.
-    ///
-    /// The default implementation reuses the incremental parser lifecycle by
-    /// feeding the full output through `push()` and then calling `finish()`.
-    /// This keeps one source of truth for robust parsers whose incremental
-    /// state machine is equivalent across arbitrary chunking.
-    fn parse_complete(&mut self, output: &str) -> Result<ToolParseResult> {
-        let mut result = self.push(output)?;
-        result.append(self.finish()?);
-        Ok(result.coalesce_calls())
-    }
-}
-
-/// Errors produced while creating or running tool parsers.
-#[derive(Debug, Error, Macro)]
-pub enum ToolParserError {
-    #[error("tool parser parsing failed: {message}")]
-    ParsingFailed { message: String },
-}
-
 /// Constructor signature for one registered tool parser implementation.
-type ToolParserCreator = fn(&[ChatTool]) -> Result<Box<dyn ToolParser>>;
+type ToolParserCreator = fn(&[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>;
 
 /// Registry and model matcher for tool parsers.
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
+pub use vllm_tool_parser::Tool as ChatTool;
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};
@@ -322,15 +323,6 @@ impl ChatOptions {
             GenerationPromptMode::ContinueFinalAssistant
         )
     }
-}
-
-/// One function-style tool made available to the model.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChatTool {
-    pub name: String,
-    pub description: Option<String>,
-    pub parameters: Value,
-    pub strict: Option<bool>,
 }
 
 /// Tool-choice semantics supported by `vllm-chat`.

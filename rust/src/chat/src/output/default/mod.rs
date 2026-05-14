@@ -108,11 +108,9 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, &request.tools)?;
 
-        parser.adjust_request(request).map_err(|error| Error::ParserInitialization {
-            kind: "tool",
-            name: parser_name.to_string(),
-            error: error.into(),
-        })?;
+        if parser.preserve_special_tokens() {
+            request.decode_options.skip_special_tokens = false;
+        }
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)

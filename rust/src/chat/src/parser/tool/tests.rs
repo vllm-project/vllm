@@ -1,20 +1,21 @@
-use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserFactory, names};
+use vllm_tool_parser::Result;
+
+use super::{ToolParseResult, ToolParser, ToolParserFactory, names};
 use crate::Error;
-use crate::request::{ChatRequest, ChatTool};
+use crate::request::ChatTool;
 
 struct FakeToolParser;
 
 impl ToolParser for FakeToolParser {
-    fn create(_tools: &[ChatTool]) -> super::Result<Box<dyn ToolParser>>
+    fn create(_tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self))
     }
 
-    fn adjust_request(&self, request: &mut ChatRequest) -> Result<()> {
-        request.decode_options.skip_special_tokens = false;
-        Ok(())
+    fn preserve_special_tokens(&self) -> bool {
+        true
     }
 
     fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
@@ -139,79 +140,5 @@ fn factory_new_resolves_default_patterns() {
     assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
-    );
-}
-
-#[test]
-fn default_parse_complete_delegates_through_push_and_finish() {
-    struct StreamingParser;
-
-    impl ToolParser for StreamingParser {
-        fn create(_tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
-        where
-            Self: Sized + 'static,
-        {
-            Ok(Box::new(Self))
-        }
-
-        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
-            Ok(ToolParseResult {
-                normal_text: "prefix ".to_string(),
-                calls: vec![
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some("weather".to_string()),
-                        arguments: "{\"location\":".to_string(),
-                    },
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: None,
-                        arguments: "\"Paris\"".to_string(),
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some("time".to_string()),
-                        arguments: "{\"timezone\":".to_string(),
-                    },
-                ],
-            })
-        }
-
-        fn finish(&mut self) -> Result<ToolParseResult> {
-            Ok(ToolParseResult {
-                normal_text: "suffix".to_string(),
-                calls: vec![
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: None,
-                        arguments: "}".to_string(),
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: None,
-                        arguments: "\"UTC\"}".to_string(),
-                    },
-                ],
-            })
-        }
-    }
-
-    let mut parser = StreamingParser;
-    let result = parser.parse_complete("ignored").unwrap();
-    assert_eq!(result.normal_text, "prefix suffix");
-    assert_eq!(
-        result.calls,
-        vec![
-            ToolCallDelta {
-                tool_index: 0,
-                name: Some("weather".to_string()),
-                arguments: "{\"location\":\"Paris\"}".to_string(),
-            },
-            ToolCallDelta {
-                tool_index: 1,
-                name: Some("time".to_string()),
-                arguments: "{\"timezone\":\"UTC\"}".to_string(),
-            },
-        ]
     );
 }

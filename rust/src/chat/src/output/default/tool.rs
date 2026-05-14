@@ -258,15 +258,14 @@ mod tests {
     use futures::{StreamExt as _, stream};
     use vllm_llm::FinishReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
+    use vllm_tool_parser::Result;
 
     use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
     use crate::error::Error;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::output::structured::structured_chat_event_stream;
-    use crate::parser::tool::{
-        Result, ToolParseResult, ToolParser, ToolParserError, parsing_failed,
-    };
+    use crate::parser::tool::{ToolParseResult, ToolParser, ToolParserError};
     use crate::request::ChatTool;
     use crate::stream::ChatEventStream;
 
@@ -280,7 +279,7 @@ mod tests {
     }
 
     impl ToolParser for FailingParser {
-        fn create(_tools: &[ChatTool]) -> crate::parser::tool::Result<Box<dyn ToolParser>>
+        fn create(_tools: &[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>
         where
             Self: Sized + 'static,
         {
@@ -290,7 +289,9 @@ mod tests {
         fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(parsing_failed!("boom"));
+                return Err(ToolParserError::ParsingFailed {
+                    message: "boom".to_string(),
+                });
             }
 
             Ok(ToolParseResult::default())
@@ -298,7 +299,7 @@ mod tests {
     }
 
     impl ToolParser for ScriptedParser {
-        fn create(_tools: &[ChatTool]) -> crate::parser::tool::Result<Box<dyn ToolParser>>
+        fn create(_tools: &[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>
         where
             Self: Sized + 'static,
         {
