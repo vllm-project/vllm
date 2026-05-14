@@ -376,6 +376,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
         self._maybe_inject_biases(quant_config, layer)
