@@ -3,6 +3,7 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 from vllm.platforms import current_platform
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
     from ..inc import INCConfig
     from ..resolver import INCLayerConfig
 
+logger = init_logger(__name__)
+
 
 class INCWna16Scheme(INCScheme):
     @staticmethod
@@ -30,18 +33,43 @@ class INCWna16Scheme(INCScheme):
         prefix: str,
         layer_config: "INCLayerConfig",
     ):
-        del config, layer, prefix
+        del config, layer
         if current_platform.is_xpu():
             if layer_config.bits == 4 and layer_config.sym:
-                from .xpu_w4a16_linear import INCXPUW4A16LinearScheme
+                from .xpu_w4a16_linear import (
+                    INCARKLinearMethod,
+                    INCXPULinearMethod,
+                    get_ark_state,
+                )
 
-                return INCLinearMethod(INCXPUW4A16LinearScheme(layer_config))
+                is_ark_available, ark_error, _, _ = get_ark_state()
+                if is_ark_available:
+                    return INCLinearMethod(INCARKLinearMethod(layer_config))
+
+                logger.debug(
+                    "ARK backend is unavailable for layer %s; "
+                    "falling back to the default XPU INC path. Error: %s",
+                    prefix,
+                    ark_error or "unknown error",
+                )
+                return INCLinearMethod(INCXPULinearMethod(layer_config))
             raise NotImplementedError(f"INC on XPU: unsupported config {layer_config}")
 
         if current_platform.is_cpu() and layer_config.is_gptq:
             if layer_config.bits == 4 and layer_config.sym:
                 from .wna16_linear import INCWNA16LinearScheme
+                from .xpu_w4a16_linear import INCARKLinearMethod, get_ark_state
 
+                is_ark_available, ark_error, _, _ = get_ark_state()
+                if is_ark_available:
+                    return INCLinearMethod(INCARKLinearMethod(layer_config))
+
+                logger.debug(
+                    "ARK backend is unavailable for layer %s; "
+                    "falling back to the default CPU INC path. Error: %s",
+                    prefix,
+                    ark_error or "unknown error",
+                )
                 return INCLinearMethod(INCWNA16LinearScheme(layer_config))
             raise NotImplementedError(f"INC on CPU: unsupported config {layer_config}")
 

@@ -24,6 +24,13 @@ from vllm.model_executor.layers.quantization.inc.schemes.wna16 import (
     _resolve_awq_moe,
     _resolve_gptq_moe,
 )
+from vllm.model_executor.layers.quantization.inc.schemes.wna16_linear import (
+    INCWNA16LinearScheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.xpu_w4a16_linear import (
+    INCARKLinearMethod,
+    INCXPULinearMethod,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
@@ -73,6 +80,20 @@ def make_config(**overrides) -> INCConfig:
     }
     kwargs.update(overrides)
     return INCConfig(**kwargs)
+
+
+def make_layer_config(**overrides) -> INCLayerConfig:
+    kwargs = {
+        "bits": 4,
+        "group_size": 128,
+        "sym": True,
+        "packing_format": "auto_round:auto_gptq",
+        "backend": "auto",
+        "data_type": "int",
+        "quantized": True,
+    }
+    kwargs.update(overrides)
+    return INCLayerConfig(**kwargs)
 
 
 def test_inc_resolver_exact_match() -> None:
@@ -284,6 +305,105 @@ def test_inc_linear_method_delegates() -> None:
         "process_weights_after_loading",
         "apply_weights",
     ]
+
+
+def test_wna16_xpu_prefers_ark_when_available(monkeypatch) -> None:
+    class DummyQuantLinear:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.xpu_w4a16_linear.get_ark_state",
+        lambda: (True, None, object(), DummyQuantLinear),
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(),
+        object(),
+        "layer",
+        make_layer_config(),
+    )
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCARKLinearMethod)
+
+
+def test_wna16_xpu_falls_back_when_ark_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.xpu_w4a16_linear.get_ark_state",
+        lambda: (False, "missing", None, None),
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(),
+        object(),
+        "layer",
+        make_layer_config(),
+    )
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCXPULinearMethod)
+
+
+def test_wna16_cpu_gptq_prefers_ark_when_available(monkeypatch) -> None:
+    class DummyQuantLinear:
+        pass
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.xpu_w4a16_linear.get_ark_state",
+        lambda: (True, None, object(), DummyQuantLinear),
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(),
+        object(),
+        "layer",
+        make_layer_config(),
+    )
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCARKLinearMethod)
+
+
+def test_wna16_cpu_gptq_falls_back_when_ark_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.xpu_w4a16_linear.get_ark_state",
+        lambda: (False, "missing", None, None),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.wna16_linear.check_marlin_supported",
+        lambda *args, **kwargs: False,
+    )
+
+    method = INCWna16Scheme().get_linear_method(
+        make_config(),
+        object(),
+        "layer",
+        make_layer_config(),
+    )
+
+    assert isinstance(method, INCLinearMethod)
+    assert isinstance(method.scheme, INCWNA16LinearScheme)
+
+
+def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+
+    with pytest.raises(NotImplementedError, match="unsupported config"):
+        INCWna16Scheme().get_linear_method(
+            make_config(sym=False),
+            object(),
+            "layer",
+            make_layer_config(sym=False),
+        )
 
 
 def test_inc_get_quant_method_unquantized_linear_returns_unquantized() -> None:
