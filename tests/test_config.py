@@ -1323,6 +1323,25 @@ def test_eplb_num_redundant_experts_disabled():
     assert parallel_config.eplb_config.num_redundant_experts == 0
 
 
+def test_vllm_config_normalizes_eplb_num_redundant_experts_disabled():
+    """Test VllmConfig restores the runtime invariant for non-EPLB models."""
+    from vllm.config.parallel import ParallelConfig
+
+    model_config = ModelConfig("facebook/opt-125m")
+    parallel_config = ParallelConfig(
+        enable_expert_parallel=False,
+        enable_eplb=False,
+    )
+    assert parallel_config.eplb_config.num_redundant_experts is None
+
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        parallel_config=parallel_config,
+    )
+
+    assert vllm_config.parallel_config.eplb_config.num_redundant_experts == 0
+
+
 def test_eplb_num_redundant_experts_explicit_value_preserved():
     """Test that explicitly set num_redundant_experts is not overwritten."""
     from vllm.config.parallel import EPLBConfig, ParallelConfig
