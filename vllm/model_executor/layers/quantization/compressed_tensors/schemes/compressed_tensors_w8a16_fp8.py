@@ -137,6 +137,12 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                     "weight_scale",
                     convert_to_channelwise(layer.weight_scale, layer.logical_widths),
                 )
+            # Weights are loaded in (N, K) format from the checkpoint.
+            # Transpose to (K, N) here so the Marlin kernel's shape-based
+            # heuristic (which skips the transpose when it sees (K, N)) works
+            # correctly even for square weight matrices where (N, K) == (K, N)
+            # in shape but not in value.
+            replace_parameter(layer, "weight", layer.weight.t().contiguous())
 
         self.linear_kernel.process_weights_after_loading(layer)
 
