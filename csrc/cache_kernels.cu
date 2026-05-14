@@ -77,7 +77,8 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
 
 void swap_blocks_batch(const torch::Tensor& src_ptrs,
                        const torch::Tensor& dst_ptrs,
-                       const torch::Tensor& sizes) {
+                       const torch::Tensor& sizes,
+                       bool is_src_access_order_any) {
   TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
   TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
   TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
@@ -124,7 +125,12 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 
   if (batch_fn != nullptr) {
     CUmemcpyAttributes attr = {};
-    attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+    // ANY lets the DMA engine prefetch source bytes out of stream order,
+    // which is only safe when no GPU stream is concurrently writing the
+    // source.
+    attr.srcAccessOrder = is_src_access_order_any
+                              ? CU_MEMCPY_SRC_ACCESS_ORDER_ANY
+                              : CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
     size_t attrs_idx = 0;
     size_t fail_idx = 0;
     CUresult result = batch_fn(reinterpret_cast<CUdeviceptr*>(dst_data),

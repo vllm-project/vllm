@@ -112,6 +112,13 @@ os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # in the environment.
 os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 
+# When unset, TileLang routes JIT temp dirs through a world-shared
+# /tmp/tvm-debug-mode-tempdirs/ whose ownership is pinned to whichever
+# user compiled first, breaking every other user on a shared host.
+# Opt into per-process tempdirs unless the user explicitly chose the
+# debug layout (see https://github.com/vllm-project/vllm/issues/41410).
+os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
+
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
 # ===================================================
