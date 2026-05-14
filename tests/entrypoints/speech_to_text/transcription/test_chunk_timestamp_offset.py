@@ -10,10 +10,10 @@ import numpy as np
 import pytest
 
 from vllm.config.speech_to_text import SpeechToTextConfig
-from vllm.entrypoints.openai.speech_to_text.speech_to_text import OpenAISpeechToText
+from vllm.entrypoints.speech_to_text.base.serving import OpenAISpeechToText
 
 SR = 16_000
-_PATCH = "vllm.entrypoints.openai.speech_to_text.speech_to_text"
+_PATCH = "vllm.entrypoints.speech_to_text.base.serving"
 
 
 @pytest.mark.asyncio
