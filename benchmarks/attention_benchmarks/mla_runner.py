@@ -180,13 +180,13 @@ def create_minimal_vllm_config(
 
     if prefill_backend is not None:
         prefill_cfg = get_prefill_backend_config(prefill_backend)
+        vllm_config.attention_config.mla_prefill_backend = prefill_cfg[
+            "mla_prefill_backend"
+        ]
         if prefill_cfg["flash_attn_version"] is not None:
             vllm_config.attention_config.flash_attn_version = prefill_cfg[
                 "flash_attn_version"
             ]
-        vllm_config.attention_config.mla_prefill_backend = prefill_cfg[
-            "mla_prefill_backend"
-        ]
 
     return vllm_config
 
@@ -218,6 +218,10 @@ _PREFILL_BACKEND_CONFIG: dict[str, dict] = {
     "trtllm": {
         "flash_attn_version": None,
         "mla_prefill_backend": MLAPrefillBackendEnum.TRTLLM_RAGGED,
+    },
+    "tokenspeed": {
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TOKENSPEED_MLA,
     },
 }
 
@@ -604,6 +608,21 @@ def _create_backend_impl(
     # Create mock layer
     layer = MockLayer(device, impl=impl, kv_cache_spec=kv_cache_spec)
 
+    # Attach a prefill backend (MLAAttention does this in __init__; the metadata
+    # builder reads layer.prefill_backend from static_forward_context).
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+    layer.prefill_backend = prefill_backend_cls(
+        num_heads=mla_dims["num_q_heads"],
+        scale=(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]) ** -0.5,
+        kv_lora_rank=mla_dims["kv_lora_rank"],
+        qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
+        qk_rope_head_dim=mla_dims["qk_rope_head_dim"],
+        v_head_dim=mla_dims["v_head_dim"],
+        vllm_config=vllm_config,
+    )
+
     # Create builder instance if needed
     builder_instance = None
     if builder_class:
@@ -951,20 +970,35 @@ def _run_mla_benchmark_batched(
             kv_cache_dtype=kv_cache_dtype,
         )
 
-        # Verify the actual prefill backend matches what was requested
+        # Verify the actual prefill backend matches what was requested. The
+        # selector + impl construction already raise on misuse; here we just
+        # check the resolved class against the requested name as a sanity guard.
         if prefill_backend is not None:
-            prefill_cfg = get_prefill_backend_config(prefill_backend)
-            fa_version = prefill_cfg["flash_attn_version"]
-
-            if fa_version is not None:
-                # FA backend: verify the impl's FA version
-                actual_fa_version = getattr(impl, "vllm_flash_attn_version", None)
+            expected_class = {
+                "fa2": "FlashAttnPrefillBackend",
+                "fa3": "FlashAttnPrefillBackend",
+                "fa4": "FlashAttnPrefillBackend",
+                "flashinfer": "FlashInferPrefillBackend",
+                "trtllm": "TrtllmRaggedPrefillBackend",
+                "tokenspeed": "TokenspeedMLAPrefillBackend",
+            }.get(prefill_backend)
+            actual_class = type(getattr(layer, "prefill_backend", None)).__name__
+            if expected_class and actual_class != expected_class:
+                raise RuntimeError(
+                    f"Prefill backend '{prefill_backend}' requested "
+                    f"{expected_class}, got {actual_class}. Check "
+                    f"attention_config plumbing or installed deps."
+                )
+            if prefill_backend in {"fa2", "fa3", "fa4"}:
+                fa_version = int(prefill_backend[2:])
+                actual_fa_version = getattr(
+                    layer.prefill_backend, "vllm_flash_attn_version", None
+                )
                 if actual_fa_version != fa_version:
                     raise RuntimeError(
                         f"Prefill backend '{prefill_backend}' requested FA "
-                        f"version {fa_version}, but the impl is using FA "
-                        f"version {actual_fa_version}. Check "
-                        f"vllm/v1/attention/backends/fa_utils.py."
+                        f"version {fa_version}, got "
+                        f"{actual_fa_version} on {actual_class}."
                     )
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
