@@ -143,4 +143,26 @@ void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
                             const torch::stable::Tensor& expert_offsets,
                             const torch::stable::Tensor& sf_offsets);
 
+// AWQ ops
+torch::stable::Tensor awq_gemm(torch::stable::Tensor _in_feats,
+                               torch::stable::Tensor _kernel,
+                               torch::stable::Tensor _scaling_factors,
+                               torch::stable::Tensor _zeros,
+                               int64_t split_k_iters);
+
+torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
+                                     torch::stable::Tensor _scaling_factors,
+                                     torch::stable::Tensor _zeros,
+                                     int64_t split_k_iters, int64_t thx,
+                                     int64_t thy);
+
+// DSV3 fused A GEMM: conditionally compiled so declaration and impl
+// registration are in the source file (dsv3_fused_a_gemm.cu)
+
+// AllSpark ops: declarations are in the source files
+// (allspark_repack.cu and allspark_qgemm_w8a16.cu)
+
 #endif
+
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
+                                         bool inplace);

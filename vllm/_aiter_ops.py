@@ -261,11 +261,19 @@ def _rocm_aiter_topk_softmax_impl(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> None:
     from aiter import topk_softmax
 
     topk_softmax(
-        topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        num_shared_experts,
+        shared_expert_scoring_func,
     )
 
 
@@ -275,6 +283,8 @@ def _rocm_aiter_topk_softmax_fake(
     token_expert_indices: torch.Tensor,
     gating_output: torch.Tensor,
     renormalize: bool,
+    num_shared_experts: int = 0,
+    shared_expert_scoring_func: str = "",
 ) -> None:
     pass
 
@@ -1206,6 +1216,9 @@ class rocm_aiter_ops:
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     # TODO: Consolidate under _LINEAR_ENABLED
     _TRITON_UNQUANT_GEMM = envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+    # Lazily probed: whether aiter.topk_softmax supports the
+    # num_shared_experts / shared_expert_scoring_func args (7-arg form).
+    _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
 
     _ALL_REDUCE_MAX_SIZE: int = 8192 * 1024 * 8 * 2
     _CUSTOM_ALL_REDUCE: AiterCustomAllreduceProto | None = None
@@ -1321,6 +1334,52 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_fusion_moe_shared_experts_enabled(cls) -> bool:
         return cls.is_fused_moe_enabled() and cls._MOE_SHARED_EXPERTS_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def topk_softmax_supports_fused_sigmoid(cls) -> bool:
+        """Check if topk_softmax supports fused shared expert activation."""
+        if cls._TOPK_SOFTMAX_FUSED_SIGMOID is None:
+            try:
+                import inspect
+
+                from aiter import topk_softmax
+
+                params = inspect.signature(topk_softmax).parameters
+                if "num_shared_experts" in params:
+                    cls._TOPK_SOFTMAX_FUSED_SIGMOID = True
+                else:
+                    # @compile_ops wrapper loses the original signature.
+                    # Fall back to the torch custom op schema.
+                    import torch
+
+                    schema = getattr(
+                        getattr(torch.ops.aiter, "topk_softmax", None), "default", None
+                    )
+                    schema_str = str(getattr(schema, "_schema", ""))
+                    cls._TOPK_SOFTMAX_FUSED_SIGMOID = "num_shared_experts" in schema_str
+            except (ImportError, ValueError):
+                cls._TOPK_SOFTMAX_FUSED_SIGMOID = False
+        return cls._TOPK_SOFTMAX_FUSED_SIGMOID
+
+    @classmethod
+    @if_aiter_supported
+    def fuse_sigmoid_in_kernel(cls, aiter_topK_meta_data: object) -> bool:
+        """Whether fused shared-expert sigmoid in the topk kernel is usable.
+
+        Combines the cached static capability checks (FSE enabled, fused-moe
+        enabled, topk_softmax supports fused sigmoid) with the runtime
+        readiness check (topK meta-data buffer initialized).
+
+        ``aiter_topK_meta_data`` is accepted as a parameter rather than
+        imported internally so callers cannot hit initialization-order
+        issues where the module-level global has not been set yet.
+        """
+        return (
+            cls.is_fusion_moe_shared_experts_enabled()
+            and cls.topk_softmax_supports_fused_sigmoid()
+            and aiter_topK_meta_data is not None
+        )
 
     @classmethod
     @if_aiter_supported
@@ -1795,9 +1854,17 @@ class rocm_aiter_ops:
         token_expert_indices: torch.Tensor,
         gating_output: torch.Tensor,
         renormalize: bool,
+        num_shared_experts: int = 0,
+        shared_expert_scoring_func: str = "",
     ) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_softmax(
-            topk_weights, topk_indices, token_expert_indices, gating_output, renormalize
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            num_shared_experts,
+            shared_expert_scoring_func,
         )
         return topk_weights, topk_indices
 
@@ -2327,6 +2394,184 @@ class rocm_aiter_ops:
             out_=out_,
             kv_cache_dtype=kv_cache_dtype,
         )
+
+    @staticmethod
+    def mhc_pre(
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Forward pass for mHC pre block.
+
+        Args:
+            residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
+            fn: shape (hc_mult3, hc_mult * hidden_size), dtype torch.float32
+            hc_scale: shape (3,), dtype torch.float32
+            hc_base: shape (hc_mult3,), dtype torch.float32
+            rms_eps: RMS normalization epsilon
+            hc_pre_eps: pre-mix epsilon
+            hc_sinkhorn_eps: sinkhorn epsilon
+            hc_post_mult_value: post-mix multiplier value
+            sinkhorn_repeat: number of sinkhorn iterations
+            n_splits: split-k factor;
+
+        Returns:
+            post_mix: shape (..., hc_mult), dtype torch.float32
+            comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
+            layer_input: shape (..., hidden_size), dtype torch.bfloat16
+        """
+        from aiter.ops.mhc import mhc_pre
+
+        # Validate shapes
+        assert residual.dtype == torch.bfloat16
+        assert fn.dtype == torch.float32
+        assert hc_scale.dtype == torch.float32
+        assert hc_base.dtype == torch.float32
+
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        hc_mult2 = hc_mult * hc_mult
+        hc_mult3 = hc_mult * 2 + hc_mult2
+
+        hc_hidden_size = hc_mult * hidden_size
+        assert fn.shape[0] == hc_mult3
+        assert fn.shape[1] == hc_hidden_size
+        assert hc_scale.shape == (3,)
+        assert hc_base.shape == (hc_mult3,)
+
+        outer_shape = residual.shape[:-2]
+
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+
+        num_tokens = residual_flat.shape[0]
+        if num_tokens == 0:
+            return (
+                torch.empty(
+                    num_tokens,
+                    hc_mult,
+                    1,
+                    dtype=torch.float32,
+                    device=residual_flat.device,
+                ),
+                torch.empty(
+                    num_tokens,
+                    hc_mult,
+                    hc_mult,
+                    dtype=torch.float32,
+                    device=residual_flat.device,
+                ),
+                torch.empty(
+                    num_tokens,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device=residual_flat.device,
+                ),
+            )
+
+        # AITER's Python wrapper allocates intermediate/output tensors without
+        # explicit device arguments, so run it under the residual tensor's device.
+        with torch.device(residual_flat.device):
+            post_mix, comb_mix, layer_input = mhc_pre(
+                residual_flat,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+        return (
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
+
+    @staticmethod
+    def hc_head(
+        hs_flat: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        out: torch.Tensor,
+        hidden_size: int,
+        rms_eps: float,
+        hc_eps: float,
+        hc_mult: int,
+    ) -> None:
+        """Run hc_head through AITER mhc_pre and write the result to out."""
+        assert hs_flat.dtype == torch.bfloat16
+        assert fn.dtype == torch.float32
+        assert hc_scale.dtype == torch.float32
+        assert hc_base.dtype == torch.float32
+        assert hs_flat.shape[-2:] == (hc_mult, hidden_size)
+        assert fn.shape == (hc_mult, hc_mult * hidden_size)
+        assert hc_scale.shape == (1,)
+        assert hc_base.shape == (hc_mult,)
+
+        num_tokens = hs_flat.shape[0]
+        if num_tokens == 0:
+            return
+
+        hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+
+        full_fn = torch.zeros(
+            hc_mult3,
+            hc_mult * hidden_size,
+            dtype=fn.dtype,
+            device=fn.device,
+        )
+        full_fn[:hc_mult] = fn
+
+        full_base = torch.zeros(hc_mult3, dtype=hc_base.dtype, device=hc_base.device)
+        full_base[:hc_mult] = hc_base
+
+        full_scale = torch.zeros(3, dtype=hc_scale.dtype, device=hc_scale.device)
+        full_scale[0] = hc_scale[0]
+
+        _, _, layer_input = rocm_aiter_ops.mhc_pre(
+            hs_flat,
+            full_fn,
+            full_scale,
+            full_base,
+            rms_eps,
+            hc_eps,
+            0.0,
+            1.0,
+            0,
+        )
+        out.copy_(layer_input)
+
+    @staticmethod
+    def mhc_post(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+    ) -> torch.Tensor:
+        from aiter.ops.mhc import mhc_post
+
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+        out = torch.empty_like(residual_flat)
+        mhc_post(
+            out,
+            x.view(num_tokens, hidden_size),
+            residual_flat,
+            post_layer_mix.view(num_tokens, hc_mult, 1),
+            comb_res_mix.view(num_tokens, hc_mult, hc_mult),
+        )
+        return out.view_as(residual)
 
 
 rocm_aiter_ops.register_ops_once()
