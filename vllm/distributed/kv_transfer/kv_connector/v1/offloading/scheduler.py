@@ -893,29 +893,22 @@ class OffloadingConnectorScheduler:
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored blocks."""
 
-        # Flush in-flight load jobs before the pool resets. Loads run on the
-        # load CUDA stream. New post-reset stores run on the store stream.
-        # These two directions have no ordering guarantee between them,
-        # so if the pool resets and reuses the same offload block ID, a new
-        # store can race with an old load over the same offload buffer address.
-        # Flushing old load IDs causes workers to synchronize those streams
-        # before starting any new stores, eliminating the race.
-        for job_id, job_status in self._jobs.items():
-            if not job_status.is_store:
-                self._current_batch_jobs_to_flush.add(job_id)
+        # reset_cache cannot be called in the middle of a schedule step
+        assert not self._current_batch_load_jobs
+        assert not self._current_batch_jobs_to_flush
 
-        self.manager.reset_cache()
-        for status in self._req_status.values():
-            for group_state in status.group_states:
-                group_state.next_stored_block_idx = 0
+        # Flush in-flight jobs
+        self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
+        # Discard jobs and save job_counter to be able to discard worker responses
+        self._job_reset_counter = self._job_counter
+        self._jobs.clear()
+        self._block_id_to_pending_jobs.clear()
+        
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.clear()
-        self._block_id_to_pending_jobs.clear()
-        self._jobs.clear()
-        self._job_reset_counter = self._job_counter
 
     def shutdown(self) -> None:
         self.manager.shutdown()
