@@ -15,17 +15,14 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import (
-    MoEActivation,
-    apply_moe_activation,
-)
-from vllm.model_executor.layers.fused_moe.config import (
+from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
-)
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
+    MoEActivation,
+    RoutedExperts,
+    SharedExperts,
+    apply_moe_activation,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -107,7 +104,7 @@ class GGUFConfig(QuantizationConfig):
             ):
                 return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
-        elif isinstance(layer, FusedMoE):
+        elif isinstance(layer, RoutedExperts):
             # TODO: Select UnquantizedFusedMoEMethod on unquantized layers.
             return GGUFMoEMethod(self, layer.moe_config)
         return None
@@ -578,7 +575,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: RoutedExperts,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -639,16 +636,17 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
 
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
         return None
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         if layer.apply_router_weight_on_input:
