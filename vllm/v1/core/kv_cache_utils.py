@@ -18,9 +18,11 @@ from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -1650,15 +1652,33 @@ def get_kv_cache_groups(
         _annotate_eagle_groups_deepseek_v4(vllm_config, kv_cache_spec, kv_cache_groups)
         return kv_cache_groups
 
+    # Pull HiddenStateCacheSpec layers out before the general multi-group
+    # path so they don't affect page-size unification or grouping.
+    hidden_specs = {
+        k: v for k, v in kv_cache_spec.items() if isinstance(v, HiddenStateCacheSpec)
+    }
+    filtered_spec = {
+        k: v
+        for k, v in kv_cache_spec.items()
+        if not isinstance(v, HiddenStateCacheSpec)
+    }
+
     # As KVCacheManager can only allocate memory of one size, we need to unify
     # the page size of the layers. For cases cannot be unified, this function
     # will raise an error.
-    kv_cache_spec = unify_kv_cache_spec_page_size(kv_cache_spec)
-    # Model contains multiple attention types, but KV cache of all layers
-    # have the same physical memory per block per layer. Split the layers
-    # into groups with the same number of layers, and thus same total page
-    # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    filtered_spec = unify_kv_cache_spec_page_size(filtered_spec)
+    groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
+
+    # Add hidden-state layers back with page aligned to the common page.
+    if hidden_specs:
+        common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        for name, spec in hidden_specs.items():
+            per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+            new_bs = max(common_page // per_token, 1)
+            aligned = replace(spec, block_size=new_bs, page_size_padded=common_page)
+            groups.append(KVCacheGroupSpec([name], aligned))
+
+    return groups
 
 
 def generate_scheduler_kv_cache_config(
