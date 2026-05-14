@@ -1251,11 +1251,12 @@ class SimpleStreamingEventProcessor:
 
         if self.state.current_state == _StateType.TOOL_CALL:
             assert delta_message.tool_calls is not None
-            tool_call_function = delta_message.tool_calls[0].function
-            assert tool_call_function is not None
-            if tool_call_function.arguments:
-                return handlers.delta_fn(self.state, tool_call_function.arguments)
-            return []
+            for tc in delta_message.tool_calls:
+                if tc.function is None:
+                    continue
+                if tc.function.arguments:
+                    events.extend(handlers.delta_fn(self.state, tc.function.arguments))
+            return events
         elif self.state.current_state == _StateType.REASONING:
             assert delta_message.reasoning is not None
             return handlers.delta_fn(self.state, delta_message.reasoning)
