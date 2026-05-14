@@ -1096,7 +1096,7 @@ class FusedMoEKernelModularImpl:
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
             # In unwrapped mode allocation is owned by the modular kernel
             # rather than by backend experts or the shared workspace manager.
-            # Experts still carve backend-specific views from these buffers.
+            # Experts may still carve backend-specific views from these buffers.
             workspace13 = torch.empty(
                 workspace13_shape,
                 dtype=workspace_dtype,

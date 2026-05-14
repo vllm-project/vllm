@@ -46,6 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
+from vllm.v1.worker.workspace import current_workspace_manager
 
 
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
@@ -205,13 +206,22 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         compute_type = _moe_compute_type(hidden_states.dtype)
 
-        # The modular kernel owns allocation; Triton experts only carve the
-        # backend-specific cache views from the provided workspaces.
-        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
-        intermediate_cache2 = _resize_cache(
-            workspace13, (num_tokens * top_k_num, cache2_dim)
-        )
-        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        if use_unwrapped:
+            intermediate_cache1, intermediate_cache2, intermediate_cache3 = (
+                current_workspace_manager().get_graph_local_tensors(
+                    ((num_tokens, top_k_num, N), workspace2.dtype),
+                    ((num_tokens * top_k_num, cache2_dim), workspace13.dtype),
+                    ((num_tokens, top_k_num, K), workspace2.dtype),
+                )
+            )
+        else:
+            # The modular kernel owns allocation; Triton experts only carve the
+            # backend-specific cache views from the provided workspaces.
+            intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
+            intermediate_cache2 = _resize_cache(
+                workspace13, (num_tokens * top_k_num, cache2_dim)
+            )
+            intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
         if use_unwrapped:
             torch.ops.vllm.moe_expert_projection(
@@ -395,10 +405,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> torch.Tensor | None:
         if envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped":
-            reduced = torch.sum(input, dim=1)
-            if not torch.compiler.is_compiling():
-                output.copy_(reduced)
-            return reduced
+            ops.moe_sum(input, output)
+            return output
 
         ops.moe_sum(input, output)
         return None
