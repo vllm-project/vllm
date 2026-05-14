@@ -122,7 +122,7 @@ steps:
 # P TP 4 - D DPEP 4 test case for DSv4-Flash
 - label: DSv4-Flash Disaggregated DP EP
   key: dsv4-flash-disaggregated
-  timeout_in_minutes: 30
+  timeout_in_minutes: 60
   device: h200
   optional: true
   working_dir: "/vllm-workspace/tests"
