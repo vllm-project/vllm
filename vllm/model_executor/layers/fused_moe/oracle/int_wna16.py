@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_permute_scales,
     marlin_permute_bias,
     moe_awq_to_marlin_zero_points,
+    marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -65,22 +66,36 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
 
-def _get_priority_backends() -> list[WNA16MoEBackend]:
+def _get_priority_backends(
+    may_have_zp: bool, may_have_bias: bool
+) -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
-    _AVAILABLE_BACKENDS = [
-        WNA16MoEBackend.FLASHINFER_TRTLLM,
+    _AVAILABLE_BACKENDS = []
+
+    # Temp. first for testing
+
+    if not may_have_bias:
+        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
+
+    if not may_have_zp and not may_have_bias:
+        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER)
+
+    # Marlin supports ZP and bias
+    _AVAILABLE_BACKENDS += [
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
-        WNA16MoEBackend.TRITON,
     ]
+
     return _AVAILABLE_BACKENDS
 
 
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
+    may_have_zp: bool,
+    may_have_bias: bool,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -92,6 +107,10 @@ def select_wna16_moe_backend(
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
     """
+
+    # TODO: deal with ZP/bias - flashinfer does not support zp or bias
+    # triton wna16 does not support bias
+    # marlin appears to support both (ZP may need processing)
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -131,7 +150,7 @@ def select_wna16_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends()
+    AVAILABLE_BACKENDS = _get_priority_backends(may_have_zp, may_have_bias)
 
     for backend in AVAILABLE_BACKENDS:
         activation_key = None  # always BF16 activation for WNA16 MoE
@@ -288,6 +307,8 @@ def _process_weights_flashinfer(
     torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
+    torch.Tensor | None,  # w13_zp
+    torch.Tensor | None,  # w2_zp
 ]:
     """Flashinfer (TRT-LLM MXINT4) weight post-processing.
 
@@ -342,6 +363,8 @@ def _process_weights_marlin(
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    w13_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -357,6 +380,8 @@ def _process_weights_marlin(
     torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
+    torch.Tensor | None,  # w13_zp
+    torch.Tensor | None,  # w2_zp
 ]:
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
@@ -381,6 +406,8 @@ def _process_weights_marlin(
     w2_input_global_scale: torch.Tensor | None = None
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
+    w13_zp_out: torch.Tensor | None = None
+    w2_zp_out: torch.Tensor | None = None
 
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
@@ -479,6 +506,25 @@ def _process_weights_marlin(
         w13_bias_out = marlin_permute_bias(w13_bias)
     if w2_bias is not None:
         w2_bias_out = marlin_permute_bias(w2_bias)
+
+    # TODO: not sure about shapes here
+    if w13_zp is not None:
+        w13_zp_out = marlin_zero_points(
+            w13_zp,
+            size_k=layer.intermediate_size_per_partition,
+            size_n=w13_zp.shape[2],
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
+        )
+
+    if w2_zp is not None:
+        w2_zp_out = marlin_zero_points(
+            w2_zp,
+            size_k=w2_zp.shape[1] * group_size_or_pack_factor,
+            size_n=w2_zp.shape[2],
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
+        )
 
     return (
         marlin_w13_qweight,
@@ -640,10 +686,11 @@ def _process_awq_weights_marlin(
         w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
+        w13_zp_out,
+        w2_zp_out,
     )
 
 
-# add zp?
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
@@ -659,6 +706,8 @@ def convert_to_wna16_moe_kernel_format(
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    w13_zp: torch.Tensor | None = None,
+    w2_zp: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -674,6 +723,8 @@ def convert_to_wna16_moe_kernel_format(
     torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
+    torch.Tensor | None,  # w13_zp
+    torch.Tensor | None,  # w2_zp
 ]:
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
@@ -754,6 +805,8 @@ def convert_to_wna16_moe_kernel_format(
             w2_qzeros,
             w13_bias,
             w2_bias,
+            w13_zp,
+            w2_zp,
         )
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return _process_weights_flashinfer(
@@ -763,27 +816,40 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_g_idx,
             w2_g_idx,
+<<<<<<< variant A
             w13_bias,
             w2_bias,
+>>>>>>> variant B
+            None,
+            None,
+            None,
+            None,
+####### Ancestor
+            None,
+            None,
+            None,
+            None,
+            w13_bias,
+            w2_bias,
+======= end
         )
-    elif backend in (
-        WNA16MoEBackend.TRITON,
-        WNA16MoEBackend.FLASHINFER,
-    ):
-        # TODO(bnell): fill in
+    elif backend == WNA16MoEBackend.TRITON:
+        # No processing needed for Triton.
         return (
             w13,
             w2,
             w13_scale,
             w2_scale,
-            w13_g_idx,
-            w2_g_idx,
+            None,
+            None,
             None,
             None,
             None,
             None,
             w13_bias,
             w2_bias,
+            w13_zp,
+            w2_zp,
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")

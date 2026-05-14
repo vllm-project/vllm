@@ -17,6 +17,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
+    convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     make_wna16_moe_quant_config,
     select_wna16_moe_backend,
@@ -41,7 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 
@@ -245,9 +247,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
         weight_key = QuantKey(quant_type, scale)
 
         # Select WNA16 MoE backend via oracle.
+        # handle ZP?
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
             weight_key=weight_key,
+            may_have_zp=self.quant_config.has_zp,
+            may_have_bias=False,
         )
 
     def create_weights(
@@ -371,6 +376,67 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 set_weight_attrs(param, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        has_zp = self.quant_config.has_zp
+        (
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            w13_g_idx_processed,
+            w2_g_idx_processed,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            _,
+            _,
+            w13_zp,
+            w2_zp,
+        ) = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=None,  # self.marlin_input_dtype,  # XXXXXXXXXXXXX
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_g_idx=layer.w13_weight_g_idx,
+            w2_g_idx=layer.w2_weight_g_idx,
+            w13_zp=layer.w13_qzeros if has_zp else None,
+            w2_zp=layer.w2_qzeros if has_zp else None,
+        )
+
+        # Replace common parameters
+        replace_parameter(layer, "w13_weight_packed", w13_qweight)
+        replace_parameter(layer, "w2_weight_packed", w2_qweight)
+        replace_parameter(layer, "w13_weight_scale", w13_scales)
+        replace_parameter(layer, "w2_weight_scale", w2_scales)
+
+        if has_zp:
+            assert w13_zp is not None and w2_zp is not None
+            replace_parameter(layer, "w13_qzeros", w13_zp)
+            replace_parameter(layer, "w2_qzeros", w2_zp)
+
+        # Marlin-specific parameters (not needed for Flashinfer)
+        if self.wna16_backend != WNA16MoEBackend.FLASHINFER:
+            replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
+            replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
+            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+
+            # Register input global scales if present
+            if w13_input_global_scale is not None:
+                layer.register_parameter(
+                    "w13_input_global_scale",
+                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+                )
+            if w2_input_global_scale is not None:
+                layer.register_parameter(
+                    "w2_input_global_scale",
+                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+                )
+
         assert self.experts_cls is not None
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
