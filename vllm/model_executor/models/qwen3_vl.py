@@ -1923,7 +1923,8 @@ class Qwen3VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_mm_item_output = token_budget // max_batch_size
+        # Use ceil so captured capacity is never smaller than token_budget.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:
