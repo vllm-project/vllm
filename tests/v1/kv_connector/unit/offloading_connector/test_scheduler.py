@@ -14,7 +14,9 @@ from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
+    TransferJobStatus,
 )
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -919,3 +921,33 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+def test_flush_all_jobs_when_no_requests_remain(request_runner):
+    """When _req_status is empty, build_connector_meta flushes all pending
+    jobs since there will be no future step to complete them."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+        block_size_factor=1,
+    )
+    sched = runner.connector_scheduler
+
+    # Simulate: requests already finished, but store jobs still pending
+    sched._jobs[42] = TransferJobStatus(
+        req_id="done_req",
+        pending_count=1,
+        keys=set(),
+        is_store=True,
+    )
+    sched._jobs[43] = TransferJobStatus(
+        req_id="done_req",
+        pending_count=1,
+        keys=set(),
+        is_store=True,
+    )
+    assert not sched._req_status
+
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    assert meta.jobs_to_flush == {42, 43}
