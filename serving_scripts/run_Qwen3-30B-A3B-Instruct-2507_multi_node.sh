@@ -523,6 +523,7 @@ copy_ray_nsight_from_node() {
   local NODE="$1"
   srun \
     --nodelist "${NODE}" \
+    --overlap \
     --nodes=1 \
     --ntasks=1 \
     --ntasks-per-node=1 \
