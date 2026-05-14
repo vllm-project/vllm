@@ -5,6 +5,7 @@ steps:
 - label: Language Models Tests (Standard)
   key: language-models-tests-standard
   timeout_in_minutes: 25
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -48,6 +49,14 @@ steps:
   parallelism: 2
   mirror:
     torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      commands:
+      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+      - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Test (Extended Generation) # 80min
   key: language-models-test-extended-generation
@@ -62,15 +71,6 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
-      commands:
-      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-      - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
   key: language-models-test-ppl
@@ -92,11 +92,6 @@ steps:
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb

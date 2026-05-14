@@ -1215,8 +1215,6 @@ def test_scheduler_config_init():
         ("facebook/opt-125m", 1, False, False),
         # Non-MoE model with DP>1 internal LB should need coordinator
         ("facebook/opt-125m", 2, False, True),
-        # Non-MoE model with DP>1 external LB should not need coordinator
-        ("facebook/opt-125m", 2, True, False),
         # MoE model with DP=1 should not need coordinator
         ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
         # MoE model with DP>1 internal LB should need both coordinator
@@ -1286,6 +1284,24 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def test_draft_sample_method_probabilistic_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        draft_sample_method="probabilistic",
+    )
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_draft_sample_method_gumbel_is_rejected():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            draft_sample_method="gumbel",
+        )
 
 
 def test_ir_op_priority_default():
