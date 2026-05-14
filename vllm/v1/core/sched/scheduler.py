@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStat
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.config.speculative import DynamicSpeculativeConfig
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -213,9 +214,13 @@ class Scheduler(SchedulerInterface):
         self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
-            if speculative_config.dynamic_config:
+            if speculative_config.num_speculative_tokens_per_batch_size:
                 self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
-                    speculative_config.dynamic_config,
+                    DynamicSpeculativeConfig(
+                        num_speculative_tokens_per_batch_size=(
+                            speculative_config.num_speculative_tokens_per_batch_size
+                        )
+                    ),
                     self.scheduler_config.max_num_seqs,
                     self.num_spec_tokens,
                 )
@@ -1924,9 +1929,6 @@ class Scheduler(SchedulerInterface):
     ) -> SpecDecodingStats | None:
         if num_invalid_spec_tokens:
             num_draft_tokens -= num_invalid_spec_tokens.get(request_id, 0)
-        if self.dynamic_sd_manager is not None and num_draft_tokens:
-            self.dynamic_sd_manager.observe_draft(num_draft_tokens, num_accepted_tokens)
-
         if not self.log_stats or not num_draft_tokens:
             return None
         if spec_decoding_stats is None:

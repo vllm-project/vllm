@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
+
 from vllm.config.speculative import DynamicSpeculativeConfig
-from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 
 class DynamicSpeculativeDecodingManager:
-    """A mapping from batch size to optimal number of drafts to use for that
-    batch size. This is used to dynamically adjust the number of drafts used
-    based on the current batch size."""
+    """Chooses speculative-token counts from a batch-size schedule."""
 
+    _RANGE_PATTERN = re.compile(r"^\s*(\d+)(?:\s*-\s*(\d+))?\s*$")
     _optimal_num_speculative_tokens: dict[int, int]
 
     def __init__(
@@ -17,187 +17,127 @@ class DynamicSpeculativeDecodingManager:
         dynamic_config: DynamicSpeculativeConfig,
         vllm_max_batch_size: int,
         vllm_num_speculative_tokens: int,
-        warmup_steps: int = 100,  # TODO: make this configurable
     ):
         self.dynamic_config = dynamic_config
         self.vllm_max_batch_size = vllm_max_batch_size
         self.vllm_num_speculative_tokens = vllm_num_speculative_tokens
-        self.use_online_acceptance_rate = dynamic_config.use_online_acceptance_rate
-        assert dynamic_config.batch_stats is not None, (
-            "batch_stats is required for dynamic speculative decoding"
-        )
-        assert dynamic_config.max_num_speculative_tokens is not None, (
-            "max_num_speculative_tokens is required for dynamic speculative decoding"
-        )
-        assert dynamic_config.acceptance_rate_per_pos is not None, (
-            "acceptance_rate_per_pos is required for dynamic speculative decoding"
-        )
 
-        self.batch_stats: dict[int, dict[int, float]] = dynamic_config.batch_stats
-        self.max_num_speculative_tokens: int = dynamic_config.max_num_speculative_tokens
-        self.acceptance_rate_per_pos: list[float] = (
-            dynamic_config.acceptance_rate_per_pos
-        )
-        self.available_batch_sizes = sorted(dynamic_config.batch_stats.keys())
-        self.steps = 0
-        self.warmup_steps = warmup_steps
-
-        # Cumulative stats for online acceptance rate updates
-        self.stats = SpecDecodingStats.new(vllm_num_speculative_tokens)
-
-        # Sanity check
-        assert (
-            vllm_num_speculative_tokens <= dynamic_config.max_num_speculative_tokens
-        ), "vllm_num_speculative_tokens must be <= max_num_speculative_tokens"
-
-        assert dynamic_config.max_num_speculative_tokens == len(
-            dynamic_config.acceptance_rate_per_pos
-        ), "max_num_speculative_tokens != len(acceptance_rate_per_pos)"
-        assert dynamic_config.max_num_speculative_tokens > 0, (
-            "max_num_speculative_tokens must be > 0"
-        )
-        assert all(0.0 <= a <= 1.0 for a in dynamic_config.acceptance_rate_per_pos), (
-            "all acceptance_rate_per_pos values must be in [0.0, 1.0]"
-        )
-        assert 1 in dynamic_config.batch_stats, (
-            f"BS 1 not found in {dynamic_config.batch_stats.keys()}"
-        )
-        assert vllm_max_batch_size in dynamic_config.batch_stats, (
-            f"max BS not found in {dynamic_config.batch_stats.keys()}"
-        )
-
-        for bs in self.available_batch_sizes:
-            assert bs > 0
-            assert 0 in dynamic_config.batch_stats[bs], (
-                f"batch size {bs} must have draft 0 stats"
+        if dynamic_config.num_speculative_tokens_per_batch_size is None:
+            raise ValueError(
+                "num_speculative_tokens_per_batch_size is required for "
+                "dynamic speculative decoding."
             )
-            assert 1 in dynamic_config.batch_stats[bs], (
-                f"batch size {bs} must have draft 1 stats"
-            )
-            assert sorted(dynamic_config.batch_stats[bs].keys()) == list(
-                dynamic_config.batch_stats[bs].keys()
-            ), f"batch size {bs} draft keys must be sorted"
+        if vllm_max_batch_size <= 0:
+            raise ValueError("vllm_max_batch_size must be > 0.")
+        if vllm_num_speculative_tokens <= 0:
+            raise ValueError("vllm_num_speculative_tokens must be > 0.")
 
-        self.update_optimal_num_speculative_tokens()
+        self._schedule = self._parse_schedule(
+            dynamic_config.num_speculative_tokens_per_batch_size
+        )
+        self._optimal_num_speculative_tokens = self._build_dense_schedule()
 
     def step(self, batch_size: int) -> int:
-        self.steps += 1
-        if self.should_update():
-            acceptance_rate_per_pos = self.compute_acceptance_rate_per_pos()
-            self.update_acceptance_rate_per_pos(acceptance_rate_per_pos)
-
-        optimal_num_speculative_tokens = self.get_optimal_num_speculative_tokens(
-            batch_size
-        )
-
-        return optimal_num_speculative_tokens
-
-    def compute_acceptance_rate_per_pos(self) -> list[float]:
-        acceptance_rate_per_pos = []
-        for i in range(self.vllm_num_speculative_tokens):
-            if self.stats.num_draft_tokens_per_pos[i] == 0:
-                acceptance_rate = 0.0
-            else:
-                acceptance_rate = (
-                    self.stats.num_accepted_tokens_per_pos[i]
-                    / self.stats.num_draft_tokens_per_pos[i]
-                )
-
-            acceptance_rate_per_pos.append(acceptance_rate)
-
-        return acceptance_rate_per_pos
-
-    def should_update(self) -> bool:
-        # Dynamic SD always adapts K by batch size. This only gates whether
-        # runtime-observed acceptance rates are allowed to refine the offline
-        # acceptance-rate profile after warmup.
-        # return self.steps > self.warmup_steps
-        return self.use_online_acceptance_rate and self.steps > self.warmup_steps
+        return self.get_optimal_num_speculative_tokens(batch_size)
 
     def get_optimal_num_speculative_tokens(self, batch_size: int) -> int:
-        assert batch_size > 0, "batch_size must be > 0"
-        assert batch_size <= self.vllm_max_batch_size, (
-            "batch_size must be <= vllm_max_batch_size"
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0.")
+        if batch_size > self.vllm_max_batch_size:
+            raise ValueError("batch_size must be <= vllm_max_batch_size.")
+        return min(
+            self.vllm_num_speculative_tokens,
+            self._optimal_num_speculative_tokens[batch_size],
         )
-        return self._optimal_num_speculative_tokens[batch_size]
 
-    def update_optimal_num_speculative_tokens(self):
-        self._optimal_num_speculative_tokens = {
-            bs: self._compute_optimal_num_speculative_tokens(bs)
-            for bs in range(1, self.vllm_max_batch_size + 1)
-        }
+    def _parse_schedule(
+        self, schedule: dict[str, int]
+    ) -> list[tuple[int, int, int]]:
+        parsed_schedule: list[tuple[int, int, int]] = []
 
-    def update_acceptance_rate_per_pos(self, acceptance_rate_per_pos: list[float]):
-        self.acceptance_rate_per_pos = acceptance_rate_per_pos
-        self.dynamic_config.acceptance_rate_per_pos = acceptance_rate_per_pos
-        self.update_optimal_num_speculative_tokens()
-
-    def _get_batch_stats(self, batch_size: int) -> dict:
-        if batch_size not in self.batch_stats:
-            # find the nearest batch size smaller and bigger than the given batch size
-            # and return the weighted avg of their stats
-
-            smaller_bs_list = [
-                bs for bs in self.available_batch_sizes if bs < batch_size
-            ]
-            smaller_bs = (
-                max(smaller_bs_list)
-                if len(smaller_bs_list)
-                else self.available_batch_sizes[0]
-            )
-            larger_bs_list = [
-                bs for bs in self.available_batch_sizes if bs > batch_size
-            ]
-            larger_bs = (
-                min(larger_bs_list)
-                if len(larger_bs_list)
-                else self.available_batch_sizes[-1]
-            )
-
-            smaller_bs_stat = self.batch_stats[smaller_bs]
-            larger_bs_stat = self.batch_stats[larger_bs]
-
-            if larger_bs == smaller_bs:
-                return self.batch_stats[smaller_bs]
-
-            ratio = (batch_size - smaller_bs) / (larger_bs - smaller_bs)
-
-            avg_stat: dict[int, float] = {}
-            for k in smaller_bs_stat:
-                avg_stat[k] = smaller_bs_stat[k] + ratio * (
-                    larger_bs_stat[k] - smaller_bs_stat[k]
+        for batch_size_range, num_speculative_tokens in schedule.items():
+            match = self._RANGE_PATTERN.fullmatch(str(batch_size_range))
+            if match is None:
+                raise ValueError(
+                    "Invalid batch-size range "
+                    f"{batch_size_range!r}. Expected 'N' or 'N-M'."
                 )
 
-            return avg_stat
-        else:
-            return self.batch_stats[batch_size]
+            range_start = int(match.group(1))
+            range_end = int(match.group(2) or match.group(1))
 
-    def _get_itl(self, batch_stats, num_drafts: int) -> float:
-        if num_drafts in batch_stats:
-            return batch_stats[num_drafts]
-        else:
-            lower_num_draft = max(k for k in batch_stats if k < num_drafts)
-            upper_num_draft = min(k for k in batch_stats if k > num_drafts)
+            if range_start <= 0 or range_end <= 0:
+                raise ValueError(
+                    f"Batch-size range {batch_size_range!r} must be positive."
+                )
+            if range_start > range_end:
+                raise ValueError(
+                    "Batch-size range start must be <= end for "
+                    f"{batch_size_range!r}."
+                )
+            if num_speculative_tokens < 0:
+                raise ValueError(
+                    "num_speculative_tokens_per_batch_size values must be >= 0."
+                )
+            parsed_schedule.append(
+                (range_start, range_end, num_speculative_tokens)
+            )
 
-            ratio = (num_drafts - lower_num_draft) / (upper_num_draft - lower_num_draft)
-            lower_itl = batch_stats[lower_num_draft]
-            upper_itl = batch_stats[upper_num_draft]
-            return lower_itl + ratio * (upper_itl - lower_itl)
+        if not parsed_schedule:
+            raise ValueError(
+                "num_speculative_tokens_per_batch_size must not be empty."
+            )
 
-    def _compute_optimal_num_speculative_tokens(self, batch_size: int) -> int:
-        batch_stats = self._get_batch_stats(batch_size)
+        parsed_schedule.sort(key=lambda entry: entry[0])
 
-        max_goodput = -1.0
-        for num_drafts in range(self.max_num_speculative_tokens + 1):
-            curr_al = 1 + sum(self.acceptance_rate_per_pos[:num_drafts])
-            curr_itl = self._get_itl(batch_stats, num_drafts)
-            curr_goodput = curr_al / curr_itl
-            if curr_goodput > max_goodput:
-                max_goodput = curr_goodput
-                chosen_num_drafts = num_drafts
+        previous_end = 0
+        for range_start, range_end, _ in parsed_schedule:
+            if range_start <= previous_end:
+                raise ValueError(
+                    "Batch-size ranges must be non-overlapping and sorted."
+                )
+            previous_end = range_end
 
-        return chosen_num_drafts
+        first_range_start = parsed_schedule[0][0]
+        if first_range_start != 1:
+            raise ValueError(
+                "The first batch-size range must start at 1 so every runtime "
+                "batch size has a defined schedule."
+            )
 
-    def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int) -> None:
-        """Record draft/accept counts for online acceptance rate updates."""
-        self.stats.observe_draft(num_draft_tokens, num_accepted_tokens)
+        return parsed_schedule
+
+    def _build_dense_schedule(self) -> dict[int, int]:
+        dense_schedule: dict[int, int] = {}
+        next_batch_size = 1
+        last_num_speculative_tokens: int | None = None
+
+        for range_start, range_end, num_speculative_tokens in self._schedule:
+            if range_start > next_batch_size and last_num_speculative_tokens is not None:
+                for batch_size in range(
+                    next_batch_size,
+                    min(range_start, self.vllm_max_batch_size + 1),
+                ):
+                    dense_schedule[batch_size] = last_num_speculative_tokens
+
+            for batch_size in range(
+                max(range_start, next_batch_size),
+                min(range_end, self.vllm_max_batch_size) + 1,
+            ):
+                dense_schedule[batch_size] = num_speculative_tokens
+
+            next_batch_size = max(next_batch_size, range_end + 1)
+            last_num_speculative_tokens = num_speculative_tokens
+
+            if next_batch_size > self.vllm_max_batch_size:
+                break
+
+        if last_num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens_per_batch_size must contain at least "
+                "one valid batch-size range."
+            )
+        for batch_size in range(next_batch_size, self.vllm_max_batch_size + 1):
+            dense_schedule[batch_size] = last_num_speculative_tokens
+
+        return dense_schedule
