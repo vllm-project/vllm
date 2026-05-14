@@ -5,12 +5,21 @@ import os
 # PROBE: enable per-layer hidden state dump in qwen2.forward at position of
 # token 2701 (' following').
 os.environ.setdefault("VLLM_DEBUG_DUMP_HS", "1")
+# PROBE: required for cuBLAS deterministic mode to be honored by PyTorch
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 from itertools import repeat  # noqa: E402
 from typing import Any  # noqa: E402
 
 import pytest  # noqa: E402
+import torch  # noqa: E402
 import torch._dynamo.config as dynamo_config  # noqa: E402
+
+# PROBE: warn_only=False -> RAISE an error at the first non-deterministic op,
+# so we can see exactly which op is the source of bit-level divergence.
+# Previously warn_only=True buried warnings in the log; warn_only=False
+# surfaces a stack trace pointing directly at the offending op.
+torch.use_deterministic_algorithms(True, warn_only=False)
 
 from tests.utils import (  # noqa: E402
     large_gpu_mark,
