@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
@@ -24,6 +25,11 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
+)
+from vllm.utils.moe_pruned_experts import (
+    build_pruned_expert_map,
+    extract_moe_layer_index,
+    load_pruned_experts_profile,
 )
 
 if TYPE_CHECKING:
@@ -92,6 +98,11 @@ class RoutedExperts(PluggableLayer):
         self.update_expert_map_info()
 
         self.rocm_aiter_fmoe_enabled = moe_config.rocm_aiter_fmoe_enabled
+
+        # Optionally prune experts before weights are created so the pruned
+        # experts are not allocated. Must run before create_weights() below.
+        self.has_pruned_experts = False
+        self._apply_pruned_experts_profile()
 
         # It would be good to eventually codify these in FusedMoEConfig
         # or some other config.
@@ -238,6 +249,92 @@ class RoutedExperts(PluggableLayer):
             self.register_buffer("expert_physical_to_global", physical_to_global)
             self.register_buffer("expert_local_to_global", local_global)
 
+    def _apply_pruned_experts_profile(self) -> None:
+        profile_path = (
+            get_current_vllm_config().load_config.moe_pruned_experts_profile
+        )
+        if not profile_path:
+            self.has_pruned_experts = False
+            return
+
+        layer_idx = extract_moe_layer_index(self.layer_name)
+        if layer_idx is None:
+            logger.warning(
+                "Skipping MoE pruned experts profile for layer %s because "
+                "its layer index could not be inferred.",
+                self.layer_name,
+            )
+            self.has_pruned_experts = False
+            return
+
+        profile = load_pruned_experts_profile(profile_path)
+        pruned_experts = profile.pruned_experts_by_layer.get(layer_idx)
+        if not pruned_experts:
+            self.has_pruned_experts = False
+            return
+
+        if self.global_num_experts != self.moe_config.num_logical_experts:
+            raise NotImplementedError(
+                "MoE pruned experts profiles do not support redundant experts."
+            )
+        if self.rocm_aiter_fmoe_enabled:
+            raise NotImplementedError(
+                "MoE pruned experts profiles do not support ROCm AITER fused MoE."
+            )
+        invalid_experts = [
+            expert_id
+            for expert_id in pruned_experts
+            if expert_id >= self.global_num_experts
+        ]
+        if invalid_experts:
+            raise ValueError(
+                f"MoE pruned experts profile for layer {layer_idx} contains "
+                f"out-of-range experts {invalid_experts}; this layer has "
+                f"{self.global_num_experts} experts."
+            )
+
+        base_expert_map = (
+            self._expert_map.cpu() if self._expert_map is not None else None
+        )
+        pruned_expert_map, num_local_experts = build_pruned_expert_map(
+            num_experts=self.global_num_experts,
+            pruned_experts=pruned_experts,
+            base_expert_map=base_expert_map,
+        )
+        if num_local_experts == 0:
+            raise ValueError(
+                f"MoE pruned experts profile prunes every local expert in "
+                f"layer {layer_idx}."
+            )
+
+        self.local_num_experts = num_local_experts
+        self.moe_config.num_local_experts = num_local_experts
+        self.register_buffer("_expert_map", pruned_expert_map)
+        self.has_pruned_experts = True
+
+        # Pruning relies on expert_map, so force a backend that supports it.
+        moe_backend = self.moe_config.moe_backend
+        if moe_backend == "auto":
+            logger.info_once(
+                "MoE pruned experts profile requires expert_map support; "
+                "using Triton MoE backend instead of auto selection."
+            )
+            self.moe_config.moe_backend = "triton"
+        elif moe_backend != "triton":
+            raise NotImplementedError(
+                "MoE pruned experts profiles currently require the Triton "
+                f"MoE backend, but got moe_backend={moe_backend!r}."
+            )
+
+        logger.info(
+            "MoE pruned experts layer %d: skipped %d/%d experts, "
+            "local_num_experts=%d",
+            layer_idx,
+            len(pruned_experts),
+            self.global_num_experts,
+            self.local_num_experts,
+        )
+
     def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
@@ -266,9 +363,12 @@ class RoutedExperts(PluggableLayer):
 
         # Update local attributes from ExpertMapManager
         self.update_expert_map_info()
+        self._apply_pruned_experts_profile()
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         """Map global expert ID to local expert ID."""
+        if self.has_pruned_experts:
+            return int(self._expert_map[expert_id])
         return self.expert_map_manager.map_global_to_local(expert_id)
 
     #
