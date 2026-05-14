@@ -7,7 +7,12 @@ import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
-from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+from vllm._custom_ops import (
+    CPUQuantMethod,
+    cpu_fused_moe,
+    cpu_prepack_moe_weight,
+    fused_experts_cpu,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
@@ -195,23 +200,21 @@ class SGLFusedMOE:
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        torch.ops._C.fused_experts_cpu(
+        return fused_experts_cpu(
             x,
             layer.w13_weight,
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            True,
-            False,
-            False,
-            None,
-            None,
-            None,
-            None,
-            None,
-            True,
+            False,  # inplace
+            CPUQuantMethod.UNQUANT,  # moe_comp_method
+            None,  # w1_scale
+            None,  # w2_scale
+            None,  # w1_zero
+            None,  # w2_zero
+            None,  # block_size
+            True,  # is_vnni
         )
-        return x
 
 
 class CPUFusedMOE:

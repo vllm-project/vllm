@@ -93,6 +93,7 @@ def _moe_forward(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner._forward_impl(
@@ -110,7 +111,14 @@ def _moe_forward_fake(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
 ) -> torch.Tensor:
+    # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
+    # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
+    # as an op arg (not peeked from the layer registry) to keep the fake
+    # a pure shape function of its inputs and preserve subgraph dedup.
+    if hidden_dim_unpadded > 0:
+        return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
     return torch.empty_like(hidden_states)
 
 
@@ -120,6 +128,7 @@ def _moe_forward_shared(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer.runner._forward_impl(
@@ -137,13 +146,17 @@ def _moe_forward_shared_fake(
     shared_experts_input: torch.Tensor | None,
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
+    hidden_dim_unpadded: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Output shapes:
-    # - fused_out: same as hidden_states (routed experts use transformed size)
-    # - shared_out: same as shared_experts_input if provided, else same as
-    #               hidden_states
-    # (For latent MoE: shared experts use original hidden_size, not latent size)
-    fused_out = torch.empty_like(hidden_states)
+    # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
+    # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
+    # else `hidden_states`.
+    if hidden_dim_unpadded > 0:
+        fused_out = hidden_states.new_empty(
+            (*hidden_states.shape[:-1], hidden_dim_unpadded)
+        )
+    else:
+        fused_out = torch.empty_like(hidden_states)
     if shared_experts_input is not None:
         shared_out = torch.empty_like(shared_experts_input)
     else:
@@ -210,6 +223,7 @@ class MoERunner(MoERunnerInterface):
         shared_experts: torch.nn.Module | None,
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
+        shared_expert_gate: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
     ):
@@ -220,8 +234,17 @@ class MoERunner(MoERunnerInterface):
         self.routed_output_transform = routed_output_transform
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
+        self.shared_expert_gate = shared_expert_gate
         self._quant_method = quant_method
         self.enable_dbo = enable_dbo
+
+        # When both gates are present and FSE is enabled, fuse their
+        # weight matrices into [num_experts + num_shared, hidden] so one
+        # F.linear produces combined logits. The topk kernel can then
+        # apply routing softmax and shared expert activation (sigmoid)
+        # in a single launch.
+        self._fse_fuse_gate = gate is not None and shared_expert_gate is not None
+        self._combined_gate_weight: torch.Tensor | None = None
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -264,6 +287,20 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._quant_method = quant_method
         self._quant_method = quant_method
+
+    def _maybe_fuse_gate_weights(self):
+        """Fuse router and shared expert gate weights on first call.
+
+        Cannot be done at __init__ because gate weights are loaded after
+        module construction (via weight_loader). Called once from
+        _forward_impl before the first forward pass.
+        """
+        if self._combined_gate_weight is None:
+            assert self.gate is not None and self.shared_expert_gate is not None
+            self._combined_gate_weight = torch.cat(
+                [self.gate.weight, self.shared_expert_gate.weight],
+                dim=0,
+            )
 
     def is_internal_router(self) -> bool:
         return self.gate is not None
@@ -389,6 +426,29 @@ class MoERunner(MoERunnerInterface):
             return "from_forward_context"
         return self.layer_name
 
+    def _trtllm_mxfp4_unpadded_dim(self) -> int:
+        """Return ``hidden_dim_unpadded`` when the active backend is TRT-LLM
+        MXFP4 (whose kernel writes narrower than the padded
+        ``hidden_states.shape[-1]``), else 0. Other MXFP4 backends (notably
+        Cutlass MXFP4 MXFP8) write the full padded width, so
+        ``moe_config.hidden_dim_unpadded`` alone is insufficient: it encodes
+        the model's logical hidden, not whether the kernel narrows. Computed
+        caller-side and passed as an op arg; doing the isinstance check
+        inside the fake would specialize per ``layer_name`` and break
+        subgraph dedup for identical-architecture models (e.g. Phi-MoE).
+        """
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+            TrtLlmMxfp4ExpertsBase,
+        )
+
+        moe_kernel = getattr(self._quant_method, "moe_kernel", None)
+        fused_experts = getattr(
+            getattr(moe_kernel, "impl", None), "fused_experts", None
+        )
+        if isinstance(fused_experts, TrtLlmMxfp4ExpertsBase):
+            return self.moe_config.hidden_dim_unpadded or self.moe_config.hidden_dim
+        return 0
+
     def _maybe_pad_hidden_states(
         self,
         shared_experts_input: torch.Tensor | None,
@@ -451,6 +511,10 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        # Get routing replay buffer from persistent layer attribute
+        # (set by bind_routing_capture_to_model during capturer init)
+        routing_replay_out = getattr(layer, "_routing_replay_out", None)
+
         if self._quant_method.is_monolithic:
             fused_out = self._quant_method.apply_monolithic(
                 layer=layer,
@@ -465,6 +529,10 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
 
+            # Write routing data for non-monolithic path (Triton, etc.)
+            if routing_replay_out is not None:
+                routing_replay_out[: topk_ids.shape[0]].copy_(topk_ids.to(torch.int16))
+
             # Passing shared_experts_input in case SharedExpertsOrder is
             # MK_INTERNAL_OVERLAPPED.
             fused_out = self._quant_method.apply(
@@ -472,6 +540,7 @@ class MoERunner(MoERunnerInterface):
                 x=hidden_states,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                shared_experts=self._shared_experts,
                 shared_experts_input=shared_experts_input,
             )
 
@@ -577,6 +646,7 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input,
             input_ids,
             self._encode_layer_name(),
+            self._trtllm_mxfp4_unpadded_dim(),
         )
 
         #
@@ -707,7 +777,11 @@ class MoERunner(MoERunnerInterface):
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
-            router_logits, _ = self.gate(hidden_states)
+            if self._fse_fuse_gate:
+                self._maybe_fuse_gate_weights()
+                router_logits = F.linear(hidden_states, self._combined_gate_weight)
+            else:
+                router_logits, _ = self.gate(hidden_states)
 
         with self._sequence_parallel_context():
             # TODO(bnell): parts of the dispatch/combine steps will go away once
