@@ -1362,6 +1362,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     return backend_cls.get_name() in (
         "FLASHINFER",
         "TRTLLM_RAGGED",
+        "TOKENSPEED_MLA",
     )
 
 
