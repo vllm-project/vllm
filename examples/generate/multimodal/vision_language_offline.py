@@ -2179,6 +2179,92 @@ def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Qwen3.5-Dense
+def run_qwen3_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Qwen/Qwen3.5-4B"
+
+    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt=mm_limit,
+    )
+
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
+    if modality == "image":
+        placeholder = image_placeholder
+    elif modality == "video":
+        placeholder = video_placeholder
+    elif modality == "image+video":
+        placeholder = image_placeholder + video_placeholder
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n{placeholder}"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Qwen3.5-MoE
+def run_qwen3_5_moe(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Qwen/Qwen3.5-35B-A3B"
+
+    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt=mm_limit,
+    )
+
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
+    if modality == "image":
+        placeholder = image_placeholder
+    elif modality == "video":
+        placeholder = video_placeholder
+    elif modality == "image+video":
+        placeholder = image_placeholder + video_placeholder
+
+    prompts = [
+        (
+            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n{placeholder}"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # R-4B
 def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2442,6 +2528,8 @@ model_example_map = {
     "qwen2_5_omni": run_qwen2_5_omni,
     "qwen3_vl": run_qwen3_vl,
     "qwen3_vl_moe": run_qwen3_vl_moe,
+    "qwen3_5": run_qwen3_5,
+    "qwen3_5_moe": run_qwen3_5_moe,
     "rvl": run_r_vl,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
@@ -2460,13 +2548,17 @@ MODELS_NEED_VIDEO_METADATA = [
     "molmo2",
     "qwen3_vl",
     "qwen3_vl_moe",
+    "qwen3_5",
+    "qwen3_5_moe",
 ]
 
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
+    "qwen2_5_vl",
     "qwen3_vl",
     "qwen3_vl_moe",
-    "qwen2_5_vl",
+    "qwen3_5",
+    "qwen3_5_moe",
 ]
 
 
