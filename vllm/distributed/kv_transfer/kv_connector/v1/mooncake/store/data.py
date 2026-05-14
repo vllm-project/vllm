@@ -29,6 +29,7 @@ class KeyMetadata:
     pcp_rank: int
     dcp_rank: int
     pp_rank: int
+    group_id: int = 0
 
 
 @dataclass(order=True)
@@ -46,6 +47,7 @@ class PoolKey:
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
                 self.key_metadata.pp_rank,
+                self.key_metadata.group_id,
                 self.chunk_hash,
             )
         )
@@ -54,6 +56,7 @@ class PoolKey:
         return (
             f"{self.key_metadata.model_name}"
             f"@tp_rank:{self.key_metadata.tp_rank}"
+            f"@group_id:{self.key_metadata.group_id}"
             f"@pcp{self.key_metadata.pcp_rank}"
             f"@dcp{self.key_metadata.dcp_rank}"
             f"@pp_rank:{self.key_metadata.pp_rank}"
@@ -83,15 +86,26 @@ class ChunkedTokenDatabase:
         self.block_len = block_len
 
     def prepare_value(
-        self, start: int, end: int, block_ids: list[int]
+        self,
+        start: int,
+        end: int,
+        block_ids: list[int] | tuple[list[int], ...],
+        group_idx: int = 0,
     ) -> tuple[list[int], list[int], int]:
         """Compute memory addresses and sizes for a token range.
+
+        Args:
+            block_ids: Either a single list of block IDs (non-HMA) or a tuple
+                of per-group block IDs (HMA).
+            group_idx: Which group's block IDs to use when block_ids is a tuple.
 
         Returns:
             (addr_list, size_list, block_id)
         """
         addr_list = []
         size_list = []
+        if isinstance(block_ids, tuple):
+            block_ids = block_ids[group_idx]
         block_id = block_ids[start // self.block_size]
         length = len(self.block_len)
         for index, base_addr in enumerate(self.kv_caches_base_addr):
@@ -154,7 +168,7 @@ class RequestTracker:
 
     req_id: str
     token_len: int
-    allocated_block_ids: list[int]
+    allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
     # Snapshot of the prefill range length at tracker creation time.
@@ -167,14 +181,20 @@ class RequestTracker:
         new_block_ids: tuple[list[int], ...] | list[int],
     ) -> None:
         if len(new_block_ids) == 0:
-            new_block_ids = []
-        elif isinstance(new_block_ids, tuple):
-            new_block_ids = new_block_ids[0]
-        elif isinstance(new_block_ids, list):
-            pass
-        else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
-        self.allocated_block_ids.extend(new_block_ids)
+            return
+        if isinstance(new_block_ids, list):
+            new_block_ids = (new_block_ids,)
+        if isinstance(self.allocated_block_ids, list):
+            self.allocated_block_ids = (self.allocated_block_ids,)
+        if len(self.allocated_block_ids) != len(new_block_ids):
+            raise ValueError(
+                f"Block ID length mismatch: "
+                f"{len(self.allocated_block_ids)} vs {len(new_block_ids)}"
+            )
+        self.allocated_block_ids = tuple(
+            list(old) + list(new)
+            for old, new in zip(self.allocated_block_ids, new_block_ids)
+        )
 
 
 @dataclass
@@ -183,7 +203,7 @@ class ReqMeta:
 
     req_id: str
     token_len_chunk: int
-    block_ids: list[int]
+    block_ids: tuple[list[int], ...]
     block_hashes: list[BlockHash]
 
     can_save: bool | None = None

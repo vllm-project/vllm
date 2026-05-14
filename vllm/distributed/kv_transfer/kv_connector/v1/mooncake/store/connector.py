@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -76,7 +77,7 @@ class MooncakeStoreKVEvents(KVConnectorKVEvents):
         return f"<MooncakeStoreKVEvents events={self.get_all_events()}>"
 
 
-class MooncakeStoreConnector(KVConnectorBase_V1):
+class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     """KV connector using MooncakeDistributedStore as shared KV pool."""
 
     @property
@@ -106,9 +107,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
         self.connector_worker: MooncakeStoreWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler = MooncakeStoreScheduler(vllm_config)
+            self.connector_scheduler = MooncakeStoreScheduler(
+                vllm_config, self._kv_cache_config
+            )
         else:
-            self.connector_worker = MooncakeStoreWorker(vllm_config)
+            self.connector_worker = MooncakeStoreWorker(
+                vllm_config, self._kv_cache_config
+            )
 
     # ============================================================
     # Scheduler-side methods
@@ -149,6 +154,16 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished_all_groups(
+            request, block_ids
+        )
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         kv_cache_events = connector_output.kv_cache_events

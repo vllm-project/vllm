@@ -21,8 +21,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
     LookupKeyClient,
 )
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -45,7 +50,11 @@ def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
 class MooncakeStoreScheduler:
     """Scheduler-side component for MooncakeStoreConnector."""
 
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: "KVCacheConfig | None" = None,
+    ):
         assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -68,11 +77,34 @@ class MooncakeStoreScheduler:
             )
         )
 
+        # HMA detection and sliding-window block counts per group.
+        if kv_cache_config is not None:
+            self._is_hma_required = (
+                not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+                and any(
+                    not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                    for g in kv_cache_config.kv_cache_groups
+                )
+            )
+            sw_sizes_tokens: list[tuple[int, int]] = [
+                (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+                if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                else (0, self._block_size)
+                for g in kv_cache_config.kv_cache_groups
+            ]
+            self.blocks_per_sw = [
+                cdiv(n_tokens, block_size) + 1 if n_tokens else 0
+                for n_tokens, block_size in sw_sizes_tokens
+            ]
+        else:
+            self._is_hma_required = False
+            self.blocks_per_sw = []
+
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
         self._preempted_req_ids: set[str] = set()  # preempted requests
-        self._unfinished_requests: dict[str, tuple[Request, list[int]]] = {}
+        self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
     def get_num_new_matched_tokens(
@@ -126,9 +158,9 @@ class MooncakeStoreScheduler:
         num_external_tokens: int,
     ):
         """Update state after block allocation."""
-        local_block_ids: list[int] = []
+        local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
-            local_block_ids = blocks.get_block_ids()[0]
+            local_block_ids = blocks.get_block_ids()
 
         self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
@@ -190,10 +222,9 @@ class MooncakeStoreScheduler:
             request_real = request_tuple[0]  # type: ignore[index]
 
             if not isinstance(request.block_ids[0], list):
-                unfolded_block_ids = request.block_ids.copy()
+                unfolded_block_ids = (request.block_ids.copy(),)
             else:
-                # TODO: support HMA
-                unfolded_block_ids = request.block_ids[0].copy()
+                unfolded_block_ids = tuple(list(g) for g in request.block_ids)
 
             prefill_tokens = _new_req_prefill_tokens(request)
             request_tracker = RequestTracker(
@@ -237,9 +268,9 @@ class MooncakeStoreScheduler:
                 if req_id in self._preempted_req_ids:
                     # Resumed after preemption
                     if isinstance(new_block_ids, tuple):
-                        block_ids_list = new_block_ids[0].copy()
+                        block_ids_list = tuple(list(g) for g in new_block_ids)
                     else:
-                        block_ids_list = new_block_ids.copy()
+                        block_ids_list = (new_block_ids.copy(),)
                     self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
@@ -358,10 +389,35 @@ class MooncakeStoreScheduler:
 
         return meta
 
+    def get_sw_clipped_blocks(
+        self,
+        block_ids: tuple[list[int], ...] | list[int],
+    ) -> tuple[list[int], ...]:
+        """Clip per-group block IDs to sliding window size.
+
+        For groups with SlidingWindowAttention, only the most recent
+        ``blocks_per_sw`` blocks are retained. Non-SWA groups keep all
+        blocks unchanged.
+        """
+        if isinstance(block_ids, list):
+            block_ids = (block_ids,)
+        if len(block_ids) == 0 or not self._is_hma_required:
+            return block_ids
+        assert len(block_ids) == len(self.blocks_per_sw), (
+            f"Block ID group count mismatch: "
+            f"{len(block_ids)} vs {len(self.blocks_per_sw)}"
+        )
+        return tuple([
+            blocks[-self.blocks_per_sw[i]:]
+            if self.blocks_per_sw[i] > 0
+            else blocks
+            for i, blocks in enumerate(block_ids)
+        ])
+
     def request_finished(
         self,
         request: Request,
-        block_ids: list[int],
+        block_ids: list[int] | tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """Determine whether to delay freeing blocks for async save."""
         if self.kv_role == "kv_consumer":
@@ -370,11 +426,23 @@ class MooncakeStoreScheduler:
         assert tracker is not None
         if tracker.num_saved_tokens <= 0:
             return False, None
-        delay_free_blocks = len(block_ids) > 0
+        if isinstance(block_ids, list):
+            block_ids = (block_ids,)
+        block_ids = self.get_sw_clipped_blocks(block_ids)
+        delay_free_blocks = any(len(g) > 0 for g in block_ids)
         if delay_free_blocks:
+            total_blocks = sum(len(g) for g in block_ids)
             logger.debug(
                 "Delaying free of %d blocks for request %s",
-                len(block_ids),
+                total_blocks,
                 request.request_id,
             )
         return delay_free_blocks, None
+
+    def request_finished_all_groups(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Determine whether to delay freeing blocks for async save (HMA)."""
+        return self.request_finished(request, block_ids)
