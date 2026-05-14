@@ -161,6 +161,12 @@ class EngineCoreClient(ABC):
     def wake_up(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
+    def release_kv_cache(self) -> None:
+        raise NotImplementedError
+
+    def resume_kv_cache(self) -> None:
+        raise NotImplementedError
+
     def is_sleeping(self) -> bool:
         raise NotImplementedError
 
@@ -236,6 +242,12 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
+        raise NotImplementedError
+
+    async def release_kv_cache_async(self) -> None:
+        raise NotImplementedError
+
+    async def resume_kv_cache_async(self) -> None:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -327,6 +339,13 @@ class InprocClient(EngineCoreClient):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.engine_core.wake_up(tags)
+
+    def release_kv_cache(self) -> None:
+        result = self.engine_core.release_kv_cache()
+        assert result is None
+
+    def resume_kv_cache(self) -> None:
+        self.engine_core.resume_kv_cache()
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
@@ -863,6 +882,12 @@ class SyncMPClient(MPClient):
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.call_utility("wake_up", tags)
 
+    def release_kv_cache(self) -> None:
+        self.call_utility("release_kv_cache")
+
+    def resume_kv_cache(self) -> None:
+        self.call_utility("resume_kv_cache")
+
     def is_sleeping(self) -> bool:
         return self.call_utility("is_sleeping")
 
@@ -1098,6 +1123,12 @@ class AsyncMPClient(MPClient):
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)
+
+    async def release_kv_cache_async(self) -> None:
+        await self.call_utility_async("release_kv_cache")
+
+    async def resume_kv_cache_async(self) -> None:
+        await self.call_utility_async("resume_kv_cache")
 
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")

@@ -198,6 +198,31 @@ class Worker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
+    def release_kv_cache(self) -> None:
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        free_bytes_before_release = torch.cuda.mem_get_info()[0]
+
+        allocator = CuMemAllocator.get_instance()
+        allocator.release_tags(("kv_cache",))
+
+        free_bytes_after_release, total = torch.cuda.mem_get_info()
+        freed_bytes = free_bytes_after_release - free_bytes_before_release
+        used_bytes = total - free_bytes_after_release
+        assert freed_bytes >= 0, "Memory usage increased after releasing KV cache."
+        logger.info(
+            "Released KV cache and freed %s GiB memory, %s GiB memory is still in use.",
+            format_gib(freed_bytes),
+            format_gib(used_bytes),
+        )
+
+    def resume_kv_cache(self) -> None:
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        allocator = CuMemAllocator.get_instance()
+        allocator.wake_up(["kv_cache"])
+        self.model_runner.post_kv_cache_wake_up()
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if not self.vllm_config.model_config.enable_sleep_mode:
             return nullcontext()

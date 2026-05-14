@@ -53,6 +53,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    is_mapped: bool = True
 
 
 def create_and_map(allocation_handle: HandleType) -> None:
@@ -190,6 +191,8 @@ class CuMemAllocator:
         backup_bytes = 0
 
         for ptr, data in self.pointer_to_data.items():
+            if not data.is_mapped:
+                continue
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
@@ -205,6 +208,7 @@ class CuMemAllocator:
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
             unmap_and_release(handle)
+            data.is_mapped = False
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -230,8 +234,11 @@ class CuMemAllocator:
         """
         for ptr, data in self.pointer_to_data.items():
             if tags is None or data.tag in tags:
+                if data.is_mapped:
+                    continue
                 handle = data.handle
                 create_and_map(handle)
+                data.is_mapped = True
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:
@@ -241,6 +248,38 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+
+    def release_tags(self, tags: tuple[str, ...] | str) -> None:
+        """
+        Release GPU memory for allocations with the specified tags only.
+        Unlike sleep(), allocations with other tags are kept mapped.
+
+        :param tags: The tags of the memory allocations to discard.
+        """
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        assert isinstance(tags, tuple)
+
+        total_bytes = 0
+        for data in self.pointer_to_data.values():
+            if data.tag not in tags or not data.is_mapped:
+                continue
+            handle = data.handle
+            total_bytes += handle[1]
+            if data.cpu_backup_tensor is not None:
+                data.cpu_backup_tensor = None
+            unmap_and_release(handle)
+            data.is_mapped = False
+
+        logger.info(
+            "CuMemAllocator: release_tags(%s) freed %.2f GiB memory.",
+            tags,
+            total_bytes / 1024**3,
+        )
+
+        gc.collect()
+        torch.cuda.empty_cache()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

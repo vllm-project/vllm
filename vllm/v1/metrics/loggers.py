@@ -496,14 +496,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "Engine sleep state; awake = 0 means engine is sleeping; "
                 "awake = 1 means engine is awake; "
                 "weights_offloaded = 1 means sleep level 1; "
-                "discard_all = 1 means sleep level 2."
+                "discard_all = 1 means sleep level 2; "
+                "kv_cache_released = 1 means only KV cache memory is released."
             ),
             labelnames=labelnames + ["sleep_state"],
             multiprocess_mode="mostrecent",
         )
 
         self.gauge_engine_sleep_state = {}
-        sleep_state = ["awake", "weights_offloaded", "discard_all"]
+        sleep_state = [
+            "awake",
+            "weights_offloaded",
+            "discard_all",
+            "kv_cache_released",
+        ]
 
         for s in sleep_state:
             self.gauge_engine_sleep_state[s] = {
@@ -1219,16 +1225,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         awake = 1
         discard_all = 0
         weights_offloaded = 0
+        kv_cache_released = 0
 
         if sleep == 1:
             awake = 0
-            if level == 1:
+            if level == 0:
+                kv_cache_released = 1
+            elif level == 1:
                 weights_offloaded = 1
             elif level == 2:
                 discard_all = 1
 
         for engine_idx in self.engine_indexes:
             self.gauge_engine_sleep_state["discard_all"][engine_idx].set(discard_all)
+            self.gauge_engine_sleep_state["kv_cache_released"][engine_idx].set(
+                kv_cache_released
+            )
             self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(
                 weights_offloaded
             )

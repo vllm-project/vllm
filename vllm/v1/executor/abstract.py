@@ -359,6 +359,39 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
+    def release_kv_cache(self):
+        if self.is_sleeping:
+            logger.warning("Executor is already sleeping.")
+            return
+        time_before_release = time.perf_counter()
+        self.collective_rpc("release_kv_cache")
+        time_after_release = time.perf_counter()
+        self.sleeping_tags = {"kv_cache"}
+        self.is_sleeping = True
+        logger.info(
+            "It took %.6f seconds to release KV cache.",
+            time_after_release - time_before_release,
+        )
+
+    def resume_kv_cache(self):
+        if not self.is_sleeping:
+            logger.warning("Executor is not sleeping.")
+            return
+        if self.sleeping_tags != {"kv_cache"}:
+            raise ValueError(
+                "resume_kv_cache() can only be used after release_kv_cache(). "
+                f"Current sleeping tags: {self.sleeping_tags}"
+            )
+        time_before_resume = time.perf_counter()
+        self.collective_rpc("resume_kv_cache")
+        time_after_resume = time.perf_counter()
+        self.sleeping_tags.clear()
+        self.is_sleeping = False
+        logger.info(
+            "It took %.6f seconds to resume KV cache.",
+            time_after_resume - time_before_resume,
+        )
+
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:

@@ -74,6 +74,14 @@ llm.wake_up(tags=["weights"])
 llm.wake_up(tags=["kv_cache"])
 ```
 
+If the model weights should stay resident on GPU, use `release_kv_cache()` instead of `sleep(level=1)`. This releases only KV cache memory, clears the logical KV/prefix cache state, and requires `resume_kv_cache()` before generation resumes. Like the default sleep behavior, `release_kv_cache()` aborts in-flight requests before releasing KV cache.
+
+```python
+llm.release_kv_cache()
+# ... Use the freed KV cache memory, for example during weight synchronization.
+llm.resume_kv_cache()
+```
+
 ### Online Serving
 
 To enable sleep mode in a vLLM server you need to initialize it with the flag `VLLM_SERVER_DEV_MODE=1` and pass `--enable-sleep-mode` to the vLLM server.
@@ -111,6 +119,8 @@ curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
+- `POST /release_kv_cache` — Release KV cache memory while keeping model weights resident on GPU. In-flight requests are aborted before KV cache is released.
+- `POST /resume_kv_cache` — Reallocate KV cache memory after `release_kv_cache`.
 - `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
 

@@ -1527,6 +1527,22 @@ class LLM:
         """
         self.llm_engine.wake_up(tags)
 
+    def release_kv_cache(self):
+        """
+        Release KV cache memory while keeping model weights and other GPU
+        allocations resident. Like the default sleep behavior, this aborts
+        in-flight requests before clearing logical cache state and releasing
+        KV cache memory.
+        """
+        self.llm_engine.release_kv_cache()
+
+    def resume_kv_cache(self):
+        """
+        Reallocate KV cache memory released by
+        [release_kv_cache][vllm.LLM.release_kv_cache] and resume generation.
+        """
+        self.llm_engine.resume_kv_cache()
+
     def get_metrics(self) -> list["Metric"]:
         """Return a snapshot of aggregated metrics from Prometheus.
 

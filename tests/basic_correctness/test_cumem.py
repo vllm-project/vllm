@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import inspect
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,10 +12,26 @@ from vllm import LLM, AsyncEngineArgs, AsyncLLMEngine, SamplingParams
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.engine.core import EngineCore
 
 from ..utils import create_new_process_for_each_test, requires_fp8
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_release_kv_cache_api_has_no_mode():
+    assert "mode" not in inspect.signature(LLM.release_kv_cache).parameters
+
+
+def test_release_kv_cache_requires_sleep_mode():
+    core = SimpleNamespace(
+        vllm_config=SimpleNamespace(
+            model_config=SimpleNamespace(enable_sleep_mode=False)
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires enable_sleep_mode=True"):
+        EngineCore.release_kv_cache(core)
 
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
@@ -73,6 +91,31 @@ def test_basic_cumem():
     # they can be used together
     output = x + y + z
     assert torch.allclose(output, torch.ones_like(output) * 3)
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_release_tags_only_releases_selected_tag():
+    allocator = CuMemAllocator.get_instance()
+
+    with allocator.use_memory_pool(tag="weights"):
+        weight = torch.ones(1024, device=DEVICE_TYPE)
+    with allocator.use_memory_pool(tag="scheduling"):
+        scheduling = torch.ones(1024, device=DEVICE_TYPE) * 3
+    with allocator.use_memory_pool(tag="kv_cache"):
+        kv_cache = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device=DEVICE_TYPE)
+        kv_cache.fill_(7)
+
+    free_bytes = torch.cuda.mem_get_info()[0]
+    allocator.release_tags(("kv_cache",))
+    free_bytes_after_release = torch.cuda.mem_get_info()[0]
+    assert free_bytes_after_release > free_bytes
+
+    assert torch.allclose(weight, torch.ones_like(weight))
+    assert torch.allclose(scheduling, torch.ones_like(scheduling) * 3)
+
+    allocator.wake_up(["kv_cache"])
+    kv_cache.zero_()
+    assert torch.count_nonzero(kv_cache) == 0
 
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
@@ -175,6 +218,31 @@ def test_end_to_end(model: str):
 
     # cmp output
     assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_release_resume_kv_cache():
+    model = "facebook/opt-125m"
+    llm = LLM(model, enable_sleep_mode=True, gpu_memory_utilization=0.3)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    free_gpu_bytes_before_release = torch.cuda.mem_get_info()[0]
+    llm.release_kv_cache()
+
+    free_gpu_bytes_after_release, _ = torch.cuda.mem_get_info()
+    released_bytes = free_gpu_bytes_after_release - free_gpu_bytes_before_release
+    assert released_bytes > 0
+
+    llm.resume_kv_cache()
+    free_gpu_bytes_after_resume = torch.cuda.mem_get_info()[0]
+    resumed_bytes = free_gpu_bytes_after_release - free_gpu_bytes_after_resume
+    assert resumed_bytes > 0
+
+    output2 = llm.generate(prompt, sampling_params)
+
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
 
 
 @create_new_process_for_each_test()

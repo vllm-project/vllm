@@ -150,6 +150,14 @@ class CPUWorker(Worker):
         logger.warning("sleep mode is not supported on CPU, ignore it.")
         pass
 
+    def release_kv_cache(self) -> None:
+        logger.warning("release_kv_cache is not supported on CPU, ignore it.")
+        pass
+
+    def resume_kv_cache(self) -> None:
+        logger.warning("resume_kv_cache is not supported on CPU, ignore it.")
+        pass
+
     def determine_available_memory(self) -> int:
         self.model_runner.warming_up_model()
 

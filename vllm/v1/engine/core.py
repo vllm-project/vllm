@@ -747,6 +747,41 @@ class EngineCore:
         # Resume scheduling (applies to all levels)
         self.resume_scheduler()
 
+    def release_kv_cache(self) -> None | Future:
+        """Release KV cache memory while keeping other GPU allocations mapped."""
+
+        if not self.vllm_config.model_config.enable_sleep_mode:
+            raise ValueError(
+                "release_kv_cache() requires enable_sleep_mode=True because "
+                "KV cache memory is only tracked by the sleep-mode allocator "
+                "when sleep mode is enabled."
+            )
+
+        pause_future = self.pause_scheduler(mode="abort", clear_cache=True)
+        if pause_future is None:
+            self.model_executor.release_kv_cache()
+            return None
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()  # propagate any exception
+                future.set_result(self.model_executor.release_kv_cache())
+            except Exception as e:
+                future.set_exception(e)
+
+        logger.info(
+            "Waiting for in-flight requests to complete before releasing KV cache..."
+        )
+        pause_future.add_done_callback(pause_complete)
+        return future
+
+    def resume_kv_cache(self) -> None:
+        """Reallocate KV cache memory released by release_kv_cache."""
+        self.model_executor.resume_kv_cache()
+        self.resume_scheduler()
+
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping

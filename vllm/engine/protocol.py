@@ -171,6 +171,16 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def release_kv_cache(self) -> None:
+        """Release KV cache memory while keeping other GPU allocations resident"""
+        ...
+
+    @abstractmethod
+    async def resume_kv_cache(self) -> None:
+        """Resume KV cache memory released by release_kv_cache"""
+        ...
+
+    @abstractmethod
     async def is_sleeping(self) -> bool:
         """Check whether the engine is sleeping"""
         ...

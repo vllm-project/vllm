@@ -43,6 +43,18 @@ async def wake_up(raw_request: Request):
     return Response(status_code=200)
 
 
+@router.post("/release_kv_cache")
+async def release_kv_cache(raw_request: Request):
+    await engine_client(raw_request).release_kv_cache()
+    return Response(status_code=200)
+
+
+@router.post("/resume_kv_cache")
+async def resume_kv_cache(raw_request: Request):
+    await engine_client(raw_request).resume_kv_cache()
+    return Response(status_code=200)
+
+
 @router.get("/is_sleeping")
 async def is_sleeping(raw_request: Request):
     is_sleeping = await engine_client(raw_request).is_sleeping()
