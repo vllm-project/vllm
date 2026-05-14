@@ -86,6 +86,9 @@ class DeviceCapability(NamedTuple):
             return NotImplemented
         return (self.major, self.minor) > (other.major, other.minor)
 
+    def __hash__(self) -> int:
+        return hash((self.major, self.minor))
+
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
 
@@ -169,6 +172,10 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
+    def uses_host_device_handling(self) -> bool:
+        """Whether vLLM should leave DeviceConfig.device unset."""
+        return self.is_tpu()
+
     def is_zen_cpu(self) -> bool:
         return False
 
@@ -206,6 +213,15 @@ class Platform:
         Get the custom compile backend for current platform.
         """
         return cls.simple_compile_backend
+
+    @classmethod
+    def import_ir_kernels(cls) -> None:
+        """
+        The default implementation imports ``vllm.kernels``, which registers
+        the built-in IR op implementations. Out-of-tree (OOT) platforms should
+        override this method to import their own kernel modules.
+        """
+        import vllm.kernels  # noqa: F401
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
@@ -383,6 +399,11 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
+        raise NotImplementedError
+
+    @classmethod
     def pre_register_and_update(
         cls, parser: FlexibleArgumentParser | None = None
     ) -> None:
@@ -505,6 +526,7 @@ class Platform:
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
+            get_kv_quant_mode,
         )
 
         cache_config = vllm_config.cache_config
@@ -516,6 +538,8 @@ class Platform:
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
+
         # Compute attention page size for 1 token
         if model_config.use_mla:
             attn_page_size_1_token = MLAAttentionSpec(
@@ -523,13 +547,51 @@ class Platform:
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
+        elif cache_config.cache_dtype.startswith("turboquant_"):
+            # TQ has a packed K|V layout; the standard FullAttentionSpec
+            # formula over-sizes it and trips unify_kv_cache_spec_page_size
+            # when all attention layers are TQ. With mixed skip+TQ the skip
+            # layers still use the standard layout — take max so mamba
+            # padding covers the largest actual page.
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            tq_cfg = TurboQuantConfig.from_cache_dtype(
+                cache_config.cache_dtype, model_config.get_head_size()
+            )
+            tq_page = TQFullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                head_size_v=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+                tq_slot_size=tq_cfg.slot_size_aligned,
+            ).page_size_bytes
+            if cache_config.kv_cache_dtype_skip_layers:
+                skip_page = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    head_size=model_config.get_head_size(),
+                    dtype=model_config.dtype,
+                ).page_size_bytes
+                # lcm, not max: skip_page is often not a multiple of
+                # tq_page, so max would leave per-layer page sizes
+                # un-unifiable downstream.
+                attn_page_size_1_token = lcm(tq_page, skip_page)
+            else:
+                attn_page_size_1_token = tq_page
         else:
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
 
         # Compute mamba page size
@@ -714,6 +776,18 @@ class Platform:
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        """
+        Returns whether the GPU is an integrated (UMA) device that shares
+        system memory with the CPU.
+
+        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        cudaMemGetInfo may underreport free memory because it does not
+        account for reclaimable OS memory (page cache, buffers).
+        """
+        return False
 
     @classmethod
     def supports_mx(cls) -> bool:

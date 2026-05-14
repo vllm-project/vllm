@@ -15,7 +15,11 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention import (
+    Attention,
+    MLAAttention,
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -106,12 +110,12 @@ def process_weights_after_loading(
             with device_loading_context(module, target_device):
                 quant_method.process_weights_after_loading(module)
 
-    # Initialize post-load attention weights for both Attention and MLA.
+    # Initialize post-load attention weights for Attention, MLA, and MM encoder.
     # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(module, (Attention, MLAAttention)) and hasattr(
-            module, "process_weights_after_loading"
-        ):
+        if isinstance(
+            module, (Attention, MLAAttention, MMEncoderAttention)
+        ) and hasattr(module, "process_weights_after_loading"):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
@@ -175,7 +179,7 @@ _MODEL_ARCH_BY_HASH = dict[int, tuple[type[nn.Module], str]]()
 def _get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], str]:
     from vllm.model_executor.models.adapters import as_embedding_model, as_seq_cls_model
 
-    architectures = getattr(model_config.hf_config, "architectures", [])
+    architectures = getattr(model_config.hf_config, "architectures", None) or []
 
     model_cls, arch = model_config.registry.resolve_model_cls(
         architectures,
@@ -215,7 +219,7 @@ def get_model_architecture(model_config: ModelConfig) -> tuple[type[nn.Module], 
             model_config.runner_type,
             model_config.trust_remote_code,
             model_config.model_impl,
-            tuple(getattr(model_config.hf_config, "architectures", [])),
+            tuple(getattr(model_config.hf_config, "architectures", None) or []),
         )
     )
     if key in _MODEL_ARCH_BY_HASH:

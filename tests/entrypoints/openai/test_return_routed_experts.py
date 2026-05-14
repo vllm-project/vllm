@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
+
+import numpy as np
+import pybase64 as base64
 import pytest
 
 from ...utils import RemoteOpenAIServer
@@ -44,11 +48,12 @@ async def test_routed_experts(server):
         assert choice["routed_experts"] is not None
         assert choice["token_ids"] is not None
 
-        routed_experts = choice["routed_experts"]
-        assert len(routed_experts) > 0
-        for token_experts in routed_experts:
-            assert len(token_experts) == NUM_HIDDEN_LAYERS
-            for layer_experts in token_experts:
-                assert len(layer_experts) == NUM_EXPERTS_PER_TOK
-                for expert_id in layer_experts:
-                    assert 0 <= expert_id < NUM_LOCAL_EXPERTS
+        # routed_experts is base64-encoded .npy bytes; decode to ndarray.
+        routed_experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
+        assert routed_experts.ndim == 3
+        num_tokens, num_layers, topk = routed_experts.shape
+        assert num_tokens > 0
+        assert num_layers == NUM_HIDDEN_LAYERS
+        assert topk == NUM_EXPERTS_PER_TOK
+        assert (routed_experts >= 0).all()
+        assert (routed_experts < NUM_LOCAL_EXPERTS).all()

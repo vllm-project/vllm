@@ -116,6 +116,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
       " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
 
+  // cutlass mxfp4 block scaled group GEMM (MXFP4 x MXFP4 MoE)
+  ops.def(
+      "cutlass_mxfp4_group_mm(Tensor! out, Tensor a, Tensor b,"
+      " Tensor a_blockscale, Tensor b_blockscales,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
+
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor input,"
@@ -148,6 +154,19 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "output_scale,"
       "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
       "Tensor output_scale_offset_by_experts) -> ()");
+
+  // Compute MXFP4 experts quantization (32-element blocks, E8M0 SFs).
+  ops.def(
+      "mxfp4_experts_quant(Tensor! output, Tensor! output_scale,"
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
+
+  // Fused SiLU+Mul+MXFP4 experts quantization.
+  ops.def(
+      "silu_and_mul_mxfp4_experts_quant(Tensor! output, Tensor! "
+      "output_scale,"
+      "Tensor input, Tensor input_offset_by_experts,"
+      "Tensor output_scale_offset_by_experts, int n_experts) -> ()");
 
   // Fused SiLU+Mul+NVFP4 quantization.
   ops.def(
@@ -199,7 +218,54 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
       "Tensor)");
+
+  // SM100 CUTLASS MLA decode
+  // conditionally compiled so impl registrations are in source file
+  ops.def(
+      "sm100_cutlass_mla_decode(Tensor! out, Tensor! lse, Tensor q_nope,"
+      "                         Tensor q_pe, Tensor kv_c_and_k_pe_cache,"
+      "                         Tensor seq_lens, Tensor page_table,"
+      "                         Tensor workspace, float scale,"
+      "                         int num_kv_splits) -> ()");
+
+  ops.def(
+      "sm100_cutlass_mla_get_workspace_size(int max_seq_len, int num_batches,"
+      "                                     int sm_count, int num_kv_splits) "
+      "-> int");
+  // Quantized GEMM for AWQ.
+  ops.def(
+      "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
+      "Tensor _zeros, SymInt split_k_iters) -> Tensor");
+
+  // Dequantization for AWQ.
+  ops.def(
+      "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
+      "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
+
+  // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+  // conditionally compiled so impl registration is in source file
+  ops.def(
+      "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+
+  // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel
+  ops.def(
+      "rearrange_kn_weight_as_n32k16_order(Tensor b_qweight, Tensor b_scales, "
+      "Tensor? b_zeros, "
+      "bool has_zp, Tensor! b_qweight_reorder, Tensor! b_scales_reorder, "
+      "Tensor!? b_zeros_reorder, "
+      "int K, int N, int N_32align) -> ()");
+
+  // AllSpark quantization ops
+  ops.def(
+      "allspark_w8a16_gemm(Tensor a, Tensor b_qweight, Tensor b_scales, "
+      "Tensor? b_qzeros, "
+      "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
+      "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
 #endif
+
+  // Hadamard transforms
+  // conditionally compiled so impl registration is in source file
+  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
@@ -233,9 +299,18 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("silu_and_mul_scaled_fp4_experts_quant",
            TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
   ops.impl("silu_and_mul_nvfp4_quant", TORCH_BOX(&silu_and_mul_nvfp4_quant));
+  // mxfp4_experts_quant: registered in mxfp4_experts_quant.cu (SM100 only).
+  // W4A8 ops: registered in w4a8_mm_entry.cu / w4a8_grouped_mm_entry.cu.
 
-  // W4A8 ops: impl registrations are in the source files
-  // (w4a8_mm_entry.cu and w4a8_grouped_mm_entry.cu)
+  // AWQ ops
+  ops.impl("awq_gemm", TORCH_BOX(&awq_gemm));
+  ops.impl("awq_dequantize", TORCH_BOX(&awq_dequantize));
+
+  // DSV3 fused A GEMM: conditionally compiled so impl registration is in
+  // source file (dsv3_fused_a_gemm.cu)
+
+  // AllSpark ops: conditionally compiled so impl registrations are in source
+  // files (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 #endif
 }
 

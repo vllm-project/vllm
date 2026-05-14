@@ -80,7 +80,7 @@ def test_commit_eplb_maps_for_layer_logical_padding():
         .contiguous()
     )
     layer = 0
-    _commit_eplb_maps_for_layer(model_state, new_phy2log, layer)
+    _commit_eplb_maps_for_layer(model_state, new_phy2log[layer], layer)
 
     assert torch.all(model_state.logical_to_physical_map[layer, :, 2] == -1)
 
@@ -143,7 +143,7 @@ def test_commit_eplb_maps_for_layer():
     )
     new_logcnt = torch.tensor([[2, 1, 1], [1, 2, 1]], dtype=torch.long)
 
-    _commit_eplb_maps_for_layer(model_state, new_phy2log, layer=0)
+    _commit_eplb_maps_for_layer(model_state, new_phy2log[0], layer=0)
 
     # Layer 0 updated
     assert torch.equal(model_state.physical_to_logical_map[0], new_phy2log[0])
