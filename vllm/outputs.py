@@ -10,6 +10,10 @@ import numpy as np
 import torch
 from typing_extensions import TypeVar
 
+from vllm.entrypoints.gradient.outputs import (  # noqa: F401
+    GradientOutput,
+    GradientRequestOutput,
+)
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest

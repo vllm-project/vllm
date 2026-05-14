@@ -152,6 +152,11 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+
+        # Gradient requests bypass the scheduler and are handled out-of-band.
+        from vllm.v1.engine.gradient_handler import GradientHandler
+
+        self._gradient_handler = GradientHandler(self.model_executor)
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
@@ -343,6 +348,11 @@ class EngineCore:
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
+        # Gradient requests bypass the scheduler; queue for step().
+        if request.gradient_params is not None:
+            self._gradient_handler.enqueue(request)
+            return
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
@@ -429,9 +439,15 @@ class EngineCore:
         was executed.
         """
 
+        self._gradient_handler.process_queue()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            if self._gradient_handler.has_pending:
+                outputs: dict[int, EngineCoreOutputs] = {}
+                self._gradient_handler.flush_outputs(outputs)
+                return outputs, False
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -450,6 +466,8 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        self._gradient_handler.flush_outputs(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -479,6 +497,8 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+
+        self._gradient_handler.process_queue()
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
@@ -578,6 +598,8 @@ class EngineCore:
             )
             future = self.model_executor.sample_tokens(grammar_output, non_block=True)
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
+
+        self._gradient_handler.flush_outputs(engine_core_outputs)
 
         return engine_core_outputs, model_executed
 

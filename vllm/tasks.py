@@ -15,6 +15,9 @@ PoolingTask = Literal[
 ]
 POOLING_TASKS: tuple[PoolingTask, ...] = get_args(PoolingTask)
 
+GradientTask = Literal["gradient"]
+GRADIENT_TASKS: tuple[GradientTask, ...] = get_args(GradientTask)
+
 ScoreType = Literal["bi-encoder", "cross-encoder", "late-interaction"]
 SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
     "embed": "bi-encoder",
@@ -25,4 +28,4 @@ SCORE_TYPE_MAP: dict[PoolingTask, ScoreType] = {
 FrontendTask = Literal["render"]
 FRONTEND_TASKS: tuple[FrontendTask, ...] = get_args(FrontendTask)
 
-SupportedTask = Literal[GenerationTask, PoolingTask, FrontendTask]
+SupportedTask = Literal[GenerationTask, PoolingTask, GradientTask, FrontendTask]
