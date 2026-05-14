@@ -413,6 +413,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
@@ -517,17 +518,3 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
-
-
-class AiterMxfp4Experts(AiterExperts):
-    """MXFP4 W4A4 variant: MXFP4 weights + dynamic MXFP4 activations."""
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return (weight_key, activation_key) == (
-            kMxfp4Static,
-            kMxfp4Dynamic,
-        )

@@ -7,5 +7,6 @@ server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 2
   --gpu-memory-utilization 0.35
+  --moe-backend aiter
 env:
   VLLM_ROCM_USE_AITER: "1"

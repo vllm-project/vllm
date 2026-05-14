@@ -197,11 +197,11 @@ def backend_to_kernel_cls(
         return [AiterW4A8ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            AiterMxfp4Experts,
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterExperts,
         )
 
-        return [AiterMxfp4Experts]
+        return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
@@ -385,6 +385,7 @@ def _filter_by_activation(
             b
             for b in backends
             if _backend_activation_key(b) == requested_activation_key
+            or b == Mxfp4MoeBackend.EMULATION
         ]
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     return bf16 if bf16 else backends
