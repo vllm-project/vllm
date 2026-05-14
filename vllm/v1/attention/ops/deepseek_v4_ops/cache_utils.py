@@ -429,6 +429,19 @@ def _compute_global_topk_indices_and_lens_kernel(
 ):
     token_idx = tl.program_id(0)
     is_valid_token = tl.load(is_valid_token_ptr + token_idx)
+    if not is_valid_token:
+        tl.store(topk_lens_ptr + token_idx, 0)
+        for i in range(0, topk, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                global_topk_indices_ptr
+                + token_idx * global_topk_indices_stride
+                + offset,
+                -1,
+                mask=offset < topk,
+            )
+        return
+
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
 
     count = tl.zeros((), dtype=tl.int32)

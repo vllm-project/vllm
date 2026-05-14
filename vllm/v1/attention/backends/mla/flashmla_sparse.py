@@ -246,10 +246,13 @@ class FlashMLASparseMetadata(AttentionMetadata):
     fp8_use_mixed_batch: bool = False
 
     # Pre-computed C128A metadata (DeepseekV4 only, compress_ratio == 128).
-    # Decode: global slot ids + valid-entry counts (fused from positions).
+    # Direct KV-cache prefill uses the mixed global fields for the single
+    # FlashMLA decode-kernel call. The decode/prefill-specific fields are kept
+    # for the normal bf16-prefill fallback path.
+    c128a_global_topk_indices: torch.Tensor | None = None
+    c128a_topk_lens: torch.Tensor | None = None
     c128a_global_decode_topk_indices: torch.Tensor | None = None
     c128a_decode_topk_lens: torch.Tensor | None = None
-    # Prefill: local topk indices (used by combine_topk_swa_indices).
     c128a_prefill_topk_indices: torch.Tensor | None = None
 
 
@@ -390,15 +393,14 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
                 # Stored so _build_c128a_metadata passes it as the kernel's
                 # max_compressed_tokens, matching the buffer stride. Otherwise
                 # the kernel's default 8192 iterates past row width and spills
-                # writes into adjacent rows (present in both decode and prefill
-                # branches of _build_c128a_topk_metadata_kernel).
+                # writes into adjacent rows.
                 self.c128a_max_compressed = c128a_max_compressed
-                self.c128a_global_decode_buffer = torch.empty(
+                self.c128a_global_topk_buffer = torch.empty(
                     (max_num_batched_tokens, c128a_max_compressed),
                     dtype=torch.int32,
                     device=self.device,
                 )
-                self.c128a_decode_lens_buffer = torch.empty(
+                self.c128a_topk_lens_buffer = torch.empty(
                     max_num_batched_tokens,
                     dtype=torch.int32,
                     device=self.device,
@@ -663,11 +665,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         cm: CommonAttentionMetadata,
         req_id_per_token: torch.Tensor,
     ) -> dict[str, torch.Tensor | None]:
-        """Pre-compute C128A topk indices for DeepseekV4 (compress_ratio >= 128)."""
-        # Must match SWA's decode split (no `require_uniform=True`) so
-        # `c128a_global_decode_topk_indices.shape[0]` lines up with q in
-        # `_forward_decode`. The per-token C128A kernel handles non-uniform
-        # query lengths.
+        """Pre-compute C128A topk indices for DeepseekV4."""
         (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 cm,
@@ -683,26 +681,28 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             "positions is required for C128A metadata build"
         )
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
-        global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
+        global_topk, topk_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
             self.compress_ratio,
             num_decode_tokens,
             req_id_per_token,
-            cm.block_table_tensor[:num_decodes],
+            cm.block_table_tensor,
             block_size,
             cm.slot_mapping,
-            self.c128a_global_decode_buffer,
-            self.c128a_decode_lens_buffer,
+            self.c128a_global_topk_buffer,
+            self.c128a_topk_lens_buffer,
             self.c128a_prefill_buffer,
             max_compressed_tokens=self.c128a_max_compressed,
         )
 
         result: dict[str, torch.Tensor | None] = {}
+        result["c128a_global_topk_indices"] = global_topk.view(num_total, 1, -1)
+        result["c128a_topk_lens"] = topk_lens
         if num_decode_tokens > 0:
-            result["c128a_global_decode_topk_indices"] = global_decode.view(
-                num_decode_tokens, 1, -1
-            )
-            result["c128a_decode_topk_lens"] = decode_lens
+            result["c128a_global_decode_topk_indices"] = global_topk[
+                :num_decode_tokens
+            ].view(num_decode_tokens, 1, -1)
+            result["c128a_decode_topk_lens"] = topk_lens[:num_decode_tokens]
         if num_prefill_tokens > 0:
             result["c128a_prefill_topk_indices"] = prefill_local
         return result
@@ -1059,15 +1059,16 @@ def build_c128a_topk_metadata(
     block_table: torch.Tensor,
     block_size: int,
     slot_mapping: torch.Tensor,
-    global_decode_buffer: torch.Tensor,
-    decode_lens_buffer: torch.Tensor,
+    global_topk_buffer: torch.Tensor,
+    topk_lens_buffer: torch.Tensor,
     prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Single kernel for all C128A tokens (decode + prefill).
+    """Build C128A topk metadata for decode and prefill tokens.
 
-    Decode tokens: position → block_table lookup → global slot ids + topk_lens.
-    Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
+    All tokens: position -> block_table lookup -> global slot ids + topk_lens.
+    Prefill tokens additionally keep local indices [0, ..., n - 1, -1, ...]
+    for the bf16-prefill fallback path.
 
     Writes into pre-allocated buffers for CUDA graph address stability.
     Returns slices of the buffers.
@@ -1075,17 +1076,17 @@ def build_c128a_topk_metadata(
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
 
-    global_decode = global_decode_buffer[:num_decode_tokens]
-    decode_lens = decode_lens_buffer[:num_decode_tokens]
+    global_topk = global_topk_buffer[:num_tokens]
+    topk_lens = topk_lens_buffer[:num_tokens]
     prefill_local = prefill_buffer[:num_prefill_tokens]
 
     if num_tokens == 0:
-        return global_decode, decode_lens, prefill_local
+        return global_topk, topk_lens, prefill_local
 
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
-        global_decode_buffer,
-        global_decode_buffer.stride(0),
-        decode_lens_buffer,
+        global_topk_buffer,
+        global_topk_buffer.stride(0),
+        topk_lens_buffer,
         prefill_buffer,
         prefill_buffer.stride(0),
         positions,
@@ -1099,16 +1100,15 @@ def build_c128a_topk_metadata(
         slot_mapping,
         BLOCK_SIZE=1024,
     )
-    return global_decode, decode_lens, prefill_local
+    return global_topk, topk_lens, prefill_local
 
 
 @triton.jit
 def _build_c128a_topk_metadata_kernel(
-    # Decode outputs
-    global_decode_ptr,
-    global_decode_stride,
-    decode_lens_ptr,
-    # Prefill output
+    # Outputs
+    global_topk_ptr,
+    global_topk_stride,
+    topk_lens_ptr,
     prefill_local_ptr,
     prefill_local_stride,
     # Inputs
@@ -1127,45 +1127,41 @@ def _build_c128a_topk_metadata_kernel(
     position = tl.load(positions_ptr + token_idx)
     num_compressed = (position + 1) // compress_ratio
     num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
-    is_decode = token_idx < num_decode_tokens
+    is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
 
-    if is_decode:
-        # --- Decode: block-table lookup → global slot ids + count ---
-        is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
-        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-        count = tl.zeros((), dtype=tl.int32)
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
-            is_valid = offset < num_compressed
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    count = tl.zeros((), dtype=tl.int32)
+    for i in range(0, max_compressed_tokens, BLOCK_SIZE):
+        offset = i + tl.arange(0, BLOCK_SIZE)
+        mask = offset < max_compressed_tokens
+        is_valid = is_valid_token & (offset < num_compressed)
 
-            block_indices = offset // block_size
-            block_numbers = tl.load(
-                block_table_ptr + req_idx * block_table_stride + block_indices,
-                mask=mask & is_valid,
-            )
-            block_offsets = offset % block_size
-            slot_ids = block_numbers * block_size + block_offsets
-            slot_ids = tl.where(is_valid, slot_ids, -1)
-            tl.store(
-                global_decode_ptr + token_idx * global_decode_stride + offset,
-                slot_ids,
-                mask=mask,
-            )
-            count += tl.sum(is_valid.to(tl.int32), axis=0)
-
-        tl.store(
-            decode_lens_ptr + token_idx,
-            tl.where(is_valid_token, count, 0),
+        block_indices = offset // block_size
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_indices,
+            mask=mask & is_valid,
+            other=0,
         )
-    else:
-        # --- Prefill: write local indices ---
+        block_offsets = offset % block_size
+        slot_ids = block_numbers * block_size + block_offsets
+        slot_ids = tl.where(is_valid, slot_ids, -1)
+        tl.store(
+            global_topk_ptr + token_idx * global_topk_stride + offset,
+            slot_ids,
+            mask=mask,
+        )
+        count += tl.sum(is_valid.to(tl.int32), axis=0)
+
+    tl.store(topk_lens_ptr + token_idx, count)
+
+    if token_idx >= num_decode_tokens:
         pfx_idx = token_idx - num_decode_tokens
         for i in range(0, max_compressed_tokens, BLOCK_SIZE):
             offset = i + tl.arange(0, BLOCK_SIZE)
             mask = offset < max_compressed_tokens
+            is_valid = is_valid_token & (offset < num_compressed)
             tl.store(
                 prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
-                tl.where(offset < num_compressed, offset, -1),
+                tl.where(is_valid, offset, -1),
                 mask=mask,
             )

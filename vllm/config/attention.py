@@ -42,6 +42,9 @@ class AttentionConfig:
     use_trtllm_ragged_deepseek_prefill: bool = False
     """Whether to use TRTLLM ragged deepseek prefill."""
 
+    use_deepseek_v4_flashmla_direct_kvcache_prefill: bool = False
+    """Use FlashMLA's direct KV-cache path for DeepSeek V4 prefill attention."""
+
     use_trtllm_attention: bool | None = None
     """If set to True/False, use or don't use the TRTLLM attention backend
     in flashinfer. If None, auto-detect the attention backend in flashinfer."""
