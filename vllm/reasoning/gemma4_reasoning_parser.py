@@ -114,6 +114,28 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         reasoning, content = super().extract_reasoning(model_output, request)
         if reasoning is not None:
             reasoning = _strip_thought_label(reasoning)
+
+        # Fix E (parser hardening, 2026-05-14): half-open thinking — model
+        # emitted `<|channel>` but never `<channel|>` (max_tokens cap mid-think,
+        # routing/scheduler edge cases, etc.). Base parser sets `content=None`
+        # in this case, which surfaces to downstream as silent-empty content
+        # even though the model produced text. Mirror the reasoning into
+        # content so consumers reading only `content` still see the answer.
+        # The reasoning field is preserved separately for clients that parse
+        # it specifically.
+        #
+        # The `self.end_token not in model_output` guard distinguishes
+        # half-open from closed-with-empty-content. In the latter case
+        # (`<|channel>thought\n…<channel|>` with nothing after the end
+        # token), the base parser also returns `(reasoning, None)` — but
+        # there `content=None` is correct semantics (the model closed its
+        # thinking and intentionally said nothing), so we must NOT mirror.
+        if (
+            content is None
+            and reasoning
+            and self.end_token not in model_output
+        ):
+            content = reasoning
         return reasoning, content
 
     # ------------------------------------------------------------------
