@@ -51,7 +51,7 @@ steps:
 
 - label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs)
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
-  timeout_in_minutes: 20
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
