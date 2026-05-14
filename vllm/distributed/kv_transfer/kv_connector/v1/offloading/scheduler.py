@@ -899,8 +899,16 @@ class OffloadingConnectorScheduler:
         assert not self._current_batch_load_jobs
         assert not self._current_batch_jobs_to_flush
 
-        # Flush in-flight jobs
+        # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
+
+        # Reset offloading manager cache
+        self.manager.reset_cache()
+
+        # Reset store progress so active requests re-offload from block 0
+        for status in self._req_status.values():
+            for group_state in status.group_states:
+                group_state.next_stored_block_idx = 0
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
