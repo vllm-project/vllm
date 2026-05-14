@@ -157,8 +157,7 @@ def get_flash_attn_version(
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
-            and head_size != 256
-            and not (head_size == 192 and head_size_v == 128)
+            and not (head_size == 256 or (head_size == 192 and head_size_v == 128))
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
