@@ -119,6 +119,13 @@ direct_register_custom_op(
 )
 
 
+def _has_flash_attn_rotary() -> bool:
+    try:
+        return find_spec("flash_attn.ops.triton.rotary") is not None
+    except ModuleNotFoundError:
+        return False
+
+
 # --8<-- [start:apply_rotary_emb]
 @CustomOp.register("apply_rotary_emb")
 class ApplyRotaryEmb(CustomOp):
@@ -135,7 +142,7 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
+        if not current_platform.is_cpu() and _has_flash_attn_rotary():
             from flash_attn.ops.triton.rotary import apply_rotary
 
             self.apply_rotary_emb_flash_attn = apply_rotary
