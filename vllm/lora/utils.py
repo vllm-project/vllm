@@ -186,7 +186,11 @@ def parse_fine_tuned_lora_name(
 
     parts = name.split(".")
     if parts[-1] == "weight" and (parts[-2] == "lora_A" or parts[-2] == "lora_B"):
-        new_name = ".".join(parts[start_index:-2])
+        # Some PEFT adapters include the base weight suffix in LoRA tensor
+        # names, e.g. q_proj.weight.lora_A.weight.  The target module is still
+        # q_proj, not q_proj.weight.
+        end_index = -3 if len(parts) >= 3 and parts[-3] == "weight" else -2
+        new_name = ".".join(parts[start_index:end_index])
         return new_name, parts[-2] == "lora_A"
 
     if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":

@@ -8,6 +8,7 @@ from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import parse_fine_tuned_lora_name
 from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
+from vllm.model_executor.models.gemma4_mm import Gemma4ForConditionalGeneration
 from vllm.model_executor.models.utils import WeightsMapper
 
 lora_lst = ["baichuan7B", "baichuan7B-zero", "baichuan7B-zero-regex", "chatglm3-6b"]
@@ -150,4 +151,13 @@ def test_gemma4_moe_lora_weights_mapping():
     assert parse_fine_tuned_lora_name(name, mapper) == (
         "model.layers.9.moe.gate_up_proj",
         False,
+    )
+
+
+def test_gemma4_mm_text_lora_weights_mapping():
+    mapper = Gemma4ForConditionalGeneration.hf_to_vllm_mapper
+    name = "base_model.model.layers.9.self_attn.q_proj.weight.lora_A.weight"
+    assert parse_fine_tuned_lora_name(name, mapper) == (
+        "language_model.model.self_decoder.decoder_layers.9.self_attn.q_proj",
+        True,
     )

@@ -938,6 +938,10 @@ class Gemma4ForConditionalGeneration(
             "model.embed_audio.": "embed_audio.",
             "model.embed_vision.": "embed_vision.",
             "model.language_model.": "language_model.model.",
+            # Text LoRA adapters for Gemma4ForConditionalGeneration commonly
+            # store language weights under layers.*. The optimized vLLM text
+            # model exposes those layers under self_decoder.decoder_layers.*.
+            "layers.": "language_model.model.self_decoder.decoder_layers.",
             "model.vision_tower.": "vision_tower.",
             "model.audio_tower.": "audio_tower.",
             "lm_head.": "language_model.lm_head.",

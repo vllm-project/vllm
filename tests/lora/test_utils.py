@@ -53,6 +53,16 @@ def test_parse_fine_tuned_lora_name_valid():
             False,
         ),
         LoRANameParserTestConfig(
+            "base_model.model.model.layers.9.self_attn.q_proj.weight.lora_A.weight",
+            "model.layers.9.self_attn.q_proj",
+            True,
+        ),
+        LoRANameParserTestConfig(
+            "base_model.model.model.layers.9.self_attn.q_proj.weight.lora_B.weight",
+            "model.layers.9.self_attn.q_proj",
+            False,
+        ),
+        LoRANameParserTestConfig(
             "language_model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.layers.9.mlp.down_proj",
             True,
