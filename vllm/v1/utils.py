@@ -308,6 +308,7 @@ class APIServerProcessManager:
                             ) from e
                         inputs[idx] = msg["input_address"]
                         outputs[idx] = msg["output_address"]
+                        item.close()
                 for item in ready:
                     if item in sentinel_to_idx:
                         # Pop to avoid re-firing on the same sentinel.
