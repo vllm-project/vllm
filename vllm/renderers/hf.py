@@ -414,7 +414,8 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 break
 
         if isinstance(loop_iter, jinja2.nodes.Name) and loop_iter.name == "content":
-            yield loop_ast, loop_iter.name
+            assert isinstance(loop_target, jinja2.nodes.Name)
+            yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
