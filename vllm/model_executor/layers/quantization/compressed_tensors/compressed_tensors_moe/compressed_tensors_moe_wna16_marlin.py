@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
@@ -321,82 +323,42 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.wna16_backend == WNA16MoEBackend.FLASHINFER:
-            (
-                w13_qweight,
-                w2_qweight,
-                w13_scales,
-                w2_scales,
-                _,  # w13_g_idx
-                _,  # w2_g_idx
-                _,  # w13_g_idx_sort_indices
-                _,  # w2_g_idx_sort_indices
-                _,  # w13_input_global_scale
-                _,  # w2_input_global_scale
-                _,  # w13_bias
-                _,  # w2_bias
-            ) = convert_to_wna16_moe_kernel_format(
-                backend=self.wna16_backend,
-                layer=layer,
-                quant_config=None,  # Not needed for flashinfer
-                input_dtype=None,  # Not needed for flashinfer
-                w13=layer.w13_weight_packed,
-                w2=layer.w2_weight_packed,
-                w13_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w13_g_idx=layer.w13_weight_g_idx,
-                w2_g_idx=layer.w2_weight_g_idx,
-            )
-            replace_parameter(layer, "w13_weight_packed", w13_qweight)
-            replace_parameter(layer, "w13_weight_scale", w13_scales)
-            replace_parameter(layer, "w2_weight_packed", w2_qweight)
-            replace_parameter(layer, "w2_weight_scale", w2_scales)
+        # Process weights using the shared oracle infrastructure
+        is_flashinfer = self.wna16_backend == WNA16MoEBackend.FLASHINFER
+        (
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            w13_g_idx_processed,
+            w2_g_idx_processed,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            _,  # w13_bias
+            _,  # w2_bias
+        ) = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_backend,
+            layer=layer,
+            quant_config=self.weight_quant,
+            input_dtype=self.marlin_input_dtype,
+            w13=layer.w13_weight_packed,
+            w2=layer.w2_weight_packed,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            w13_g_idx=layer.w13_weight_g_idx,
+            w2_g_idx=layer.w2_weight_g_idx,
+        )
 
-            # Alias packed weights to w13_weight/w2_weight for the modular
-            # kernel interface.
-            layer.w13_weight = layer.w13_weight_packed
-            layer.w2_weight = layer.w2_weight_packed
+        # Replace common parameters
+        replace_parameter(layer, "w13_weight_packed", w13_qweight)
+        replace_parameter(layer, "w2_weight_packed", w2_qweight)
+        replace_parameter(layer, "w13_weight_scale", w13_scales)
+        replace_parameter(layer, "w2_weight_scale", w2_scales)
 
-            # Setup moe_kernel for the Flashinfer monolithic path.
-            assert self.experts_cls is not None
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
-            self.moe_kernel = make_wna16_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
-        else:
-            (
-                w13_qweight,
-                w2_qweight,
-                w13_scales,
-                w2_scales,
-                w13_g_idx_processed,
-                w2_g_idx_processed,
-                w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices,
-                w13_input_global_scale,
-                w2_input_global_scale,
-                _,  # w13_bias
-                _,  # w2_bias
-            ) = convert_to_wna16_moe_kernel_format(
-                backend=self.wna16_backend,
-                layer=layer,
-                quant_config=self.weight_quant,
-                input_dtype=self.marlin_input_dtype,
-                w13=layer.w13_weight_packed,
-                w2=layer.w2_weight_packed,
-                w13_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w13_g_idx=layer.w13_weight_g_idx,
-                w2_g_idx=layer.w2_weight_g_idx,
-            )
-            replace_parameter(layer, "w13_weight_packed", w13_qweight)
-            replace_parameter(layer, "w2_weight_packed", w2_qweight)
-            replace_parameter(layer, "w13_weight_scale", w13_scales)
-            replace_parameter(layer, "w2_weight_scale", w2_scales)
+        # Marlin-specific parameters (not needed for Flashinfer)
+        if not is_flashinfer:
             replace_parameter(layer, "w13_weight_g_idx", w13_g_idx_processed)
             replace_parameter(layer, "w2_weight_g_idx", w2_g_idx_processed)
             replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
@@ -414,31 +376,38 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                     torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
                 )
 
-            device = layer.w13_weight_g_idx.device
-            layer.workspace = marlin_make_workspace_new(device, 4)
-
-            # Alias packed weights to w13_weight/w2_weight for the modular
-            # kernel interface.
-            layer.w13_weight = layer.w13_weight_packed
-            layer.w2_weight = layer.w2_weight_packed
-
-            # Setup moe_kernel for the Marlin path.
-            assert self.experts_cls is not None
-            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            assert self.moe_quant_config is not None
-            self.moe_kernel = make_wna16_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-                w13_g_idx=layer.w13_weight_g_idx,
-                w2_g_idx=layer.w2_weight_g_idx,
-                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
-                input_global_scale1=getattr(layer, "w13_input_global_scale", None),
-                input_global_scale2=getattr(layer, "w2_input_global_scale", None),
-                is_k_full=self.is_k_full,
-                routing_tables=layer._expert_routing_tables(),
+            layer.workspace = marlin_make_workspace_new(
+                layer.w13_weight_g_idx.device, 4
             )
+
+        # Alias packed weights to w13_weight/w2_weight for the modular kernel interface
+        layer.w13_weight = layer.w13_weight_packed
+        layer.w2_weight = layer.w2_weight_packed
+
+        assert self.experts_cls is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+
+        # Add Marlin-specific arguments
+        marlin_args: dict[str, Any] = {}
+        if not is_flashinfer:
+            marlin_args = {
+                "w13_g_idx": layer.w13_weight_g_idx,
+                "w2_g_idx": layer.w2_weight_g_idx,
+                "w13_g_idx_sort_indices": layer.w13_g_idx_sort_indices,
+                "w2_g_idx_sort_indices": layer.w2_g_idx_sort_indices,
+                "input_global_scale1": getattr(layer, "w13_input_global_scale", None),
+                "input_global_scale2": getattr(layer, "w2_input_global_scale", None),
+                "is_k_full": self.is_k_full,
+            }
+
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+            **marlin_args,
+        )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
