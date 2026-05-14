@@ -53,12 +53,11 @@ class DummyRouter(BaseRouter):
         return topk_ids + 10
 
 
-def _make_router() -> DummyRouter:
+def _make_router(eplb_state: EplbLayerState | None = None) -> DummyRouter:
     return DummyRouter(
         top_k=2,
         global_num_experts=16,
-        eplb_state=EplbLayerState(),
-        enable_eplb=False,
+        eplb_state=eplb_state,
         indices_type_getter=None,
     )
 
@@ -83,12 +82,12 @@ def test_base_router_capture_pre_eplb_mapping():
 
 
 def test_base_router_capture_with_eplb_enabled():
-    router = _make_router()
-    router.enable_eplb = True
-    router.eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
-    router.eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
-    router.eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
-    router.eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    eplb_state = EplbLayerState()
+    eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
+    eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
+    eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
+    eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    router = _make_router(eplb_state=eplb_state)
 
     captured = []
 
