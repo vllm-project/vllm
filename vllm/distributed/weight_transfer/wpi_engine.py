@@ -190,8 +190,7 @@ def _import_wpi_client():
     except ImportError:
         raise ImportError(
             "WPI weight transfer backend requires the `wpi_client` package. "
-            "Install it with: pip install wpi_client\n"
-            "Or from the WPI source: cd weight-propagation-interface/consumer/"
+            "Install it from the WPI source: cd weight-propagation-interface/consumer/"
             "wpi_client && pip install -e ."
         ) from None
 
