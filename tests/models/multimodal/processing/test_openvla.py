@@ -23,15 +23,11 @@ class _FakeTokenizer:
     bos_token_id = 1
 
     def encode(self, prompt: str, **kwargs: object) -> list[int]:
-        if prompt == "<image>":
-            assert kwargs == {"add_special_tokens": False}
-            return [32000]
-
-        assert prompt == "<image>\nIn: test\nOut:"
+        assert prompt == "In: test\nOut:"
         if kwargs == {"add_special_tokens": True}:
-            return [self.bos_token_id, 32000, 10, 11]
+            return [self.bos_token_id, 10, 11]
         assert kwargs == {"add_special_tokens": False}
-        return [32000, 10, 11]
+        return [10, 11]
 
 
 class _FakeProcessingInfo:
@@ -144,13 +140,13 @@ def test_openvla_processor_outputs_pixel_values() -> None:
     image = Image.new("RGB", (8, 8), color=(255, 0, 0))
 
     batch = processor._call_hf_processor(
-        "<image>\nIn: test\nOut:",
+        "In: test\nOut:",
         {"images": image},
         {},
         {"add_special_tokens": True},
     )
 
-    assert batch["input_ids"].tolist() == [[1, 32000, 10, 11]]
+    assert batch["input_ids"].tolist() == [[1, 10, 11]]
     assert batch["pixel_values"].shape == (1, 6, 224, 224)
     assert batch["pixel_values"].dtype == torch.float32
 
@@ -167,7 +163,7 @@ def test_openvla_processing_info_token_counts() -> None:
     }
 
 
-def test_openvla_prompt_update_replaces_image_placeholder() -> None:
+def test_openvla_prompt_update_inserts_image_tokens_after_bos() -> None:
     processor = _make_processor()
     image = Image.new("RGB", (640, 480), color=(255, 255, 255))
     mm_items = MultiModalDataItems({"image": ImageProcessorItems([image])})
@@ -179,8 +175,8 @@ def test_openvla_prompt_update_replaces_image_placeholder() -> None:
     assert resolved.modality == "image"
     assert [
         (match.start_idx, match.end_idx)
-        for match in resolved.iter_token_matches([1, 32000, 10, 11], _FakeTokenizer())
-    ] == [(1, 2)]
+        for match in resolved.iter_matches([1, 10, 11], _FakeTokenizer())
+    ] == [(1, 1)]
     assert content.full == [32000] * 256
 
     is_embed = content.is_embed(None, content.full)
@@ -189,4 +185,4 @@ def test_openvla_prompt_update_replaces_image_placeholder() -> None:
 
 
 def test_openvla_placeholder_string() -> None:
-    assert OpenVLAForActionPrediction.get_placeholder_str("image", 0) == "<image>"
+    assert OpenVLAForActionPrediction.get_placeholder_str("image", 0) is None

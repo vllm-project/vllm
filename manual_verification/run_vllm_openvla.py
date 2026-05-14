@@ -32,12 +32,6 @@ STAGES = [
 ]
 
 
-def vllm_prompt(prompt: str) -> str:
-    if prompt.startswith("<image>"):
-        return prompt
-    return f"<image>\n{prompt}"
-
-
 def tensor_stats(tensor: torch.Tensor) -> dict[str, Any]:
     tensor = tensor.detach().float().cpu()
     return {
@@ -104,9 +98,9 @@ def compact_trace(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.cpu()
 
 
-def vision_block_trace(model: torch.nn.Module, pixel_values: torch.Tensor) -> dict[
-    str, torch.Tensor
-]:
+def vision_block_trace(
+    model: torch.nn.Module, pixel_values: torch.Tensor
+) -> dict[str, torch.Tensor]:
     traces = {}
     dino_pixels = pixel_values[:, :3]
     siglip_pixels = pixel_values[:, 3:]
@@ -156,8 +150,9 @@ def collect_trace(model: torch.nn.Module, image_path: str) -> dict[str, torch.Te
     }
 
 
-def compare_generation(hf_outputs: list[dict[str, Any]],
-                       vllm_outputs: list[dict[str, Any]]) -> dict[str, Any]:
+def compare_generation(
+    hf_outputs: list[dict[str, Any]], vllm_outputs: list[dict[str, Any]]
+) -> dict[str, Any]:
     cases = []
     for hf_case, vllm_case in zip(hf_outputs, vllm_outputs):
         if hf_case["case_id"] != vllm_case["case_id"]:
@@ -209,8 +204,10 @@ def compare_generation(hf_outputs: list[dict[str, Any]],
     }
 
 
-def compare_traces(hf_tensors: dict[str, dict[str, torch.Tensor]],
-                   vllm_tensors: dict[str, dict[str, torch.Tensor]]) -> dict[str, Any]:
+def compare_traces(
+    hf_tensors: dict[str, dict[str, torch.Tensor]],
+    vllm_tensors: dict[str, dict[str, torch.Tensor]],
+) -> dict[str, Any]:
     cases = []
     for case_id, hf_case_tensors in hf_tensors.items():
         stage_diffs = {
@@ -299,8 +296,9 @@ def compare_traces(hf_tensors: dict[str, dict[str, torch.Tensor]],
     }
 
 
-def compare_weights(hf_weights: dict[str, dict[str, Any]],
-                    vllm_weights: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def compare_weights(
+    hf_weights: dict[str, dict[str, Any]], vllm_weights: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
     hf_normalized = {
         normalized_weight_name(name): value for name, value in hf_weights.items()
     }
@@ -351,8 +349,7 @@ def main() -> None:
                     .to("cuda:0")
                     .to(
                         dtype=(
-                            model.vision_backbone.dinov2_featurizer
-                            .patch_embed.proj.weight.dtype
+                            model.vision_backbone.dinov2_featurizer.patch_embed.proj.weight.dtype
                         )
                     )
                 )
@@ -376,10 +373,9 @@ def main() -> None:
 
     outputs = []
     for case in cases:
-        prompt = vllm_prompt(case["prompt"])
         result = llm.generate(
             {
-                "prompt": prompt,
+                "prompt": case["prompt"],
                 "multi_modal_data": {
                     "image": Image.open(case["image_path"]).convert("RGB")
                 },
@@ -391,8 +387,7 @@ def main() -> None:
                 "case_id": case["case_id"],
                 "episode_index": case["episode_index"],
                 "frame_index": case["frame_index"],
-                "prompt": prompt,
-                "hf_prompt": case["prompt"],
+                "prompt": case["prompt"],
                 "image_path": case["image_path"],
                 "instruction": case["instruction"],
                 "generated_token_ids": list(result[0].outputs[0].token_ids),
@@ -420,8 +415,7 @@ def main() -> None:
         "hf_artifacts": str(HF_ARTIFACTS_PATH),
         "vllm_artifacts": str(VLLM_ARTIFACTS_PATH),
         "generation": compare_generation(hf["outputs"], outputs),
-        "weights": compare_weights(hf["weight_digests"],
-                                   model_data["weight_digests"]),
+        "weights": compare_weights(hf["weight_digests"], model_data["weight_digests"]),
         "trace": compare_traces(hf["tensors"], vllm_tensors),
     }
     RESULT_PATH.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

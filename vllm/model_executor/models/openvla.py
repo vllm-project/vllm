@@ -37,7 +37,8 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    PromptReplacement,
+    PromptIndexTargets,
+    PromptInsertion,
     PromptUpdate,
     PromptUpdateDetails,
 )
@@ -60,7 +61,6 @@ _OPENVLA_TIMM_MODEL_IDS = (
 )
 _OPENVLA_TIMM_OVERRIDE_ACT_LAYERS = (None, None)
 _OPENVLA_IMAGE_SIZES = (_OPENVLA_IMAGE_SIZE, _OPENVLA_IMAGE_SIZE)
-_OPENVLA_IMAGE_PLACEHOLDER = "<image>"
 
 
 def _get_num_image_tokens(image_size: int) -> int:
@@ -294,7 +294,7 @@ class OpenVLAProcessingInfo(BaseProcessingInfo):
 
 class OpenVLADummyInputsBuilder(BaseDummyInputsBuilder[OpenVLAProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return _OPENVLA_IMAGE_PLACEHOLDER * mm_counts.get("image", 0)
+        return ""
 
     def get_dummy_mm_data(
         self,
@@ -427,7 +427,10 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
-        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        tokenizer = self.info.get_tokenizer()
+        bos_token_id = tokenizer.bos_token_id
+
+        def get_insertion(item_idx: int) -> PromptUpdateDetails[list[int]]:
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems)
             )
@@ -447,10 +450,12 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
             )
 
         return [
-            PromptReplacement(
+            PromptInsertion(
                 modality="image",
-                target=_OPENVLA_IMAGE_PLACEHOLDER,
-                replacement=get_replacement,
+                target=PromptIndexTargets.prefix(
+                    [bos_token_id] if bos_token_id is not None else []
+                ),
+                insertion=get_insertion,
             )
         ]
 
@@ -468,7 +473,7 @@ class OpenVLAForActionPrediction(nn.Module, SupportsMultiModal, SupportsPP):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
-            return _OPENVLA_IMAGE_PLACEHOLDER
+            return None
         raise ValueError("Only image modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
