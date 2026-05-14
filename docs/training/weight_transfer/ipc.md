@@ -93,7 +93,7 @@ response = requests.post(url, json={}, timeout=60)
 response.raise_for_status()
 ```
 
-In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. Because the worker deserializes the payload via `pickle.loads`, the vLLM server must be started with `VLLM_ALLOW_INSECURE_SERIALIZATION=1`; otherwise `parse_update_info` raises a `ValueError` and refuses the update. In practice the pickled payload contains only `rebuild_cuda_tensor` argument tuples (ints, bytes, strings) rather than arbitrary callables, but the env-var gate is enforced regardless — only enable HTTP mode on a trusted network.
+In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. Because the worker deserializes the payload via `pickle.loads`, the vLLM server must be started with `VLLM_ALLOW_INSECURE_SERIALIZATION=1`.
 
 ```python
 def my_custom_sender(update_info: IPCWeightTransferUpdateInfo):
