@@ -344,6 +344,7 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
         if self.attn_backend.get_name() == "FLEX_ATTENTION":
+            assert vllm_config is not None
             block_m = vllm_config.attention_config.flex_attn_block_m
             block_n = vllm_config.attention_config.flex_attn_block_n
 
