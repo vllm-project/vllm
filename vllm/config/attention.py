@@ -67,6 +67,27 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
+    flex_attn_block_m: int | None = None
+    """Triton kernel BLOCK_M tile size for flex attention.
+    Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
+    defaults to 16."""
+
+    flex_attn_block_n: int | None = None
+    """Triton kernel BLOCK_N tile size for flex attention.
+    Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,
+    defaults to 16."""
+
+    flex_attn_q_block_size: int | None = None
+    """Logical Q block size for the flex attention block mask.
+    Must be a power of 2 and divisible by flex_attn_block_m.
+    If None, uses the default (16 on PyTorch >= 2.9, 128 otherwise)."""
+
+    flex_attn_kv_block_size: int | None = None
+    """Logical KV block size for the flex attention block mask.
+    Must be a power of 2 and divisible by flex_attn_block_n.
+    If None, uses the default (kv_cache_block_size on PyTorch >= 2.9,
+    128 otherwise)."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs

@@ -25,49 +25,26 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import is_complete_json, partial_tag_overlap
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
 
-def _partial_tag_overlap(text: str, tag: str) -> int:
-    """Length of the longest prefix of `tag` that matches a suffix of `text`.
-
-    E.g. text ending in "<tool_" returns 6 when tag is "<tool_call>".
-    Returns 0 if there is no overlap.
-    """
-    max_check = min(len(tag) - 1, len(text))
-    for k in range(max_check, 0, -1):
-        if text.endswith(tag[:k]):
-            return k
-    return 0
-
-
-def _is_valid_json(text: str) -> bool:
-    try:
-        json.loads(text)
-        return True
-    except (json.JSONDecodeError, ValueError):
-        return False
-
-
 class Hermes2ProToolParser(ToolParser):
+    tool_call_start_token: str = "<tool_call>"
+    tool_call_end_token: str = "</tool_call>"
+    tool_call_regex = re.compile(
+        r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL
+    )
+    scratch_pad_regex = re.compile(r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL)
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
         if is_mistral_tokenizer(tokenizer):
             logger.error("Detected Mistral tokenizer when using a Hermes model")
             self.model_tokenizer = tokenizer.tokenizer
-
-        self.tool_call_start_token: str = "<tool_call>"
-        self.tool_call_end_token: str = "</tool_call>"
-
-        self.tool_call_regex = re.compile(
-            r"<tool_call>(.*?)</tool_call>|<tool_call>(.*)", re.DOTALL
-        )
-        self.scratch_pad_regex = re.compile(
-            r"<scratch_pad>(.*?)</scratch_pad>", re.DOTALL
-        )
 
         if not self.model_tokenizer:
             raise ValueError(
@@ -147,7 +124,7 @@ class Hermes2ProToolParser(ToolParser):
         Holds back any suffix that could be a partial <tool_call> tag.
         """
         if self.tool_call_start_token not in current_text:
-            overlap_length = _partial_tag_overlap(
+            overlap_length = partial_tag_overlap(
                 current_text, self.tool_call_start_token
             )
             sendable_idx = len(current_text) - overlap_length
@@ -176,13 +153,13 @@ class Hermes2ProToolParser(ToolParser):
             else:
                 raw = text[json_start:]
                 # Strip partial </tool_call> suffix if present.
-                overlap = _partial_tag_overlap(raw, self.tool_call_end_token)
+                overlap = partial_tag_overlap(raw, self.tool_call_end_token)
                 if overlap:
                     raw = raw[:-overlap]
                 tc_json = raw.strip()
                 # Valid JSON without closing tag = complete body,
                 # tag tokens just haven't arrived yet.
-                is_complete = _is_valid_json(tc_json) if tc_json else False
+                is_complete = is_complete_json(tc_json) if tc_json else False
                 results.append((tc_json, is_complete))
                 break
         return results
