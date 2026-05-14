@@ -13,11 +13,13 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    int4_w4a16_moe_quant_config,
-    int8_w8a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    make_wna16_moe_kernel,
+    make_wna16_moe_quant_config,
+    select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -216,6 +218,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
 
+        # Select WNA16 MoE backend via oracle.
+        self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
+            config=self.moe,
+            weight_key=weight_key,
+        )
+
     def create_weights(
         self,
         layer: RoutedExperts,
@@ -339,21 +347,14 @@ class MoeWNA16Method(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
-        weight_bits = self.quant_config.weight_bits
         has_zp = self.quant_config.has_zp
-        assert weight_bits == 4 or weight_bits == 8
-        config_builder = (
-            int4_w4a16_moe_quant_config
-            if weight_bits == 4
-            else int8_w8a16_moe_quant_config
-        )
-
-        return config_builder(
+        return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
             w1_zp=layer.w13_qzeros if has_zp else None,
             w2_zp=layer.w2_qzeros if has_zp else None,
-            block_shape=[0, layer.group_size],
+            group_size=layer.group_size,
+            num_bits=self.quant_config.weight_bits,
         )
 
     def apply(
@@ -365,22 +366,20 @@ class MoeWNA16Method(FusedMoEMethodBase):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe import fused_experts
-
-        assert layer.activation == MoEActivation.SILU, (
-            f"Only SiLU activation is supported, not {layer.activation}."
-        )
-
-        return fused_experts(
+        assert not self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            layer.w13_weight,
+            layer.w2_weight,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
-            quant_config=self.moe_quant_config,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )
 
     @staticmethod

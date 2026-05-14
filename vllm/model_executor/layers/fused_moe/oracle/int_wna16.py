@@ -22,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
     MarlinExpertsBase,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonWNA16Experts,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
@@ -42,7 +45,8 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
-    FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
+    FLASHINFER = "FLASHINFER_TRTLLM"
+    TRITON = "TRITON"
 
 
 def backend_to_kernel_cls(
@@ -55,6 +59,8 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return [TrtLlmMxint4ExpertsMonolithic]
+    elif backend == WNA16MoEBackend.TRITON:
+        return [TritonWNA16Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -67,6 +73,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
+        WNA16MoEBackend.TRITON,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -194,12 +201,11 @@ def make_wna16_moe_kernel(
     w2_g_idx_sort_indices: torch.Tensor | None = None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts
-    # and BatchedMarlinExperts
     assert experts_cls in (
         MarlinExperts,
         BatchedMarlinExperts,
         TrtLlmMxint4ExpertsMonolithic,
+        TritonWNA16Experts,
     )
 
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
