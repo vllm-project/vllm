@@ -615,7 +615,6 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
 
-                    # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
