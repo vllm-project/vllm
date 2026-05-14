@@ -421,7 +421,7 @@ def check_aiter_fused_qk_rmsnorm() -> bool:
     (AITER >= PR #2442).
 
     TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    AITER stabilizes the API.
+    AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
     """
     global _AITER_HAS_FUSED_QK_RMSNORM
     if _AITER_HAS_FUSED_QK_RMSNORM is None:
@@ -1054,7 +1054,7 @@ def _fused_mla_dual_rms_norm_impl(
         )
 
     # TODO(rbrugaro-amd): remove the legacy fused_qk_rmsnorm path once
-    # AITER stabilizes the API.
+    # AITER stabilizes the API (https://github.com/ROCm/aiter/issues/3207).
     if hasattr(aiter_ops, "fused_qk_rmsnorm"):
         return aiter_ops.fused_qk_rmsnorm(
             q=x1,
