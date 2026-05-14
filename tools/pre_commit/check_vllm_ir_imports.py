@@ -136,7 +136,7 @@ def main() -> int:
 
     # Use files passed as arguments (from pre-commit), or find all if none
     if len(sys.argv) > 1:
-        python_files = [Path(f) for f in sys.argv[1:]]
+        python_files = [Path(f).resolve() for f in sys.argv[1:]]
     else:
         if not ir_dir.exists():
             print(

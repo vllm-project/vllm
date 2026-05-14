@@ -3,7 +3,6 @@
 import torch
 from torch import Tensor
 
-from vllm.model_executor import get_model_architecture
 from ..op import register_op
 
 
