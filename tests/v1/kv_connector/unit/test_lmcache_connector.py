@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1 import SupportsHMA
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
@@ -814,3 +815,35 @@ def test_legacy_layerwise_engine_does_not_reuse_storers_on_empty_steps():
         connector.clear_connector_metadata()
 
     assert connector._lmcache_engine.layerwise_storers == []
+
+
+def test_lmcache_connector_supports_hma() -> None:
+    assert issubclass(LMCacheConnectorV1, SupportsHMA)
+
+
+def test_request_finished_all_groups_uses_adapter_selected_group(
+    mock_connector,
+) -> None:
+    request = MagicMock()
+    block_ids = ([1], [2], [3])
+    mock_connector._lmcache_engine.get_lmcache_kv_cache_group_id.return_value = 2
+    mock_connector.request_finished.return_value = (False, {"ok": True})
+
+    result = LMCacheConnectorV1.request_finished_all_groups(
+        mock_connector, request, block_ids
+    )
+
+    assert result == (False, {"ok": True})
+    mock_connector.request_finished.assert_called_once_with(request, [3])
+
+
+def test_request_finished_all_groups_rejects_missing_selected_group(
+    mock_connector,
+) -> None:
+    request = MagicMock()
+    mock_connector._lmcache_engine.get_lmcache_kv_cache_group_id.return_value = 2
+
+    with pytest.raises(ValueError, match="selected KV cache group 2"):
+        LMCacheConnectorV1.request_finished_all_groups(
+            mock_connector, request, ([1], [2])
+        )
