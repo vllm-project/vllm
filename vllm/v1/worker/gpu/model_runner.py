@@ -687,9 +687,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # For non-last PP ranks, update decode requests with sampler output from
         # the prior step in which they were scheduled (pp_size steps ago).
         if self.pp_handler is not None:
-            outputs = self.pp_handler.get_prev_step_sampled_outputs()
+            outputs = self.pp_handler.get_prev_step_sampled_outputs(self.req_states)
             if outputs is not None:
-                self.postprocess_sampled(**outputs.received_tensors)
+                self.postprocess_sampled(**outputs)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:

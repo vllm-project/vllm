@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 
+from vllm.distributed import get_pp_group
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 
@@ -26,6 +27,12 @@ class RequestState:
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
+
+        # Per-slot generation counter, incremented every time a slot is
+        # freed. Used for invalidating freed req data between PP decodes.
+        self.slot_gen_np = None
+        if get_pp_group().world_size > 1:
+            self.slot_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
@@ -135,6 +142,8 @@ class RequestState:
             # Request not found.
             return False
         self.index_to_req_id.pop(req_idx, None)
+        if self.slot_gen_np is not None:
+            self.slot_gen_np[req_idx] += 1
         self.free_indices.append(req_idx)
         return True
 

@@ -22,15 +22,10 @@ class PendingRecv:
     num_sampled: torch.Tensor  # [num_reqs]
     num_rejected: torch.Tensor  # [num_reqs]
     idx_mapping: torch.Tensor  # [num_reqs]
-
-    @property
-    def received_tensors(self) -> dict[str, torch.Tensor]:
-        return dict(
-            sampled_tokens=self.sampled_tokens,
-            num_sampled=self.num_sampled,
-            num_rejected=self.num_rejected,
-            idx_mapping=self.idx_mapping,
-        )
+    idx_mapping_np: np.ndarray  # [num_reqs]
+    # Snapshot of slot generation counters at receive time, used to
+    # detect requests aborted since then.
+    gen_at_receive_np: np.ndarray  # [num_reqs]
 
 
 def compute_need_sampled_mask(
@@ -77,22 +72,58 @@ class PPHandler:
             [] if self.is_last_rank else [None] * get_pp_group().world_size
         )
         self.slot_index = -1
+        # Holds the most-recently-consumed PendingRecv (or None) for one
+        # additional worker step, to avoid allocator reusing the tensors
+        # prematurely, since we schedule pp_size+1 steps concurrently.
+        self.last_consumed_slot: PendingRecv | None = None
 
         # Dedicated subgroup for the sampled-token broadcast.
         self.broadcast_group = get_pp_group().make_sibling_device_group(
             group_desc="pp_broadcast"
         )
 
-    def get_prev_step_sampled_outputs(self) -> PendingRecv | None:
-        """Advance to this step's slot and wait for its recv event."""
+    def get_prev_step_sampled_outputs(
+        self, req_states: RequestState
+    ) -> dict[str, torch.Tensor] | None:
+        """Advance to this step's slot and wait for its recv event, then
+        filter out entries whose request was freed since `receive`.
+        """
         if not self.slots:
             return None
         self.slot_index = (self.slot_index + 1) % len(self.slots)
         slot = self.slots[self.slot_index]
-        if slot is not None:
-            self.main_stream.wait_event(slot.event)
-            self.slots[self.slot_index] = None
-        return slot
+        self.last_consumed_slot = slot
+        if slot is None:
+            return None
+        self.main_stream.wait_event(slot.event)
+        self.slots[self.slot_index] = None
+
+        # Skip slots whose request has been freed (and possibly reassigned)
+        # since this `PendingRecv` was created.
+        assert req_states.slot_gen_np is not None
+        alive_mask = (
+            req_states.slot_gen_np[slot.idx_mapping_np] == slot.gen_at_receive_np
+        )
+        if alive_mask.all():
+            return dict(
+                sampled_tokens=slot.sampled_tokens,
+                num_sampled=slot.num_sampled,
+                num_rejected=slot.num_rejected,
+                idx_mapping=slot.idx_mapping,
+            )
+        if not alive_mask.any():
+            return None
+
+        alive_indices_np = np.flatnonzero(alive_mask).astype(np.int32)
+        alive_indices = torch.from_numpy(alive_indices_np).to(
+            self.device, non_blocking=True
+        )
+        return dict(
+            sampled_tokens=slot.sampled_tokens[alive_indices],
+            num_sampled=slot.num_sampled[alive_indices],
+            num_rejected=slot.num_rejected[alive_indices],
+            idx_mapping=slot.idx_mapping[alive_indices],
+        )
 
     def receive(self, input_batch: InputBatch, req_states: RequestState) -> bool:
         assert not self.is_last_rank
@@ -101,12 +132,19 @@ class PPHandler:
             self.slots[self.slot_index] = None
             return False
 
-        idx_mapping = input_batch.idx_mapping
-        if not need_sampled_mask.all():
-            subset_idx_mapping_np = input_batch.idx_mapping_np[need_sampled_mask]
-            idx_mapping = torch.from_numpy(subset_idx_mapping_np).to(
+        if need_sampled_mask.all():
+            idx_mapping = input_batch.idx_mapping
+            idx_mapping_np = input_batch.idx_mapping_np
+        else:
+            idx_mapping_np = input_batch.idx_mapping_np[need_sampled_mask]
+            idx_mapping = torch.from_numpy(idx_mapping_np).to(
                 self.device, non_blocking=True
             )
+
+        # Snapshot the per-slot generation counter so a later free of any
+        # of these slots is detectable at consume time.
+        assert req_states.slot_gen_np is not None
+        gen_at_receive_np = req_states.slot_gen_np[idx_mapping_np]
 
         # Allocate receive tensors on the main stream.
         num_reqs = idx_mapping.shape[0]
@@ -126,7 +164,13 @@ class PPHandler:
             num_sampled, num_rejected = combined.unbind(dim=0)
             event = self.broadcast_stream.record_event()
         self.slots[self.slot_index] = PendingRecv(
-            event, sampled_tokens, num_sampled, num_rejected, idx_mapping
+            event,
+            sampled_tokens,
+            num_sampled,
+            num_rejected,
+            idx_mapping,
+            idx_mapping_np,
+            gen_at_receive_np,
         )
 
         # Return True if all requests will have a decode step next.
