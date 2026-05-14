@@ -335,6 +335,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     _lock = threading.Lock()
 
     def __init__(self, cpu_group, tcp_store_group=None):
+        assert tcp_store_group is not None
         super().__init__(cpu_group, tcp_store_group)
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
