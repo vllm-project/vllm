@@ -4,6 +4,9 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import torch
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+)
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -33,7 +36,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
+    pass
 
 logger = init_logger(__name__)
 
@@ -310,8 +313,11 @@ def _process_weights_flashinfer(
 
 def _process_weights_marlin(
     layer: torch.nn.Module,
-    quant_config: "GPTQMarlinConfig",
     input_dtype: torch.dtype | None,
+    num_bits: int,
+    pack_factor: int,
+    group_size: int,
+    actorder: str | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
@@ -360,6 +366,7 @@ def _process_weights_marlin(
 
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
+        # NOTE: for non-zp quantization format only
         marlin_w13_qweight = ops.marlin_int4_fp8_preprocess(w13_qweight, inplace=False)
         marlin_w2_qweight = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
         marlin_w13_scales = w13_scales.data * 512
@@ -371,7 +378,7 @@ def _process_weights_marlin(
         marlin_w2_scales = w2_scales
 
     # --- Process act_order (g_idx) ---
-    if quant_config.desc_act:
+    if actorder == "group":
         num_experts = w13_g_idx.shape[0]
         w13_g_idx_sort_indices = torch.empty_like(w13_g_idx)
         w2_g_idx_sort_indices = torch.empty_like(w2_g_idx)
@@ -382,6 +389,8 @@ def _process_weights_marlin(
             w2_g_idx_sort_indices[e] = torch.argsort(w2_g_idx[e]).to(torch.int32)
             w13_sorted_g_idx[e] = w13_g_idx[e][w13_g_idx_sort_indices[e]]
             w2_sorted_g_idx[e] = w2_g_idx[e][w2_g_idx_sort_indices[e]]
+        w13_g_idx = w13_sorted_g_idx
+        w2_g_idx = w2_sorted_g_idx
     else:
         num_experts = w13_g_idx.shape[0]
         device = w13_g_idx.device
@@ -406,17 +415,17 @@ def _process_weights_marlin(
     marlin_w13_qweight = ops.gptq_marlin_moe_repack(
         marlin_w13_qweight,
         w13_g_idx_sort_indices,
-        marlin_w13_qweight.shape[1] * quant_config.pack_factor,
+        marlin_w13_qweight.shape[1] * pack_factor,
         marlin_w13_qweight.shape[2],
-        quant_config.quant_type.size_bits,
+        num_bits,
         is_a_8bit=is_a_8bit,
     )
     marlin_w2_qweight = ops.gptq_marlin_moe_repack(
         marlin_w2_qweight,
         w2_g_idx_sort_indices,
-        marlin_w2_qweight.shape[1] * quant_config.pack_factor,
+        marlin_w2_qweight.shape[1] * pack_factor,
         marlin_w2_qweight.shape[2],
-        quant_config.quant_type.size_bits,
+        num_bits,
         is_a_8bit=is_a_8bit,
     )
 
@@ -425,19 +434,15 @@ def _process_weights_marlin(
         s=marlin_w13_scales,
         size_k=layer.intermediate_size_per_partition,
         size_n=marlin_w13_scales.shape[2],
-        group_size=quant_config.group_size,
+        group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
+    group_size_or_pack_factor = group_size if group_size != -1 else pack_factor
     marlin_w2_scales = marlin_moe_permute_scales(
         s=marlin_w2_scales,
-        size_k=marlin_w2_scales.shape[1]
-        * (
-            quant_config.group_size
-            if quant_config.group_size != -1
-            else quant_config.pack_factor
-        ),
+        size_k=marlin_w2_scales.shape[1] * group_size_or_pack_factor,
         size_n=marlin_w2_scales.shape[2],
-        group_size=quant_config.group_size,
+        group_size=group_size,
         is_a_8bit=is_a_8bit,
     )
 
@@ -476,7 +481,7 @@ def _process_weights_marlin(
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig | None,
+    quant_config: QuantizationConfig | QuantizationArgs | None,
     input_dtype: torch.dtype | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -508,26 +513,41 @@ def convert_to_wna16_moe_kernel_format(
     Args:
         backend: the selected ``WNA16MoEBackend``.
         layer: the ``FusedMoE`` layer whose parameters are being prepared.
-        quant_config: the ``QuantizationConfig`` for this layer.
+        quant_config: the ``QuantizationConfig`` for this layer (GPTQ/AWQ).
         input_dtype: optional activation dtype, usually should be 16 bit.
+        num_bits: quantization bits (compressed tensors only).
+        pack_factor: packing factor (compressed tensors only).
+        group_size: group size for quantization (compressed tensors only).
+        actorder: activation ordering mode (compressed tensors only).
     """
     if backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
+        # GPTQ Marlin
         from vllm.model_executor.layers.quantization.gptq_marlin import (
             GPTQMarlinConfig,
         )
 
-        if not isinstance(quant_config, GPTQMarlinConfig):
-            raise TypeError(
-                "Marlin WNA16 MoE backend requires GPTQMarlinConfig, got "
-                f"{type(quant_config).__name__}."
-            )
+        if isinstance(quant_config, GPTQMarlinConfig):
+            num_bits = quant_config.quant_type.size_bits
+            pack_factor = quant_config.pack_factor
+            group_size = quant_config.group_size
+            actorder = "group" if quant_config.desc_act else None
+        else:
+            assert isinstance(quant_config, QuantizationArgs)
+            num_bits = quant_config.num_bits
+            pack_factor = 32 // quant_config.num_bits
+            group_size = quant_config.group_size
+            actorder = quant_config.actorder
+
         return _process_weights_marlin(
             layer,
-            quant_config,
             input_dtype,
+            num_bits,
+            pack_factor,
+            group_size,
+            actorder,
             w13,
             w2,
             w13_scale,
