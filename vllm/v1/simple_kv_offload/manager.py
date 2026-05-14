@@ -146,6 +146,7 @@ class SimpleCPUOffloadScheduler:
         # Eager mode only
         self._reqs_to_store: dict[str, StoreRequestState] = {}
         self._store_event_to_reqs: dict[int, list[str]] = {}
+        self._in_flight_store_gpu_blocks: set[int] = set()
 
         # Event counters
         self._load_event_counter: int = 0
@@ -468,7 +469,8 @@ class SimpleCPUOffloadScheduler:
         num_free = cpu_block_pool.get_num_free_blocks()
         kv_cache_groups = self.cpu_kv_cache_config.kv_cache_groups
         num_groups = len(kv_cache_groups)
-        gpu_blocks_this_step: set[int] = set()
+        # Dedup against blocks already scheduled.
+        in_flight = self._in_flight_store_gpu_blocks
 
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
@@ -523,10 +525,9 @@ class SimpleCPUOffloadScheduler:
                     if bhash_with_group is None:
                         break
 
-                    # Check if this group's data is already scheduled for store
-                    # in this step or already cached in CPU.
+                    # Skip if already scheduled for store or already cached in CPU.
                     if (
-                        gpu_block_id in gpu_blocks_this_step
+                        gpu_block_id in in_flight
                         or cpu_block_pool.cached_block_hash_to_block.get_one_block(
                             bhash_with_group
                         )
@@ -561,7 +562,7 @@ class SimpleCPUOffloadScheduler:
                 req_ids.append(req_id)
                 merged_gpu_block_ids.extend(gpu_block_ids)
                 merged_cpu_block_ids.extend(cpu_block_ids)
-                gpu_blocks_this_step.update(gpu_block_ids)
+                in_flight.update(gpu_block_ids)
 
                 # Touch GPU blocks to prevent freeing during async copy
                 gpu_block_pool.touch(
@@ -608,6 +609,8 @@ class SimpleCPUOffloadScheduler:
     def _process_store_event(self, event_idx: int) -> None:
         """Process a fully-completed store event."""
         transfer = self._store_event_to_blocks.pop(event_idx)
+        if not self._lazy_mode:
+            self._in_flight_store_gpu_blocks.difference_update(transfer.gpu_block_ids)
         self._process_store_completion(transfer.gpu_block_ids, transfer.cpu_block_ids)
         logger.debug(
             "Store event %d completed: cached %d blocks to CPU",
