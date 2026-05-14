@@ -173,3 +173,37 @@ void silu_and_mul_scaled_fp4_experts_quant(
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled silu_and_mul nvfp4 experts quantization kernel");
 }
+
+// MXFP4 link stubs for archs without a compiled MXFP4 kernel. On SM10.x the
+// real impls in `mxfp4_experts_quant.cu` are compiled (same CMake block that
+// defines `ENABLE_NVFP4_SM100`); on SM 8.x the real file is skipped, leaving
+// `torch_bindings.cpp`'s unconditional `&mxfp4_experts_quant` reference with
+// no symbol to bind to, so the `.so` fails to load. These stubs satisfy the
+// linker on unsupported archs and raise NOT_IMPLEMENTED if anyone actually
+// calls them.
+#if !(defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100)
+void mxfp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts,
+    int64_t n_experts) {
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled mxfp4 experts quantization kernel for SM ",
+      get_sm_version_num(),
+      ". Recompile with SM 10.x (Blackwell) for MXFP4 support.");
+}
+
+void silu_and_mul_mxfp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts,
+    int64_t n_experts) {
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled silu_and_mul mxfp4 experts quantization kernel for SM ",
+      get_sm_version_num(),
+      ". Recompile with SM 10.x (Blackwell) for MXFP4 support.");
+}
+#endif  // !ENABLE_NVFP4_SM100
