@@ -367,9 +367,38 @@ def run_test(
         enable_prefix_caching=False,  # PROBE: disable prefix caching
         **cache_arg,
     ) as vllm_model:
+        # PROBE: warm up every parametrization once before the actual test loop.
+        # If failure was caused by Triton kernel JIT compilation occurring
+        # mid-test (which changes GPU/cuBLAS state for the next forward pass),
+        # this warmup will trigger ALL JIT compiles upfront so the actual
+        # measured runs all start from the same post-JIT state.
+        import sys as _probe_sys
+
+        print(
+            "[PROBE_MARKER] WARMUP_START — running all params once to trigger JIT",
+            file=_probe_sys.stderr,
+            flush=True,
+        )
+        for _warmup_params in sampling_param_tests:
+            _ = vllm_model.generate(
+                example_prompts[:2],  # small subset to save time
+                sampling_params=SamplingParams(**default_params, **_warmup_params),
+                return_logprobs=True,
+            )
+        print(
+            "[PROBE_MARKER] WARMUP_END — JIT should be done; starting measured runs",
+            file=_probe_sys.stderr,
+            flush=True,
+        )
+
         results = []
         acceptance_rates: list[float] | None = [] if spec_decoding else None
-        for override_params in sampling_param_tests:
+        for _gen_idx, override_params in enumerate(sampling_param_tests, start=1):
+            print(
+                f"[PROBE_MARKER] GEN_{_gen_idx}_START params={override_params}",
+                file=_probe_sys.stderr,
+                flush=True,
+            )
             metrics_before = vllm_model.llm.get_metrics()
             print(f"----------- RUNNING PARAMS: {override_params}")
             results.append(
@@ -378,6 +407,11 @@ def run_test(
                     sampling_params=SamplingParams(**default_params, **override_params),
                     return_logprobs=True,
                 )
+            )
+            print(
+                f"[PROBE_MARKER] GEN_{_gen_idx}_END params={override_params}",
+                file=_probe_sys.stderr,
+                flush=True,
             )
             metrics_after = vllm_model.llm.get_metrics()
             if acceptance_rates is not None:
