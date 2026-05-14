@@ -476,5 +476,21 @@ def convert_to_wna16_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif backend == WNA16MoEBackend.FLASHINFER:
+        # TODO(bnell): fill in
+        return (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
+            None,
+            None,
+            None,
+            None,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
