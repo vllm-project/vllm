@@ -16,14 +16,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "bias) -> ()");
   m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
-#ifndef USE_ROCM
   m.def(
       "topk_softplus_sqrt(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, float "
       "routed_scaling_factor, Tensor? "
       "bias, Tensor? input_ids, Tensor? tid2eid) -> ()");
   m.impl("topk_softplus_sqrt", torch::kCUDA, &topk_softplus_sqrt);
-#endif
+
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
   m.def("moe_sum(Tensor input, Tensor! output) -> ()");
@@ -133,12 +132,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 
-  // cuBLAS bf16 x bf16 -> fp32 router GEMM (fallback for non-SM90 / batch > 16)
-  m.def("router_gemm_bf16_fp32(Tensor input, Tensor weight) -> Tensor");
-  m.impl("router_gemm_bf16_fp32", torch::kCUDA, &router_gemm_bf16_fp32);
-
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+  // conditionally compiled so impl registration is in source file
+
+  // DeepSeek V4 fused RMSNorm + router GEMV for SM90+
+  m.def(
+      "dsv4_norm_router_gemm(Tensor! logits, Tensor! normed_x, Tensor x, "
+      "Tensor norm_weight, Tensor gate_weight, float eps) -> ()");
   // conditionally compiled so impl registration is in source file
 #endif
 }

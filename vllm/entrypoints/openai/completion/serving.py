@@ -118,6 +118,15 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_completion(request, raw_request), request, raw_request
+        )
+
+    async def _create_completion(
+        self,
+        request: CompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
@@ -151,6 +160,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 self._extract_prompt_len(engine_input),
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
 
             sampling_params: SamplingParams | BeamSearchParams
