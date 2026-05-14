@@ -140,9 +140,10 @@ class LLMEngine:
             "snapshot_provider", None
         )
 
+        self.snapshot_manager = None
+        self.snapshot_task = None
         if enable_snapshot:
             self.snapshot_manager = SnapshotManager(snapshot_provider)
-            self.snapshot_manager.run_snapshot()
 
     @classmethod
     def from_vllm_config(
