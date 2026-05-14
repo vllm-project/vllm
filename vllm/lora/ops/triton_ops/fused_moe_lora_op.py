@@ -417,21 +417,29 @@ def _run_fused_moe_lora_one_shot(
     npid = max(1, min(npid, max(1, N_per_slice // 128)))
 
     # Robust defaults across the prefill regime (H100/H200/B200, bf16/fp16).
-    # NPID > 1 is the small-M / under-saturated path -- more warps + a
-    # deeper pipeline help amortise the inner-N expand loop.
+    # NPID > 1 is the small-M / under-saturated path -- more warps help
+    # amortise the inner-N expand loop. ns=3 instead of 4: GB200 ncu showed
+    # the 4-stage pipeline pushed register count to 168/thread and capped
+    # achieved occupancy at ~17% (3 blocks/SM, register-bound); ns=3 frees
+    # ~30 regs/thread which keeps a 4th block resident on small grids.
     if npid > 1:
-        block_n, nw, ns = 128, 8, 4
+        block_n, nw, ns = 128, 8, 3
     else:
         block_n, nw, ns = 128, 4, 3
-    # BLOCK_K choice: when each expert sees enough tokens, the wider K tile
-    # halves the K-loop trip count and amortises load/MMA setup -- worth ~5
-    # to 10% on GB200 for prefill-sized inputs. For sparsely-populated
-    # routings (e.g. M=16 mixtral, ~4 tokens/expert) the wider tile inflates
-    # per-program startup and most blocks early-exit anyway, so we keep the
-    # narrower tile. Threshold derived from GB200 sweeps over mixtral
-    # (E=8) and qwen3moe (E=64).
-    work_per_expert = topk_weights.numel() / max(num_experts, 1)
-    block_k = 128 if work_per_expert >= 16 else 64
+    # BLOCK_K choice: for hidden-sized K (≥256, i.e. the K=hidden_size
+    # shrink input on w13) force BLOCK_K=128 -- the wider tile halves the
+    # K-loop trip count and removes the scoreboard stalls that dominated
+    # M=16-64 on GB200 (kernel time -13% to -37% vs the work_per_expert
+    # heuristic which picked 64 for low-tokens-per-expert ratios). For
+    # small-K shapes (e.g. w2 with K=192 where the down-proj reads the
+    # MoE intermediate) keep the work_per_expert heuristic: BLOCK_K=128
+    # would force the EVEN_K=False masked path and add no K-loop savings
+    # (K/64=3 vs K/128=2 masked) while inflating per-program startup.
+    if K >= 256:
+        block_k = 128
+    else:
+        work_per_expert = topk_weights.numel() / max(num_experts, 1)
+        block_k = 128 if work_per_expert >= 16 else 64
 
     grid = (M_blocks * npid, num_slices, grid_lora_dim)
 
