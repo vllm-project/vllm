@@ -1212,12 +1212,6 @@ class VllmConfig:
         if envs.VLLM_USE_V2_MODEL_RUNNER:
             self._validate_v2_model_runner()
 
-        if (
-            self.model_config is not None
-            and self.model_config.enable_return_routed_experts
-        ):
-            self._validate_return_routed_experts()
-
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -1931,51 +1925,6 @@ class VllmConfig:
             raise ValueError(
                 "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
                 + ", ".join(unsupported)
-            )
-
-    def _validate_return_routed_experts(self) -> None:
-        """Reject parallelism configurations not yet validated with
-        --enable-return-routed-experts.
-
-        Validated scope (PR #39917): TP, EP, DP, single-node and multi-node,
-        prefix caching, and speculative decoding (MTP validated end-to-end;
-        Eagle/Eagle3/Ngram/Medusa supported by construction since the
-        routing buffer is bound only to the target model and verified-token
-        routing lands at the correct positions during the main forward).
-
-        Out-of-scope (block until validated): PP > 1, prefill context
-        parallelism (PCP) > 1, decode context parallelism (DCP) > 1,
-        async scheduling.
-        """
-        unsupported: list[str] = []
-
-        if self.parallel_config.pipeline_parallel_size > 1:
-            unsupported.append(
-                "pipeline parallelism "
-                f"(pipeline_parallel_size="
-                f"{self.parallel_config.pipeline_parallel_size})"
-            )
-        if self.parallel_config.prefill_context_parallel_size > 1:
-            unsupported.append(
-                "prefill context parallelism "
-                f"(prefill_context_parallel_size="
-                f"{self.parallel_config.prefill_context_parallel_size})"
-            )
-        if self.parallel_config.decode_context_parallel_size > 1:
-            unsupported.append(
-                "decode context parallelism "
-                f"(decode_context_parallel_size="
-                f"{self.parallel_config.decode_context_parallel_size})"
-            )
-        if self.scheduler_config.async_scheduling:
-            unsupported.append("async scheduling")
-
-        if unsupported:
-            raise ValueError(
-                "--enable-return-routed-experts is not yet validated with: "
-                + ", ".join(unsupported)
-                + ". Disable these features or omit "
-                "--enable-return-routed-experts."
             )
 
     def validate_block_size(self) -> None:
