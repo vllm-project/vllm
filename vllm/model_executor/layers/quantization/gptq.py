@@ -239,7 +239,18 @@ class GPTQLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
 
         # GPTQ v1 and v2 format deals with zero points differently
-        self.use_v2_format = quant_config.checkpoint_format == "gptq_v2"
+        # GPTQ v1 stores zero_point - 1 (e.g., 7 for symmetric 4-bit),
+        # and the kernel adds +1 during dequantization.
+        # GPTQ v2 stores the actual zero_point (e.g., 8 for symmetric 4-bit),
+        # and the kernel uses it directly.
+        # Some quantizers (e.g., GPTQModel v5+) set checkpoint_format="gptq"
+        # but store v2-style zeros. Auto-detect from actual zero values
+        # in process_weights_after_loading() if not explicitly set.
+        if quant_config.checkpoint_format == "gptq_v2":
+            self.use_v2_format = True
+        else:
+            # Will be auto-detected after weights are loaded
+            self.use_v2_format = None
 
     def create_weights(
         self,
@@ -355,6 +366,19 @@ class GPTQLinearMethod(LinearMethodBase):
         layer.exllama_state = exllama_state
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Auto-detect v1/v2 format from actual zero-point values
+        # if not explicitly set via checkpoint_format
+        if self.use_v2_format is None:
+            qzeros = layer.qzeros.data
+            if qzeros.numel() > 0:
+                # Extract first zero-point value
+                first_packed = qzeros.view(-1)[0].item()
+                first_zero = first_packed & ((1 << self.quant_config.weight_bits) - 1)
+                expected_v2_zero = 1 << (self.quant_config.weight_bits - 1)  # e.g., 8 for 4-bit
+                self.use_v2_format = (first_zero == expected_v2_zero)
+            else:
+                self.use_v2_format = False
+
         # for torch.compile
         layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
