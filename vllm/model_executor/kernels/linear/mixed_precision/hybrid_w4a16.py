@@ -51,11 +51,24 @@ LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 # handles all shapes (M/N/K are runtime args; only KPerBlock is templated).
 # Each wired layer costs an extra weight copy (~0.92 GB total for the four
 # Qwen3-4B columns on a 36-layer model).
+#
+# fp16 only — bf16 deliberately omitted. The CK kernel builds bf16 instances
+# (required by aiter convention which expects both F16/B16), but bf16 dispatch
+# is not registered here because measurement shows Triton W4A16 wins on bf16
+# at this hardware:
+#   gate_up M=2048 N=19456 K=2560 G=128 on gfx1151:
+#     fp16: CK 29.1 vs Triton 21.3 TFLOPS (CK 1.36x faster) -> dispatch CK
+#     bf16: CK 19.4 vs Triton 24.4 TFLOPS (Triton 1.26x faster) -> Triton
+# Root cause of the bf16 gap: RDNA3 (gfx11) lacks a packed bf16 multiply
+# instruction (no V_PK_FMA_BF16 in the ISA), so CK's bf16 dequant falls back
+# to scalar fp32 conversion. Triton's compiler appears to schedule fp32 dual-
+# issue more aggressively. Re-tune CK for bf16 in a follow-up if needed.
 _CK_W4A16_TARGET_SHAPES: dict[tuple, tuple[int, int]] = {
     (19456, 2560, 128, torch.float16): (256, 32),  # gate_up_proj
     (6144, 2560, 128, torch.float16): (256, 32),  # qkv_proj (q=4096+k=1024+v=1024)
     (2560, 4096, 128, torch.float16): (256, 32),  # o_proj
     (2560, 9728, 128, torch.float16): (256, 32),  # down_proj
+    # bf16 entries intentionally absent — see comment above.
 }
 
 
