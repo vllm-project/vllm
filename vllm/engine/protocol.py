@@ -181,6 +181,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def remove_lora(self, lora_id: int) -> bool:
+        """Remove an already loaded LoRA adapter from the engine."""
+        ...
+
+    @abstractmethod
     async def pause_generation(
         self,
         *,
