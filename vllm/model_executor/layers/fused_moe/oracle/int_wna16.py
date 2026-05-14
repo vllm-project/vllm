@@ -247,6 +247,67 @@ def make_wna16_moe_kernel(
 # ---------------------------------------------------------------------------
 
 
+def _process_weights_flashinfer(
+    w13_qweight: torch.Tensor,
+    w2_qweight: torch.Tensor,
+    w13_scales: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w13_g_idx: torch.Tensor,
+    w2_g_idx: torch.Tensor,
+    w13_g_idx_sort_indices: torch.Tensor | None,
+    w2_g_idx_sort_indices: torch.Tensor | None,
+    w13_input_global_scale: torch.Tensor | None,
+    w2_input_global_scale: torch.Tensor | None,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor,  # w13_g_idx
+    torch.Tensor,  # w2_g_idx
+    torch.Tensor,  # w13_g_idx_sort_indices
+    torch.Tensor,  # w2_g_idx_sort_indices
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """Flashinfer (TRT-LLM MXINT4) weight post-processing.
+
+    Steps
+    -----
+    1. Transform weights/scales via ``prepare_static_weights_for_trtllm_mxint4_moe``.
+    2. Return transformed tensors, passing through g_idx/bias unchanged.
+    """
+    from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
+        prepare_static_weights_for_trtllm_mxint4_moe,
+    )
+
+    dict_weights_mxint4 = prepare_static_weights_for_trtllm_mxint4_moe(
+        w13_qweight,
+        w13_scales,
+        w2_qweight,
+        w2_scales,
+    )
+
+    return (
+        dict_weights_mxint4["gemm1_weights"],
+        dict_weights_mxint4["gemm2_weights"],
+        dict_weights_mxint4["gemm1_scales"],
+        dict_weights_mxint4["gemm2_scales"],
+        w13_g_idx,
+        w2_g_idx,
+        w13_g_idx_sort_indices,
+        w2_g_idx_sort_indices,
+        w13_input_global_scale,
+        w2_input_global_scale,
+        w13_bias,
+        w2_bias,
+    )
+
+
 def _process_weights_marlin(
     layer: torch.nn.Module,
     quant_config: "GPTQMarlinConfig",
@@ -415,7 +476,7 @@ def _process_weights_marlin(
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
-    quant_config: QuantizationConfig,
+    quant_config: QuantizationConfig | None,
     input_dtype: torch.dtype | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -477,8 +538,7 @@ def convert_to_wna16_moe_kernel_format(
             w2_bias,
         )
     elif backend == WNA16MoEBackend.FLASHINFER:
-        # TODO(bnell): fill in
-        return (
+        return _process_weights_flashinfer(
             w13,
             w2,
             w13_scale,

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     WNA16MoEBackend,
+    convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     make_wna16_moe_quant_config,
     select_wna16_moe_backend,
@@ -27,9 +28,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_TYPES_MAP,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
-    prepare_static_weights_for_trtllm_mxint4_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -329,24 +327,36 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         num_experts = layer.w13_weight_g_idx.shape[0]
         device = layer.w13_weight_g_idx.device
         if self.wna16_backend == WNA16MoEBackend.FLASHINFER:
-            dict_weights_mxint4 = prepare_static_weights_for_trtllm_mxint4_moe(
-                layer.w13_weight_packed,
-                layer.w13_weight_scale,
-                layer.w2_weight_packed,
-                layer.w2_weight_scale,
+            (
+                marlin_w13_qweight,
+                marlin_w2_qweight,
+                marlin_w13_scales,
+                marlin_w2_scales,
+                _,  # w13_g_idx
+                _,  # w2_g_idx
+                _,  # w13_g_idx_sort_indices
+                _,  # w2_g_idx_sort_indices
+                _,  # w13_input_global_scale
+                _,  # w2_input_global_scale
+                _,  # w13_bias
+                _,  # w2_bias
+            ) = convert_to_wna16_moe_kernel_format(
+                backend=self.wna16_backend,
+                layer=layer,
+                quant_config=None,  # Not needed for flashinfer
+                input_dtype=None,  # Not needed for flashinfer
+                w13=layer.w13_weight_packed,
+                w2=layer.w2_weight_packed,
+                w13_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                w13_g_idx=layer.w13_weight_g_idx,
+                w2_g_idx=layer.w2_weight_g_idx,
             )
-            replace_parameter(
-                layer, "w13_weight_packed", dict_weights_mxint4["gemm1_weights"]
-            )
-            replace_parameter(
-                layer, "w13_weight_scale", dict_weights_mxint4["gemm1_scales"]
-            )
-            replace_parameter(
-                layer, "w2_weight_packed", dict_weights_mxint4["gemm2_weights"]
-            )
-            replace_parameter(
-                layer, "w2_weight_scale", dict_weights_mxint4["gemm2_scales"]
-            )
+            replace_parameter(layer, "w13_weight_packed", marlin_w13_qweight)
+            replace_parameter(layer, "w13_weight_scale", marlin_w13_scales)
+            replace_parameter(layer, "w2_weight_packed", marlin_w2_qweight)
+            replace_parameter(layer, "w2_weight_scale", marlin_w2_scales)
+
             # Alias packed weights to w13_weight/w2_weight for the modular
             # kernel interface.
             layer.w13_weight = layer.w13_weight_packed
