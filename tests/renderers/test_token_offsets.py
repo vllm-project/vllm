@@ -87,3 +87,60 @@ class TestTokenizePromptOffsets:
         for s, e in offsets:
             assert isinstance(s, int) and isinstance(e, int)
             assert 0 <= s <= e <= text_len
+
+    def test_default_flag_no_offsets(self, fast_tokenizer):
+        from vllm.renderers.params import TokenizeParams
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None)  # flag defaults False
+        prompt = {"prompt": "Hello, world."}
+
+        result = renderer._tokenize_prompt(prompt, params)
+
+        # Field must be absent (not set to None) so JSON serialization
+        # of TokensInput stays minimal for existing consumers.
+        assert "prompt_token_offsets" not in result
+
+    def test_slow_tokenizer_with_flag_no_offsets(self, fast_tokenizer):
+        """Force is_fast=False to simulate a Slow tokenizer. The flag is
+        True but offsets must not be returned because the tokenizer
+        cannot produce them."""
+        from unittest.mock import PropertyMock, patch
+
+        from vllm.renderers.params import TokenizeParams
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello, world."}
+
+        with patch.object(
+            type(fast_tokenizer),
+            "is_fast",
+            new_callable=PropertyMock,
+            return_value=False,
+        ):
+            result = renderer._tokenize_prompt(prompt, params)
+
+        assert "prompt_token_offsets" not in result
+
+    def test_multimodal_data_with_flag_no_offsets(self, fast_tokenizer):
+        from vllm.renderers.params import TokenizeParams
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello.", "multi_modal_data": {"image": ["fake"]}}
+
+        result = renderer._tokenize_prompt(prompt, params)
+
+        assert "prompt_token_offsets" not in result
+
+    def test_multimodal_uuids_with_flag_no_offsets(self, fast_tokenizer):
+        from vllm.renderers.params import TokenizeParams
+
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompt = {"prompt": "Hello.", "multi_modal_uuids": {"image": ["uuid-1"]}}
+
+        result = renderer._tokenize_prompt(prompt, params)
+
+        assert "prompt_token_offsets" not in result
