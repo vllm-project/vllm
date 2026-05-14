@@ -1298,9 +1298,9 @@ class SpecDecodeBaseProposer:
                         " model."
                     )
                 else:
-                    logger.info(
+                    logger.warning(
                         "Detected EAGLE model with distinct embed_tokens weights. "
-                        "Keeping separate embedding weights from the target model."
+                        "Embedding space inconsistency may degrade draft quality."
                     )
             else:
                 # MTP model
