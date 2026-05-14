@@ -177,6 +177,14 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
+    thinking_token_budget: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of tokens allowed for thinking operations "
+            "(reasoning models). -1 = unlimited."
+        ),
+    )
+
     # --8<-- [end:completion-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -322,6 +330,7 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            thinking_token_budget=self.thinking_token_budget,
         )
 
     @model_validator(mode="before")
