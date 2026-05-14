@@ -16,7 +16,7 @@ import queue
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import regex as re
 import torch
@@ -50,6 +50,11 @@ logger = init_logger(__name__)
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
+_T = TypeVar("_T")
+
+
+def _rotate_list(values: list[_T], offset: int) -> list[_T]:
+    return values[offset:] + values[:offset]
 
 
 @dataclass
@@ -419,6 +424,18 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreRecvingThread",
         )
+        self._invalid_block_ids_lock = threading.Lock()
+        self._invalid_block_ids: set[int] = set()
+
+    def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
+        with self._invalid_block_ids_lock:
+            self._invalid_block_ids.update(block_ids)
+
+    def get_and_clear_block_ids_with_load_errors(self) -> set[int]:
+        with self._invalid_block_ids_lock:
+            invalid_block_ids = self._invalid_block_ids.copy()
+            self._invalid_block_ids.clear()
+        return invalid_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
@@ -432,47 +449,46 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list = []
         size_list = []
         key_list = []
+        block_id_list = []
         for start, end, key in self.token_database.process_tokens(
             token_len, req_meta.block_hashes, mask_num
         ):
-            addr, size, _ = self.token_database.prepare_value(
+            addr, size, block_id = self.token_database.prepare_value(
                 start, end, req_meta.block_ids
             )
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
+            block_id_list.append(block_id)
 
-        # Rotate lists by tp_rank for load balancing
-        key_list_c = (
-            key_list[self.tp_rank % len(key_list) :]
-            + key_list[: self.tp_rank % len(key_list)]
-        )
-        addr_list_c = (
-            addr_list[self.tp_rank % len(addr_list) :]
-            + addr_list[: self.tp_rank % len(addr_list)]
-        )
-        size_list_c = (
-            size_list[self.tp_rank % len(size_list) :]
-            + size_list[: self.tp_rank % len(size_list)]
-        )
+        # Rotate aligned lists by tp_rank for load balancing.
+        rotation = self.tp_rank % len(key_list)
+        key_list_c = _rotate_list(key_list, rotation)
+        addr_list_c = _rotate_list(addr_list, rotation)
+        size_list_c = _rotate_list(size_list, rotation)
+        block_id_list_c = _rotate_list(block_id_list, rotation)
 
         try:
             res = self.store.batch_get_into_multi_buffers(
                 key_list_c, addr_list_c, size_list_c
             )
             failed = [
-                (key, value)
-                for key, value in zip(key_list_c, res, strict=True)
+                (key, value, block_id)
+                for key, value, block_id in zip(
+                    key_list_c, res, block_id_list_c, strict=True
+                )
                 if value < 0
             ]
             if failed:
+                self._add_load_error_block_ids([block_id for _, _, block_id in failed])
                 logger.warning(
                     "Failed to get %d Mooncake keys (batch_keys=%d, first_failures=%s)",
                     len(failed),
                     len(key_list_c),
-                    failed[:3],
+                    [(key, value) for key, value, _ in failed[:3]],
                 )
         except Exception as e:
+            self._add_load_error_block_ids(block_id_list_c)
             logger.warning(
                 "Failed to get Mooncake batch %s, error: %s",
                 key_list_c[:3],
@@ -790,6 +806,11 @@ class MooncakeStoreWorker:
             self.tp_rank,
         )
         return done_sending, done_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        if self.kv_recv_thread is None:
+            return set()
+        return self.kv_recv_thread.get_and_clear_block_ids_with_load_errors()
 
     def _get_and_clear_finished_sending(
         self,

@@ -137,14 +137,18 @@ def test_worker_methods_delegate_to_store_worker():
 
     worker_inst = mock_worker_cls.return_value
     worker_inst.get_finished.return_value = ({"req-1"}, {"req-2"})
+    worker_inst.get_block_ids_with_load_errors.return_value = {3, 4}
     conn.bind_connector_metadata(metadata)
 
     conn.register_kv_caches(kv_caches)
     result = conn.get_finished(finished_req_ids)
+    invalid_block_ids = conn.get_block_ids_with_load_errors()
 
     worker_inst.register_kv_caches.assert_called_once_with(kv_caches)
     worker_inst.get_finished.assert_called_once_with(finished_req_ids, metadata)
     assert result == ({"req-1"}, {"req-2"})
+    worker_inst.get_block_ids_with_load_errors.assert_called_once_with()
+    assert invalid_block_ids == {3, 4}
 
 
 def test_get_kv_connector_kv_cache_events_returns_none_when_empty():

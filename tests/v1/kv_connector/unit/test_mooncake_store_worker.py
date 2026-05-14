@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     ChunkedTokenDatabase,
     KeyMetadata,
+    LoadSpec,
     ReqMeta,
 )
 
@@ -45,6 +46,41 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
         block_hashes=block_hashes,
         can_save=True,
         original_block_size=16,
+    )
+
+
+def _make_store_recving_thread(
+    store: MagicMock,
+    tp_rank: int = 0,
+) -> worker.KVCacheStoreRecvingThread:
+    token_database = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=16
+    )
+    token_database.set_kv_caches_base_addr([0x1000])
+    token_database.set_block_len([256])
+    thread = worker.KVCacheStoreRecvingThread(
+        store=store,
+        token_database=token_database,
+        block_size=16,
+        tp_rank=tp_rank,
+        ready_event=threading.Event(),
+    )
+    thread.request_queue.task_done = MagicMock()
+    return thread
+
+
+def _make_load_req(req_id: str = "req-a") -> ReqMeta:
+    return ReqMeta(
+        req_id=req_id,
+        token_len_chunk=48,
+        block_ids=[10, 11, 12],
+        block_hashes=[b"a0", b"a1", b"a2"],
+        load_spec=LoadSpec(
+            vllm_cached_tokens=0,
+            kvpool_cached_tokens=48,
+            can_load=True,
+            token_len=48,
+        ),
     )
 
 
@@ -103,6 +139,49 @@ def test_store_sending_thread_only_skips_on_no_available_handle():
     thread._handle_request(_make_store_req("req-a", [b"a2", b"a3"]))
 
     assert store.batch_put_from_multi_buffers.call_count == 2
+
+
+def test_store_recving_thread_reports_failed_block_ids():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -5, -7]
+    thread = _make_store_recving_thread(store)
+
+    thread._handle_request(_make_load_req())
+
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {11, 12}
+    assert thread.get_and_clear_block_ids_with_load_errors() == set()
+
+
+def test_store_recving_thread_reports_failed_block_ids_after_rotation():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, -5, 256]
+    thread = _make_store_recving_thread(store, tp_rank=1)
+
+    thread._handle_request(_make_load_req())
+
+    assert thread.get_and_clear_block_ids_with_load_errors() == {12}
+
+
+def test_store_recving_thread_reports_all_attempted_blocks_on_exception():
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.side_effect = RuntimeError("boom")
+    thread = _make_store_recving_thread(store)
+
+    thread._handle_request(_make_load_req())
+
+    assert thread.get_and_clear_finished_requests() == {"req-a"}
+    assert thread.get_and_clear_block_ids_with_load_errors() == {10, 11, 12}
+
+
+def test_store_worker_get_block_ids_with_load_errors_delegates_to_recv_thread():
+    recv_thread = MagicMock()
+    recv_thread.get_and_clear_block_ids_with_load_errors.return_value = {3, 4}
+    w = _make_bare_worker()
+    w.kv_recv_thread = recv_thread
+
+    assert w.get_block_ids_with_load_errors() == {3, 4}
+    recv_thread.get_and_clear_block_ids_with_load_errors.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------
