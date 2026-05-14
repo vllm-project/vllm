@@ -48,6 +48,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    CK_MXFP4_MOE_DIM_ALIGNMENT,
+)
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -1065,14 +1068,49 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        # TODO: Remove once all OCP MX schemes use the kernel abstraction
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4", "w_mxfp4_a_fp8")
-        self.emulate = (
-            not current_platform.supports_mx()
-            or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES
-        ) and (
-            self.mxfp4_backend is Mxfp4MoeBackend.NONE or not self.use_rocm_aiter_moe
+        # Native CK path requires MX hardware + w_mxfp4_a_mxfp4 scheme + AITER
+        # MoE enabled. CK kernels require activation also in mxfp4 (not _a_fp8),
+        # so we explicitly check both startswith("w_mxfp4") and
+        # endswith("a_mxfp4"). The Mxfp4MoeBackend abstraction handles
+        # weight-only mxfp4 (w_mxfp4) and w_mxfp4_a_fp8 with static input
+        # scales. If neither native path is available, fall back to emulation.
+        can_use_native_ck = (
+            current_platform.supports_mx()
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.ocp_mx_scheme.endswith("a_mxfp4")
+            and self.use_rocm_aiter_moe
         )
+        can_use_mxfp4_backend = self.mxfp4_backend is not Mxfp4MoeBackend.NONE
+
+        self.emulate = not (can_use_native_ck or can_use_mxfp4_backend)
+
+        # CK's pre-compiled MXFP4 MoE GEMM kernel instances have dimension
+        # alignment requirements. When violated (e.g. MiniMax-M2.1 with TP=4
+        # yields intermediate_size_per_partition=384), AITER raises:
+        # "device_gemm ... does not support this GEMM problem".
+        # Fall back to emulation in that case.
+        if (
+            not self.emulate
+            and self.use_rocm_aiter_moe
+            and self.ocp_mx_scheme is not None
+            and self.ocp_mx_scheme.startswith("w_mxfp4")
+            and self.ocp_mx_scheme.endswith("a_mxfp4")
+            and moe.intermediate_size_per_partition % CK_MXFP4_MOE_DIM_ALIGNMENT != 0
+        ):
+            logger.warning_once(
+                "AITER CK MXFP4 MoE GEMM does not support "
+                "intermediate_size_per_partition=%d (not a multiple of %d). "
+                "This typically happens when intermediate_size / "
+                "tensor_parallel_size produces an incompatible dimension. "
+                "Falling back to emulation mode. To avoid this overhead, "
+                "use a compatible tensor_parallel_size or set "
+                "VLLM_ROCM_USE_AITER_MOE=0.",
+                moe.intermediate_size_per_partition,
+                CK_MXFP4_MOE_DIM_ALIGNMENT,
+            )
+            self.use_rocm_aiter_moe = False
+            self.emulate = True
 
         if self.emulate:
             # We use the same code path between MXFP4/MXFP6 emulation.
