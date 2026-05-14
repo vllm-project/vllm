@@ -4,7 +4,6 @@
 from unittest.mock import patch
 
 import pytest
-from openai.types.chat import ChatCompletionMessageParam
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -17,15 +16,103 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.responses.utils import (
-    _construct_single_message_from_response_item,
-    _maybe_combine_reasoning_and_tool_call,
+    _construct_message_from_response_item,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
     convert_tool_responses_to_completions_format,
     should_continue_final_message,
 )
+
+
+def _single_chat_message(item):
+    message = _construct_message_from_response_item(item)
+    assert message is not None
+    return message
+
+
+def make_output_message(
+    text: str,
+    *,
+    id: str = "msg_1",
+    status: str = "completed",
+) -> ResponseOutputMessage:
+    return ResponseOutputMessage(
+        id=id,
+        content=[
+            ResponseOutputText(
+                annotations=[],
+                text=text,
+                type="output_text",
+                logprobs=None,
+            )
+        ],
+        role="assistant",
+        status=status,
+        type="message",
+    )
+
+
+def make_reasoning_item(
+    *,
+    content_text: str | None = None,
+    summary_text: str | None = None,
+    content: list[Content] | None = None,
+    summary: list[Summary] | None = None,
+    encrypted_content: str | None = None,
+    id: str = "reasoning_1",
+    status: str | None = None,
+) -> ResponseReasoningItem:
+    if content is None and content_text is not None:
+        content = [Content(text=content_text, type="reasoning_text")]
+    if summary is None and summary_text is not None:
+        summary = [Summary(text=summary_text, type="summary_text")]
+
+    return ResponseReasoningItem(
+        id=id,
+        summary=[] if summary is None else summary,
+        type="reasoning",
+        content=content,
+        encrypted_content=encrypted_content,
+        status=status,
+    )
+
+
+def make_function_call(
+    *,
+    call_id: str,
+    name: str = "test_function",
+    arguments: str = "{}",
+    id: str = "tool_id",
+    status: str | None = None,
+) -> ResponseFunctionToolCall:
+    kwargs = {
+        "type": "function_call",
+        "id": id,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }
+    if status is not None:
+        kwargs["status"] = status
+
+    return ResponseFunctionToolCall(**kwargs)
+
+
+def make_function_call_output(
+    *,
+    call_id: str,
+    output: str = "42",
+    id: str = "output_1",
+    status: str = "completed",
+) -> ResponseFunctionToolCallOutputItem:
+    return ResponseFunctionToolCallOutputItem(
+        id=id,
+        type="function_call_output",
+        call_id=call_id,
+        output=output,
+        status=status,
+    )
 
 
 class TestResponsesUtils:
@@ -87,7 +174,7 @@ class TestResponsesUtils:
             message["tool_calls"][0]["function"]["arguments"] == '{"code": "123+456"}'
         )
 
-    def test_construct_single_message_from_response_item(self):
+    def test_construct_chat_messages_preserves_single_item_conversions(self):
         item = ResponseReasoningItem(
             id="lol",
             summary=[],
@@ -101,7 +188,7 @@ class TestResponsesUtils:
             encrypted_content=None,
             status=None,
         )
-        formatted_item = _construct_single_message_from_response_item(item)
+        formatted_item = _single_chat_message(item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["reasoning"] == "Leroy Jenkins"
 
@@ -119,7 +206,7 @@ class TestResponsesUtils:
             status=None,
         )
 
-        formatted_item = _construct_single_message_from_response_item(item)
+        formatted_item = _single_chat_message(item)
         assert formatted_item["role"] == "assistant"
         assert (
             formatted_item["reasoning"]
@@ -133,10 +220,21 @@ class TestResponsesUtils:
             output="1234",
             status="completed",
         )
-        formatted_item = _construct_single_message_from_response_item(tool_call_output)
+        formatted_item = _single_chat_message(tool_call_output)
         assert formatted_item["role"] == "tool"
         assert formatted_item["content"] == "1234"
         assert formatted_item["tool_call_id"] == "temp"
+
+        formatted_item = _single_chat_message(
+            {
+                "type": "function_call_output",
+                "call_id": "temp_dict",
+                "output": "5678",
+            }
+        )
+        assert formatted_item["role"] == "tool"
+        assert formatted_item["content"] == "5678"
+        assert formatted_item["tool_call_id"] == "temp_dict"
 
         item = ResponseReasoningItem(
             id="lol",
@@ -147,7 +245,7 @@ class TestResponsesUtils:
             status=None,
         )
         with pytest.raises(ValueError):
-            _construct_single_message_from_response_item(item)
+            construct_chat_messages_with_tool_call([item])
 
         output_item = ResponseOutputMessage(
             id="msg_bf585bbbe3d500e0",
@@ -164,7 +262,7 @@ class TestResponsesUtils:
             type="message",
         )
 
-        formatted_item = _construct_single_message_from_response_item(output_item)
+        formatted_item = _single_chat_message(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
 
@@ -192,7 +290,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        formatted = _construct_single_message_from_response_item(item)
+        formatted = _single_chat_message(item)
         assert formatted["reasoning"] == "This is the actual content"
 
     def test_content_only(self):
@@ -210,7 +308,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        formatted = _construct_single_message_from_response_item(item)
+        formatted = _single_chat_message(item)
         assert formatted["reasoning"] == "Content without summary"
 
     @patch("vllm.entrypoints.openai.responses.utils.logger")
@@ -229,7 +327,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        formatted = _construct_single_message_from_response_item(item)
+        formatted = _single_chat_message(item)
         assert formatted["reasoning"] == "Fallback summary text"
         mock_logger.warning.assert_called_once()
         assert (
@@ -252,7 +350,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        formatted = _construct_single_message_from_response_item(item)
+        formatted = _single_chat_message(item)
         assert formatted["reasoning"] == "Summary when content empty"
         mock_logger.warning.assert_called_once()
         assert (
@@ -269,7 +367,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        formatted = _construct_single_message_from_response_item(item)
+        formatted = _single_chat_message(item)
         assert formatted["reasoning"] == ""
 
     def test_encrypted_content_raises(self):
@@ -293,7 +391,7 @@ class TestReasoningItemContentPriority:
             status=None,
         )
         with pytest.raises(ValueError):
-            _construct_single_message_from_response_item(item)
+            construct_chat_messages_with_tool_call([item])
 
     @patch("vllm.entrypoints.openai.responses.utils.logger")
     def test_summary_with_multiple_entries_uses_first(self, mock_logger):
@@ -315,7 +413,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        formatted = _construct_single_message_from_response_item(item)
+        formatted = _single_chat_message(item)
         assert formatted["reasoning"] == "First summary"
         mock_logger.warning.assert_called_once()
         assert (
@@ -343,7 +441,7 @@ class TestReasoningItemContentPriority:
             encrypted_content=None,
             status=None,
         )
-        _construct_single_message_from_response_item(item)
+        construct_chat_messages_with_tool_call([item])
         mock_logger.warning.assert_not_called()
 
 
@@ -626,119 +724,125 @@ class TestShouldContinueFinalMessage:
         assert should_continue_final_message([dict_item]) is False
 
 
-class TestMaybeCombineReasoningAndToolCall:
-    """Tests for _maybe_combine_reasoning_and_tool_call function."""
+class TestConstructChatMessagesCombinePolicy:
+    """Tests for contiguous assistant-side merging."""
 
-    def test_returns_none_when_item_id_is_none(self):
-        """
-        Test fix from PR #31999: when item.id is None, should return None
-        instead of raising TypeError on startswith().
-        """
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id=None,  # This was causing TypeError before the fix
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages: list[ChatCompletionMessageParam] = []
+    @pytest.mark.parametrize(
+        ("items", "expected_content", "expected_reasoning", "expected_tool_call_ids"),
+        [
+            pytest.param(
+                [
+                    make_reasoning_item(content_text="Let me think"),
+                    make_output_message("Hello"),
+                ],
+                "Hello",
+                "Let me think",
+                None,
+                id="reasoning-output-messages",
+            ),
+            pytest.param(
+                [
+                    make_function_call(call_id="call_123"),
+                    make_function_call(call_id="call_456"),
+                ],
+                None,
+                None,
+                ["call_123", "call_456"],
+                id="consecutive-tool-calls",
+            ),
+            pytest.param(
+                [
+                    make_reasoning_item(content_text="Let me think"),
+                    make_function_call(call_id="call_123"),
+                ],
+                None,
+                "Let me think",
+                ["call_123"],
+                id="reasoning-tool-call",
+            ),
+            pytest.param(
+                [
+                    make_output_message("Hello"),
+                    make_function_call(call_id="call_123"),
+                ],
+                "Hello",
+                None,
+                ["call_123"],
+                id="output-tool-call",
+            ),
+            pytest.param(
+                [
+                    make_reasoning_item(content_text="Thinking"),
+                    make_output_message("Hello"),
+                    make_function_call(call_id="call_123"),
+                    make_function_call(call_id="call_456"),
+                ],
+                "Hello",
+                "Thinking",
+                ["call_123", "call_456"],
+                id="reasoning-output-tool-call",
+            ),
+        ],
+    )
+    def test_assistant_side_items_merge_until_tool_output(
+        self,
+        items,
+        expected_content,
+        expected_reasoning,
+        expected_tool_call_ids,
+    ):
+        messages = construct_chat_messages_with_tool_call(items)
 
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
+        assert len(messages) == 1
+        assert messages[0]["role"] == "assistant"
+        if expected_content is None:
+            assert "content" not in messages[0]
+        else:
+            assert messages[0]["content"] == expected_content
+        if expected_reasoning is None:
+            assert "reasoning" not in messages[0]
+        else:
+            assert messages[0]["reasoning"] == expected_reasoning
+        if expected_tool_call_ids is None:
+            assert "tool_calls" not in messages[0]
+        else:
+            assert [tool_call["id"] for tool_call in messages[0]["tool_calls"]] == (
+                expected_tool_call_ids
+            )
 
-        assert result is None
-
-    def test_returns_none_when_id_does_not_start_with_mcp_prefix(self):
-        """Test that non-MCP tool calls are not combined."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id="regular_id",  # Does not start with MCP_PREFIX
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_returns_none_when_last_message_is_not_assistant(self):
-        """Test that non-assistant last message returns None."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = [{"role": "user", "content": "hello"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_returns_none_when_last_message_has_no_reasoning(self):
-        """Test that assistant message without reasoning returns None."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = [{"role": "assistant", "content": "some content"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_combines_reasoning_and_mcp_tool_call(self):
-        """Test successful combination of reasoning message and MCP tool call."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id=f"{MCP_PREFIX}tool_id",
-            call_id="call_123",
-            name="test_function",
-            arguments='{"arg": "value"}',
-        )
-        messages = [{"role": "assistant", "reasoning": "I need to call this tool"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is not None
-        assert result["role"] == "assistant"
-        assert result["reasoning"] == "I need to call this tool"
-        assert "tool_calls" in result
-        assert len(result["tool_calls"]) == 1
-        assert result["tool_calls"][0]["id"] == "call_123"
-        assert result["tool_calls"][0]["function"]["name"] == "test_function"
-        assert result["tool_calls"][0]["function"]["arguments"] == '{"arg": "value"}'
-        assert result["tool_calls"][0]["type"] == "function"
-
-    def test_returns_none_for_non_function_tool_call_type(self):
-        """Test that non-ResponseFunctionToolCall items return None."""
-        # Pass a dict instead of ResponseFunctionToolCall
-        item = {"type": "message", "content": "hello"}
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
-
-    def test_returns_none_when_id_is_empty_string(self):
-        """Test that empty string id returns None (falsy check)."""
-        item = ResponseFunctionToolCall(
-            type="function_call",
-            id="",  # Empty string is falsy
-            call_id="call_123",
-            name="test_function",
-            arguments="{}",
-        )
-        messages = [{"role": "assistant", "reasoning": "some reasoning"}]
-
-        result = _maybe_combine_reasoning_and_tool_call(item, messages)
-
-        assert result is None
+    @pytest.mark.parametrize(
+        ("items", "num_expected_messages"),
+        [
+            pytest.param(
+                [
+                    make_output_message("Hello"),
+                    make_output_message("World"),
+                ],
+                2,
+                id="consecutive-output-messages",
+            ),
+            pytest.param(
+                [
+                    make_reasoning_item(content_text="Let me think"),
+                    make_reasoning_item(content_text="Let me think more"),
+                ],
+                2,
+                id="consecutive-reasoning-messages",
+            ),
+            pytest.param(
+                [
+                    make_function_call(call_id="call_123"),
+                    make_function_call_output(call_id="call_123", output="42"),
+                    make_function_call(call_id="call_456"),
+                ],
+                3,
+                id="interrupted-by-non-assistant-item",
+            ),
+        ],
+    )
+    def test_merge_chain_breaks(self, items, num_expected_messages):
+        messages = construct_chat_messages_with_tool_call(items)
+        assert len(messages) == num_expected_messages
 
 
 class TestConstructInputMessagesInstructionsLeak:
