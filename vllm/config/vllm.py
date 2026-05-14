@@ -794,14 +794,19 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with "
                     "pipeline parallelism (PP > 1)."
                 )
-            offload = self.offload_config
+
+            # Incompatible with any KV connector — covers both PD disaggregation
+            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
+            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
+            # change when KV blocks live outside local GPU memory, breaking the
+            # slot-indexed routed_experts buffer).
             if (
-                offload.uva.cpu_offload_gb > 0
-                or offload.prefetch.offload_group_size > 0
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
             ):
                 raise ValueError(
-                    "--enable-return-routed-experts is incompatible with "
-                    "CPU offloading."
+                    "--enable-return-routed-experts is incompatible with KV "
+                    "connectors (PD disaggregation, KV cache offload)."
                 )
 
         if self.lora_config is not None:
