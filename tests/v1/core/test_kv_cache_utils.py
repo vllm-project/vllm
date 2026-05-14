@@ -36,6 +36,7 @@ from vllm.v1.core.kv_cache_utils import (
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
     tensor_data,
+    token_capacity_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -2362,3 +2363,82 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def _vllm_config_with_mamba_mode(mamba_cache_mode: str) -> VllmConfig:
+    from vllm.config import CacheConfig
+
+    return VllmConfig(
+        model_config=ModelConfig(max_model_len=16),
+        cache_config=CacheConfig(mamba_cache_mode=mamba_cache_mode),
+    )
+
+
+def _kv_cache_config(*groups: KVCacheGroupSpec) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=list(groups),
+    )
+
+
+def test_token_capacity_groups_dense_all_attention():
+    """All-attention models: every group contributes to per-token capacity."""
+    vllm_config = _vllm_config_with_mamba_mode("none")
+    attn = new_kv_cache_spec()
+    config = _kv_cache_config(
+        KVCacheGroupSpec(["a0"], attn),
+        KVCacheGroupSpec(["a1"], attn),
+    )
+    assert token_capacity_kv_cache_groups(vllm_config, config) == config.kv_cache_groups
+
+
+@pytest.mark.parametrize("mamba_mode", ["none", "align"])
+def test_token_capacity_groups_hybrid_excludes_o1_mamba(mamba_mode):
+    """Hybrid with mamba_cache_mode in ('none','align'): filter drops Mamba."""
+    vllm_config = _vllm_config_with_mamba_mode(mamba_mode)
+    attn_group = KVCacheGroupSpec(["a0"], new_kv_cache_spec())
+    mamba_group = KVCacheGroupSpec(["m0"], new_mamba_spec())
+    config = _kv_cache_config(attn_group, mamba_group)
+    assert token_capacity_kv_cache_groups(vllm_config, config) == [attn_group]
+
+
+def test_token_capacity_groups_hybrid_mamba_all_includes_mamba():
+    """mamba_cache_mode='all': Mamba state scales with sequence length, kept."""
+    vllm_config = _vllm_config_with_mamba_mode("all")
+    attn_group = KVCacheGroupSpec(["a0"], new_kv_cache_spec())
+    mamba_group = KVCacheGroupSpec(["m0"], new_mamba_spec())
+    config = _kv_cache_config(attn_group, mamba_group)
+    assert token_capacity_kv_cache_groups(vllm_config, config) == [
+        attn_group,
+        mamba_group,
+    ]
+
+
+def test_token_capacity_groups_mamba_only_falls_back():
+    """Mamba-only model with mode='none' would filter to empty; keep all."""
+    vllm_config = _vllm_config_with_mamba_mode("none")
+    mamba_groups = [
+        KVCacheGroupSpec(["m0"], new_mamba_spec()),
+        KVCacheGroupSpec(["m1"], new_mamba_spec()),
+    ]
+    config = _kv_cache_config(*mamba_groups)
+    assert token_capacity_kv_cache_groups(vllm_config, config) == mamba_groups
+
+
+def test_token_capacity_groups_multiple_attn_and_mamba():
+    """Nemotron-H-style 1 attn + 3 Mamba groups: drops to 1 attn group."""
+    vllm_config = _vllm_config_with_mamba_mode("none")
+    attn_group = KVCacheGroupSpec(["a0"], new_kv_cache_spec())
+    mamba_groups = [
+        KVCacheGroupSpec([f"m{i}"], new_mamba_spec()) for i in range(3)
+    ]
+    config = _kv_cache_config(attn_group, *mamba_groups)
+    assert token_capacity_kv_cache_groups(vllm_config, config) == [attn_group]
+
+
+def test_token_capacity_groups_empty_config_returns_empty():
+    """Edge case: no groups at all → empty list (no IndexError)."""
+    vllm_config = _vllm_config_with_mamba_mode("none")
+    config = _kv_cache_config()
+    assert token_capacity_kv_cache_groups(vllm_config, config) == []

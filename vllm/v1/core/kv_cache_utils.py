@@ -20,6 +20,7 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
@@ -1701,6 +1702,31 @@ def generate_scheduler_kv_cache_config(
                 iter(group.kv_cache_spec.kv_cache_specs.values())
             )
     return cfg
+
+
+def token_capacity_kv_cache_groups(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
+) -> list[KVCacheGroupSpec]:
+    """KV cache groups that contribute to per-token capacity.
+
+    Attention groups always scale with sequence length. Mamba groups only
+    scale when ``mamba_cache_mode == 'all'``; in ``'none'`` and ``'align'``
+    they hold O(1) state per request and pre-reserve a fixed number of
+    blocks, so counting them in the per-token divisor under-reports
+    capacity on hybrid models.
+
+    Falls back to all groups if the filter would produce an empty list.
+    """
+    mamba_scales = (
+        getattr(vllm_config.cache_config, "mamba_cache_mode", "none") == "all"
+    )
+    groups = [
+        g
+        for g in kv_cache_config.kv_cache_groups
+        if isinstance(g.kv_cache_spec, AttentionSpec)
+        or (isinstance(g.kv_cache_spec, MambaSpec) and mamba_scales)
+    ]
+    return groups or list(kv_cache_config.kv_cache_groups)
 
 
 def _report_kv_cache_config(
