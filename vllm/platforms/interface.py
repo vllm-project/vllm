@@ -474,6 +474,7 @@ class Platform:
         """
         from vllm.config.cache import CacheConfig
         from vllm.config.vllm import set_current_vllm_config
+        from vllm.v1.attention.backend import MultipleOf
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -499,6 +500,22 @@ class Platform:
                     backend_cls.get_name(),
                 )
             cache_config.block_size = preferred
+        else:
+            with set_current_vllm_config(vllm_config):
+                block_size_supported = backend_cls.supports_block_size(
+                    cache_config.block_size
+                )
+                supported_sizes = backend_cls.get_supported_kernel_block_sizes()
+            if not block_size_supported:
+                supported = ", ".join(
+                    f"multiple of {s.base}" if isinstance(s, MultipleOf) else str(s)
+                    for s in supported_sizes
+                )
+                raise ValueError(
+                    f"block_size ({cache_config.block_size}) is not supported "
+                    f"by the {backend_cls.get_name()} attention backend. "
+                    f"Supported kernel block sizes: {supported}."
+                )
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
