@@ -174,6 +174,14 @@ def deepseek_v4_sm12x_fp8_einsum(
         BLOCK_TOKENS=block_tokens,
         BLOCK_OUT=block_out,
         BLOCK_HIDDEN=block_hidden,
+        # Pinned to the SM12x-optimal config: a previous ``@triton.autotune``
+        # block selected from {num_warps in {4,8}, num_stages in {2,3}} with
+        # key=["num_tokens", ...]. ``num_tokens`` varies per request, so the
+        # autotune cache missed every call and the 4-config bench replayed
+        # on every shape — pure overhead. The other three keys are
+        # model-architecture-fixed, so the same config (num_warps=4,
+        # num_stages=3) always won; we pin it directly. Reported by
+        # ``alexbi29`` in PR #41834 comment 4464750956.
         num_warps=4,
         num_stages=3,
     )

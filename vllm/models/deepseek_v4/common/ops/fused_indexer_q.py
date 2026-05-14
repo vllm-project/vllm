@@ -66,6 +66,14 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
     return packed, ue8m0
 
 
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=1),
+        triton.Config({}, num_warps=2),
+        triton.Config({}, num_warps=4),
+    ],
+    key=["INDEX_Q_HALF_ROT_DIM", "INDEX_Q_HEAD_DIM"],
+)
 @triton.jit
 def _fused_indexer_q_rope_quant_kernel(
     pos_ptr,
@@ -433,6 +441,6 @@ def fused_indexer_q_rope_quant(
             index_weights_head_scale,
             index_weights_out,
             index_weights_out.stride(0),
-            num_warps=1,  # TODO: Tune this
+            # num_warps supplied by @triton.autotune above.
         )
     return index_q_fp8, index_weights_out
