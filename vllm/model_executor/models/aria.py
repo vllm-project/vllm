@@ -540,7 +540,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             self.vision_tower = AriaVisionTransformer(
                 config.vision_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.vision_tower",
+                prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.multi_modal_projector = AriaProjector(
                 config, prefix=maybe_prefix(prefix, "multi_modal_projector")
