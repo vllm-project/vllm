@@ -482,9 +482,9 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             # Patch legacy fields into rope_parameters
             if rope_theta is not None and "rope_theta" not in config.rope_parameters:
                 config.rope_parameters["rope_theta"] = rope_theta
-            if partial_rotary_factor is not None and "rope_theta" not in config.rope_parameters:
+            if partial_rotary_factor is not None and "partial_rotary_factor" not in config.rope_parameters:
                 config.rope_parameters["partial_rotary_factor"] = partial_rotary_factor
-            if ompe is not None and "rope_theta" not in config.rope_parameters:
+            if ompe is not None and "original_max_position_embeddings" not in config.rope_parameters:
                 config.rope_parameters["original_max_position_embeddings"] = ompe
             patch_legacy_rope_type(getattr(config, "rope_parameters", None))
     elif rope_theta is not None or getattr(config, "rope_parameters", None):
