@@ -779,10 +779,15 @@ class OffloadingConnectorScheduler:
             assert self._jobs[any_jid].is_store
             self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
 
-        # If no requests remain, flush all pending jobs - there won't be
-        # a future scheduler step to trigger their completion.
-        if not self._req_status:
-            self._current_batch_jobs_to_flush.update(self._jobs)
+        # If all tracked requests are finished, flush all pending store
+        # jobs - there won't be a future scheduler step to trigger their
+        # completion.
+        if self._req_status and all(
+            rs.req.is_finished() for rs in self._req_status.values()
+        ):
+            self._current_batch_jobs_to_flush.update(
+                jid for jid, js in self._jobs.items() if js.is_store
+            )
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,

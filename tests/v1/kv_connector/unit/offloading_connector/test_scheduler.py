@@ -260,9 +260,12 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
+    # With sync scheduling, all-finished flush fires within this run.
+    # With async scheduling, the finish is delayed so flush fires later.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
@@ -327,6 +330,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
@@ -768,7 +772,11 @@ def test_do_remote_decode_stores_all_blocks(request_runner, async_scheduling: bo
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(0, 1, 2))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
 
     # Reset GPU prefix cache so the next request must load from CPU.
     runner.scheduler.reset_prefix_cache()
@@ -833,8 +841,13 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
-    assert runner.connector_scheduler._block_id_to_pending_jobs
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * 4)
@@ -845,8 +858,6 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
-        expected_stored=(0,),
-        expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -866,8 +877,13 @@ def test_fence_at_build_store_jobs(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
-    assert runner.connector_scheduler._block_id_to_pending_jobs
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
+    )
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[1] * 4)
@@ -877,8 +893,6 @@ def test_fence_at_build_store_jobs(request_runner):
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored=(0,),
-        expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -924,30 +938,26 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
 
 
 def test_flush_all_jobs_when_no_requests_remain(request_runner):
-    """When _req_status is empty, build_connector_meta flushes all pending
-    jobs since there will be no future step to complete them."""
+    """When all tracked requests are finished, build_connector_meta flushes
+    all pending jobs since there will be no future step to complete them."""
+    block_size = 4
+    block_size_factor = 1
+    offloaded_block_size = block_size * block_size_factor
+
     runner = request_runner(
-        block_size=4,
+        block_size=block_size,
         num_gpu_blocks=100,
         async_scheduling=False,
-        block_size_factor=1,
+        block_size_factor=block_size_factor,
     )
-    sched = runner.connector_scheduler
 
-    # Simulate: requests already finished, but store jobs still pending
-    sched._jobs[42] = TransferJobStatus(
-        req_id="done_req",
-        pending_count=1,
-        keys=set(),
-        is_store=True,
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
     )
-    sched._jobs[43] = TransferJobStatus(
-        req_id="done_req",
-        pending_count=1,
-        keys=set(),
-        is_store=True,
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
     )
-    assert not sched._req_status
-
-    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
-    assert meta.jobs_to_flush == {42, 43}
