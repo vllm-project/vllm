@@ -50,7 +50,7 @@ class LoadRecoveryExampleConnector(ExampleConnector):
         self._async_load = vllm_config.kv_transfer_config.get_from_extra_config(
             "async_load", False
         )
-        self._invalid_block_ids: set = None
+        self._failed_request_ids: set[str] = set()
         self._seen_requests: set = set()
         self._req_to_block_ids: dict[str, list[int]] = dict()
 
@@ -66,20 +66,20 @@ class LoadRecoveryExampleConnector(ExampleConnector):
         )
         if index is not None:
             del connector_metadata.requests[index]
-            self._invalid_block_ids = set(
-                (
-                    failed_request.slot_mapping[:: self._block_size] // self._block_size
-                ).tolist()
+            self._failed_request_ids = (
+                set(connector_metadata.req_to_block_ids.keys())
+                if connector_metadata.req_to_block_ids
+                else set()
             )
             logger.info(
-                "Simulating failure to load all KV blocks for the "
-                "first load request. Total blocks: %d",
-                len(self._invalid_block_ids),
+                "Simulating failure to load KV for the first load "
+                "request. Failed request IDs: %s",
+                self._failed_request_ids,
             )
         super().bind_connector_metadata(connector_metadata)
 
     def clear_connector_metadata(self) -> None:
-        self._invalid_block_ids = None
+        self._failed_request_ids = set()
         super().clear_connector_metadata()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
@@ -100,8 +100,8 @@ class LoadRecoveryExampleConnector(ExampleConnector):
 
         return None, None
 
-    def get_block_ids_with_load_errors(self) -> set[int]:
-        return self._invalid_block_ids
+    def get_request_ids_with_load_errors(self) -> set[str]:
+        return self._failed_request_ids
 
     def get_num_new_matched_tokens(
         self,
