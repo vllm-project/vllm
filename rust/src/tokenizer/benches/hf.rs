@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use hf_hub::api::sync::ApiBuilder;
-use vllm_text::tokenizer::{HuggingFaceTokenizer, Tokenizer};
+use vllm_tokenizer::{HuggingFaceTokenizer, Tokenizer};
 
 const MODEL_ID: &str = "Qwen/Qwen3.5-0.8B";
 const SAMPLE_TEXT: &str = "\

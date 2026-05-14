@@ -1,7 +1,6 @@
-use vllm_text::tokenizer::DynTokenizer;
+use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
-use crate::request::ChatRequest;
 
 const THOUGHT_PREFIX: &str = "thought\n";
 
@@ -91,11 +90,8 @@ impl ReasoningParser for Gemma4ReasoningParser {
         Ok(Box::new(Self::new(tokenizer)?))
     }
 
-    fn adjust_request(&self, request: &mut ChatRequest) -> Result<()> {
-        // Gemma4's reasoning delimiters are marked as special tokens, so we need to
-        // ensure they are not stripped during decoding.
-        request.decode_options.skip_special_tokens = false;
-        Ok(())
+    fn preserve_special_tokens(&self) -> bool {
+        true
     }
 
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
@@ -120,16 +116,19 @@ impl ReasoningParser for Gemma4ReasoningParser {
 mod tests {
     use std::sync::Arc;
 
-    use vllm_text::tokenizer::Tokenizer;
+    use vllm_tokenizer::Tokenizer;
 
     use super::Gemma4ReasoningParser;
-    use crate::parser::reasoning::ReasoningParser;
-    use crate::request::ChatRequest;
+    use crate::ReasoningParser;
 
     struct FakeTokenizer;
 
     impl Tokenizer for FakeTokenizer {
-        fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_text::Result<Vec<u32>> {
+        fn encode(
+            &self,
+            text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
             Ok(text.chars().map(u32::from).collect())
         }
 
@@ -137,7 +136,7 @@ mod tests {
             &self,
             token_ids: &[u32],
             _skip_special_tokens: bool,
-        ) -> vllm_text::Result<String> {
+        ) -> vllm_tokenizer::Result<String> {
             Ok(token_ids
                 .iter()
                 .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
@@ -265,13 +264,10 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_adjust_request_keeps_special_tokens() {
+    fn gemma4_preserves_special_tokens() {
         let tokenizer = Arc::new(FakeTokenizer);
         let parser = Gemma4ReasoningParser::new(tokenizer).unwrap();
-        let mut request = ChatRequest::for_test();
 
-        assert!(request.decode_options.skip_special_tokens);
-        parser.adjust_request(&mut request).unwrap();
-        assert!(!request.decode_options.skip_special_tokens);
+        assert!(parser.preserve_special_tokens());
     }
 }

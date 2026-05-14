@@ -7,13 +7,12 @@ use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput};
+use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
     DecodedLogprobs, DecodedPromptLogprobs, decode_logprobs, decode_prompt_logprobs,
 };
 use crate::error::Error;
-use crate::incremental::IncrementalDecoder;
-use crate::tokenizer::DynTokenizer;
 
 /// Request-neutral options for incremental text decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,16 +319,20 @@ mod tests {
     use futures::{Stream, stream};
     use vllm_engine_core_client::AbortCause;
     use vllm_llm::GenerateOutput;
+    use vllm_tokenizer::Tokenizer;
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
-    use crate::tokenizer::Tokenizer;
 
     /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
     struct ByteTokenizer;
 
     impl Tokenizer for ByteTokenizer {
-        fn encode(&self, _text: &str, _add_special_tokens: bool) -> crate::error::Result<Vec<u32>> {
+        fn encode(
+            &self,
+            _text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
             unreachable!()
         }
 
@@ -337,7 +340,7 @@ mod tests {
             &self,
             token_ids: &[u32],
             _skip_special_tokens: bool,
-        ) -> crate::error::Result<String> {
+        ) -> vllm_tokenizer::Result<String> {
             let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
             Ok(String::from_utf8_lossy(&bytes).into_owned())
         }

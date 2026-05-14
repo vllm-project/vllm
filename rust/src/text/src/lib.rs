@@ -21,16 +21,14 @@ use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
-
-use crate::tokenizer::DynTokenizer;
+use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
 mod error;
-mod incremental;
 mod lower;
 pub mod output;
 mod request;
-pub mod tokenizer;
+pub use vllm_tokenizer as tokenizer;
 
 trait_set! {
     /// Shared streamed text output type used by raw completions and other text-only northbound paths.

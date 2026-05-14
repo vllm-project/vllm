@@ -1,14 +1,18 @@
 use std::sync::Arc;
 
-use crate::error::Result;
-use crate::incremental::{DecodeStream, IncrementalDecoder};
+use crate::incremental::DecodeStream;
 
 mod byte_level_decode;
+#[macro_use]
+mod error;
 mod hf;
+mod incremental;
 mod tekken;
 mod tiktoken;
 
+pub use error::{Result, TokenizerError};
 pub use hf::HuggingFaceTokenizer;
+pub use incremental::IncrementalDecoder;
 pub use tekken::TekkenTokenizer;
 pub use tiktoken::TiktokenTokenizer;
 

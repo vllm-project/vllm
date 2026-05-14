@@ -7,10 +7,8 @@ use thiserror_ext::AsReport as _;
 use tokenizers::Tokenizer as HfTokenizer;
 use tracing::{info, warn};
 
-use crate::Error;
-use crate::error::Result;
-use crate::tokenizer::Tokenizer;
-use crate::tokenizer::byte_level_decode::decode_byte_level;
+use crate::byte_level_decode::decode_byte_level;
+use crate::{Result, Tokenizer};
 
 enum Backend {
     Hf(Box<HfTokenizer>),
@@ -43,7 +41,7 @@ fn decode_fastokens_byte_level(
         .filter(|&&id| !(skip_special_tokens && t.is_special_token(id)))
         .map(|&id| {
             t.id_to_token(id)
-                .ok_or_else(|| Error::Tokenizer(format!("decoding failed: unknown token ID: {id}")))
+                .ok_or_else(|| tokenizer_error!("decoding failed: unknown token ID: {id}"))
         })
         .collect::<Result<_>>()?;
     Ok(decode_byte_level(tokens))
@@ -106,18 +104,16 @@ impl HuggingFaceTokenizer {
     /// Load from `tokenizer.json` with `fastokens`.
     pub fn new_fastokens(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with fastokens");
-        let t = FastokensTokenizer::from_file(path).map_err(|error| {
-            Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
-        })?;
+        let t = FastokensTokenizer::from_file(path)
+            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
         Ok(Self::from_fastokens_backend(t))
     }
 
     /// Load from `tokenizer.json` with Hugging Face `tokenizers`.
     pub fn new_hf(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
-        let t = HfTokenizer::from_file(path).map_err(|error| {
-            Error::Tokenizer(format!("failed to load tokenizer: {}", error.as_report()))
-        })?;
+        let t = HfTokenizer::from_file(path)
+            .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
         Ok(Self::from_hf_backend(t))
     }
 
@@ -141,27 +137,25 @@ impl Tokenizer for HuggingFaceTokenizer {
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         match &self.backend {
             Backend::Hf(t) => {
-                let encoding = t.encode(text, add_special_tokens).map_err(|error| {
-                    Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
-                })?;
+                let encoding = t
+                    .encode(text, add_special_tokens)
+                    .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report()))?;
                 Ok(encoding.get_ids().to_vec())
             }
-            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => {
-                t.encode_with_special_tokens(text, add_special_tokens).map_err(|error| {
-                    Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
-                })
-            }
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t
+                .encode_with_special_tokens(text, add_special_tokens)
+                .map_err(|error| tokenizer_error!("encoding failed: {}", error.as_report())),
         }
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         match &self.backend {
-            Backend::Hf(t) => t.decode(token_ids, skip_special_tokens).map_err(|error| {
-                Error::Tokenizer(format!("decoding failed: {}", error.as_report()))
-            }),
-            Backend::Fastokens(t) => t.decode(token_ids, skip_special_tokens).map_err(|error| {
-                Error::Tokenizer(format!("decoding failed: {}", error.as_report()))
-            }),
+            Backend::Hf(t) => t
+                .decode(token_ids, skip_special_tokens)
+                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
+            Backend::Fastokens(t) => t
+                .decode(token_ids, skip_special_tokens)
+                .map_err(|error| tokenizer_error!("decoding failed: {}", error.as_report())),
             Backend::FastokensByteLevel(t) => {
                 decode_fastokens_byte_level(t, token_ids, skip_special_tokens)
             }

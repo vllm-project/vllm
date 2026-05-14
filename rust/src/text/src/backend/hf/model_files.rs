@@ -364,6 +364,7 @@ mod tests {
     use std::fs;
 
     use tempfile::tempdir;
+    use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
     use super::{ResolvedModelFiles, TokenizerSource};
 
@@ -393,5 +394,62 @@ mod tests {
             files.tokenizer_config_path,
             Some(dir.path().join("tokenizer_config.json"))
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to Hugging Face and downloads the real Kimi K2.5 tokenizer"]
+    async fn tiktoken_real_kimi_k25_tokenizer_files_load_and_handle_special_tokens() {
+        let files = ResolvedModelFiles::new("moonshotai/Kimi-K2.5")
+            .await
+            .expect("resolve real Kimi K2.5 model files");
+
+        let tokenizer_path = match &files.tokenizer {
+            TokenizerSource::Tiktoken(path) => path.clone(),
+            other => panic!("expected tiktoken tokenizer source, got {other:?}"),
+        };
+
+        for backend in [
+            TiktokenTokenizer::new_riptoken(&tokenizer_path).expect("load riptoken backend"),
+            TiktokenTokenizer::new_tiktoken_rs(&tokenizer_path).expect("load tiktoken-rs backend"),
+        ] {
+            let think_id = backend.token_to_id("<think>").expect("resolve <think>");
+            let end_think_id = backend.token_to_id("</think>").expect("resolve </think>");
+            let tool_section_id = backend
+                .token_to_id("<|tool_calls_section_begin|>")
+                .expect("resolve tool call section marker");
+            let contraction_heavy_text =
+                "I'm sure it's fine, but I can't say I'd trust that it's what we'd ship.";
+            let contraction_heavy_ids = backend.encode(contraction_heavy_text, false).unwrap();
+
+            assert_eq!(
+                (think_id, end_think_id, tool_section_id),
+                (163606, 163607, 163595)
+            );
+            assert_eq!(backend.decode(&[think_id], true).unwrap(), "<think>");
+            assert_eq!(backend.decode(&[end_think_id], true).unwrap(), "</think>");
+            assert_eq!(
+                backend.decode(&[tool_section_id], true).unwrap(),
+                "<|tool_calls_section_begin|>"
+            );
+
+            // This demonstrates that we're using Kimi's custom BPE pattern.
+            // With CL100K this will be 23 tokens instead.
+            assert_eq!(
+                contraction_heavy_ids,
+                vec![
+                    17172, 3287, 4643, 8201, 11, 996, 374, 8971, 3637, 20020, 8173, 473, 4643,
+                    1573, 56229, 13922, 13,
+                ]
+            );
+            assert_eq!(contraction_heavy_ids.len(), 17);
+            assert_eq!(
+                backend.decode(&contraction_heavy_ids, false).unwrap(),
+                contraction_heavy_text
+            );
+
+            // Special-looking text that is not actually registered should fail gracefully.
+            assert_eq!(backend.token_to_id("◁think▷"), None);
+            assert_eq!(backend.token_to_id("<|definitely_not_registered|>"), None);
+        }
     }
 }

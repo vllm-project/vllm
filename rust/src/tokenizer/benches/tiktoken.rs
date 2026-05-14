@@ -1,6 +1,6 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use hf_hub::api::sync::ApiBuilder;
-use vllm_text::tokenizer::{TiktokenTokenizer, Tokenizer};
+use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
 const MODEL_ID: &str = "moonshotai/Kimi-K2.5";
 const SAMPLE_TEXT: &str = "\

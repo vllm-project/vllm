@@ -3,9 +3,7 @@ use std::path::Path;
 use tekken::Tekkenizer;
 use tracing::info;
 
-use super::Tokenizer;
-use crate::Error;
-use crate::error::Result;
+use crate::{Result, Tokenizer};
 
 /// Mistral Tekken tokenizer from a `tekken.json` file.
 pub struct TekkenTokenizer {
@@ -18,10 +16,10 @@ impl TekkenTokenizer {
         info!(path = %path.display(), "loading tokenizer with Mistral Tekken");
 
         let inner = Tekkenizer::from_file(path).map_err(|error| {
-            Error::Tokenizer(format!(
+            tokenizer_error!(
                 "failed to load tekken tokenizer from {}: {error}",
                 path.display()
-            ))
+            )
         })?;
         Ok(Self { inner })
     }
@@ -31,7 +29,7 @@ impl Tokenizer for TekkenTokenizer {
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
         self.inner
             .encode(text, add_special_tokens, false)
-            .map_err(|error| Error::Tokenizer(format!("encoding failed: {error}")))
+            .map_err(|error| tokenizer_error!("encoding failed: {error}"))
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
@@ -42,7 +40,7 @@ impl Tokenizer for TekkenTokenizer {
         };
         self.inner
             .decode(token_ids, policy)
-            .map_err(|error| Error::Tokenizer(format!("decoding failed: {error}")))
+            .map_err(|error| tokenizer_error!("decoding failed: {error}"))
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {

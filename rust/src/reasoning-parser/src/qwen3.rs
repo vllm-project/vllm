@@ -1,27 +1,26 @@
-use vllm_text::tokenizer::DynTokenizer;
+use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
-/// Reasoning parser for DeepSeek R1 style outputs.
+/// Reasoning parser for the Qwen3/Qwen3.5 family.
 ///
-/// DeepSeek R1 may begin generating directly inside a reasoning span and only
-/// emit the closing `</think>` delimiter, so the no-boundary fallback defaults
-/// to `in_reasoning = true`.
-pub struct DeepSeekR1ReasoningParser {
+/// This parser uses standard `<think>...</think>` delimiters and defaults to
+/// waiting for an explicit start token when prompt initialization finds no
+/// reasoning boundary.
+pub struct Qwen3ReasoningParser {
     inner: DelimitedReasoningParser,
 }
 
-impl DeepSeekR1ReasoningParser {
-    /// Create a DeepSeek R1 parser backed by the shared delimited state
-    /// machine.
+impl Qwen3ReasoningParser {
+    /// Create a Qwen3 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,
+            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false)?,
         })
     }
 }
 
-impl ReasoningParser for DeepSeekR1ReasoningParser {
+impl ReasoningParser for Qwen3ReasoningParser {
     fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,

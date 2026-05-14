@@ -163,11 +163,15 @@ struct FakeChatBackend {
 struct FakeChatTokenizer;
 
 impl Tokenizer for FakeChatTokenizer {
-    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_text::Result<Vec<u32>> {
+    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
         Ok(text.bytes().map(u32::from).collect())
     }
 
-    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
+    fn decode(
+        &self,
+        token_ids: &[u32],
+        skip_special_tokens: bool,
+    ) -> vllm_tokenizer::Result<String> {
         let bytes = token_ids
             .iter()
             .filter_map(|id| {
@@ -285,13 +289,17 @@ struct FailingDecodeBackend {
 struct FailingDecodeTokenizer;
 
 impl Tokenizer for FailingDecodeTokenizer {
-    fn encode(&self, text: &str, add_special_tokens: bool) -> vllm_text::Result<Vec<u32>> {
+    fn encode(&self, text: &str, add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
         FakeChatTokenizer.encode(text, add_special_tokens)
     }
 
-    fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> vllm_text::Result<String> {
+    fn decode(
+        &self,
+        token_ids: &[u32],
+        skip_special_tokens: bool,
+    ) -> vllm_tokenizer::Result<String> {
         if token_ids.contains(&(b'i' as u32)) {
-            return Err(vllm_text::Error::Tokenizer("decode failed".to_string()));
+            return Err(vllm_tokenizer::TokenizerError("decode failed".to_string()));
         }
         FakeChatTokenizer.decode(token_ids, skip_special_tokens)
     }

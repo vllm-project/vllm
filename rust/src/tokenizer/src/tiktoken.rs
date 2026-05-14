@@ -8,9 +8,7 @@ use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 
-use super::Tokenizer;
-use crate::Error;
-use crate::error::Result;
+use crate::{Result, Tokenizer};
 
 /// Default regex pattern used when loading tiktoken from a BPE file. This is
 /// the same `cl100k_base` pattern that HuggingFace transformers uses as its
@@ -279,10 +277,10 @@ impl TiktokenTokenizer {
             config.pattern,
         )
         .map_err(|error| {
-            Error::Tokenizer(format!(
+            tokenizer_error!(
                 "failed to create riptoken tokenizer from {}: {error}",
                 path.display()
-            ))
+            )
         })?;
 
         Ok(Self {
@@ -306,10 +304,10 @@ impl TiktokenTokenizer {
             config.pattern,
         )
         .map_err(|error| {
-            Error::Tokenizer(format!(
+            tokenizer_error!(
                 "failed to create tiktoken-rs tokenizer from {}: {error}",
                 path.display()
-            ))
+            )
         })?;
 
         Ok(Self {
@@ -333,11 +331,11 @@ struct LoadedTiktokenConfig {
 impl LoadedTiktokenConfig {
     fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|error| {
-            Error::Tokenizer(format!(
+            tokenizer_error!(
                 "failed to read tiktoken file {}: {}",
                 path.display(),
                 error.as_report()
-            ))
+            )
         })?;
         let mut encoder: FxHashMap<Vec<u8>, u32> =
             FxHashMap::with_capacity_and_hasher(content.lines().count(), Default::default());
@@ -346,19 +344,16 @@ impl LoadedTiktokenConfig {
                 continue;
             }
             let mut parts = line.split_whitespace();
-            let token_b64 = parts
-                .next()
-                .ok_or_else(|| Error::Tokenizer("missing token in tiktoken file".to_string()))?;
-            let rank_str = parts
-                .next()
-                .ok_or_else(|| Error::Tokenizer("missing rank in tiktoken file".to_string()))?;
-            let token_bytes =
-                base64::engine::general_purpose::STANDARD.decode(token_b64).map_err(|error| {
-                    Error::Tokenizer(format!("invalid base64 in tiktoken file: {error}"))
-                })?;
-            let rank: u32 = rank_str.parse().map_err(|error| {
-                Error::Tokenizer(format!("invalid rank in tiktoken file: {error}"))
-            })?;
+            let token_b64 =
+                parts.next().ok_or_else(|| tokenizer_error!("missing token in tiktoken file"))?;
+            let rank_str =
+                parts.next().ok_or_else(|| tokenizer_error!("missing rank in tiktoken file"))?;
+            let token_bytes = base64::engine::general_purpose::STANDARD
+                .decode(token_b64)
+                .map_err(|error| tokenizer_error!("invalid base64 in tiktoken file: {error}"))?;
+            let rank: u32 = rank_str
+                .parse()
+                .map_err(|error| tokenizer_error!("invalid rank in tiktoken file: {error}"))?;
             encoder.insert(token_bytes, rank);
         }
 
@@ -515,8 +510,7 @@ mod tests {
         CL100K_BASE_PATTERN, KIMI_PATTERN, TiktokenModelConfig, TiktokenTokenizer,
         TiktokenTokenizerConfig, detect_bpe_pattern,
     };
-    use crate::backend::hf::{ResolvedModelFiles, TokenizerSource};
-    use crate::tokenizer::Tokenizer;
+    use crate::Tokenizer;
 
     macro_rules! config_json {
         ($($json:tt)+) => {
@@ -982,59 +976,5 @@ mod tests {
         let backend = TiktokenTokenizer::new_riptoken(&path).expect("load riptoken backend");
 
         assert_eq!(backend.token_to_id("<|definitely_not_registered|>"), None);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires network access to Hugging Face and downloads the real Kimi K2.5 tokenizer"]
-    async fn tiktoken_real_kimi_k25_tokenizer_files_load_and_handle_special_tokens() {
-        let files = ResolvedModelFiles::new("moonshotai/Kimi-K2.5")
-            .await
-            .expect("resolve real Kimi K2.5 model files");
-
-        let tokenizer_path = match &files.tokenizer {
-            TokenizerSource::Tiktoken(path) => path.clone(),
-            other => panic!("expected tiktoken tokenizer source, got {other:?}"),
-        };
-
-        for backend in explicit_backends(&tokenizer_path) {
-            let think_id = backend.token_to_id("<think>").expect("resolve <think>");
-            let end_think_id = backend.token_to_id("</think>").expect("resolve </think>");
-            let tool_section_id = backend
-                .token_to_id("<|tool_calls_section_begin|>")
-                .expect("resolve tool call section marker");
-            let contraction_heavy_text =
-                "I'm sure it's fine, but I can't say I'd trust that it's what we'd ship.";
-            let contraction_heavy_ids = backend.encode(contraction_heavy_text, false).unwrap();
-
-            assert_eq!(
-                (think_id, end_think_id, tool_section_id),
-                (163606, 163607, 163595)
-            );
-            assert_eq!(backend.decode(&[think_id], true).unwrap(), "<think>");
-            assert_eq!(backend.decode(&[end_think_id], true).unwrap(), "</think>");
-            assert_eq!(
-                backend.decode(&[tool_section_id], true).unwrap(),
-                "<|tool_calls_section_begin|>"
-            );
-
-            // This demonstrates that we're using Kimi's custom BPE pattern.
-            // With CL100K this will be 23 tokens instead.
-            assert_eq!(
-                contraction_heavy_ids,
-                vec![
-                    17172, 3287, 4643, 8201, 11, 996, 374, 8971, 3637, 20020, 8173, 473, 4643,
-                    1573, 56229, 13922, 13,
-                ]
-            );
-            assert_eq!(contraction_heavy_ids.len(), 17);
-            assert_eq!(
-                backend.decode(&contraction_heavy_ids, false).unwrap(),
-                contraction_heavy_text
-            );
-
-            // Special-looking text that is not actually registered should fail gracefully.
-            assert_eq!(backend.token_to_id("◁think▷"), None);
-            assert_eq!(backend.token_to_id("<|definitely_not_registered|>"), None);
-        }
     }
 }

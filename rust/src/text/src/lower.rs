@@ -2,11 +2,11 @@ use std::collections::BTreeSet;
 
 use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
 use vllm_llm::GenerateRequest;
+use vllm_tokenizer::Tokenizer;
 
 use crate::backend::SamplingHints;
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
-use crate::tokenizer::Tokenizer;
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -244,7 +244,11 @@ mod tests {
     struct StubTokenizer;
 
     impl Tokenizer for StubTokenizer {
-        fn encode(&self, _text: &str, _add_special_tokens: bool) -> crate::error::Result<Vec<u32>> {
+        fn encode(
+            &self,
+            _text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
             Ok(vec![])
         }
 
@@ -252,7 +256,7 @@ mod tests {
             &self,
             _token_ids: &[u32],
             _skip_special_tokens: bool,
-        ) -> crate::error::Result<String> {
+        ) -> vllm_tokenizer::Result<String> {
             Ok(String::new())
         }
 

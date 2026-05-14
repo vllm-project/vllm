@@ -5507,9 +5507,10 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-reasoning-parser",
  "vllm-text",
+ "vllm-tokenizer",
  "vllm-tool-parser",
- "winnow",
  "zeromq",
 ]
 
@@ -5618,6 +5619,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-reasoning-parser"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "vllm-tokenizer",
+]
+
+[[package]]
 name = "vllm-server"
 version = "0.1.0"
 dependencies = [
@@ -5669,31 +5678,45 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "asynk-strim-attr",
- "base64 0.22.1",
- "criterion",
  "easy-ext",
  "enum-as-inner",
  "expect-test",
- "fastokens",
  "futures",
  "hf-hub 0.5.0",
  "itertools 0.14.0",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "tempfile",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tokio",
+ "tracing",
+ "trait-set",
+ "vllm-engine-core-client",
+ "vllm-llm",
+ "vllm-tokenizer",
+]
+
+[[package]]
+name = "vllm-tokenizer"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "criterion",
+ "fastokens",
+ "hf-hub 0.5.0",
  "riptoken",
  "rustc-hash 1.1.0",
  "serde",
  "serde_json",
- "serde_with",
  "tekken-rs",
  "tempfile",
  "thiserror 2.0.18",
  "thiserror-ext",
  "tiktoken-rs 0.9.1",
  "tokenizers",
- "tokio",
  "tracing",
- "trait-set",
- "vllm-engine-core-client",
- "vllm-llm",
 ]
 
 [[package]]

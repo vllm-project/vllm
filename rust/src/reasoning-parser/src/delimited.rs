@@ -1,4 +1,4 @@
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_tokenizer::{DynTokenizer, Tokenizer};
 
 use super::{ReasoningDelta, ReasoningError, Result};
 

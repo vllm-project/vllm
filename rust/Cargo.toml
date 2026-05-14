@@ -6,8 +6,10 @@ members = [
     "src/llm",
     "src/managed-engine",
     "src/metrics",
+    "src/reasoning-parser",
     "src/server",
     "src/text",
+    "src/tokenizer",
     "src/tool-parser",
 ]
 resolver = "3"
@@ -67,7 +69,7 @@ serial_test = "3.2.0"
 socket2 = "0.6.3"
 subenum = "1.1.3"
 task-local = "0.1.1"
-tekken-rs = { version = "0.1.1", default-features = false }
+tekken = { package = "tekken-rs", version = "0.1.1", default-features = false }
 tempfile = "3.23.0"
 thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
@@ -101,8 +103,10 @@ vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
 vllm-metrics = { path = "src/metrics" }
+vllm-reasoning-parser = { path = "src/reasoning-parser" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
+vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tool-parser = { path = "src/tool-parser" }
 winnow = "1.0.2"
 zeromq = { version = "0.6.0", default-features = false, features = [

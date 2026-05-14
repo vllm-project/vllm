@@ -1,22 +1,28 @@
-use vllm_text::tokenizer::DynTokenizer;
+use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
-/// Reasoning parser for legacy Kimi models that use Unicode thinking tags.
-pub struct KimiReasoningParser {
+/// Reasoning parser for Cohere Command models that use explicit START/END tags.
+pub struct CohereCmdReasoningParser {
     inner: DelimitedReasoningParser,
 }
 
-impl KimiReasoningParser {
-    /// Create a Kimi parser backed by the shared delimited state machine.
+impl CohereCmdReasoningParser {
+    /// Create a Cohere Command parser backed by the shared delimited state
+    /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "◁think▷", "◁/think▷", false)?,
+            inner: DelimitedReasoningParser::new(
+                tokenizer,
+                "<|START_THINKING|>",
+                "<|END_THINKING|>",
+                false,
+            )?,
         })
     }
 }
 
-impl ReasoningParser for KimiReasoningParser {
+impl ReasoningParser for CohereCmdReasoningParser {
     fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,

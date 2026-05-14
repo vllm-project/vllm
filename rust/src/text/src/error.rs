@@ -22,3 +22,9 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<vllm_tokenizer::TokenizerError> for Error {
+    fn from(error: vllm_tokenizer::TokenizerError) -> Self {
+        Self::Tokenizer(error.0)
+    }
+}

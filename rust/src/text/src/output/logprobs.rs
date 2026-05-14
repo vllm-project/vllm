@@ -1,9 +1,9 @@
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use vllm_llm::{Logprobs, PositionLogprobs};
+use vllm_tokenizer::Tokenizer;
 
 use crate::error::Error;
-use crate::tokenizer::Tokenizer;
 
 /// One decoded token candidate and its logprob metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,12 +135,20 @@ mod tests {
     #[derive(Debug)]
     struct ByteTokenizer;
 
-    impl crate::tokenizer::Tokenizer for ByteTokenizer {
-        fn encode(&self, _text: &str, _add_special_tokens: bool) -> crate::Result<Vec<u32>> {
+    impl vllm_tokenizer::Tokenizer for ByteTokenizer {
+        fn encode(
+            &self,
+            _text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
             unreachable!()
         }
 
-        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> crate::Result<String> {
+        fn decode(
+            &self,
+            token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<String> {
             Ok(String::from_utf8_lossy(
                 &token_ids.iter().map(|token_id| *token_id as u8).collect::<Vec<_>>(),
             )

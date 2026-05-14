@@ -1,26 +1,22 @@
-use vllm_text::tokenizer::DynTokenizer;
+use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
-/// Reasoning parser for the Qwen3/Qwen3.5 family.
-///
-/// This parser uses standard `<think>...</think>` delimiters and defaults to
-/// waiting for an explicit start token when prompt initialization finds no
-/// reasoning boundary.
-pub struct Qwen3ReasoningParser {
+/// Reasoning parser for legacy Kimi models that use Unicode thinking tags.
+pub struct KimiReasoningParser {
     inner: DelimitedReasoningParser,
 }
 
-impl Qwen3ReasoningParser {
-    /// Create a Qwen3 parser backed by the shared delimited state machine.
+impl KimiReasoningParser {
+    /// Create a Kimi parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false)?,
+            inner: DelimitedReasoningParser::new(tokenizer, "◁think▷", "◁/think▷", false)?,
         })
     }
 }
 
-impl ReasoningParser for Qwen3ReasoningParser {
+impl ReasoningParser for KimiReasoningParser {
     fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,

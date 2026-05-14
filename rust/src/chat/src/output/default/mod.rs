@@ -136,11 +136,9 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, tokenizer)?;
 
-        parser.adjust_request(request).map_err(|error| Error::ParserInitialization {
-            kind: "reasoning",
-            name: parser_name.to_string(),
-            error: error.into(),
-        })?;
+        if parser.preserve_special_tokens() {
+            request.decode_options.skip_special_tokens = false;
+        }
 
         REASONING_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using reasoning parser"));
         Ok(Some(parser))

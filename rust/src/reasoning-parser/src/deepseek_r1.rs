@@ -1,28 +1,27 @@
-use vllm_text::tokenizer::DynTokenizer;
+use vllm_tokenizer::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
-/// Reasoning parser for Cohere Command models that use explicit START/END tags.
-pub struct CohereCmdReasoningParser {
+/// Reasoning parser for DeepSeek R1 style outputs.
+///
+/// DeepSeek R1 may begin generating directly inside a reasoning span and only
+/// emit the closing `</think>` delimiter, so the no-boundary fallback defaults
+/// to `in_reasoning = true`.
+pub struct DeepSeekR1ReasoningParser {
     inner: DelimitedReasoningParser,
 }
 
-impl CohereCmdReasoningParser {
-    /// Create a Cohere Command parser backed by the shared delimited state
+impl DeepSeekR1ReasoningParser {
+    /// Create a DeepSeek R1 parser backed by the shared delimited state
     /// machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
-            inner: DelimitedReasoningParser::new(
-                tokenizer,
-                "<|START_THINKING|>",
-                "<|END_THINKING|>",
-                false,
-            )?,
+            inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,
         })
     }
 }
 
-impl ReasoningParser for CohereCmdReasoningParser {
+impl ReasoningParser for DeepSeekR1ReasoningParser {
     fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,
