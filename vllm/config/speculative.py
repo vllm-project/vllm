@@ -67,7 +67,7 @@ SpeculativeMethod = Literal[
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
-DraftSampleMethod = Literal["greedy", "gumbel"]
+DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config
@@ -256,10 +256,10 @@ class SpeculativeConfig:
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
-    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
-    draft logits are used for the probability ratio test during rejection
-    sampling. This comes at the cost of additional GPU memory usage. This
-    parameter currently only applies to Model Runner V2."""
+    sampling. 'probabilistic' samples stochastically from the draft
+    distribution and uses the full draft logits for the probability ratio test
+    during rejection sampling. This comes at the cost of additional GPU memory
+    usage."""
 
     def compute_hash(self) -> str:
         """
