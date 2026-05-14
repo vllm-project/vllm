@@ -356,8 +356,8 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=hidden_pad,
-            intermediate_pad=intermediate_pad,
+            hidden_pad=hidden_pad // 128 * 128,
+            intermediate_pad=intermediate_pad // 64 * 64 * 2,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
