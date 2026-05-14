@@ -384,6 +384,28 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 device=self.device,
             )
 
+            # Pre-grow the workspace for _forward_with_dcp's context-branch
+            # output. CUDA-graph warmup only exercises decode-sized batches
+            # (n <= max_num_seqs), but the prefill DCP context branch is
+            # invoked with up to max_num_batched_tokens. Without this
+            # pre-grow, lock_workspace() at the end of capture happens at
+            # the smaller decode size and prefill batches hit
+            # "Workspace is locked but allocation requires ... MB".
+            total_attn_heads = self.model_config.hf_config.num_attention_heads
+            tp_size = self.parallel_config.tensor_parallel_size
+            # Max per-rank head count in the DCP context branch is the
+            # same under both modes: non-TPA needs num_heads_q*dcp after
+            # all-gather; TPA-GQA needs num_heads_q natively. Under the
+            # TPA invariant TPA*DCP=TP, both equal total/tp*dcp.
+            max_context_heads = (total_attn_heads // tp_size) * self.dcp_world_size
+            max_n = vllm_config.scheduler_config.max_num_batched_tokens
+            _ = current_workspace_manager().get_simultaneous(
+                (
+                    (max_n, max_context_heads, self.headdim),
+                    self.model_config.dtype,
+                ),
+            )
+
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
