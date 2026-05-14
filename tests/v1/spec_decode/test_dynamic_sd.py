@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for the Dynamic SD batch-size schedule manager."""
 
 from tests.v1.core.utils import create_requests, create_scheduler
@@ -13,9 +15,7 @@ def _make_manager(
     max_batch_size: int = 256,
     runtime_num_speculative_tokens: int = 3,
 ) -> DynamicSpeculativeDecodingManager:
-    config = DynamicSpeculativeConfig(
-        num_speculative_tokens_per_batch_size=schedule
-    )
+    config = DynamicSpeculativeConfig(num_speculative_tokens_per_batch_size=schedule)
     return DynamicSpeculativeDecodingManager(
         config,
         vllm_max_batch_size=max_batch_size,
@@ -45,9 +45,7 @@ def _make_scheduler_with_dynamic_sd(
         kv_cache_config=base_scheduler.kv_cache_config,
         block_size=base_scheduler.block_size,
         log_stats=True,
-        structured_output_manager=StructuredOutputManager(
-            base_scheduler.vllm_config
-        ),
+        structured_output_manager=StructuredOutputManager(base_scheduler.vllm_config),
     )
 
 

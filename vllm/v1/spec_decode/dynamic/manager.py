@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
+import regex as re
 
 from vllm.config.speculative import DynamicSpeculativeConfig
 
@@ -50,9 +50,7 @@ class DynamicSpeculativeDecodingManager:
             self._optimal_num_speculative_tokens[batch_size],
         )
 
-    def _parse_schedule(
-        self, schedule: dict[str, int]
-    ) -> list[tuple[int, int, int]]:
+    def _parse_schedule(self, schedule: dict[str, int]) -> list[tuple[int, int, int]]:
         parsed_schedule: list[tuple[int, int, int]] = []
 
         for batch_size_range, num_speculative_tokens in schedule.items():
@@ -72,21 +70,16 @@ class DynamicSpeculativeDecodingManager:
                 )
             if range_start > range_end:
                 raise ValueError(
-                    "Batch-size range start must be <= end for "
-                    f"{batch_size_range!r}."
+                    f"Batch-size range start must be <= end for {batch_size_range!r}."
                 )
             if num_speculative_tokens < 0:
                 raise ValueError(
                     "num_speculative_tokens_per_batch_size values must be >= 0."
                 )
-            parsed_schedule.append(
-                (range_start, range_end, num_speculative_tokens)
-            )
+            parsed_schedule.append((range_start, range_end, num_speculative_tokens))
 
         if not parsed_schedule:
-            raise ValueError(
-                "num_speculative_tokens_per_batch_size must not be empty."
-            )
+            raise ValueError("num_speculative_tokens_per_batch_size must not be empty.")
 
         parsed_schedule.sort(key=lambda entry: entry[0])
 
@@ -113,7 +106,10 @@ class DynamicSpeculativeDecodingManager:
         last_num_speculative_tokens: int | None = None
 
         for range_start, range_end, num_speculative_tokens in self._schedule:
-            if range_start > next_batch_size and last_num_speculative_tokens is not None:
+            if (
+                range_start > next_batch_size
+                and last_num_speculative_tokens is not None
+            ):
                 for batch_size in range(
                     next_batch_size,
                     min(range_start, self.vllm_max_batch_size + 1),
