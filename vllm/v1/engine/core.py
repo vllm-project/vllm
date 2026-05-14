@@ -1709,9 +1709,7 @@ class DPEngineCoreProc(EngineCoreProc):
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
-            # Publish updated request counts to the DP coordinator BEFORE the
-            # GPU step. This makes newly-drained ADDs visible to the LB ~1 step
-            # earlier than publishing only post-step.
+            # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
 
             if self.eep_scaling_state is not None:
