@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -40,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
@@ -745,6 +747,39 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 def test_reload_weights_before_load_model(model_runner):
     with pytest.raises(ValueError):
         model_runner.reload_weights()
+
+
+def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
+    runner = object.__new__(GPUModelRunner)
+    runner.use_async_scheduling = False
+    runner.input_batch = SimpleNamespace(
+        sampling_metadata=Mock(spec=SamplingMetadata),
+        update_async_output_token_ids=Mock(),
+        req_ids=["req_a", "req_b", "req_c"],
+    )
+    runner.rejection_sampler = Mock(return_value="sampler_output")
+    runner.sampler = Mock()
+    runner._draft_prob_req_ids = ["req_c", "req_a", "req_b"]
+    runner._draft_probs = torch.arange(3 * 3 * 4, dtype=torch.float32).reshape(3, 3, 4)
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        [[1, 2], [], [3]],
+        device=torch.device("cpu"),
+    )
+    logits = torch.randn(6, 4)
+
+    output = GPUModelRunner._sample(runner, logits, spec_decode_metadata)
+
+    assert output == "sampler_output"
+    passed_draft_probs = runner.rejection_sampler.call_args.args[1]
+    expected_draft_probs = torch.cat(
+        [
+            runner._draft_probs[1, :2],
+            runner._draft_probs[0, :1],
+        ],
+        dim=0,
+    )
+    assert torch.equal(passed_draft_probs, expected_draft_probs)
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
