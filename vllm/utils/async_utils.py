@@ -185,11 +185,17 @@ class AsyncMicrobatchTokenizer:
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
+        - `return_offsets_mapping`: {True/False}
+          Routed to a separate can_batch queue so requests that need
+          offset mappings are not fused into a batched tokenizer call
+          whose first request did not ask for them (the batched call
+          uses only the first request's kwargs).
 
         Examples:
           - Decode: ("decode",)
           - Encode typical:
-            ("encode", add_special_tokens, bool_truncation, max_length_label)
+            ("encode", add_special_tokens, bool_truncation, max_length_label,
+             return_offsets_mapping)
           - Fallback: ("encode", "other")
         """
 
@@ -199,13 +205,14 @@ class AsyncMicrobatchTokenizer:
         add_special_tokens = kwargs.get("add_special_tokens", True)
         truncation = kwargs.get("truncation", False)
         max_length = kwargs.get("max_length")
+        return_offsets = bool(kwargs.get("return_offsets_mapping", False))
 
         if not truncation:
-            return "encode", add_special_tokens, False, None
+            return "encode", add_special_tokens, False, None, return_offsets
 
         model_max = getattr(self.tokenizer, "model_max_length", None)
         if max_length is None or (model_max is not None and max_length == model_max):
-            return "encode", add_special_tokens, True, "model_max"
+            return "encode", add_special_tokens, True, "model_max", return_offsets
 
         return "encode", "other"
 

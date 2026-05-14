@@ -181,3 +181,35 @@ class TestTokenizePromptOffsets:
         result = await renderer._tokenize_prompt_async(prompt, params)
 
         assert "prompt_token_offsets" not in result
+
+    @pytest.mark.asyncio
+    async def test_async_concurrent_offset_and_non_offset_requests(
+        self, fast_tokenizer
+    ):
+        """Regression test: concurrent calls with and without
+        `return_offsets_mapping=True` must not be fused into the same
+        batched tokenizer invocation. Before the fix, the offset
+        requester could land in the same can-batch queue as a
+        non-offset requester whose kwargs lacked `return_offsets_mapping`,
+        causing the resulting BatchEncoding to omit `offset_mapping`."""
+        import asyncio
+
+        from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+
+        async_tokenizer = AsyncMicrobatchTokenizer(fast_tokenizer)
+
+        # Race both into the same batching window (default
+        # batch_wait_timeout_s=0.002s).
+        offset_result, plain_result = await asyncio.gather(
+            async_tokenizer("Hello, world.", return_offsets_mapping=True),
+            async_tokenizer("Hello, world."),
+        )
+
+        # The offset-requesting result must include offset_mapping.
+        assert "offset_mapping" in offset_result
+        assert offset_result["offset_mapping"] is not None
+        assert len(offset_result["offset_mapping"]) == len(offset_result["input_ids"])
+        # The non-offset result must still produce input_ids without
+        # raising and without offset_mapping.
+        assert "input_ids" in plain_result
+        assert "offset_mapping" not in plain_result
