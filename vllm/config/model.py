@@ -702,6 +702,7 @@ class ModelConfig:
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
         self._try_verify_and_update_model_config()
+        self._verify_return_routed_experts()
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
@@ -1092,6 +1093,13 @@ class ModelConfig:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
                 "when expert parallelism is enabled."
+            )
+
+    def _verify_return_routed_experts(self) -> None:
+        if self.enable_return_routed_experts and not self.is_moe:
+            raise ValueError(
+                "--enable-return-routed-experts requires a MoE model. "
+                "Disable it for dense models."
             )
 
     def _try_verify_and_update_model_config(self):

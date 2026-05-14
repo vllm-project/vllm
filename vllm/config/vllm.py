@@ -1209,8 +1209,6 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        self._validate_return_routed_experts()
-
         if envs.VLLM_USE_V2_MODEL_RUNNER:
             self._validate_v2_model_runner()
 
@@ -1927,17 +1925,6 @@ class VllmConfig:
             raise ValueError(
                 "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
                 + ", ".join(unsupported)
-            )
-
-    def _validate_return_routed_experts(self) -> None:
-        if (
-            self.model_config is not None
-            and self.model_config.enable_return_routed_experts
-            and not self.model_config.is_moe
-        ):
-            raise ValueError(
-                "--enable-return-routed-experts requires a MoE model. "
-                "Disable it for dense models."
             )
 
     def validate_block_size(self) -> None:
