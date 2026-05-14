@@ -40,12 +40,13 @@ from vllm.platforms import current_platform
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerBlockOnlineMoEMethod,
         ),
-        # quantization='online' with per-layer-kind overrides
+        # quantization='online with linear_scheme_override and
+        # moe_scheme_override
         (
             "online",
             {
-                "linear": "fp8_per_block",
-                "moe": "fp8_per_tensor",
+                "linear_scheme_override": "fp8_per_block",
+                "moe_scheme_override": "fp8_per_tensor",
             },
             Fp8PerBlockOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
