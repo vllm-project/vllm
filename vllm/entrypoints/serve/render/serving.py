@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 from openai_harmony import Message as OpenAIMessage
 
@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     MultiModalFeatures,
@@ -37,6 +38,7 @@ from vllm.entrypoints.utils import (
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
+    MultiModalInput,
     MultiModalPlaceholders,
     PromptType,
     SingletonPrompt,
@@ -54,7 +56,7 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
@@ -65,7 +67,6 @@ class OpenAIServingRender:
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        io_processor: Any,
         model_registry: OpenAIModelRegistry,
         *,
         request_logger: RequestLogger | None,
@@ -81,7 +82,6 @@ class OpenAIServingRender:
     ) -> None:
         self.model_config = model_config
         self.renderer = renderer
-        self.io_processor = io_processor
         self.model_registry = model_registry
         self.request_logger = request_logger
         self.chat_template = chat_template
@@ -136,7 +136,7 @@ class OpenAIServingRender:
                 "Beam search is not supported by the render endpoint"
             )
 
-        result = await self.render_chat(request)
+        result = await self.render_chat(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
 
@@ -164,6 +164,7 @@ class OpenAIServingRender:
             input_length,
             self.default_sampling_params,
             self.override_max_tokens,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
@@ -184,6 +185,8 @@ class OpenAIServingRender:
     async def render_chat(
         self,
         request: ChatCompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """Core preprocessing logic for chat requests (no model/engine check).
 
@@ -252,6 +255,7 @@ class OpenAIServingRender:
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
+                skip_mm_cache=skip_mm_cache,
                 reasoning_parser=self.reasoning_parser,
             )
         else:
@@ -275,7 +279,7 @@ class OpenAIServingRender:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
-        result = await self.render_completion(request)
+        result = await self.render_completion(request, skip_mm_cache=True)
         if isinstance(result, ErrorResponse):
             return result
         generate_requests: list[GenerateRequest] = []
@@ -295,6 +299,7 @@ class OpenAIServingRender:
                 input_length,
                 self.default_sampling_params,
                 self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
             )
             params = request.to_sampling_params(
                 max_tokens, self.default_sampling_params
@@ -321,6 +326,8 @@ class OpenAIServingRender:
     async def render_completion(
         self,
         request: CompletionRequest,
+        *,
+        skip_mm_cache: bool = False,
     ) -> list[EngineInput] | ErrorResponse:
         """Core preprocessing logic for completion requests (no model/engine check).
 
@@ -343,6 +350,7 @@ class OpenAIServingRender:
             request,
             prompt_input=request.prompt,
             prompt_embeds=request.prompt_embeds,
+            skip_mm_cache=skip_mm_cache,
         )
 
         return engine_inputs
@@ -358,9 +366,10 @@ class OpenAIServingRender:
         if engine_input.get("type") != "multimodal":
             return None
 
-        # At this point engine_input is a MultiModalInputs TypedDict.
-        mm_hashes: MultiModalHashes = engine_input["mm_hashes"]  # type: ignore[typeddict-item]
-        raw_placeholders: MultiModalPlaceholders = engine_input["mm_placeholders"]  # type: ignore[typeddict-item]
+        # At this point engine_input is a MultiModalInput TypedDict.
+        mm_engine_input = cast(MultiModalInput, engine_input)
+        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
 
         mm_placeholders = {
             modality: [
@@ -369,9 +378,20 @@ class OpenAIServingRender:
             for modality, ranges in raw_placeholders.items()
         }
 
+        # Serialize tensor data per modality.
+        kwargs_data: dict[str, list[str | None]] | None = None
+        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
+            kwargs_data = {}
+            for modality, items in raw_mm_kwargs.items():
+                kwargs_data[modality] = [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+
         return MultiModalFeatures(
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
+            kwargs_data=kwargs_data,
         )
 
     def _make_request_with_harmony(
@@ -523,7 +543,10 @@ class OpenAIServingRender:
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                tokenize=(
+                    is_mistral_tokenizer(renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
             ),
         )
 
@@ -550,14 +573,28 @@ class OpenAIServingRender:
 
         if reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
-            request = reasoning_parser(tokenizer).adjust_request(request=request)
+            request = reasoning_parser(
+                tokenizer,
+                model_config=self.model_config,
+                chat_template_kwargs=chat_params.chat_template_kwargs,
+            ).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        #
+        # Exception: Mistral grammar-capable tokenizers always call
+        # adjust_request — even for tool_choice="none" — so that the grammar
+        # factory can prevent special-token leakage.
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
+            tokenizer = renderer.get_tokenizer()
+            is_mistral_grammar_eligible = (
+                is_mistral_tool_parser(tool_parser)
+                and is_mistral_tokenizer(tokenizer)
+                and tokenizer.supports_grammar
+            )
+            if tool_choice != "none" or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -565,7 +602,6 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer, request.tools).adjust_request(
                     request=request
                 )

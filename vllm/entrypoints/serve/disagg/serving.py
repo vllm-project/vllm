@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -33,9 +34,15 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateStreamResponse,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import should_include_usage
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
@@ -74,6 +81,18 @@ class ServingTokens(OpenAIServing):
                 "step for incoming requests."
             )
 
+        # Mirrors ``OpenAIServingChat`` so we can apply server-side
+        # ``max_tokens`` defaulting when the client omits it. Without this,
+        # ``SamplingParams.max_tokens`` falls back to its dataclass default
+        # of 16 and silently truncates every generation.
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
+
     async def serve_tokens(
         self,
         request: GenerateRequest,
@@ -103,15 +122,60 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        (engine_input,) = await self.openai_serving_render.preprocess_completion(
-            request,
-            prompt_input=request.token_ids,
-            prompt_embeds=None,
-        )
+        engine_input: EngineInput
+        if features := request.features:
+            # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
+            mm_placeholders: dict[str, list[PlaceholderRange]] = {
+                modality: [
+                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
+                ]
+                for modality, ranges in features.mm_placeholders.items()
+            }
+
+            # Deserialize tensor data when present; None → cache hit.
+            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
+            if features.kwargs_data is not None:
+                for modality, items in features.kwargs_data.items():
+                    mm_kwargs[modality] = [
+                        decode_mm_kwargs_item(item) if item is not None else None
+                        for item in items
+                    ]
+            else:
+                for modality, hashes in features.mm_hashes.items():
+                    mm_kwargs[modality] = [None] * len(hashes)
+
+            engine_input = mm_input(
+                prompt_token_ids=request.token_ids,
+                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+                mm_hashes=features.mm_hashes,
+                mm_placeholders=mm_placeholders,
+                cache_salt=request.cache_salt,
+            )
+        else:
+            (engine_input,) = await self.openai_serving_render.preprocess_completion(
+                request,
+                prompt_input=request.token_ids,
+                prompt_embeds=None,
+                skip_mm_cache=True,
+            )
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
         sampling_params = request.sampling_params
+
+        # Apply server-side ``max_tokens`` defaulting when the client did
+        # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
+        # defaults ``max_tokens`` to 16, which would otherwise silently cap
+        # every generation that omits the field.
+        if not request.is_sampling_param_provided("max_tokens"):
+            sampling_params.max_tokens = get_max_tokens(
+                max_model_len=self.model_config.max_model_len,
+                max_tokens=None,
+                input_length=self._extract_prompt_len(engine_input),
+                default_sampling_params=self.default_sampling_params,
+                override_max_tokens=self.override_max_tokens,
+            )
+
         if self.force_no_detokenize:
             sampling_params.detokenize = False
         if request.stream:

@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import 
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import set_random_seed
 
 
 def mxint4_quantize(
@@ -134,7 +135,7 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
     pytest.importorskip("flashinfer")
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_INT4", "1")
 
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     dtype = torch.bfloat16
 
@@ -289,7 +290,7 @@ def test_flashinfer_trtllm_mxint4_moe_wrapper(m, n, k, e, topk):
         flashinfer_trtllm_mxint4_moe,
     )
 
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
     dtype = torch.bfloat16
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) * 0.5
