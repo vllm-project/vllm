@@ -193,11 +193,14 @@ def make_wna16_moe_kernel(
         maybe_make_prepare_finalize,
     )
 
+    is_monolithic = experts_cls.is_monolithic()
+
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
+        use_monolithic=is_monolithic,
     )
     assert prepare_finalize is not None
 
@@ -231,8 +234,6 @@ def make_wna16_moe_kernel(
             quant_config=moe_quant_config,
             **extra_args,
         )
-
-    is_monolithic = experts_cls.is_monolithic()
 
     return mk.FusedMoEKernel(
         prepare_finalize,
