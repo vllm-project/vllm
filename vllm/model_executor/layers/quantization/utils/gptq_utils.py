@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from copy import deepcopy
+from fractions import Fraction
+from itertools import chain
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
@@ -82,6 +84,8 @@ def is_layer_gptq_quantized(
     # Full prefix ["model.layers.0.self_attn.q_proj"]
 
     proj_name = prefix.split(".")[-1]
+
+    quantized_layers = list(chain.from_iterable(quantized_layers))
 
     # Fused layers like gate_up_proj or qkv_proj will not be fused
     # in the safetensors checkpoint. So, we convert the name

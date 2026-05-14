@@ -226,7 +226,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
 
-        num_bits = (self.quant_config.weight_bits,)
+        num_bits = self.quant_config.weight_bits
         group_size = self.quant_config.group_size
 
         if num_bits == 4:
@@ -407,8 +407,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            layer.w13_qweight,
+            layer.w2_qweight,
             topk_weights,
             topk_ids,
             activation=layer.activation,

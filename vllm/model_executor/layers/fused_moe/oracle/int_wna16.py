@@ -224,6 +224,7 @@ def make_wna16_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
     if issubclass(experts_cls, MarlinExpertsBase):
@@ -642,6 +643,7 @@ def _process_awq_weights_marlin(
     )
 
 
+# add zp?
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
@@ -761,6 +763,25 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_g_idx,
             w2_g_idx,
+            w13_bias,
+            w2_bias,
+        )
+    elif backend in (
+        WNA16MoEBackend.TRITON,
+        WNA16MoEBackend.FLASHINFER,
+    ):
+        # TODO(bnell): fill in
+        return (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
+            None,
+            None,
+            None,
+            None,
             w13_bias,
             w2_bias,
         )
