@@ -394,8 +394,8 @@ steps:
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # Features demo
     - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-    - python3 offline_inference/llm_engine_example.py
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 deployment/llm_engine_example.py
+    - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
@@ -460,7 +460,7 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
 #------------------------------------------------------  mi250 · model_executor  -------------------------------------------------------#
 
@@ -880,7 +880,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+  - ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 - label: V1 e2e (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -929,6 +929,7 @@ steps:
   - tests/tokenizers_
   - tests/reasoning
   - tests/tool_parsers
+  - tests/parser
   - tests/transformers_utils
   - tests/config
   commands:
@@ -942,6 +943,7 @@ steps:
   - pytest -v -s tokenizers_
   - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
   - pytest -v -s tool_parsers
+  - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
@@ -1100,13 +1102,13 @@ steps:
   - vllm/compilation/
   - vllm/model_executor/layers
   - tests/compile/passes/distributed/
+  - tests/compile/fusions_e2e/
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
-  - pytest -v -s tests/compile/passes/distributed/test_sequence_parallelism.py
-  - pytest -v -s tests/compile/passes/distributed/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py::test_tp2_ar_rms_fusions
 
 #-----------------------------------------------------------  mi300 · cuda  ------------------------------------------------------------#
 
@@ -1320,7 +1322,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
@@ -1336,7 +1337,21 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+
+- label: Entrypoints Integration (Speech to Text) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/speech_to_text
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/speech_to_text
 
 - label: Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
@@ -1649,8 +1664,8 @@ steps:
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # Features demo
     - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-    - python3 offline_inference/llm_engine_example.py
-    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 deployment/llm_engine_example.py
+    - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
@@ -1760,7 +1775,7 @@ steps:
   - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
-  - pytest -v -s -x lora/test_llm_with_multi_loras.py
+  - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
@@ -1803,9 +1818,10 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
-  - pytest -v -s models/multimodal/test_mapping.py
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
@@ -1817,8 +1833,10 @@ steps:
   - vllm/
   - tests/models/multimodal/generation
   commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
   timeout_in_minutes: 180
@@ -2763,7 +2781,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - pytest -v -s entrypoints/openai/speech_to_text/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration (API Server openai - Part 3) # TBD
@@ -2779,7 +2796,21 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+
+- label: Entrypoints Integration (Speech to Text) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi355]
+  agent_pool: mi355_1
+  fast_check: true
+  torch_nightly: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/speech_to_text
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/speech_to_text
 
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
@@ -2930,8 +2961,8 @@ steps:
   - python3 pooling/embed/vision_embedding_offline.py --seed 0
   # Features demo
   - python3 features/automatic_prefix_caching/prefix_caching_offline.py
-  - python3 offline_inference/llm_engine_example.py
-  - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+  - python3 deployment/llm_engine_example.py
+  - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
   - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
   - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
@@ -3043,7 +3074,7 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
@@ -3318,7 +3349,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-  - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+  - ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
 
 - label: Distributed NixlConnector PD accuracy (4 GPUs) # TBD
   timeout_in_minutes: 180

@@ -263,7 +263,7 @@
             {%- if message.get('tool_responses') -%}
                 {#- Legacy: tool_responses embedded on the assistant message (Google/Gemma native) -#}
                 {%- for tool_response in message['tool_responses'] -%}
-                    {{- format_tool_response_block(tool_response['name'] | default('unknown'), tool_response['response']) -}}
+                    {{- format_tool_response_block(tool_response['name'] | default('unknown', true), tool_response['response']) -}}
                     {%- set ns_tr_out.flag = true -%}
                     {%- set ns.prev_message_type = 'tool_response' -%}
                 {%- endfor -%}
@@ -277,7 +277,7 @@
                     {%- else -%}
                         {%- set follow = loop_messages[k] -%}
                         {#- Resolve tool_call_id to function name -#}
-                        {%- set ns_tname = namespace(name=follow.get('name') | default('unknown')) -%}
+                        {%- set ns_tname = namespace(name=follow.get('name') | default('unknown', true)) -%}
                         {%- for tc in message['tool_calls'] -%}
                             {%- if tc.get('id') == follow.get('tool_call_id') -%}
                                 {%- set ns_tname.name = tc['function']['name'] -%}
