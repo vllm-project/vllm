@@ -19,7 +19,6 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 logger = logging.getLogger(__name__)
 
 
-
 def _get_num_experts_per_tok(hf_config) -> int:
     """Resolve the per-token expert count from the HF config.
 
