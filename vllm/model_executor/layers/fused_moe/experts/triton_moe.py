@@ -294,7 +294,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         if (
             activation == MoEActivation.SILU
             and self.quant_config.use_fp8_w8a8
-            and list(self.block_shape) == [128, 128]
+            and self.block_shape == [128, 128]
             and lora_context is None
             and not is_deep_gemm_e8m0_used()
         ):
