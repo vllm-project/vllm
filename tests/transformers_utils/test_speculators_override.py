@@ -106,6 +106,20 @@ def test_speculators_user_cannot_override_model_field():
     assert spec["model"] == "fake-org/fake-dflash-spec"
 
 
+def test_speculators_user_cannot_override_method_field():
+    user_overrides = {"method": "ngram"}
+    with _patched_get_config_dict(_SPECULATORS_CONFIG_DICT):
+        _, _, spec = maybe_override_with_speculators(
+            model="fake-org/fake-dflash-spec",
+            tokenizer=None,
+            trust_remote_code=False,
+            vllm_speculative_config=user_overrides,
+        )
+
+    assert spec is not None
+    assert spec["method"] == "dflash"
+
+
 def test_speculators_user_can_override_num_speculative_tokens():
     """Runtime knobs (num_speculative_tokens, moe_backend, etc.) take user value."""
     user_overrides = {
