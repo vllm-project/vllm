@@ -1245,7 +1245,7 @@ def process_fp8_weight_tensor_strategy(
         requantize_with_max_scale,
     )
 
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
         weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
@@ -1271,7 +1271,7 @@ def process_fp8_weight_channel_strategy(
         normalize_e4m3fn_to_e4m3fnuz,
     )
 
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
         weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale, input_scale=input_scale
         )
@@ -1288,7 +1288,7 @@ def process_fp8_weight_block_strategy(
         normalize_e4m3fn_to_e4m3fnuz,
     )
 
-    if current_platform.is_fp8_fnuz():
+    if current_platform.is_fp8_fnuz() and weight.dtype == torch.float8_e4m3fn:
         weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
             weight=weight, weight_scale=weight_scale
         )
