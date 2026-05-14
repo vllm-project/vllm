@@ -17,6 +17,7 @@ from vllm.config.speculative import DynamicSpeculativeConfig
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.metrics.reader import Counter, Vector
+from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
 
 
 def build_serve_params(
@@ -405,7 +406,7 @@ def main():
 
     # Step 4: Save DynamicSpeculativeConfig to a json file
     dynamic_config = DynamicSpeculativeConfig(
-        is_online=False,
+        use_online_acceptance_rate=False,
         max_num_speculative_tokens=len(acceptance_rate_per_pos),
         acceptance_rate_per_pos=acceptance_rate_per_pos,
         batch_stats=batch_stats,
@@ -419,6 +420,17 @@ def main():
 
     end = time.time()
     print(f"Total time taken: {end - start:.2f} seconds")
+
+    manager = DynamicSpeculativeDecodingManager(
+        dynamic_config=dynamic_config,
+        vllm_max_batch_size=args.max_vllm_batch_size,
+        vllm_num_speculative_tokens=args.num_spec_tokens,
+    )
+    print("Optimal K by batch size:")
+    bs = 1
+    while bs <= args.max_vllm_batch_size:
+        print(f"  BS {bs}: {manager.get_optimal_num_speculative_tokens(bs)}")
+        bs *= 2
 
 
 """

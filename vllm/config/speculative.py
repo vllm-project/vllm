@@ -76,8 +76,8 @@ class DynamicSpeculativeConfig:
     batch size. This is used to dynamically adjust the number of drafts used
     based on the current batch size."""
 
-    is_online: bool = False
-    """Whether the statistics are updated online or not during inference."""
+    use_online_acceptance_rate: bool = False
+    """Uses latest acceptance rates to calculate the optimal K during inference."""
 
     batch_stats: dict[int, dict[int, float]] | None = None
     """ 

@@ -17,12 +17,12 @@ class DynamicSpeculativeDecodingManager:
         dynamic_config: DynamicSpeculativeConfig,
         vllm_max_batch_size: int,
         vllm_num_speculative_tokens: int,
-        warmup_steps: int = 10,  # TODO: make this configurable
+        warmup_steps: int = 100,  # TODO: make this configurable
     ):
         self.dynamic_config = dynamic_config
         self.vllm_max_batch_size = vllm_max_batch_size
         self.vllm_num_speculative_tokens = vllm_num_speculative_tokens
-
+        self.use_online_acceptance_rate = dynamic_config.use_online_acceptance_rate
         assert dynamic_config.batch_stats is not None, (
             "batch_stats is required for dynamic speculative decoding"
         )
@@ -108,8 +108,11 @@ class DynamicSpeculativeDecodingManager:
         return acceptance_rate_per_pos
 
     def should_update(self) -> bool:
-        # making this a separate function for easier overriding or extension
-        return self.steps > self.warmup_steps
+        # Dynamic SD always adapts K by batch size. This only gates whether
+        # runtime-observed acceptance rates are allowed to refine the offline
+        # acceptance-rate profile after warmup.
+        # return self.steps > self.warmup_steps
+        return self.use_online_acceptance_rate and self.steps > self.warmup_steps
 
     def get_optimal_num_speculative_tokens(self, batch_size: int) -> int:
         assert batch_size > 0, "batch_size must be > 0"
