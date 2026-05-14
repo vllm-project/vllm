@@ -310,6 +310,7 @@ async def async_request_openai_chat_completions(
         "stream": True,
         "stream_options": {
             "include_usage": True,
+            "continuous_usage_stats": True,
         },
     }
     _update_payload_common(payload, request_func_input)
@@ -322,6 +323,7 @@ async def async_request_openai_chat_completions(
 
     generated_text = ""
     ttft = 0.0
+    prev_completion_tokens = 0
     st = time.perf_counter()
     output.start_time = st
     most_recent_timestamp = st
@@ -350,14 +352,37 @@ async def async_request_openai_chat_completions(
 
                             if choices := data.get("choices"):
                                 content = choices[0]["delta"].get("content")
+
+                                # Determine token count from continuous
+                                # usage stats. Falls back to 1 if the server
+                                # does not support continuous_usage_stats.
+                                n_tokens = 1
+                                if usage := data.get("usage"):
+                                    completion_tokens = usage.get(
+                                        "completion_tokens", 0
+                                    )
+                                    n_tokens = max(
+                                        1,
+                                        completion_tokens - prev_completion_tokens,
+                                    )
+                                    prev_completion_tokens = completion_tokens
+
                                 # First token
                                 if ttft == 0.0:
                                     ttft = timestamp - st
                                     output.ttft = ttft
+                                    if n_tokens > 1:
+                                        output.itl.extend(
+                                            [0.0] * (n_tokens - 1)
+                                        )
 
                                 # Decoding phase
                                 else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                    time_delta = timestamp - most_recent_timestamp
+                                    per_token_itl = time_delta / n_tokens
+                                    output.itl.extend(
+                                        [per_token_itl] * n_tokens
+                                    )
 
                                 generated_text += content or ""
                             elif usage := data.get("usage"):
