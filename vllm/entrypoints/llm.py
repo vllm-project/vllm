@@ -35,7 +35,7 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.config.quantization import (
-    OnlineQuantizationConfigArgs,
+    QuantizationConfigArgs,
 )
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
@@ -248,9 +248,7 @@ class LLM:
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
-        quantization_config: dict[str, Any]
-        | OnlineQuantizationConfigArgs
-        | None = None,
+        quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -926,7 +924,10 @@ class LLM:
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
                     tools=tools,
-                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                    tokenize=(
+                        is_mistral_tokenizer(renderer.tokenizer)
+                        or self.model_config.enable_prompt_embeds
+                    ),
                 ),
             ),
             mm_processor_kwargs=mm_processor_kwargs,
@@ -1905,6 +1906,20 @@ class LLM:
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+        """
+        Start a new weight update.
+
+        Args:
+            is_checkpoint_format: Whether incoming weights are in checkpoint
+                format (need layerwise processing) or kernel format (direct
+                copy).
+        """
+        self.llm_engine.collective_rpc(
+            "start_weight_update",
+            kwargs={"is_checkpoint_format": is_checkpoint_format},
+        )
+
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
         Update the weights of the model.
@@ -1919,6 +1934,12 @@ class LLM:
         self.llm_engine.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}
         )
+
+    def finish_weight_update(self) -> None:
+        """
+        Finish the current weight update.
+        """
+        self.llm_engine.collective_rpc("finish_weight_update")
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

@@ -240,9 +240,7 @@ class Scheduler(SchedulerInterface):
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
-        if self.connector is not None and hasattr(
-            self.connector, "bind_gpu_block_pool"
-        ):
+        if self.connector is not None:
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
@@ -741,20 +739,6 @@ class Scheduler(SchedulerInterface):
                         for i in encoder_inputs_to_schedule
                     )
 
-                if (
-                    self.scheduler_reserve_full_isl
-                    and not self.kv_cache_manager.can_fit_full_sequence(
-                        request,
-                        num_new_computed_tokens=num_new_local_computed_tokens,
-                        new_computed_blocks=new_computed_blocks,
-                        num_external_computed_tokens=num_external_computed_tokens,
-                        num_encoder_tokens=num_encoder_tokens,
-                    )
-                ):
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
-                    break
-
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
@@ -764,6 +748,7 @@ class Scheduler(SchedulerInterface):
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
+                    full_sequence_must_fit=self.scheduler_reserve_full_isl,
                 )
 
                 if new_blocks is None:
@@ -1448,7 +1433,7 @@ class Scheduler(SchedulerInterface):
             # Extract sample logprobs if needed.
             if (
                 request.sampling_params is not None
-                and request.sampling_params.logprobs is not None
+                and request.sampling_params.num_logprobs is not None
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
@@ -1757,6 +1742,8 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.connector is not None:
+                self.connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 

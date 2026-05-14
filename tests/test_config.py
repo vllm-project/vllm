@@ -1215,8 +1215,6 @@ def test_scheduler_config_init():
         ("facebook/opt-125m", 1, False, False),
         # Non-MoE model with DP>1 internal LB should need coordinator
         ("facebook/opt-125m", 2, False, True),
-        # Non-MoE model with DP>1 external LB should not need coordinator
-        ("facebook/opt-125m", 2, True, False),
         # MoE model with DP=1 should not need coordinator
         ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
         # MoE model with DP>1 internal LB should need both coordinator
@@ -1288,6 +1286,24 @@ def test_eagle_draft_model_config():
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
 
 
+def test_draft_sample_method_probabilistic_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        draft_sample_method="probabilistic",
+    )
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_draft_sample_method_gumbel_is_rejected():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            draft_sample_method="gumbel",
+        )
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
@@ -1295,11 +1311,14 @@ def test_ir_op_priority_default():
     # Assert default is applied to ops
     priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
     assert priority_config.rms_norm == ["vllm_c", "native"]
+    assert priority_config.fused_add_rms_norm == ["vllm_c", "native"]
 
     # Assert single ops override the default
-    assert IrOpPriorityConfig.with_default(
-        ["vllm_c", "native"], rms_norm=["oink", "native"]
-    ) == IrOpPriorityConfig(rms_norm=["oink", "native"])
+    priority_config = IrOpPriorityConfig.with_default(
+        ["native"], rms_norm=["oink", "native"]
+    )
+    assert priority_config.rms_norm == ["oink", "native"]
+    assert priority_config.fused_add_rms_norm == ["native"]
 
 
 def test_ir_op_priority_str():
@@ -1318,3 +1337,34 @@ def test_ir_op_priority_str():
     with pytest.raises(pydantic.ValidationError):
         # must be list of only strings
         priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
+
+
+def test_ir_op_priority_ctx():
+    """Test that the priority-setting context sets priority correctly."""
+    from vllm import ir
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllm_c"])
+    priority2 = IrOpPriorityConfig.with_default(
+        ["native"], fused_add_rms_norm=["vllm_c"]
+    )
+    with priority.set_priority():
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+        with priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+        # context restored
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+        with pytest.raises(ValueError), priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+            raise ValueError
+
+        # context restored even after exception
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]

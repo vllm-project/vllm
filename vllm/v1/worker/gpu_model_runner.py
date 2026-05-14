@@ -69,6 +69,7 @@ from vllm.model_executor.model_loader.reload import (
     initialize_layerwise_reload,
 )
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
@@ -165,10 +166,12 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
+from vllm.v1.spec_decode.custom_class_proposer import create_custom_proposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.extract_hidden_states import ExtractHiddenStatesProposer
+from vllm.v1.spec_decode.gemma4 import Gemma4Proposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer_gpu import (
@@ -483,6 +486,7 @@ class GPUModelRunner(
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
         self.eplb_state: EplbState | None = None
+        self._moe_model: MixtureOfExperts | None = None
         # NOTE(yongji): flag to temporarily disable EPLB during scaling up/down
         self.eep_eplb_suppressed = False
         """
@@ -524,8 +528,13 @@ class GPUModelRunner(
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
+                | Gemma4Proposer
             )
-            if self.speculative_config.method == "ngram":
+            if self.speculative_config.method == "custom_class":
+                self.drafter = create_custom_proposer(  # type: ignore[assignment]
+                    self.vllm_config
+                )
+            elif self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
                 self.drafter = NgramProposer(self.vllm_config)
@@ -552,6 +561,8 @@ class GPUModelRunner(
                 self._ngram_pinned_val_buf = torch.zeros(
                     self.max_num_reqs, dtype=torch.int32, pin_memory=True
                 )
+            elif self.speculative_config.use_gemma4_mtp():
+                self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
@@ -793,6 +804,8 @@ class GPUModelRunner(
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        self._draft_probs: torch.Tensor | None = None
+        self._draft_prob_req_ids: list[str] | None = None
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
@@ -987,16 +1000,23 @@ class GPUModelRunner(
         if len(token_type_id_requests) == 0:
             return model_kwargs
 
-        seq_lens = self.seq_lens[:num_reqs]
+        # Build ids on CPU using the CPU-resident upper bound for seq_lens;
+        # `torch.arange(seq_lens[i])` with a GPU scalar would force a sync.
+        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].tolist()
         token_type_ids = []
 
         for i in range(num_reqs):
-            pos = token_type_id_requests.get(i, seq_lens[i])
-            ids = (torch.arange(seq_lens[i]) >= pos).int()
+            seq_len_i = seq_lens_cpu[i]
+            pos = token_type_id_requests.get(i, seq_len_i)
+            ids = (torch.arange(seq_len_i) >= pos).int()
             token_type_ids.append(ids)
 
-        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
-            device=self.device
+        token_type_ids_cpu = torch.empty(
+            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=self.pin_memory
+        )
+        torch.cat(token_type_ids, out=token_type_ids_cpu)
+        model_kwargs["token_type_ids"] = token_type_ids_cpu.to(
+            device=self.device, non_blocking=True
         )
         return model_kwargs
 
@@ -1163,6 +1183,7 @@ class GPUModelRunner(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 prompt_embeds=new_req_data.prompt_embeds,
+                prompt_is_token_ids=new_req_data.prompt_is_token_ids,
                 mm_features=new_req_data.mm_features,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
@@ -1342,13 +1363,27 @@ class GPUModelRunner(
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
-                # Add new_token_ids to token_ids_cpu.
-                start_token_index = num_computed_tokens
-                end_token_index = num_computed_tokens + len(new_token_ids)
-                self.input_batch.token_ids_cpu[
-                    req_index, start_token_index:end_token_index
-                ] = new_token_ids
-                self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+                start_token_index = self.input_batch.num_tokens_no_spec[req_index]
+                # For chunked prefill, num_computed_tokens may less
+                # than num_tokens_no_spec.
+                # Async scheduled PP: no new_token_ids, advance num_tokens_no_spec
+                # according to num_computed_tokens.
+                end_token_index = max(
+                    start_token_index,
+                    num_computed_tokens + len(new_token_ids),
+                )
+                if end_token_index > start_token_index:
+                    if new_token_ids:
+                        # Add new_token_ids to token_ids_cpu.
+                        num_new_tokens = end_token_index - start_token_index
+                        tokens_to_append = new_token_ids[-num_new_tokens:]
+                        self.input_batch.token_ids_cpu[
+                            req_index, start_token_index:end_token_index
+                        ] = tokens_to_append
+                    self.input_batch.is_token_ids[
+                        req_index, start_token_index:end_token_index
+                    ] = True
+                    self.input_batch.num_tokens_no_spec[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
@@ -1505,10 +1540,16 @@ class GPUModelRunner(
         )
         mrope_model = cast(SupportsMRoPE, model)
 
+        # `prompt_embeds` is a passthrough modality (no grid_thw), models'
+        # M-RoPE code assumes per-feature grid info, so filter it out. The
+        # prompt_embeds positions are treated as text positions for M-RoPE.
+        mrope_features = [
+            f for f in req_state.mm_features if f.modality != "prompt_embeds"
+        ]
         req_state.mrope_positions, req_state.mrope_position_delta = (
             mrope_model.get_mrope_input_positions(
                 req_state.prompt_token_ids,
-                req_state.mm_features,
+                mrope_features,
             )
         )
 
@@ -2303,11 +2344,24 @@ class GPUModelRunner(
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
             if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, (EagleProposer, DFlashProposer)):
+                if isinstance(
+                    self.drafter,
+                    (
+                        EagleProposer,
+                        DFlashProposer,
+                        Gemma4Proposer,
+                        ExtractHiddenStatesProposer,
+                    ),
+                ):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
+            # Capture per-group block tables for multi-group proposers.
+            if self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+                self.drafter.set_per_group_block_table(
+                    kv_cache_gid, cm.block_table_tensor
+                )
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
@@ -2677,10 +2731,9 @@ class GPUModelRunner(
         # There might have leftover indices in logits_indices[num_logits:]
         # from previous iterations, whose values may be greater than the
         # batch size in the current iteration. To ensure indices are always
-        # valid, we fill the padded indices with the last index.
-        self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
-            logits_indices[-1].item()
-        )
+        # valid, fill the padded indices with the last index. Broadcast the
+        # scalar GPU-side to avoid a D2H sync on `.item()`.
+        self.kv_sharing_fast_prefill_logits_indices[num_logits:] = logits_indices[-1]
         # Dispatch for the decoder portion of the model.
         _, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_logits, invalid_modes={CUDAGraphMode.FULL}
@@ -2743,6 +2796,33 @@ class GPUModelRunner(
 
         if not mm_kwargs:
             return []
+
+        # `prompt_embeds` is a passthrough modality, the tensor is already in
+        # the model embedding space, so no encoder runs. Inject each
+        # `prompt_embeds` tensor directly into the encoder cache here so that
+        # `_gather_mm_embeddings` can splice it via the standard `is_mm_embed`
+        # path.
+        pe_indices = [
+            i
+            for i, (modality, _) in enumerate(mm_kwargs)
+            if modality == "prompt_embeds"
+        ]
+        if pe_indices:
+            for i in pe_indices:
+                pe_tensor = mm_kwargs[i][1]["embedding"].data
+                assert isinstance(pe_tensor, torch.Tensor)
+
+                self.encoder_cache[mm_hashes[i]] = pe_tensor.to(self.device)
+                self.maybe_save_ec_to_connector(self.encoder_cache, mm_hashes[i])
+            # Filter out `prompt_embeds` items from mm_kwargs/mm_hashes/mm_lora_refs
+            # since they don't require further encoder processing.
+            mm_hashes = [h for i, h in enumerate(mm_hashes) if i not in pe_indices]
+            mm_kwargs = [k for i, k in enumerate(mm_kwargs) if i not in pe_indices]
+            mm_lora_refs = [
+                r for i, r in enumerate(mm_lora_refs) if i not in pe_indices
+            ]
+            if not mm_kwargs:
+                return []  # nothing left to encode after filtering out `prompt_embeds`
 
         should_time = bool(
             self.observability_config
@@ -3064,7 +3144,7 @@ class GPUModelRunner(
 
         return tuple(tasks)
 
-    def sync_and_slice_intermediate_tensors(
+    def sync_and_gather_intermediate_tensors(
         self,
         num_tokens: int,
         intermediate_tensors: IntermediateTensors | None,
@@ -3075,24 +3155,23 @@ class GPUModelRunner(
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
 
-        # When sequence parallelism is enabled, the "residual" tensor is sharded
-        # across tensor parallel ranks, so each rank only needs its own slice.
+        # When sequence parallelism is enabled, the "residual" tensor is
+        # sharded across TP ranks. All-gather it here because downstream
+        # QKV + Attention needs the full residual before the SP split point.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
                 is_scattered = k == "residual" and is_rs
-                copy_len = num_tokens // tp if is_scattered else num_tokens
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
+                if is_scattered:
+                    local_len = num_tokens // tp
+                    v = get_tp_group().all_gather(v[:local_len], dim=0)
+
+                self.intermediate_tensors[k][:num_tokens].copy_(
+                    v[:num_tokens], non_blocking=True
                 )
 
         return IntermediateTensors(
-            {
-                k: v[: num_tokens // tp]
-                if k == "residual" and is_rs
-                else v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
-            }
+            {k: v[:num_tokens] for k, v in self.intermediate_tensors.items()}
         )
 
     def eplb_step(self, is_dummy: bool = False, is_profile: bool = False) -> None:
@@ -3103,8 +3182,7 @@ class GPUModelRunner(
             return
 
         assert self.eplb_state is not None
-        model = self.get_model()
-        assert is_mixture_of_experts(model)
+        assert self._moe_model is not None
         self.eplb_state.step(
             is_dummy,
             is_profile,
@@ -3116,11 +3194,10 @@ class GPUModelRunner(
         expanded_physical_to_logical: torch.Tensor,
         old_num_physical_experts: int,
     ) -> None:
-        model = self.get_model()
-        assert is_mixture_of_experts(model)
+        assert self._moe_model is not None
 
         self.eplb_state = EplbState.from_mapping(
-            model=model,
+            model=self._moe_model,
             model_config=self.model_config,
             device=self.device,
             parallel_config=self.parallel_config,
@@ -3308,7 +3385,7 @@ class GPUModelRunner(
             intermediate_tensors = None
         else:
             assert intermediate_tensors is not None
-            intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+            intermediate_tensors = self.sync_and_gather_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True
             )
 
@@ -3352,9 +3429,10 @@ class GPUModelRunner(
             draft_token_ids_cpu, _ = self._get_draft_token_ids_cpu()
             self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
+        draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
@@ -4148,7 +4226,7 @@ class GPUModelRunner(
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            if self.use_async_scheduling and not get_pp_group().is_last_rank:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
@@ -4201,6 +4279,8 @@ class GPUModelRunner(
                 )
 
         self._draft_token_ids = None
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
         self._draft_token_req_ids = None
         self.valid_sampled_token_count_gpu = None
         self.input_batch.prev_sampled_token_ids = None
@@ -4242,7 +4322,8 @@ class GPUModelRunner(
                     EagleProposer
                     | DFlashProposer
                     | DraftModelProposer
-                    | ExtractHiddenStatesProposer,
+                    | ExtractHiddenStatesProposer
+                    | Gemma4Proposer,
                 )
                 sampled_token_ids = sampler_output.sampled_token_ids
                 if input_fits_in_drafter:
@@ -4294,6 +4375,8 @@ class GPUModelRunner(
                 self._draft_token_ids = torch.zeros(
                     1, device=self.device, dtype=torch.int32
                 ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
+                self._draft_probs = None
+                self._draft_prob_req_ids = None
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
@@ -4507,6 +4590,35 @@ class GPUModelRunner(
         sampled_count_event.synchronize()
         return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
+    def _get_spec_decode_draft_probs(
+        self, spec_decode_metadata: SpecDecodeMetadata
+    ) -> torch.Tensor | None:
+        if self._draft_probs is None or self._draft_prob_req_ids is None:
+            return None
+
+        row_by_req_id = {
+            req_id: idx for idx, req_id in enumerate(self._draft_prob_req_ids)
+        }
+        draft_probs_rows: list[torch.Tensor] = []
+        for req_id, num_draft in zip(
+            self.input_batch.req_ids, spec_decode_metadata.num_draft_tokens
+        ):
+            if num_draft == 0:
+                continue
+            row_idx = row_by_req_id.get(req_id)
+            if row_idx is None:
+                logger.warning(
+                    "Missing cached draft probabilities for request %s; "
+                    "falling back to legacy speculative rejection behavior.",
+                    req_id,
+                )
+                return None
+            draft_probs_rows.append(self._draft_probs[row_idx, :num_draft])
+
+        if not draft_probs_rows:
+            return None
+        return torch.cat(draft_probs_rows, dim=0).contiguous()
+
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4522,12 +4634,22 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
+                sampled_token_ids,
+                self.input_batch.num_tokens_no_spec,
+                self.input_batch.token_ids_cpu,
+                slot_mappings=slot_mappings,
+            )
+        elif spec_config.method == "custom_class":
+            assert isinstance(sampled_token_ids, list)
+            draft_token_ids = cast(Any, self.drafter).propose(
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -4638,7 +4760,8 @@ class GPUModelRunner(
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
-                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+                self.drafter,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
 
             if spec_config.disable_padded_drafter_batch:
@@ -4758,6 +4881,11 @@ class GPUModelRunner(
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
             )
+            if hasattr(self.drafter, "take_last_draft_probs"):
+                draft_probs = self.drafter.take_last_draft_probs()
+                if draft_probs is not None:
+                    self._draft_probs = draft_probs
+                    self._draft_prob_req_ids = self.input_batch.req_ids.copy()
 
         return draft_token_ids
 
@@ -4803,7 +4931,8 @@ class GPUModelRunner(
                     )
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
-                    self.drafter.load_model(self.model)
+                    if hasattr(self.drafter, "load_model"):
+                        self.drafter.load_model(self.model)
                     if (
                         hasattr(self.drafter, "model")
                         and is_mixture_of_experts(self.drafter.model)
@@ -4851,8 +4980,20 @@ class GPUModelRunner(
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
 
+                # Resolve the MoE model, unwrapping VLM wrappers if needed.
+                # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
+                # actual MoE language model but don't implement
+                # MixtureOfExperts themselves.
+                moe_candidate = self.model
+                if not is_mixture_of_experts(moe_candidate) and isinstance(
+                    moe_candidate, SupportsMultiModal
+                ):
+                    moe_candidate = moe_candidate.get_language_model()
+                if is_mixture_of_experts(moe_candidate):
+                    self._moe_model = moe_candidate
+
                 if (
-                    is_mixture_of_experts(self.model)
+                    self._moe_model is not None
                     and self.parallel_config.enable_eplb
                     and not load_dummy_weights
                 ):
@@ -4862,7 +5003,7 @@ class GPUModelRunner(
                     )
                     assert self.eplb_state is not None
                     self.eplb_state.add_model(
-                        self.model,
+                        self._moe_model,
                         self.model_config,
                     )
                     eplb_models += 1
@@ -4902,7 +5043,7 @@ class GPUModelRunner(
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
         if (
-            is_mixture_of_experts(self.model)
+            self._moe_model is not None
             and self.parallel_config.enable_eplb
             and not load_dummy_weights
             and self.eplb_state is not None
@@ -5060,7 +5201,6 @@ class GPUModelRunner(
         if not num_prompt_logprobs_dict:
             return {}
 
-        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
@@ -5084,14 +5224,14 @@ class GPUModelRunner(
             )
 
             # Set up target LogprobsTensors object.
-            logprobs_tensors = in_progress_dict.get(req_id)
-            if not logprobs_tensors:
+            logprobs_tensors = request.in_progress_prompt_logprobs_cpu
+            if logprobs_tensors is None:
                 # Create empty logprobs CPU tensors for the entire prompt.
                 # If chunked, we'll copy in slice by slice.
                 logprobs_tensors = LogprobsTensors.empty_cpu(
                     num_prompt_tokens - 1, num_prompt_logprobs + 1
                 )
-                in_progress_dict[req_id] = logprobs_tensors
+                request.in_progress_prompt_logprobs_cpu = logprobs_tensors
 
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
@@ -5148,7 +5288,7 @@ class GPUModelRunner(
         # num_prompt_logprobs_dict.
         for req_id in completed_prefill_reqs:
             del num_prompt_logprobs_dict[req_id]
-            del in_progress_dict[req_id]
+            self.requests[req_id].in_progress_prompt_logprobs_cpu = None
 
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
@@ -5513,7 +5653,7 @@ class GPUModelRunner(
                         )
                     )
 
-                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
+                intermediate_tensors = self.sync_and_gather_intermediate_tensors(
                     num_tokens_padded, None, False
                 )
 
@@ -5561,7 +5701,8 @@ class GPUModelRunner(
                     EagleProposer
                     | DFlashProposer
                     | DraftModelProposer
-                    | ExtractHiddenStatesProposer,
+                    | ExtractHiddenStatesProposer
+                    | Gemma4Proposer,
                 )
                 assert self.speculative_config is not None
                 # Eagle currently only supports PIECEWISE cudagraphs.
@@ -5667,6 +5808,26 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
+            # Also warm forward_native (taken when generators dict is non-empty),
+            # but skip the extra call in 'processed_logits' / 'processed_logprobs'
+            # modes — there TopKTopPSampler binds forward = forward_native at
+            # init time, so the warmup call is redundant and only inflates peak
+            # memory during profile_run.
+            # No .clone() of logits: warmup output is discarded, so any in-place
+            # mutation by forward_native does not affect correctness.
+            if self.sampler.logprobs_mode not in (
+                "processed_logits",
+                "processed_logprobs",
+            ):
+                self.sampler(
+                    logits=logits,
+                    sampling_metadata=replace(
+                        dummy_metadata,
+                        generators={
+                            0: torch.Generator(device=self.device).manual_seed(0)
+                        },
+                    ),
+                )
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(
@@ -5684,10 +5845,18 @@ class GPUModelRunner(
             )
 
             num_tokens = sum(len(ids) for ids in draft_token_ids)
-            # draft_probs = torch.randn(
-            #     num_tokens, logits.shape[-1], device=self.device,
-            #     dtype=logits.dtype)
             draft_probs = None
+            if (
+                self.speculative_config.rejection_sample_method == "standard"
+                and self.speculative_config.draft_sample_method == "probabilistic"
+            ):
+                draft_probs = torch.rand(
+                    num_tokens,
+                    logits.shape[-1],
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                draft_probs = torch.softmax(draft_probs, dim=-1)
             logits = torch.randn(
                 num_tokens + num_reqs,
                 logits.shape[-1],
@@ -6342,7 +6511,8 @@ class GPUModelRunner(
             or self.speculative_config.uses_draft_model()
         ):
             assert isinstance(
-                self.drafter, EagleProposer | DFlashProposer | DraftModelProposer
+                self.drafter,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -6395,7 +6565,10 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | ExtractHiddenStatesProposer,
+                EagleProposer
+                | DFlashProposer
+                | ExtractHiddenStatesProposer
+                | Gemma4Proposer,
             )
             self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 

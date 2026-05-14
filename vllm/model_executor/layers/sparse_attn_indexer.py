@@ -499,13 +499,31 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        assert not self.skip_k_cache_insert, (
-            "AMD platform doesn't support skip cache insert yet"
-        )
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
+        if self.skip_k_cache_insert or not rocm_aiter_ops.is_enabled():
+            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_aiter_sparse_attn_indexer_native,
+            )
+
+            return rocm_aiter_sparse_attn_indexer_native(
+                hidden_states,
+                _encode_layer_name(self.k_cache.prefix),
+                self.k_cache.kv_cache,
+                q_quant,
+                k,
+                weights,
+                self.quant_block_size,
+                self.scale_fmt,
+                self.topk_tokens,
+                self.head_dim,
+                self.max_model_len,
+                self.max_total_seq_len,
+                self.topk_indices_buffer,
+                skip_k_cache_insert=self.skip_k_cache_insert,
+            )
         if rocm_aiter_ops.is_enabled():
             return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
                 hidden_states,
@@ -522,8 +540,4 @@ class SparseAttnIndexer(CustomOp):
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
             )
-        else:
-            raise RuntimeError(
-                "Sparse attention indexer ROCm custom op requires ROCm "
-                "Aiter ops to be enabled."
-            )
+        raise RuntimeError("Sparse attention indexer ROCm path could not be selected.")
