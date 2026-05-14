@@ -31,20 +31,23 @@ at::Tensor causal_conv1d_update_cpu_impl(
 
   at::ScalarType dtype = x.scalar_type();
 
-  // Ensure contiguous in native dtype — no float32 conversion.
+  // Input x: contiguous in native dtype.
   at::Tensor x_c = x.is_contiguous() ? x : x.contiguous();
-  // conv_state is modified in-place; make a contiguous working copy if needed.
-  bool state_copied = !conv_state.is_contiguous() ||
-                       conv_state.scalar_type() != dtype;
-  at::Tensor state_c = state_copied ?
-      conv_state.to(dtype).contiguous() :
-      conv_state;
+
+  // conv_state: NEVER copy the full paged tensor just for layout reasons.
+  // If the dtype matches we work directly on conv_state (contiguous or not)
+  // by extracting strides and passing them to the kernel.
+  // Only a dtype-conversion copy is made when types differ (rare for BF16).
+  bool state_type_ok = (conv_state.scalar_type() == dtype);
+  at::Tensor state_c = state_type_ok ? conv_state : conv_state.to(dtype);
+  // state_c and conv_state may be non-contiguous — that is intentional.
+
   // Weight: coerce to same dtype if needed (should match in practice)
   at::Tensor w_c = (weight.scalar_type() != dtype) ?
       weight.to(dtype).contiguous() :
       (weight.is_contiguous() ? weight : weight.contiguous());
 
-  // Bias stays float32 (small tensor, used for accumulation only)
+  // Bias stays float32 (small scalar, used only for fp32 accumulation)
   at::Tensor bias_f32;
   if (bias.has_value() && bias.value().defined())
     bias_f32 = bias.value().to(at::kFloat).contiguous();
@@ -54,6 +57,14 @@ at::Tensor causal_conv1d_update_cpu_impl(
   int64_t seqlen    = (x_c.dim() == 3) ? x_c.size(2) : 1;
   int64_t width     = w_c.size(1);
   int64_t state_len = state_c.size(2);
+
+  // Extract strides — works for contiguous AND non-contiguous (transposed) state.
+  // stride(0): between cache slots (e.g. num_slots × dim × width-1 in contiguous)
+  // stride(1): between conv channels (dim stride)
+  // stride(2): between state elements (=1 when contiguous, =dim when transposed)
+  int64_t stride_s_slot  = state_c.stride(0);
+  int64_t stride_s_dim   = state_c.stride(1);
+  int64_t stride_s_state = state_c.stride(2);
 
   at::Tensor out = at::empty_like(x_c);  // native dtype, no float32 alloc
 
@@ -68,6 +79,7 @@ at::Tensor causal_conv1d_update_cpu_impl(
     mamba_cpu::causal_conv1d_update_kernel<scalar_t>(
         x_c.data_ptr<scalar_t>(),
         state_c.data_ptr<scalar_t>(),
+        stride_s_slot, stride_s_dim, stride_s_state,
         w_c.data_ptr<scalar_t>(),
         bias_f32.defined() ? bias_f32.data_ptr<float>() : nullptr,
         out.data_ptr<scalar_t>(),
@@ -75,8 +87,9 @@ at::Tensor causal_conv1d_update_cpu_impl(
         batch, dim, seqlen, width, state_len, do_silu);
   });
 
-  // Write state back only if we made a working copy
-  if (state_copied) conv_state.copy_(state_c);
+  // Write back only when a type-conversion copy was made.
+  // Layout-only non-contiguity is handled via strides above — no copy needed.
+  if (!state_type_ok) conv_state.copy_(state_c);
 
   return out;
 }

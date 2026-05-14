@@ -17,12 +17,23 @@ namespace mamba_cpu {
 
 // ---------------------------------------------------------------------------
 // causal_conv1d_update — templated for native BF16/FP32
-// x, state, weight, out are in scalar_t; accumulation in float32.
-// Eliminates 5 dtype-conversion copies that the old float32-only path did.
+//
+// state_ptr may point to a NON-CONTIGUOUS paged KV cache tensor.
+// Explicit strides are passed so the kernel writes directly into the
+// correct memory locations without making a contiguous copy of the full
+// paged tensor (which was the source of the 34-41% direct_copy_kernel).
+//
+//   stride_s_slot  = state.stride(0)  — between cache slots
+//   stride_s_dim   = state.stride(1)  — between conv_dim channels
+//   stride_s_state = state.stride(2)  — between state elements
+//
+// When stride_s_state == 1 (contiguous), the memmove fast path is used.
 // ---------------------------------------------------------------------------
 template<typename scalar_t>
 inline void causal_conv1d_update_kernel(
-    const scalar_t* __restrict__ x_ptr, scalar_t* __restrict__ state_ptr,
+    const scalar_t* __restrict__ x_ptr,
+    scalar_t*       __restrict__ state_ptr,
+    int64_t stride_s_slot, int64_t stride_s_dim, int64_t stride_s_state,
     const scalar_t* __restrict__ weight_ptr, const float* __restrict__ bias_ptr,
     scalar_t* __restrict__ out_ptr, const int32_t* __restrict__ cache_idxs,
     int32_t pad_slot_id, int64_t batch, int64_t dim, int64_t seqlen,
@@ -36,26 +47,34 @@ inline void causal_conv1d_update_kernel(
     for (int64_t t = 0; t < seqlen; ++t) {
       const scalar_t* x_b = x_ptr + (b * dim * seqlen + t);
       scalar_t* out_b = out_ptr + (b * dim * seqlen + t);
-      scalar_t* s = state_ptr + cache_idx * dim * state_len;
+      // Base of this slot in the (possibly non-contiguous) paged state
+      scalar_t* s_base = state_ptr + cache_idx * stride_s_slot;
 
       for (int64_t d = 0; d < dim; ++d) {
         float x_val = static_cast<float>(x_b[d * seqlen]);
-        scalar_t* sd = s + d * state_len;
+        scalar_t* sd  = s_base + d * stride_s_dim;  // start of this dim's state
         const scalar_t* w = weight_ptr + d * width;
 
         // Accumulate in float32 for precision
         float acc = (bias_ptr != nullptr) ? bias_ptr[d] : 0.0f;
         for (int64_t k = 0; k < state_len; ++k) {
-          acc += static_cast<float>(w[k]) * static_cast<float>(sd[k]);
+          acc += static_cast<float>(w[k]) *
+                 static_cast<float>(sd[k * stride_s_state]);
         }
         acc += static_cast<float>(w[state_len]) * x_val;
 
-        // Shift state left, append new input — native dtype, no copy
-        if (state_len > 1) {
-          std::memmove(sd, sd + 1, (state_len - 1) * sizeof(scalar_t));
-        }
-        if (state_len > 0) {
-          sd[state_len - 1] = static_cast<scalar_t>(x_val);
+        // Shift state left and append new input.
+        // Use memmove when contiguous (stride==1); element loop otherwise.
+        if (stride_s_state == 1) {
+          if (state_len > 1)
+            std::memmove(sd, sd + 1, (state_len - 1) * sizeof(scalar_t));
+          if (state_len > 0)
+            sd[state_len - 1] = static_cast<scalar_t>(x_val);
+        } else {
+          for (int64_t k = 0; k < state_len - 1; ++k)
+            sd[k * stride_s_state] = sd[(k + 1) * stride_s_state];
+          if (state_len > 0)
+            sd[(state_len - 1) * stride_s_state] = static_cast<scalar_t>(x_val);
         }
 
         if (do_silu) {
