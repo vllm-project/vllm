@@ -46,8 +46,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4Static,
     kInt4Static32,
     kInt8DynamicTokenSym,
-    kInt8StaticChannelSym,
     kInt8Static,
+    kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -497,6 +497,7 @@ class TritonWNA16Experts(TritonExperts):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        # Why?
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels

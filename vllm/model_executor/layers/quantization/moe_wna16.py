@@ -33,6 +33,14 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    INT4_DTYPE,
+    INT8_DTYPE,
+    QuantKey,
+    kInt4Static32GroupScale,
+    kInt4StaticGroupScale,
+    kInt8StaticGroupScale,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -218,6 +226,24 @@ class MoeWNA16Method(FusedMoEMethodBase):
         super().__init__(moe)
         self.quant_config = quant_config
 
+        num_bits = (self.quant_config.weight_bits,)
+        group_size = self.quant_config.group_size
+
+        if num_bits == 4:
+            quant_type = INT4_DTYPE
+            if group_size == 32:
+                scale = kInt4Static32GroupScale
+            else:
+                scale = kInt4StaticGroupScale
+        elif num_bits == 8:
+            assert group_size == -1
+            quant_type = INT8_DTYPE
+            scale = kInt8StaticGroupScale
+        else:
+            raise ValueError("MoeWNA16Method only supports int4 and int8 now.")
+
+        weight_key = QuantKey(quant_type, scale)
+
         # Select WNA16 MoE backend via oracle.
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
@@ -343,6 +369,17 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 )
                 layer.register_parameter(key, param)
                 set_weight_attrs(param, extra_weight_attrs)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        assert self.experts_cls is not None
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
+        self.moe_kernel = make_wna16_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+        )
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
