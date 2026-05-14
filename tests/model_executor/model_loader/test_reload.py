@@ -6,6 +6,7 @@ from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
+from torch.nn.parameter import UninitializedParameter
 
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.model_executor.layers.linear import QKVParallelLinear
@@ -47,6 +48,15 @@ class _ParentAliasedChildBufferLayer(torch.nn.Module):
         )
         self.register_buffer(
             "conv_weights", self.conv1d.weight.detach().view(-1), persistent=False
+        )
+
+
+class _AliasedBufferWithUninitializedChildLayer(_AliasedBufferLayer):
+    def __init__(self):
+        super().__init__()
+        self.child = torch.nn.Module()
+        self.child.register_parameter(
+            "lazy_weight", UninitializedParameter(requires_grad=False)
         )
 
 
@@ -182,6 +192,14 @@ def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypat
     assert layer.weight_view.untyped_storage().data_ptr() == (
         layer.weight.untyped_storage().data_ptr()
     )
+
+
+def test_capture_layer_to_meta_skips_uninitialized_parameter_storage_ptrs():
+    layer = _AliasedBufferWithUninitializedChildLayer()
+
+    _, buffers = capture_layer_to_meta(layer)
+
+    assert "weight_view" not in buffers
 
 
 def test_layerwise_reload_skips_child_parameter_alias_buffers(monkeypatch):

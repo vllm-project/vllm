@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable
 
 import torch
+from torch.nn.parameter import UninitializedParameter
 from torch.utils._python_dispatch import TorchDispatchMode
 
 from .sanitize import restore_layer_refs, sanitize_layer_refs
@@ -71,9 +72,12 @@ def _is_non_persistent_parameter_alias_buffer(
 
 
 def _tensor_storage_ptr(tensor: torch.Tensor) -> int | None:
+    if isinstance(tensor, UninitializedParameter):
+        return None
+
     try:
         return tensor.untyped_storage().data_ptr()
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         return None
 
 
