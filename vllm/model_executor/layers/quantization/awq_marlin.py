@@ -74,6 +74,19 @@ logger = init_logger(__name__)
 _REVERSE_AWQ_PACK_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]
 
 
+def _replace_or_register_parameter(
+    layer: torch.nn.Module,
+    name: str,
+    value: torch.Tensor | None,
+) -> None:
+    if value is None:
+        return
+    if hasattr(layer, name):
+        replace_parameter(layer, name, value)
+    else:
+        layer.register_parameter(name, Parameter(value, requires_grad=False))
+
+
 def _convert_awq_to_standard_format(
     layer: torch.nn.Module,
     w_q_name: str,
@@ -655,70 +668,24 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
 
         replace_parameter(layer, "w13_scales", w13_scale)
         replace_parameter(layer, "w2_scales", w2_scale)
-        if hasattr(layer, "w13_g_idx_sort_indices"):
-            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        else:
-            layer.register_parameter(
-                "w13_g_idx_sort_indices",
-                Parameter(w13_g_idx_sort_indices, requires_grad=False),
-            )
-        if hasattr(layer, "w2_g_idx_sort_indices"):
-            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        else:
-            layer.register_parameter(
-                "w2_g_idx_sort_indices",
-                Parameter(w2_g_idx_sort_indices, requires_grad=False),
-            )
-        if w13_g_idx is not None:
-            if hasattr(layer, "w13_g_idx"):
-                replace_parameter(layer, "w13_g_idx", w13_g_idx)
-            else:
-                layer.register_parameter(
-                    "w13_g_idx", Parameter(w13_g_idx, requires_grad=False)
-                )
-        if w2_g_idx is not None:
-            if hasattr(layer, "w2_g_idx"):
-                replace_parameter(layer, "w2_g_idx", w2_g_idx)
-            else:
-                layer.register_parameter(
-                    "w2_g_idx", Parameter(w2_g_idx, requires_grad=False)
-                )
-        if w13_qzeros is not None:
-            replace_parameter(layer, "w13_qzeros", w13_qzeros)
-        if w2_qzeros is not None:
-            replace_parameter(layer, "w2_qzeros", w2_qzeros)
-        if w13_input_global_scale is not None:
-            if hasattr(layer, "w13_input_global_scale"):
-                replace_parameter(
-                    layer, "w13_input_global_scale", w13_input_global_scale
-                )
-            else:
-                layer.register_parameter(
-                    "w13_input_global_scale",
-                    Parameter(w13_input_global_scale, requires_grad=False),
-                )
-        if w2_input_global_scale is not None:
-            if hasattr(layer, "w2_input_global_scale"):
-                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
-            else:
-                layer.register_parameter(
-                    "w2_input_global_scale",
-                    Parameter(w2_input_global_scale, requires_grad=False),
-                )
-        if w13_bias is not None:
-            if hasattr(layer, "w13_bias"):
-                replace_parameter(layer, "w13_bias", w13_bias)
-            else:
-                layer.register_parameter(
-                    "w13_bias", Parameter(w13_bias, requires_grad=False)
-                )
-        if w2_bias is not None:
-            if hasattr(layer, "w2_bias"):
-                replace_parameter(layer, "w2_bias", w2_bias)
-            else:
-                layer.register_parameter(
-                    "w2_bias", Parameter(w2_bias, requires_grad=False)
-                )
+        _replace_or_register_parameter(
+            layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices
+        )
+        _replace_or_register_parameter(
+            layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices
+        )
+        _replace_or_register_parameter(layer, "w13_g_idx", w13_g_idx)
+        _replace_or_register_parameter(layer, "w2_g_idx", w2_g_idx)
+        _replace_or_register_parameter(layer, "w13_qzeros", w13_qzeros)
+        _replace_or_register_parameter(layer, "w2_qzeros", w2_qzeros)
+        _replace_or_register_parameter(
+            layer, "w13_input_global_scale", w13_input_global_scale
+        )
+        _replace_or_register_parameter(
+            layer, "w2_input_global_scale", w2_input_global_scale
+        )
+        _replace_or_register_parameter(layer, "w13_bias", w13_bias)
+        _replace_or_register_parameter(layer, "w2_bias", w2_bias)
 
         self._setup_kernel(layer)
 
