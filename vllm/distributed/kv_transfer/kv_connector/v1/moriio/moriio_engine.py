@@ -25,7 +25,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     HandshakeError,
     LayerTransferPlan,
     MoRIIOAgentMetadata,
-    MoRIIOConstants,
     MoRIIOError,
     RemoteAllocInfo,
     TransferError,
@@ -532,13 +531,31 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str.startswith(MoRIIOConstants.TRANSFER_PREFIX):
-                self._handle_completion_message(msg_str)
-                handled = True
+            # Read-completion notifications carry the consumer's request_id.
+            # In upstream the prefix was assumed to be MoRIIOConstants.TRANSFER_PREFIX,
+            # but the toy-proxy convention embeds peer addresses into the request_id
+            # (e.g. "chatcmpl-___prefill_addr_host:...___decode_addr_host:..._UUID"),
+            # so the prefix never matches and the original code raised
+            # "Unhandled message format", killing the notify listener thread on the
+            # first read-completion. Treat any UTF-8 decoded payload as a completion
+            # message and let _handle_completion_message append it to done_req_ids;
+            # the scheduler's _update_from_kv_xfer_finished will reject anything that
+            # isn't a live request_id, so this stays safe.
+            self._handle_completion_message(msg_str)
+            handled = True
         except UnicodeDecodeError:
-            logger.warning("Received non-UTF8 message: %s", msg_str)
+            # Non-UTF-8 payloads are not actionable here (the toy-proxy
+            # convention is UTF-8 request_ids). Logging and dropping the
+            # message is the right behavior; falling through into the
+            # MoRIIOError below would propagate to the listener loop and
+            # kill the notify thread on a single malformed packet.
+            logger.warning(
+                "Received non-UTF8 completion message of %d bytes; dropping",
+                len(msg),
+            )
+            return
         if not handled:
-            raise MoRIIOError(f"Unhandled message format: {msg_str}")
+            raise MoRIIOError(f"Unhandled message format ({len(msg)} bytes)")
 
     def _handle_structured_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
