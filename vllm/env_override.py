@@ -100,10 +100,9 @@ logger = init_logger(__name__)
 # it avoids unintentional cuda initialization from torch.cuda.is_available()
 os.environ["PYTORCH_NVML_BASED_CUDA_CHECK"] = "1"
 
-# see https://github.com/vllm-project/vllm/issues/10480
+# see https://github.com/vllm-project/vllm/issues/10480 and
+# https://github.com/vllm-project/vllm/issues/10619.
 os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
-# see https://github.com/vllm-project/vllm/issues/10619
-torch._inductor.config.compile_threads = 1
 
 # Enable Triton autotuning result caching to disk by default.
 # Without this, Triton re-runs autotuning on every process restart,
@@ -112,6 +111,13 @@ torch._inductor.config.compile_threads = 1
 # It can still be overridden by setting TRITON_CACHE_AUTOTUNING=0
 # in the environment.
 os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
+
+# When unset, TileLang routes JIT temp dirs through a world-shared
+# /tmp/tvm-debug-mode-tempdirs/ whose ownership is pinned to whichever
+# user compiled first, breaking every other user on a shared host.
+# Opt into per-process tempdirs unless the user explicitly chose the
+# debug layout (see https://github.com/vllm-project/vllm/issues/41410).
+os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
@@ -554,7 +560,7 @@ def _apply_constrain_to_fx_strides_patch():
     _lowering.constrain_to_fx_strides = _patched
 
 
-if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
+if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0.dev"):
     import builtins as _builtins
     import pickle
 
@@ -586,3 +592,169 @@ if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
         return runtime_env
 
     GraphCaptureOutput.get_runtime_env = _patched_get_runtime_env
+
+# ===================================================
+# torch 2.10 FxGraphCachePickler.dumps ValueError fix
+# ===================================================
+# PyTorch 2.10's FxGraphCachePickler.dumps() doesn't catch ValueError,
+# causing torch.compile cache failures when tensors with non-standard
+# layouts (e.g. blocked-layout prepacked weights) are serialized.
+# PyTorch mainline fixed this in pytorch/pytorch#176557 (merged 2026-03-04).
+# This is a thin backport for 2.10 users; remove once 2.10 is dropped.
+
+
+def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
+    """Wrap pickler_cls.dumps to convert ValueError into bypass_cls.
+
+    Idempotent: sets `_vllm_fxgraph_dumps_patched` on the class after the
+    first apply to prevent re-application. The wrapper function is also
+    marked with `_vllm_patched` as an additional safeguard.
+    """
+    if getattr(pickler_cls, "_vllm_fxgraph_dumps_patched", False):
+        return
+
+    original_dumps = pickler_cls.dumps
+    if hasattr(original_dumps, "_vllm_patched"):
+        return
+
+    def patched_dumps(self, obj):
+        try:
+            return original_dumps(self, obj)
+        except ValueError as e:
+            raise bypass_cls("Failed to pickle cache key") from e
+
+    patched_dumps._vllm_patched = True  # type: ignore[attr-defined]
+    pickler_cls.dumps = patched_dumps
+    pickler_cls._vllm_fxgraph_dumps_patched = True  # type: ignore[attr-defined]
+
+
+def _patch_fxgraphcache_pickle_if_needed():
+    """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
+        return
+
+    from torch._inductor.codecache import BypassFxGraphCache, FxGraphCachePickler
+
+    _apply_fxgraphcache_pickle_patch(FxGraphCachePickler, BypassFxGraphCache)
+
+
+_patch_fxgraphcache_pickle_if_needed()
+
+# ===================================================
+# torch 2.11 Inductor cpp codegen indirect_assert scalar-mask fix
+# ===================================================
+# CppVecKernel.indirect_assert wraps a scalar mask with
+# `VecMask<...>(scalar)`, which is not a valid constructor and triggers a
+# C++ compile error during torch.compile of any model that does indirect
+# indexing inside a tail-vectorized loop (e.g. Qwen3-VL).
+# Failure looks like:
+#   no matching function for call to 'VecMask<int64_t,2>::VecMask(int&)'
+# Upstream fix in PyTorch mainline replaces the call with
+# `VecMask<...>::from(scalar)`, see pytorch/pytorch#178148 (lands in 2.12).
+# This is a thin backport for torch >= 2.11 and < 2.12; remove once the
+# minimum supported torch is 2.12.
+
+
+def _apply_cpp_indirect_assert_patch():
+    """Replace CppVecKernel.indirect_assert with a fixed copy that uses
+    `VecMask<...>::from(scalar)` for scalar masks.
+
+    Idempotent: marks the class with `_vllm_indirect_assert_patched` after
+    the first apply.
+    """
+    from torch._inductor.codegen.cpp import CppVecKernel
+
+    if getattr(CppVecKernel, "_vllm_indirect_assert_patched", False):
+        return
+
+    from torch._inductor.codegen.cpp import CppCSEVariable, cexpr_index
+
+    def patched_indirect_assert(self, var, lower, upper, mask=None):
+        assert isinstance(var, CppCSEVariable)
+        assert var.dtype is not None
+        if not var.is_vec:
+            if isinstance(mask, CppCSEVariable) and mask.is_vec:
+                mask = f"({mask}).all_masked()"
+            return super(CppVecKernel, self).indirect_assert(var, lower, upper, mask)
+        lower_scalar = lower
+        upper_scalar = upper
+        if lower:
+            lower = f"{self._get_vec_type(var.dtype)}({lower})"
+        if upper:
+            upper = f"{self._get_vec_type(var.dtype)}({upper})"
+        if lower and upper:
+            cond = f"({lower} <= {var}) & ({var} < {upper})"
+            cond_print = f"{lower_scalar} <= {var} < {upper_scalar}"
+        elif lower:
+            cond = f"{lower} <= {var}"
+            cond_print = f"{lower_scalar} <= {var}"
+        else:
+            assert upper
+            cond = f"{var} < {upper}"
+            cond_print = f"{var} < {upper_scalar}"
+        cond = f"{self._get_mask_type(var.dtype)}({cond})"
+        if mask:
+            if not mask.is_vec:
+                # Backport of pytorch/pytorch#178148 -- use ::from for
+                # scalar masks so g++ picks the correct overload.
+                mask = f"{self._get_mask_type(var.dtype)}::from({mask})"
+            cond = f"({cond}) | ~({mask})"
+        if self.tail_size:
+            cond = (
+                f"{self._get_mask_type(var.dtype)}::set("
+                f"{self._get_mask_type(var.dtype)}::from(1)"
+                f", ({cond}), {cexpr_index(self.tail_size)})"
+            )
+        cond = f"({cond}).all_masked()"
+        return f'{self.assert_function}({cond}, "index out of bounds: {cond_print}")'
+
+    CppVecKernel.indirect_assert = patched_indirect_assert
+    CppVecKernel._vllm_indirect_assert_patched = True  # type: ignore[attr-defined]
+
+
+def _patch_cpp_indirect_assert_if_needed():
+    """Apply cpp codegen indirect_assert backport when on torch 2.11.x.
+
+    Defers application until torch._inductor.codegen.cpp is naturally
+    imported by Inductor. Importing it eagerly during vllm.__init__ pulls
+    in torch._inductor.scheduler, whose top-level
+    `import torch._inductor.async_compile` can fail with
+    `ModuleNotFoundError: import of torch._inductor.async_compile halted;
+    None in sys.modules` depending on the import order on the runner
+    (observed in vLLM CPU CI).
+    """
+    if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
+        return
+
+    import sys
+
+    target_name = "torch._inductor.codegen.cpp"
+    if target_name in sys.modules:
+        _apply_cpp_indirect_assert_patch()
+        return
+
+    import importlib.abc
+
+    class _CppCodegenPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_cpp_indirect_assert_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _CppCodegenPatchFinder())
+
+
+_patch_cpp_indirect_assert_if_needed()

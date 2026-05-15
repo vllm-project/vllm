@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
-from collections.abc import Callable
+from typing import Any
 
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.response_function_tool_call_output_item import (
@@ -15,6 +15,7 @@ from openai.types.responses.response_reasoning_item import (
     ResponseReasoningItem,
 )
 
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -36,10 +37,12 @@ class ResponsesParser:
         self,
         *,
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
+        reasoning_parser_cls: type[ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
         tool_parser_cls: type[ToolParser] | None,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
     ):
         self.response_messages: list[ResponseInputOutputItem] = (
             # TODO: initial messages may not be properly typed
@@ -49,7 +52,14 @@ class ResponsesParser:
         self.tokenizer = tokenizer
         self.request = request
 
-        self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
+        self.reasoning_parser_instance = reasoning_parser_cls(
+            tokenizer,
+            chat_template_kwargs=_effective_chat_template_kwargs(
+                request,
+                chat_template=chat_template,
+                chat_template_content_format=chat_template_content_format,
+            ),
+        )
         self.tool_parser_instance = None
         if tool_parser_cls is not None:
             self.tool_parser_instance = tool_parser_cls(tokenizer, request.tools)
@@ -159,10 +169,12 @@ class ResponsesParser:
 def get_responses_parser_for_simple_context(
     *,
     tokenizer: TokenizerLike,
-    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
+    reasoning_parser_cls: type[ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
     tool_parser_cls,
+    chat_template: str | None,
+    chat_template_content_format: ChatTemplateContentFormatOption,
 ) -> ResponsesParser:
     """Factory function to create a ResponsesParser with
     optional reasoning parser.
@@ -176,4 +188,17 @@ def get_responses_parser_for_simple_context(
         response_messages=response_messages,
         request=request,
         tool_parser_cls=tool_parser_cls,
+        chat_template=chat_template,
+        chat_template_content_format=chat_template_content_format,
     )
+
+
+def _effective_chat_template_kwargs(
+    request: ResponsesRequest,
+    chat_template: str | None,
+    chat_template_content_format: ChatTemplateContentFormatOption,
+) -> dict[str, Any]:
+    return request.build_chat_params(
+        default_template=chat_template,
+        default_template_content_format=chat_template_content_format,
+    ).chat_template_kwargs
