@@ -654,20 +654,9 @@ class EngineCore:
         reset_running_requests: bool = True,
         reset_connector: bool = True,
     ) -> None:
-        # ``reset_connector`` defaults to True so external KV-store
-        # connectors (e.g. MooncakeStoreConnector) drop their state
-        # alongside the local prefix/mm/encoder caches. This matches the
-        # invariant callers of ``pause_generation(clear_cache=True)``
-        # expect: clear all caches, not just the on-engine ones.
-        # ``Scheduler.reset_connector_cache`` already handles the
-        # no-connector case (logs + short-circuits), so this is a no-op
-        # for engines without a configured KV connector.
-        #
-        # Internal callers that genuinely want a local-only invalidation
-        # can pass ``reset_connector=False``; users that need that escape
-        # hatch from outside should call
-        # ``scheduler.reset_prefix_cache(reset_connector=False)``
-        # directly rather than going through this cascade.
+        # reset_connector=True so external connectors clear alongside
+        # local caches, matching the pause_generation(clear_cache=True)
+        # contract. No-op when no connector is configured.
         self.reset_prefix_cache(
             reset_running_requests=reset_running_requests,
             reset_connector=reset_connector,
