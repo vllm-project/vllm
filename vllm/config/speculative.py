@@ -675,7 +675,11 @@ class SpeculativeConfig:
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
-                    tokenizer=(self.model if self.method == "universal_draft" else self.target_model_config.tokenizer),
+                    tokenizer=(
+                        self.model
+                        if self.method == "universal_draft"
+                        else self.target_model_config.tokenizer
+                    ),
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
@@ -724,6 +728,16 @@ class SpeculativeConfig:
                             "Enabling num_speculative_tokens > 1 will run "
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
+                        )
+                elif self.draft_model_config.hf_config.model_type in (
+                    "longcat_flash_mtp"
+                ):
+                    self.method = "longcat_flash_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                            "LongCat MTP models only have "
+                            "one layer. Might need some code changes "
+                            "to support multiple layers."
                         )
                 elif self.method == "draft_model":
                     pass

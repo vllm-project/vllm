@@ -142,9 +142,9 @@ class DraftModelProposer(SpecDecodeBaseProposer):
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
         if self.vocab_mapping is not None:
             target_token_ids = self.vocab_mapping.map_target_to_draft_ids(
-                target_token_ids)
-            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(
-                next_token_ids)
+                target_token_ids
+            )
+            next_token_ids = self.vocab_mapping.map_target_to_draft_ids(next_token_ids)
         return super().set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,

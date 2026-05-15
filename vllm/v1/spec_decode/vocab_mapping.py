@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -17,8 +19,11 @@ def _detect_space_prefix(tokenizer) -> tuple[str, ...]:
         space_ids = tokenizer.encode(" ", add_special_tokens=False)
         if space_ids:
             tok_str = tokenizer.convert_ids_to_tokens(space_ids[0])
-            if isinstance(tok_str, str) and len(tok_str) > 1 \
-                    and tok_str[0] not in (" ", "\t"):
+            if (
+                isinstance(tok_str, str)
+                and len(tok_str) > 1
+                and tok_str[0] not in (" ", "\t")
+            ):
                 return (tok_str[0],)
     except Exception:
         pass
@@ -29,7 +34,7 @@ def _detect_space_prefix(tokenizer) -> tuple[str, ...]:
 def _normalize_token(token: str, space_prefixes: tuple[str, ...]) -> str:
     for prefix in space_prefixes:
         if token.startswith(prefix):
-            return " " + token[len(prefix):]
+            return " " + token[len(prefix) :]
     return token
 
 
@@ -39,7 +44,7 @@ def _get_unk_token_id(tokenizer, role: str) -> int:
     Preferred: unk_token_id → eos_token_id → ValueError.
     Checking with ``is not None`` is required because token ID 0 is a valid
     (and common) unk ID on many tokenizers; using ``or 0`` would silently
-    mis-handle those cases.
+    mishandle those cases.
     """
     unk = getattr(tokenizer, "unk_token_id", None)
     if unk is not None:
@@ -49,7 +54,8 @@ def _get_unk_token_id(tokenizer, role: str) -> int:
         logger.warning(
             "VocabMapping: %s has no unk_token_id; "
             "falling back to eos_token_id=%d for out-of-intersection tokens",
-            role, eos,
+            role,
+            eos,
         )
         return eos
     raise ValueError(
@@ -59,21 +65,27 @@ def _get_unk_token_id(tokenizer, role: str) -> int:
 
 
 class VocabMapping:
-    def __init__(self, target_tokenizer, draft_tokenizer,
-                 target_vocab_size, draft_vocab_size, device):
+    def __init__(
+        self,
+        target_tokenizer,
+        draft_tokenizer,
+        target_vocab_size,
+        draft_vocab_size,
+        device,
+    ):
         self.target_vocab_size = target_vocab_size
         self.draft_vocab_size = draft_vocab_size
         self.device = device
-        self.target_unk_token_id = _get_unk_token_id(target_tokenizer,
-                                                      "target tokenizer")
-        self.draft_unk_token_id  = _get_unk_token_id(draft_tokenizer,
-                                                      "draft tokenizer")
+        self.target_unk_token_id = _get_unk_token_id(
+            target_tokenizer, "target tokenizer"
+        )
+        self.draft_unk_token_id = _get_unk_token_id(draft_tokenizer, "draft tokenizer")
 
         target_prefixes = _detect_space_prefix(target_tokenizer)
-        draft_prefixes  = _detect_space_prefix(draft_tokenizer)
+        draft_prefixes = _detect_space_prefix(draft_tokenizer)
 
         target_vocab = target_tokenizer.get_vocab()
-        draft_vocab  = draft_tokenizer.get_vocab()
+        draft_vocab = draft_tokenizer.get_vocab()
 
         target_normalized = {}
         for token, tid in target_vocab.items():
@@ -109,7 +121,9 @@ class VocabMapping:
         logger.info(
             "VocabMapping initialized: target_vocab=%d, draft_vocab=%d, "
             "intersection=%d (%.1f%% of draft, %.1f%% of target)",
-            target_vocab_size, draft_vocab_size, self.intersection_size,
+            target_vocab_size,
+            draft_vocab_size,
+            self.intersection_size,
             100.0 * self.intersection_size / max(draft_vocab_size, 1),
             100.0 * self.intersection_size / max(target_vocab_size, 1),
         )

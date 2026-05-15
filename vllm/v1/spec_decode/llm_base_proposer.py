@@ -575,8 +575,7 @@ class SpecDecodeBaseProposer:
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
-            input_ids = self._prepare_draft_input_ids(
-                draft_token_ids_list[-1].int())
+            input_ids = self._prepare_draft_input_ids(draft_token_ids_list[-1].int())
 
             if not self.constant_draft_positions:
                 positions = self._update_positions_dependent_metadata(
