@@ -230,6 +230,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         key_cache, value_cache = fixed_k, fixed_v
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
+            # queries are quantized in the attention layer
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
 
