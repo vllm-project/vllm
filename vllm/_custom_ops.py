@@ -2541,7 +2541,7 @@ def moe_wna16_marlin_gemm(
     )
 
 
-if hasattr(torch.ops, "_moe_C"):
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "moe_wna16_marlin_gemm"):
 
     @register_fake("_moe_C::moe_wna16_marlin_gemm")
     def moe_wna16_marlin_gemm_fake(
