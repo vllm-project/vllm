@@ -1975,10 +1975,9 @@ class VllmConfig:
             unsupported.append("sequence parallelism")
 
         if speculative_config is not None:
-            # TODO: ngram are not supported by the v2 model runner yet
-            if speculative_config.method in ("ngram",):
-                unsupported.append("ngram cpu speculative decoding")
-            elif speculative_config.method not in ("eagle", "eagle3", "mtp"):
+            if speculative_config.method not in get_args(
+                EagleModelTypes
+            ) and speculative_config.method not in get_args(NgramGPUTypes):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             if (
