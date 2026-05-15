@@ -115,11 +115,12 @@ async def serve_grpc(args: argparse.Namespace):
     # Bind to address
     host = args.host or "0.0.0.0"
     address = f"{host}:{args.port}"
-    if not args.api_key:
+    api_keys = [k for k in (args.api_key or [envs.VLLM_API_KEY]) if k]
+    if not api_keys:
         logger.warning(
-            "No --api-key set. gRPC server is running without authentication. "
-            "Anyone who can reach this port (%s) has full access to the "
-            "vLLM engine.",
+            "No --api-key set or VLLM_API_KEY env var found. gRPC server is "
+            "running without authentication. Anyone who can reach this "
+            "port (%s) has full access to the vLLM engine.",
             address,
         )
     server.add_insecure_port(address)
