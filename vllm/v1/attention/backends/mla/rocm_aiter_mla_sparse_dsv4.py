@@ -302,6 +302,30 @@ def combine_topk_swa_indices_ragged(
     return combined_ragged, combined_indptr, combined_lens
 
 
+def _copy_ragged_to_graph_buffers(
+    ragged_indices: torch.Tensor,
+    ragged_indptr: torch.Tensor,
+    ragged_indices_buffer: torch.Tensor,
+    ragged_indptr_buffer: torch.Tensor,
+    num_rows: int,
+    max_entries_per_row: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Copy dynamic ragged metadata into persistent CUDA graph buffers.
+
+    FULL decode graphs capture kernel argument addresses. Keep the returned
+    tensors backed by stable storage, while indptr continues to bound reads.
+    """
+    indptr_out = ragged_indptr_buffer[: num_rows + 1]
+    indptr_out.copy_(ragged_indptr, non_blocking=True)
+
+    max_entries = max(num_rows * max_entries_per_row, 1)
+    ragged_out = ragged_indices_buffer[:max_entries]
+    nnz = ragged_indices.numel()
+    if nnz > 0:
+        ragged_out[:nnz].copy_(ragged_indices, non_blocking=True)
+    return ragged_out, indptr_out
+
+
 @dataclass
 class DeepseekV4ROCMAiterMLASparseMetadata(FlashMLASparseMetadata):
     """ROCm-specific DeepSeek V4 metadata carrying ragged decode topk."""
@@ -317,6 +341,23 @@ class DeepseekV4ROCMAiterSparseSWAMetadata(DeepseekSparseSWAMetadata):
 
 
 class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.c128a_decode_topk_ragged_indices_buffer: torch.Tensor | None = None
+        self.c128a_decode_topk_ragged_indptr_buffer: torch.Tensor | None = None
+        if self.is_deepseek_v4 and self.compress_ratio == 128:
+            max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            self.c128a_decode_topk_ragged_indices_buffer = torch.empty(
+                max_tokens * self.c128a_max_compressed,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            self.c128a_decode_topk_ragged_indptr_buffer = torch.empty(
+                max_tokens + 1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
     def build(
         self,
         common_prefix_len: int,
@@ -338,6 +379,16 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder)
                 dense_decode.reshape(dense_decode.shape[0], -1),
                 decode_lens,
             )
+            assert self.c128a_decode_topk_ragged_indices_buffer is not None
+            assert self.c128a_decode_topk_ragged_indptr_buffer is not None
+            ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
+                ragged_indices,
+                ragged_indptr,
+                self.c128a_decode_topk_ragged_indices_buffer,
+                self.c128a_decode_topk_ragged_indptr_buffer,
+                dense_decode.shape[0],
+                self.c128a_max_compressed,
+            )
 
         return DeepseekV4ROCMAiterMLASparseMetadata(
             **vars(base),
@@ -347,6 +398,20 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(FlashMLASparseMetadataBuilder)
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        self.decode_swa_ragged_indices_buffer = torch.empty(
+            max_tokens * self.window_size,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.decode_swa_ragged_indptr_buffer = torch.empty(
+            max_tokens + 1,
+            dtype=torch.int32,
+            device=self.device,
+        )
+
     def build(
         self,
         common_prefix_len: int,
@@ -369,6 +434,14 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
                 base.decode_swa_indices.reshape(base.num_decode_tokens, -1),
                 base.decode_swa_lens,
+            )
+            ragged_indices, ragged_indptr = _copy_ragged_to_graph_buffers(
+                ragged_indices,
+                ragged_indptr,
+                self.decode_swa_ragged_indices_buffer,
+                self.decode_swa_ragged_indptr_buffer,
+                base.num_decode_tokens,
+                self.window_size,
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
