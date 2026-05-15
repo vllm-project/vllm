@@ -422,7 +422,10 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 1
+        return (
+            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
+            and len(packed_modules_list) == 1
+        )
 
 
 class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
@@ -480,7 +483,10 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 3
+        return (
+            type(source_layer) is maybe_get_oot_by_class(QKVParallelLinear)
+            and len(packed_modules_list) == 3
+        )
 
 
 # These following layers are based on the tensor parallelism strategy given in
