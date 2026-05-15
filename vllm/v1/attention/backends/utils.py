@@ -413,6 +413,10 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
     decode_max_query_len = int(num_decode_tokens.max().item())
+    # TODO(perf): .max() and .sum() here force GPU→CPU syncs because
+    # num_decode_tokens is a GPU tensor.  Both values can be derived from
+    # decode_query_start_loc_cpu once it is available (last element = total,
+    # max per-request count from adjacent differences), avoiding these syncs.
     total_num_decode_tokens = int(num_decode_tokens.sum().item())
 
     common_attn_metadata = CommonAttentionMetadata(
@@ -492,8 +496,8 @@ def split_decodes_prefills_and_extends(
     num_extends = first_prefill - num_decodes
     num_prefills = num_reqs - first_prefill
 
-    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
-    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
+    num_prefill_tokens = int(num_tokens - query_start_loc[first_prefill])
+    num_extend_tokens = int(num_prefill_or_extend_tokens - num_prefill_tokens)
     return (
         num_decodes,
         num_extends,

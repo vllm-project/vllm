@@ -8,6 +8,7 @@ from tests.v1.attention.test_attention_backends import BATCH_SPECS
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
+    split_decodes_prefills_and_extends,
 )
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
@@ -379,3 +380,125 @@ def test_prefill_split_across_ubatches(
         # Map to original request index
         orig_idx = split_req_idx + j
         assert int(second_meta.seq_lens[j]) == seq_lens[orig_idx]
+
+
+# ---------------------------------------------------------------------------
+# Tests for split_decodes_prefills_and_extends (6-tuple version)
+# ---------------------------------------------------------------------------
+
+
+def apply_split_decodes_prefills_and_extends(
+    query_lens: list[int],
+    seq_lens: list[int] | None = None,
+    decode_threshold: int = 1,
+):
+    """Helper: build CommonAttentionMetadata and call the 6-tuple split."""
+    device = torch.device("cpu")
+    if seq_lens is None:
+        seq_lens = [10 * (i + 1) for i in range(len(query_lens))]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=16,
+        device=device,
+    )
+    return split_decodes_prefills_and_extends(common, decode_threshold=decode_threshold)
+
+
+def test_split_decodes_prefills_and_extends_returns_ints():
+    """All 6 return values must be Python ints, not tensors."""
+    result = apply_split_decodes_prefills_and_extends([1, 3, 8])
+    assert len(result) == 6
+    for i, val in enumerate(result):
+        assert isinstance(val, int), (
+            f"Return value at position {i} is {type(val).__name__}, expected int: {val}"
+        )
+
+
+def test_split_decodes_prefills_and_extends_all_decodes():
+    """All single-token requests → all decodes, no extends, no prefills."""
+    query_lens = [1, 1, 1]
+    seq_lens = [10, 20, 30]  # seq_len > query_len so not prefills
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens
+    )
+    assert nd == 3
+    assert ne == 0
+    assert np_ == 0
+    assert ndt == 3
+    assert net == 0
+    assert npt == 0
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_all_prefills():
+    """All first-token requests (seq_len == query_len) → all prefills."""
+    query_lens = [5, 6, 7]
+    seq_lens = [5, 6, 7]  # seq_len == query_len → prefill
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens, decode_threshold=1
+    )
+    assert nd == 0
+    assert ne == 0
+    assert np_ == 3
+    assert ndt == 0
+    assert net == 0
+    assert npt == sum(query_lens)
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_all_extends():
+    """Multi-token requests where seq_len > query_len → all extends."""
+    query_lens = [3, 4, 5]
+    seq_lens = [10, 20, 30]  # seq_len > query_len, query_len > 1 → extends
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens, decode_threshold=1
+    )
+    assert nd == 0
+    assert ne == 3
+    assert np_ == 0
+    assert ndt == 0
+    assert net == sum(query_lens)
+    assert npt == 0
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_mixed():
+    """Mixed batch: decodes first, then extends, then prefills."""
+    # decodes: query_len=1, seq_len > query_len
+    # extends: query_len > 1, seq_len > query_len
+    # prefills: query_len == seq_len (fresh prompts)
+    query_lens = [1, 1, 3, 4, 6, 8]
+    seq_lens = [20, 30, 10, 15, 6, 8]
+    # requests 0,1: decode (query=1, seq>1)
+    # requests 2,3: extend (query>1, seq>query)
+    # requests 4,5: prefill (query==seq)
+    nd, ne, np_, ndt, net, npt = apply_split_decodes_prefills_and_extends(
+        query_lens, seq_lens=seq_lens, decode_threshold=1
+    )
+    assert nd == 2
+    assert ne == 2
+    assert np_ == 2
+    assert ndt == 2  # 1 + 1
+    assert net == 7  # 3 + 4
+    assert npt == 14  # 6 + 8
+    assert ndt + net + npt == sum(query_lens)
+
+
+def test_split_decodes_prefills_and_extends_token_counts_sum():
+    """Token counts across all three groups always sum to total tokens."""
+    test_cases = [
+        ([1, 1, 1], [10, 20, 30]),
+        ([5, 5, 5], [5, 5, 5]),
+        ([1, 3, 8], None),
+        ([1, 1, 4, 6, 10, 10], [20, 30, 4, 6, 10, 10]),
+    ]
+    for query_lens, seq_lens in test_cases:
+        result = apply_split_decodes_prefills_and_extends(query_lens, seq_lens=seq_lens)
+        nd, ne, np_, ndt, net, npt = result
+        assert ndt + net + npt == sum(query_lens), (
+            f"Token count mismatch for query_lens={query_lens}: "
+            f"{ndt}+{net}+{npt} != {sum(query_lens)}"
+        )
+        assert nd + ne + np_ == len(query_lens), (
+            f"Request count mismatch: {nd}+{ne}+{np_} != {len(query_lens)}"
+        )
