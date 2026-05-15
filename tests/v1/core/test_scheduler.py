@@ -774,6 +774,27 @@ def test_scheduler_reset_prefix_cache():
         assert scheduler.waiting[i] == request
 
 
+def test_reset_connector_cache_no_connector_is_no_op_success():
+    """``reset_connector_cache`` must return True when no connector is
+    configured.
+
+    Without this, ``reset_prefix_cache(reset_connector=True)`` returns
+    ``False`` on every engine that doesn't have a KV connector configured —
+    even when the local prefix cache reset succeeded — and any caller that
+    interprets the return value as "did the reset I asked for succeed?"
+    sees a spurious failure.
+    """
+    scheduler = create_scheduler(enable_prefix_caching=True)
+    assert scheduler.connector is None
+
+    # No-connector reset is treated as success.
+    assert scheduler.reset_connector_cache() is True
+
+    # End-to-end: reset_prefix_cache(reset_connector=True) on an idle
+    # scheduler succeeds with or without a connector.
+    assert scheduler.reset_prefix_cache(reset_connector=True) is True
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
