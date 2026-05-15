@@ -83,6 +83,7 @@ def _dump_subop_out(name: str, output):
     if t.ndim < 2:
         return
     trigger = _qwen2._probe_trigger_idx
+    M = _qwen2._probe_batch_M
     import sys as _sys
 
     for pos in positions[:2]:
@@ -90,10 +91,49 @@ def _dump_subop_out(name: str, output):
             continue
         flat = t[pos].detach().reshape(-1)[:8].cpu().float().tolist()
         print(
-            f"[SUBOP_OUT] trigger={trigger} op={name} pos={pos} first8={flat}",
+            f"[SUBOP_OUT] trigger={trigger} M={M} op={name} pos={pos} "
+            f"shape={list(t.shape)} first8={flat}",
             file=_sys.stderr,
             flush=True,
         )
+
+
+# PROBE: dump qkv_proj weight checksum once per trigger, only from layer 0,
+# to rule out weight-drift as an explanation for output divergence. We log
+# (a) sum of weight[0, :8], (b) sum of full weight tensor, both as float64
+# to avoid the fp32 sum precision issue. If these match across configs but
+# qkv_proj output still differs, the weight is not the cause.
+_weight_dumped_for_trigger: int = -1
+
+
+def _dump_weight_once_per_trigger(weight: torch.Tensor):
+    import os as _os
+
+    if _os.environ.get("VLLM_DET_CHECK", "") != "1":
+        return
+    from . import qwen2 as _qwen2
+
+    if not _qwen2._probe_target_positions:
+        return
+    global _weight_dumped_for_trigger
+    trigger = _qwen2._probe_trigger_idx
+    if trigger == _weight_dumped_for_trigger:
+        return
+    _weight_dumped_for_trigger = trigger
+    try:
+        w0 = weight[0, :8].detach().cpu().float().tolist()
+        wsum = float(weight.detach().double().sum().item())
+        wshape = list(weight.shape)
+    except Exception:
+        return
+    import sys as _sys
+
+    print(
+        f"[SUBOP_WEIGHT] trigger={trigger} op=qkv_proj shape={wshape} "
+        f"row0_first8={w0} fullsum={wsum:.18g}",
+        file=_sys.stderr,
+        flush=True,
+    )
 
 
 # Wrapper that calls fn once and dumps its output. Replaces the old
@@ -202,7 +242,31 @@ class Qwen3Attention(nn.Module):
             and __import__("os").environ.get("VLLM_DET_CHECK", "") == "1"
         )
         if _det:
+            # PROBE: weight checksum once per trigger to rule out weight drift.
+            _dump_weight_once_per_trigger(self.qkv_proj.weight)
             qkv, _ = _det_check_call("qkv_proj", self.qkv_proj, hidden_states)
+            # PROBE: within-call re-run with the SAME input + weight. If qkv ==
+            # qkv_recheck bit-for-bit, cuBLAS is deterministic for this shape
+            # in this forward — and any cross-config divergence is purely a
+            # function of the shape (M-dim) or pre-forward GPU state. If they
+            # differ, cuBLAS handle/workspace state is leaking across calls
+            # within the same forward, and shape-only theories are wrong.
+            qkv_recheck, _ = self.qkv_proj(hidden_states)
+            _dump_subop_out("qkv_proj_recheck", qkv_recheck)
+            # PROBE: float64 reference. F.linear(input.double(), weight.double())
+            # gives an effectively-exact result; the config whose qkv is closer
+            # to this is the "correct" one. Both being equally far means cuBLAS
+            # is picking different but equally-valid algos.
+            try:
+                import torch.nn.functional as _F
+
+                qkv_ref = _F.linear(
+                    hidden_states.detach().double(),
+                    self.qkv_proj.weight.detach().double(),
+                )
+                _dump_subop_out("qkv_proj_ref_fp64", qkv_ref.float())
+            except Exception:
+                pass
         else:
             qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)

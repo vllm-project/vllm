@@ -86,6 +86,13 @@ from .utils import (
 # order. Populated in Qwen2Model.forward; consumed in qwen3.py.
 _probe_target_positions: list[int] = []
 _probe_trigger_idx: int = 0
+# M = leading dim of input_ids in the forward call (= num scheduled tokens for
+# this micro-batch). Needed to test the "cuBLAS picks different GEMM kernel
+# when M changes" hypothesis at qkv_proj. Set together with positions/trigger.
+_probe_batch_M: int = 0
+# Position values at each 2701 occurrence. Same logical-prompt-position should
+# hold across configs; difference would mean scheduler chunked differently.
+_probe_position_vals: list[int] = []
 
 
 class Qwen2MLP(nn.Module):
@@ -414,8 +421,12 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         # If input_ids contains token 2701 in this forward call, capture all
         # positions and bump a monotonic trigger counter so cross-config
         # alignment is possible. Otherwise clear to suppress sub-op dumps on
-        # decode/unrelated-prefill calls.
+        # decode/unrelated-prefill calls. Also records M (batch leading dim)
+        # and the value of `positions` at each 2701 occurrence, so we can
+        # decide whether qkv_proj output drift is explained by M-dependent
+        # cuBLAS algo selection or by scheduler-induced position changes.
         global _probe_target_positions, _probe_trigger_idx
+        global _probe_batch_M, _probe_position_vals
         if _DET and input_ids is not None and input_ids.ndim == 1:
             try:
                 _positions_2701 = (
@@ -426,6 +437,24 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             if _positions_2701:
                 _probe_target_positions = _positions_2701
                 _probe_trigger_idx += 1
+                _probe_batch_M = int(input_ids.shape[0])
+                try:
+                    if positions is not None and positions.ndim == 1:
+                        _probe_position_vals = [
+                            int(positions[p].item()) for p in _positions_2701[:2]
+                        ]
+                    else:
+                        _probe_position_vals = []
+                except Exception:
+                    _probe_position_vals = []
+                import sys as _sys
+
+                print(
+                    f"[SUBOP_META] trigger={_probe_trigger_idx} M={_probe_batch_M} "
+                    f"pos2701={_positions_2701[:4]} posvals={_probe_position_vals}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
             else:
                 _probe_target_positions = []
         elif _DET:
