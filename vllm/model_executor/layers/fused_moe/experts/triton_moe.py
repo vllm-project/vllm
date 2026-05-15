@@ -12,14 +12,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     _prepare_expert_assignment,
     invoke_fused_moe_triton_kernel,
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
-)
-from vllm.model_executor.layers.fused_moe.lora_experts_mixin import (
-    LoRAExpertsMixin,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -237,7 +237,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             hidden_states,
             w1,
             intermediate_cache1,
-            a1q_scale,
+            a1q_scale if a1q_scale is not None else self.a1_scale,
             self.w1_scale,
             None,  # topk_weights
             sorted_token_ids,

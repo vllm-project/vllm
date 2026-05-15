@@ -234,9 +234,7 @@ class LLM(PoolingOfflineMixin):
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
-        quantization_config: dict[str, Any]
-        | OnlineQuantizationConfigArgs
-        | None = None,
+        quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,
     ) -> None:
