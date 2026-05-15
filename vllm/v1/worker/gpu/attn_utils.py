@@ -15,8 +15,9 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-        self._seq_lens_cpu = seq_lens_cpu
-        self._num_computed_tokens_cpu = _num_computed_tokens_cpu
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
