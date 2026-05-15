@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping
 from copy import deepcopy
-from fractions import Fraction
 from itertools import chain
 from types import MappingProxyType
 from typing import TYPE_CHECKING

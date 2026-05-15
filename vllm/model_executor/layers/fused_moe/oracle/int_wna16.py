@@ -74,8 +74,7 @@ def _get_priority_backends(
     """
     _AVAILABLE_BACKENDS = []
 
-    # Temp. first for testing
-
+    # Temp. triton first for testing
     if not may_have_bias:
         _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
 
@@ -107,10 +106,6 @@ def select_wna16_moe_backend(
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
     """
-
-    # TODO: deal with ZP/bias - flashinfer does not support zp or bias
-    # triton wna16 does not support bias
-    # marlin appears to support both (ZP may need processing)
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
