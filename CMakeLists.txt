@@ -1038,6 +1038,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Needed by CUTLASS kernels
   target_compile_definitions(_C_stable_libtorch PRIVATE
     CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+elseif(VLLM_GPU_LANG STREQUAL "HIP")
+  # ROCm: stable extension with per-token group FP8/int8 quant only (no
+  # CUTLASS in this target). See csrc/libtorch_stable/torch_bindings.cpp.
+  message(STATUS "Enabling C_stable extension (ROCm per-token quant).")
+  set(VLLM_STABLE_EXT_SRC_ROCM
+    "csrc/libtorch_stable/torch_bindings.cpp"
+    "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
+    "csrc/libtorch_stable/quantization/w8a8/fp8/per_token_group_quant.cu"
+  )
+  define_extension_target(
+    _C_stable_libtorch
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_STABLE_EXT_SRC_ROCM}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
+  target_compile_definitions(_C_stable_libtorch PRIVATE
+    TORCH_TARGET_VERSION=0x020A000000000000ULL
+    USE_ROCM)
 endif()
 
 #
