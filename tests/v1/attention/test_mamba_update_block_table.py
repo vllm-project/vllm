@@ -26,7 +26,6 @@ from vllm.v1.attention.backends.mamba_attn import (
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
-
 pytestmark = pytest.mark.skip_global_cleanup
 
 
@@ -192,7 +191,9 @@ def test_build_chunk_metadata_uses_cached_num_computed_tokens_cpu():
         slot_mapping=torch.zeros(5, dtype=torch.int64),
         causal=True,
     )
-    common = SimpleNamespace(num_reqs=num_reqs, num_prefills=num_reqs, num_decode_tokens=0)
+    common = SimpleNamespace(
+        num_reqs=num_reqs, num_prefills=num_reqs, num_decode_tokens=0
+    )
 
     with patch.object(
         CommonAttentionMetadata,

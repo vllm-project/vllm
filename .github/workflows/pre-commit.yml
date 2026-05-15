@@ -49,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      with:
+        fetch-depth: 0
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.11"
@@ -80,4 +82,12 @@ jobs:
         XDG_CONFIG_HOME: ${{ runner.temp }}/.config
         UV_CACHE_DIR: ${{ runner.temp }}/.cache/uv
         SKIP: actionlint
-      run: pre-commit run --all-files --hook-stage manual
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          pre-commit run \
+            --from-ref "${{ github.event.pull_request.base.sha }}" \
+            --to-ref "${{ github.sha }}" \
+            --hook-stage manual
+        else
+          pre-commit run --all-files --hook-stage manual
+        fi

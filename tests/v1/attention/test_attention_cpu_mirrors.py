@@ -12,7 +12,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-
 pytestmark = pytest.mark.skip_global_cleanup
 
 

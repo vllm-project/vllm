@@ -431,7 +431,10 @@ class CommonAttentionMetadata:
         return self._seq_lens_cpu
 
     def get_num_computed_tokens_cpu(self) -> torch.Tensor:
-        """Return the CPU mirror of num_computed_tokens, creating it only when needed."""
+        """Return the CPU mirror of num_computed_tokens.
+
+        Create it only when needed.
+        """
         if self._num_computed_tokens_cpu is None:
             query_seq_lens = (
                 self.query_start_loc_cpu[1:] - self.query_start_loc_cpu[:-1]

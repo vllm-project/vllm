@@ -259,7 +259,9 @@ def build_attn_metadata(
         if seq_lens.device.type == "cpu"
         else seq_lens.to("cpu", non_blocking=True)
     )
-    query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+    query_lens_cpu = (
+        query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+    )
     num_computed_tokens_cpu = seq_lens_cpu - query_lens_cpu
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]

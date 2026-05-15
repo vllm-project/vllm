@@ -9,7 +9,6 @@ import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 
-
 pytestmark = pytest.mark.skip_global_cleanup
 
 
@@ -105,7 +104,10 @@ def test_build_attn_metadata_seeds_seq_lens_cpu_for_all_kv_groups():
     assert len(builder0.seen_metadata) == 1
     assert len(builder1.seen_metadata) == 1
     assert builder0.seen_metadata[0]._seq_lens_cpu is not None
-    assert builder0.seen_metadata[0]._seq_lens_cpu is builder1.seen_metadata[0]._seq_lens_cpu
+    assert (
+        builder0.seen_metadata[0]._seq_lens_cpu
+        is builder1.seen_metadata[0]._seq_lens_cpu
+    )
     assert builder0.seen_metadata[0]._num_computed_tokens_cpu is not None
     assert (
         builder0.seen_metadata[0]._num_computed_tokens_cpu
