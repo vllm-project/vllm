@@ -8,8 +8,12 @@ import torch
 import vllm.envs as envs
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer, has_module_attribute, multi_gpu_test
+from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.allreduce_rms_fusion import AllReduceFusionPass
+from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+    AllReduceFusionPass,
+    RocmAiterAllReduceFusionPass,
+)
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
 )
@@ -37,14 +41,24 @@ from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE_TYPE = current_platform.device_type
+
 
 class TestAllReduceRMSNormModel(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(
+        self,
+        hidden_size=16,
+        token_num=16,
+        eps=1e-6,
+        dtype: torch.dtype = torch.float16,
+        use_aiter: bool = False,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
         self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
+        self.use_aiter = use_aiter
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
@@ -72,13 +86,17 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         return [torch.ops.vllm.all_reduce.default]
 
     def ops_in_model_after(self):
+        if self.use_aiter:
+            return [rocm_aiter_ops.get_fused_allreduce_rmsnorm_op()]
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
 
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
     quant_key = kFp8StaticTensorSym
 
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(
+        self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -88,6 +106,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
                 weight_shape=(hidden_size, hidden_size),
                 activation_quant_key=self.quant_key,
                 weight_quant_key=self.quant_key,
+                input_dtype=dtype,
             )
             for i in range(3)
         ]
@@ -127,7 +146,9 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
-    def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
+    def __init__(
+        self, hidden_size=16, token_num=16, eps=1e-6, dtype: torch.dtype = torch.float16
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
@@ -142,7 +163,6 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
             *(scaled_fp4_quant(w, wg) for w, wg in zip(self.w, wgscale))
         )
         self.wq, self.wscale = list(wq_gen), list(wscale_gen)
-        print(f"{self.wq=}, {self.wscale=}")
 
     def forward(self, hidden_states):
         # avoid having graph input be an arg to a pattern directly
@@ -180,18 +200,42 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.scaled_fp4_quant.default,
+            torch.ops._C.scaled_fp4_quant.out,
         ]
 
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "test_model, enable_quant_fp8_custom_op",
+    "test_model, enable_quant_fp8_custom_op, use_aiter",
     [
-        (TestAllReduceRMSNormModel, False),
-        (TestAllReduceRMSNormStaticQuantFP8Model, True),
-        (TestAllReduceRMSNormStaticQuantFP8Model, False),
-        (TestAllReduceFusedAddRMSNormStaticQuantFP4Model, False),
+        (TestAllReduceRMSNormModel, False, IS_AITER_FOUND),
+        pytest.param(
+            TestAllReduceRMSNormStaticQuantFP8Model,
+            True,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
+        pytest.param(
+            TestAllReduceRMSNormStaticQuantFP8Model,
+            False,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
+        pytest.param(
+            TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
+            False,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
@@ -199,12 +243,23 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.parametrize("flashinfer_allreduce_backend", ["trtllm", "mnnvl"])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
-    not find_spec("flashinfer")
-    or not has_module_attribute("flashinfer.comm", "trtllm_allreduce_fusion"),
+    current_platform.is_rocm() and not IS_AITER_FOUND,
+    reason="aiter is not found",
+)
+@pytest.mark.skipif(
+    current_platform.is_cuda()
+    and (
+        not find_spec("flashinfer")
+        or not has_module_attribute("flashinfer.comm", "allreduce_fusion")
+        or not has_module_attribute(
+            "flashinfer.comm", "create_allreduce_fusion_workspace"
+        )
+    ),
     reason="flashinfer is not found or flashinfer "
-    "is not compiled with trtllm_allreduce_fusion",
+    "is not compiled with allreduce_fusion",
 )
 def test_all_reduce_fusion_pass_replace(
     test_model: torch.nn.Module,
@@ -214,7 +269,15 @@ def test_all_reduce_fusion_pass_replace(
     dtype: torch.dtype,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
+    flashinfer_allreduce_backend,
+    use_aiter: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    if use_aiter:
+        with monkeypatch.context() as m:
+            m.setenv("VLLM_ROCM_USE_AITER", str(use_aiter))
+            rocm_aiter_ops.refresh_env_variables()
+
     num_processes = 2
     if (
         test_model == TestAllReduceFusedAddRMSNormStaticQuantFP4Model
@@ -237,6 +300,9 @@ def test_all_reduce_fusion_pass_replace(
                 dtype,
                 enable_rms_norm_custom_op,
                 enable_quant_fp8_custom_op,
+                flashinfer_allreduce_backend,
+                use_aiter,
+                monkeypatch,
             ),
             nprocs=nprocs,
         )
@@ -254,11 +320,14 @@ def all_reduce_fusion_pass_on_test_model(
     dtype: torch.dtype,
     enable_rms_norm_custom_op,
     enable_quant_fp8_custom_op,
+    flashinfer_allreduce_backend,
+    use_aiter: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     set_random_seed(0)
 
-    device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -269,11 +338,11 @@ def all_reduce_fusion_pass_on_test_model(
             "WORLD_SIZE": str(world_size),
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": "12345",
+            "VLLM_FLASHINFER_ALLREDUCE_BACKEND": flashinfer_allreduce_backend,
         }
     )
 
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     custom_ops = []
     if enable_rms_norm_custom_op:
@@ -289,7 +358,7 @@ def all_reduce_fusion_pass_on_test_model(
     vllm_config.compilation_config.pass_config = PassConfig(
         fuse_allreduce_rms=True, eliminate_noops=True
     )
-    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.device_config = DeviceConfig(device=torch.device(DEVICE_TYPE))
     vllm_config.parallel_config.rank = local_rank  # Setup rank for debug path
 
     # this is a fake model name to construct the model config
@@ -299,7 +368,12 @@ def all_reduce_fusion_pass_on_test_model(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
     with set_current_vllm_config(vllm_config):
-        all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+        all_reduce_fusion_pass = (
+            RocmAiterAllReduceFusionPass(vllm_config)
+            if use_aiter
+            else AllReduceFusionPass(vllm_config)
+        )
         noop_pass = NoOpEliminationPass(vllm_config)
         func_pass = FixFunctionalizationPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
@@ -309,12 +383,21 @@ def all_reduce_fusion_pass_on_test_model(
         )
 
         token_num = batch_size * seq_len
-        model = test_model_cls(hidden_size, token_num)
+        if test_model_cls is TestAllReduceRMSNormModel:
+            model = test_model_cls(
+                hidden_size, token_num, dtype=dtype, use_aiter=use_aiter
+            )
+        else:
+            model = test_model_cls(hidden_size, token_num, dtype=dtype)
 
         hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
 
         compiled_model = torch.compile(model, backend=backend)
         compiled_model(hidden_states)
+
+        results_unfused = model(hidden_states)
+        results_fused = compiled_model(hidden_states)
+        torch.testing.assert_close(results_unfused, results_fused, atol=1e-2, rtol=1e-2)
 
         assert all_reduce_fusion_pass.matched_count == 4, (
             f"{all_reduce_fusion_pass.matched_count=}"

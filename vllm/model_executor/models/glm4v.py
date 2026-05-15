@@ -13,15 +13,12 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import LayerNorm
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-from transformers import BatchFeature, PreTrainedTokenizer, TensorType
-from transformers.image_utils import ImageInput
-from transformers.tokenization_utils_base import TextInput
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -36,7 +33,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -50,7 +46,11 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import ChatGLMConfig
+from vllm.transformers_utils.configs.chatglm import ChatGLMConfig
+from vllm.transformers_utils.processors.glm4v import (
+    GLM4VImageProcessorFast,
+    GLM4VProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .chatglm import ChatGLMBaseModel, ChatGLMModel, GLMTransformer
@@ -386,81 +386,24 @@ class GLM4VModel(ChatGLMModel):
         )
 
 
-class GLM4VProcessor:
-    """
-    This model doesn't define its own HF processor,
-    so we implement our own one here.
-    """
-
-    def __init__(
-        self,
-        config: ChatGLMConfig,
-        tokenizer: PreTrainedTokenizer,
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        self.tokenizer = tokenizer
-
-        vision_config = config.vision_config
-        image_size = vision_config["image_size"]
-
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    (image_size, image_size),
-                    interpolation=InterpolationMode.BICUBIC,
-                ),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
-
-    def __call__(
-        self,
-        text: TextInput | list[TextInput] | None = None,
-        images: ImageInput | list[ImageInput] | None = None,
-        return_tensors: str | TensorType | None = None,
-    ) -> BatchFeature:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-
-        text_inputs = self.tokenizer(text)
-
-        if len(images) == 0:
-            image_inputs = {}
-        else:
-            pixel_values = [self.image_transform(image) for image in images]
-            image_inputs = {"pixel_values": torch.stack(pixel_values)}
-
-        return BatchFeature(
-            {
-                **text_inputs,
-                **image_inputs,
-            },
-            tensor_type=return_tensors,
-        )
-
-
 class GLM4VProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_size = vision_config["image_size"]
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs.setdefault("size", {"width": image_size, "height": image_size})
+
+        return GLM4VImageProcessorFast(**kwargs)
+
     def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
-        return self.ctx.init_processor(
-            GLM4VProcessor,
-            config=self.get_hf_config(),
+        return GLM4VProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=self.get_image_processor(**kwargs),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -492,7 +435,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -500,7 +443,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

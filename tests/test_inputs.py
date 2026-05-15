@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs.preprocess import InputPreprocessor
 
 pytestmark = pytest.mark.cpu_test
@@ -20,7 +20,8 @@ pytestmark = pytest.mark.cpu_test
 )
 def test_preprocessor_always_mm_code_path(model_id, prompt):
     model_config = ModelConfig(model=model_id)
-    input_preprocessor = InputPreprocessor(model_config)
+    vllm_config = VllmConfig(model_config=model_config)
+    input_preprocessor = InputPreprocessor(vllm_config)
 
     # HF processor adds sep token
     tokenizer = input_preprocessor.get_tokenizer()

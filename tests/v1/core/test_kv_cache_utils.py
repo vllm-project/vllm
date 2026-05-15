@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import importlib
 from collections.abc import Callable
 from typing import Any
@@ -9,6 +10,7 @@ import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -41,10 +43,16 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheSpecKind,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
@@ -84,13 +92,15 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -154,6 +164,24 @@ def new_chunked_local_attention_spec(
     )
 
 
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    mamba_cache_mode="none",
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
@@ -197,6 +225,18 @@ def test_kv_cache_block():
 
     block.reset_hash()
     assert block.block_hash is None
+
+
+def test_kv_cache_block_uses_slots():
+    block = KVCacheBlock(block_id=0)
+
+    # Slots eliminate per-instance __dict__, saving ~264 bytes per block.
+    # At 100K+ blocks this avoids tens of MB of overhead and GC pressure.
+    assert not hasattr(block, "__dict__")
+
+    # Verify that slots actually prevent dynamic attribute assignment.
+    with pytest.raises(AttributeError):
+        block.unexpected_field = True
 
 
 def test_free_kv_cache_block_queue_initialization():
@@ -305,7 +345,7 @@ def test_free_kv_cache_block_queue_append_n():
 
     # Create an empty FreeKVCacheBlockQueue
     invalid_queue = FreeKVCacheBlockQueue([])
-    # set prev_free_block to None and this will cause assertation in append_n
+    # set prev_free_block to None and this will cause assertion in append_n
     invalid_queue.fake_free_list_tail.prev_free_block = None
     with pytest.raises(AssertionError):
         # Append 1 block
@@ -413,12 +453,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -428,7 +468,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == ("hash1", "hash2")
+    assert extra_keys == (("hash1", 0), ("hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -479,7 +519,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == ("hash1", "salt")
+    assert extra_keys == (("hash1", 0), "salt")
     assert next_mm_idx == 1
 
 
@@ -496,14 +536,41 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     # Test with prompt embeds for the first block
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
-    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
-    assert extra_keys == (expected_bytes,)
+    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    assert extra_keys == (expected_hash,)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
-    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
-    assert extra_keys == (expected_bytes,)
+    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    assert extra_keys == (expected_hash,)
+
+
+def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
+    prompt_embeds = torch.randn(10, 3)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds,
+        block_size=20,
+    )
+
+    num_tensor_data_calls = 0
+    original_tensor_data = kv_cache_utils.tensor_data
+
+    def counting_tensor_data(tensor: torch.Tensor):
+        nonlocal num_tensor_data_calls
+        num_tensor_data_calls += 1
+        return original_tensor_data(tensor)
+
+    monkeypatch.setattr(kv_cache_utils, "tensor_data", counting_tensor_data)
+
+    extra_keys_1, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    extra_keys_2, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    assert extra_keys_1 == extra_keys_2
+    assert num_tensor_data_calls == 1
 
 
 def test_generate_block_hash_extra_keys_different_prompt_embeds():
@@ -576,8 +643,10 @@ def test_request_block_hasher(hash_fn):
 
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
-    assert block_hashes[0] == hash_fn((kv_cache_utils.NONE_HASH, (0, 1, 2), ("hash1",)))
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), ("hash2",)))
+    assert block_hashes[0] == hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+    )
+    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1044,6 +1113,99 @@ def test_get_kv_cache_configs_multiple_workers():
                 ref_kv_cache_spec.page_size_bytes * 2 * 10,
             ],
         )
+
+
+@pytest.mark.parametrize(
+    "asymmetric_memory",
+    [False, True],
+    ids=["symmetric", "asymmetric"],
+)
+def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
+    model_config = ModelConfig(max_model_len=512)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    ref_kv_cache_spec = new_kv_cache_spec()
+    pp_kv_cache_specs = [
+        {"layer1": ref_kv_cache_spec},
+        {"layer2": ref_kv_cache_spec},
+    ]
+
+    expected_num_blocks = model_config.max_model_len // ref_kv_cache_spec.block_size + 1
+    avail_memory = ref_kv_cache_spec.page_size_bytes * expected_num_blocks
+
+    # With per-worker validation, each worker only needs memory for its own
+    # layers. Worker 2 having more memory shouldn't affect worker 1's config.
+    available_memory = (
+        [avail_memory, avail_memory * 2] if asymmetric_memory else [avail_memory] * 2
+    )
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        pp_kv_cache_specs,
+        available_memory,
+    )
+
+    assert kv_cache_configs == [
+        KVCacheConfig(
+            num_blocks=expected_num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=ref_kv_cache_spec.page_size_bytes * expected_num_blocks,
+                    shared_by=["layer1"],
+                ),
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer1"], ref_kv_cache_spec)],
+        ),
+        KVCacheConfig(
+            num_blocks=expected_num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=ref_kv_cache_spec.page_size_bytes * expected_num_blocks,
+                    shared_by=["layer2"],
+                ),
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer2"], ref_kv_cache_spec)],
+        ),
+    ]
+
+
+def test_project_kv_cache_groups_to_worker():
+    spec_a = new_kv_cache_spec()
+    spec_b = new_kv_cache_spec(num_kv_heads=4)
+
+    global_groups = [
+        KVCacheGroupSpec(["layer1", "layer2", "layer3"], spec_a),
+    ]
+    worker_spec = {"layer1": spec_a, "layer2": spec_a}
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, worker_spec
+    )
+    assert len(projected) == 1
+    assert projected[0].layer_names == ["layer1", "layer2"]
+    assert projected[0].kv_cache_spec is spec_a
+
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, {"layer4": spec_a}
+    )
+    assert len(projected) == 1
+    assert projected[0].layer_names == []
+    assert projected[0].kv_cache_spec is spec_a
+
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer1": spec_a, "layer2": spec_b, "layer3": spec_a},
+    )
+    global_groups_uniform = [
+        KVCacheGroupSpec(["layer1", "layer2", "layer3"], uniform_spec),
+    ]
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups_uniform, {"layer1": spec_a, "layer3": spec_a}
+    )
+    assert len(projected) == 1
+    assert projected[0].layer_names == ["layer1", "layer3"]
+    proj_spec = projected[0].kv_cache_spec
+    assert isinstance(proj_spec, UniformTypeKVCacheSpecs)
+    assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
 def test_merge_kv_cache_spec():
@@ -1698,13 +1860,157 @@ def test_generate_scheduler_kv_cache_config():
 
 
 def new_mla_spec(cache_dtype_str=None):
+    # head_size = kv_lora_rank(512) + qk_rope_head_dim(64) = 576
     return MLAAttentionSpec(
         block_size=16,
-        num_kv_heads=16,
-        head_size=64,
+        num_kv_heads=1,
+        head_size=576,
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
+    assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
+
+    sliding_window_mla_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    assert (
+        get_kv_cache_spec_kind(sliding_window_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+    sink_full_attention_spec = SinkFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sink_len=4,
+    )
+    assert (
+        get_kv_cache_spec_kind(sink_full_attention_spec)
+        == KVCacheSpecKind.SINK_FULL_ATTENTION
+    )
+
+
+def test_get_kv_cache_spec_kind_unwraps_uniform_type_specs():
+    uniform_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": new_mla_spec(cache_dtype_str="fp8"),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mla_spec) == KVCacheSpecKind.MLA_ATTENTION
+
+    uniform_swa_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1024,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert (
+        get_kv_cache_spec_kind(uniform_swa_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+
+def test_get_kv_cache_spec_kind_unknown_for_mixed_uniform_type_specs():
+    uniform_mixed_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mixed_spec) == KVCacheSpecKind.UNKNOWN
+
+
+def test_get_kv_cache_spec_sliding_window_reads_windowed_specs():
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+
+    assert get_kv_cache_spec_sliding_window(full_attention_spec) is None
+    assert get_kv_cache_spec_sliding_window(sliding_window_spec) == 128
+
+
+def test_get_kv_cache_spec_sliding_window_unwraps_uniform_type_specs():
+    uniform_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    mixed_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=256,
+            ),
+        },
+    )
+
+    assert get_kv_cache_spec_sliding_window(uniform_window_spec) == 128
+    assert get_kv_cache_spec_sliding_window(mixed_window_spec) is None
 
 
 def test_merge_mla_spec():
@@ -1763,22 +2069,26 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    block1_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[:block_size])
+    ).digest()
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (block1_embeds_bytes,),
+            (block1_embeds_hash,),
         )
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    block2_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[block_size:num_tokens])
+    ).digest()
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (block2_embeds_bytes,),
+            (block2_embeds_hash,),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -1808,22 +2118,26 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    block1_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[:block_size])
+    ).digest()
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            ("hash1", block1_embeds_bytes),
+            (("hash1", 0), block1_embeds_hash),
         )
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    block2_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[block_size:num_tokens])
+    ).digest()
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            ("hash2", block2_embeds_bytes),
+            (("hash2", 0), block2_embeds_hash),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -1867,6 +2181,28 @@ def test_auto_fit_max_model_len():
     assert vllm_config.model_config.max_model_len > 0
 
 
+def test_auto_fit_max_model_len_with_hybrid():
+    """Test that auto-fit works with hybrid KV cache specs."""
+    # Create config with original_max_model_len=-1 to trigger auto-fit
+    model_config = ModelConfig(max_model_len=8192)
+    # Simulate the user passing -1 by setting original_max_model_len
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
+    gamma = 2
+    kv_cache_specs = {
+        "layer_1": new_mamba_spec(num_speculative_blocks=gamma),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )
+    assert vllm_config.model_config.max_model_len == 1024
+
+
 def test_auto_fit_max_model_len_not_triggered():
     """Test that auto-fit is not triggered when original_max_model_len is not -1."""
     model_config = ModelConfig(max_model_len=16)
@@ -1884,6 +2220,54 @@ def test_auto_fit_max_model_len_not_triggered():
         vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
     )
     assert vllm_config.model_config.max_model_len == 16
+
+
+def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
+    """Auto-fit must size max_model_len against the override-clamped pool, not
+    the raw `available_memory`. Without this, auto-fit could pick a
+    max_model_len that no longer fits once `num_gpu_blocks_override` is applied.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    model_config.original_max_model_len = -1  # request auto-fit
+    vllm_config = VllmConfig(model_config=model_config)
+    # Cap the cache to 32 blocks regardless of available memory.
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),  # block_size=16
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory (1024 blocks per layer would fit max_model_len=16384).
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
+
+    # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
+    # auto-fit at or below that.
+    assert 0 < vllm_config.model_config.max_model_len <= 32 * 16
+
+
+def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
+    """Admission check must use the override-clamped pool size, not raw
+    `available_memory`. Without this, startup could accept a max_model_len
+    that does not actually fit in `num_gpu_blocks_override` blocks.
+    """
+    model_config = ModelConfig(max_model_len=16384)
+    vllm_config = VllmConfig(model_config=model_config)
+    # 32 blocks is far too small for max_model_len=16384 (would need 1024).
+    vllm_config.cache_config.num_gpu_blocks_override = 32
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+    # Plenty of raw memory: a bytes-only check against this would pass.
+    large_available_memory = mem_per_block_per_layer * 2 * 1024
+
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
 
 def test_unify_hybrid_kv_cache_specs():
@@ -1951,3 +2335,30 @@ def test_unify_hybrid_kv_cache_specs():
 
     with pytest.raises(ValueError):
         kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+
+def test_hma_not_disabled_when_kv_events_enabled():
+    """
+    Test enabling KV events must not force disable_hybrid_kv_cache_manager to True.
+
+    This test guards against that regression by verifying that a VllmConfig
+    with kv_events_config set still resolves disable_hybrid_kv_cache_manager
+    to False (i.e. HMA remains enabled) when no other condition requires it
+    to be disabled.
+    """
+    model_config = ModelConfig(max_model_len=16)
+    kv_events_config = KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="null",
+    )
+
+    # Leave disable_hybrid_kv_cache_manager as None (the default) so that
+    # VllmConfig.__post_init__ resolves it automatically.
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        kv_events_config=kv_events_config,
+    )
+
+    assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
+        "kv_events_config must not force-disable the hybrid KV cache manager."
+    )

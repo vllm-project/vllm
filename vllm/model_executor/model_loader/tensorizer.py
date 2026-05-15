@@ -211,7 +211,7 @@ class TensorizerConfig(MutableMapping):
         encryption_keyfile: File path to a binary file containing a  
             binary key to use for decryption. `None` (the default) means 
             no decryption. See the example script in 
-            examples/others/tensorize_vllm_model.py. 
+            examples/features/tensorize_vllm_model.py. 
         s3_access_key_id: The access key for the S3 bucket. Can also be set via
             the S3_ACCESS_KEY_ID environment variable.
         s3_secret_access_key: The secret access key for the S3 bucket. Can also
@@ -539,6 +539,8 @@ def deserialize_tensorizer_model(
         )
     before_mem = get_mem_usage()
     start = time.perf_counter()
+    device_index = torch.accelerator.current_device_index()
+    device_type = current_platform.device_type
     with (
         open_stream(
             tensorizer_config.tensorizer_uri, mode="rb", **tensorizer_args.stream_kwargs
@@ -546,9 +548,7 @@ def deserialize_tensorizer_model(
         TensorDeserializer(
             stream,
             dtype=tensorizer_config.dtype,
-            device=f"xpu:{torch.xpu.current_device()}"
-            if current_platform.is_xpu()
-            else f"cuda:{torch.cuda.current_device()}",
+            device=f"{device_type}:{device_index}",
             **tensorizer_args.deserialization_kwargs,
         ) as deserializer,
     ):
@@ -579,7 +579,7 @@ def tensorizer_weights_iterator(
         "loading on vLLM, as tensorizer is forced to load to CPU. "
         "Consider deserializing a vLLM model instead for faster "
         "load times. See the "
-        "examples/others/tensorize_vllm_model.py example script "
+        "examples/features/tensorize_vllm_model.py example script "
         "for serializing vLLM models."
     )
 
@@ -674,7 +674,8 @@ def serialize_vllm_model(
             key = f.read()
         encryption_params = EncryptionParams(key=key)
 
-    output_file = tensorizer_args.tensorizer_uri
+    if (output_file := tensorizer_args.tensorizer_uri) is None:
+        raise ValueError("tensorizer_uri must be specified for serialization.")
     if tensorizer_config._is_sharded:
         from vllm.distributed import get_tensor_model_parallel_rank
 

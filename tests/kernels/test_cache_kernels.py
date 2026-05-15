@@ -13,7 +13,7 @@ except ImportError:
     )
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
+@pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
 def test_gather_cache_oob():
     """
     Tests for OOB read in gather_and_maybe_dequant_cache (Issue #27909).
@@ -57,7 +57,7 @@ def test_gather_cache_oob():
         seq_starts,
     )
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert True
 
 

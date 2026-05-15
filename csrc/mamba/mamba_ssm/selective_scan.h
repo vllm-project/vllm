@@ -15,13 +15,13 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct SSMParamsBase {
-    using index_t = uint32_t;
+    using index_t = size_t;
 
-    int batch, dim, seqlen, dstate, n_groups, n_chunks;
+    int batch, dim, seqlen, dstate, n_groups;
     int dim_ngroups_ratio;
     bool is_variable_B;
     bool is_variable_C;
-    int64_t pad_slot_id;
+    int64_t null_block_id;
 
     bool delta_softplus;
     bool cache_enabled;
@@ -72,6 +72,8 @@ struct SSMParamsBase {
     void *__restrict__ block_idx_first_scheduled_token_ptr;  // (batch,) - first block to write
     void *__restrict__ block_idx_last_scheduled_token_ptr;   // (batch,) - last block to write
     void *__restrict__ initial_state_idx_ptr;  // (batch,) - index of the initial state to use
+    void *__restrict__ cu_chunk_seqlen_ptr;      // (nchunks+1,) - cumulative chunk token offsets
+    void *__restrict__ last_chunk_indices_ptr;   // (batch,) - index of last chunk per sequence
 };
 
 

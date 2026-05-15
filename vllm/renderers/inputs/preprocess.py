@@ -1,14 +1,15 @@
 """
-Schemas and utilites for preprocessing inputs.
+Schemas and utilities for preprocessing inputs.
 """
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
 
 from vllm.inputs import (
     EmbedsPrompt,
+    EngineInput,
     ExplicitEncoderDecoderPrompt,
     PromptType,
     SingletonPrompt,
@@ -69,28 +70,28 @@ def conversation_to_seq(
 
 DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
 """
-A [`DecoderOnlyPrompt`][vllm.inputs.data.DecoderOnlyPrompt]
+A [`DecoderOnlyPrompt`][vllm.inputs.llm.DecoderOnlyPrompt]
 that has been standardized into a dictionary.
 """
 
 
 EncoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
-A [`EncoderPrompt`][vllm.inputs.data.EncoderPrompt]
+A [`EncoderPrompt`][vllm.inputs.llm.EncoderPrompt]
 that has been standardized into a dictionary.
 """
 
 
 DecoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
-A [`DecoderPrompt`][vllm.inputs.data.DecoderPrompt]
+A [`DecoderPrompt`][vllm.inputs.llm.DecoderPrompt]
 that has been standardized into a dictionary.
 """
 
 
 class EncoderDecoderDictPrompt(TypedDict):
     """
-    A [`EncoderDecoderPrompt`][vllm.inputs.data.EncoderDecoderPrompt]
+    A [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
     that has been standardized into a dictionary.
     """
 
@@ -103,19 +104,32 @@ SingletonDictPrompt: TypeAlias = (
     DecoderOnlyDictPrompt | EncoderDictPrompt | DecoderDictPrompt
 )
 """
-A [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt]
+A [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt]
 that has been standardized into a dictionary.
 """
 
 
 DictPrompt: TypeAlias = DecoderOnlyDictPrompt | EncoderDecoderDictPrompt
 """
-A [`PromptType`][vllm.inputs.data.PromptType]
+A [`PromptType`][vllm.inputs.llm.PromptType]
 that has been standardized into a dictionary.
 """
 
 
-def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
+def _validate_prompt_dict(prompt: Mapping[str, object]) -> None:
+    """Reject malformed dict prompts before renderer tokenization."""
+    if (
+        "prompt" not in prompt
+        or "prompt_token_ids" in prompt
+        or "prompt_embeds" in prompt
+    ):
+        return
+
+    if not isinstance(prompt["prompt"], str):
+        raise TypeError("Prompt text should be a string")
+
+
+def parse_dec_only_prompt(prompt: PromptType | object) -> DecoderOnlyDictPrompt:
     """
     Parse a prompt for a decoder-only model and normalize it to a dictionary.
     """
@@ -132,6 +146,8 @@ def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
         if "encoder_prompt" in prompt:
             raise TypeError("Cannot pass encoder-decoder prompt to decoder-only models")
 
+        _validate_prompt_dict(prompt)
+
         if (
             "prompt" in prompt
             or "prompt_token_ids" in prompt
@@ -144,7 +160,7 @@ def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
+def _parse_enc_prompt(prompt: PromptType | object) -> EncoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -155,6 +171,8 @@ def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
         return TokensPrompt(prompt_token_ids=prompt)
 
     if isinstance(prompt, dict):
+        _validate_prompt_dict(prompt)
+
         if "prompt_embeds" in prompt:
             raise TypeError("Cannot pass embeddings prompt to encoder-decoder models")
 
@@ -166,7 +184,7 @@ def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
+def _parse_dec_prompt(prompt: PromptType | object) -> DecoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -177,6 +195,8 @@ def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
         return TokensPrompt(prompt_token_ids=prompt)
 
     if isinstance(prompt, dict):
+        _validate_prompt_dict(prompt)
+
         if "prompt_embeds" in prompt:
             raise TypeError("Cannot pass embeddings prompt to encoder-decoder models")
 
@@ -195,13 +215,13 @@ def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def parse_enc_dec_prompt(prompt: object) -> EncoderDecoderDictPrompt:
+def parse_enc_dec_prompt(prompt: PromptType | object) -> EncoderDecoderDictPrompt:
     """
     Parse a prompt for an encoder-decoder model and normalize it to a dictionary.
     """
     if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-        enc_prompt: object = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
-        dec_prompt: object | None = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
+        enc_prompt = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
+        dec_prompt = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
     else:
         enc_prompt = prompt
         dec_prompt = None
@@ -235,21 +255,24 @@ def extract_target_prompt(model_config: "ModelConfig", prompt: object):
 
 def extract_prompt_components(
     model_config: "ModelConfig",
-    prompt: object,
+    prompt: PromptType | EngineInput,
 ) -> PromptComponents:
     target_prompt = extract_target_prompt(model_config, prompt)
 
     return PromptComponents(
         text=target_prompt.get("prompt"),
-        token_ids=target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        token_ids=target_prompt.get("prompt_token_ids"),
         embeds=target_prompt.get("prompt_embeds"),
     )
 
 
-def extract_prompt_len(model_config: "ModelConfig", prompt: object):
+def extract_prompt_len(
+    model_config: "ModelConfig",
+    prompt: PromptType | EngineInput,
+):
     target_prompt = extract_target_prompt(model_config, prompt)
 
     return length_from_prompt_token_ids_or_embeds(
-        target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        target_prompt.get("prompt_token_ids"),
         target_prompt.get("prompt_embeds"),
     )
