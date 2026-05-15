@@ -177,16 +177,15 @@ class StreamingResult:
     content: str | None
 
 
-def _run_streaming(parser, tokenizer, model_output: str) -> StreamingResult:
-    """Run streaming extraction and return the accumulated tool calls,
-    reasoning text, and content text produced across all deltas."""
-    token_strings = _token_deltas(tokenizer, model_output)
+def _run_streaming_over_deltas(parser, deltas: list[str]) -> StreamingResult:
+    """Run streaming extraction over a pre-built list of decoded deltas and
+    return the accumulated tool calls, reasoning, and content."""
     accumulated: dict[int, dict] = {}
     reasoning_parts: list[str] = []
     content_parts: list[str] = []
     previous_text = ""
 
-    for token_str in token_strings:
+    for token_str in deltas:
         current_text = previous_text + token_str
         delta = parser.extract_tool_calls_streaming(
             previous_text=previous_text,
@@ -219,6 +218,11 @@ def _run_streaming(parser, tokenizer, model_output: str) -> StreamingResult:
         reasoning="".join(reasoning_parts) if reasoning_parts else None,
         content="".join(content_parts) if content_parts else None,
     )
+
+
+def _run_streaming(parser, tokenizer, model_output: str) -> StreamingResult:
+    """One-token-per-delta streaming extraction over ``model_output``."""
+    return _run_streaming_over_deltas(parser, _token_deltas(tokenizer, model_output))
 
 
 @pytest.mark.parametrize("case", TOOL_CALL_CASES)
@@ -288,6 +292,116 @@ class TestExtractToolCalls:
             assert json.loads(streamed.tool_calls[i]["arguments"]) == json.loads(
                 actual_tc.function.arguments
             )
+
+
+SPECIAL_TOKEN_MARKERS = (
+    "<|START_THINKING|>",
+    "<|END_THINKING|>",
+    "<|START_RESPONSE|>",
+    "<|END_RESPONSE|>",
+    "<|START_ACTION|>",
+    "<|END_ACTION|>",
+    "<|START_TEXT|>",
+    "<|END_TEXT|>",
+)
+
+
+def _multi_token_deltas(tokenizer, text: str, chunk_size: int) -> list[str]:
+    """Like ``_token_deltas`` but groups up to ``chunk_size`` consecutive
+    tokens into a single decoded delta, mimicking what happens with
+    speculative decoding when multiple tokens are accepted in one step."""
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    deltas: list[str] = []
+    prev = ""
+    i = 0
+    while i < len(ids):
+        end = min(len(ids), i + chunk_size)
+        current = tokenizer.decode(ids[:end], skip_special_tokens=False)
+        i = end
+        if current.endswith(REPLACEMENT_CHAR):
+            continue
+        delta = current[len(prev) :]
+        if delta:
+            deltas.append(delta)
+        prev = current
+    return deltas
+
+
+class TestSpeculativeDecodingMultiTokenDelta:
+    """Multi-token spec-dec deltas must not emit special-token markers in
+    any streaming field (reasoning / content / tool-call args/name) and
+    must still produce a correct accumulated tool call."""
+
+    MODEL_OUTPUT = (
+        "<|START_THINKING|> i will call foo with query1<|END_THINKING|>"
+        "<|START_ACTION|>\n"
+        '[\n    {"tool_call_id": "0", "tool_name": "foo", '
+        '"parameters": {"query": "query1"}}\n]\n'
+        "<|END_ACTION|>"
+    )
+
+    @pytest.mark.parametrize(
+        "parser_cls",
+        [CohereCommand3ToolParser, CohereCommand4ToolParser],
+        ids=["cmd3", "cmd4"],
+    )
+    @pytest.mark.parametrize("chunk_size", [2, 3, 4, 6])
+    def test_no_special_token_leak_in_streaming_deltas(
+        self, tokenizer, parser_cls, chunk_size
+    ):
+        parser = parser_cls(tokenizer)
+        chunked = _multi_token_deltas(tokenizer, self.MODEL_OUTPUT, chunk_size)
+
+        previous_text = ""
+        for token_str in chunked:
+            current_text = previous_text + token_str
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=token_str,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=None,  # type: ignore[arg-type]
+            )
+            previous_text = current_text
+            if delta is None:
+                continue
+
+            fields: list[tuple[str, str | None]] = [
+                ("reasoning", delta.reasoning),
+                ("content", delta.content),
+            ]
+            for tc in delta.tool_calls or []:
+                if tc.function:
+                    fields.append(("tool_call.name", tc.function.name))
+                    fields.append(("tool_call.arguments", tc.function.arguments))
+
+            for marker in SPECIAL_TOKEN_MARKERS:
+                for field_name, value in fields:
+                    assert value is None or marker not in value, (
+                        f"special token {marker!r} leaked into {field_name} "
+                        f"with chunk_size={chunk_size} delta={delta!r}"
+                    )
+
+    @pytest.mark.parametrize(
+        "parser_cls",
+        [CohereCommand3ToolParser, CohereCommand4ToolParser],
+        ids=["cmd3", "cmd4"],
+    )
+    @pytest.mark.parametrize("chunk_size", [2, 3, 4, 6])
+    def test_multi_token_chunks_still_produce_correct_tool_call(
+        self, tokenizer, parser_cls, chunk_size
+    ):
+        parser = parser_cls(tokenizer)
+        chunked = _multi_token_deltas(tokenizer, self.MODEL_OUTPUT, chunk_size)
+        streamed = _run_streaming_over_deltas(parser, chunked)
+
+        assert len(streamed.tool_calls) == 1
+        tc = streamed.tool_calls[0]
+        assert tc["id"] == "0"
+        assert tc["name"] == "foo"
+        assert json.loads(tc["arguments"]) == {"query": "query1"}
 
 
 class TestStreamingDeltaShape:
