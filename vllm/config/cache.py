@@ -235,6 +235,22 @@ class CacheConfig:
             object.__setattr__(self, "user_specified_mamba_block_size", True)
         return self
 
+    @model_validator(mode="after")
+    def _validate_prefix_caching_hash_algo_dependencies(self) -> "CacheConfig":
+        if self.enable_prefix_caching and self.prefix_caching_hash_algo in (
+            "xxhash",
+            "xxhash_cbor",
+        ):
+            from vllm.utils.hashing import _xxhash
+
+            if _xxhash is None:
+                raise ValueError(
+                    "`xxhash` is required when `prefix_caching_hash_algo` is "
+                    f"`{self.prefix_caching_hash_algo}`. Install it with "
+                    "`pip install xxhash`, or use `sha256`/`sha256_cbor`."
+                )
+        return self
+
     @field_validator("calculate_kv_scales", mode="after")
     @classmethod
     def _warn_deprecated_calculate_kv_scales(cls, calculate_kv_scales: bool) -> bool:
