@@ -25,10 +25,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
