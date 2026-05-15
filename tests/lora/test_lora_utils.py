@@ -58,3 +58,24 @@ class TestIsInTargetModules:
 
     def test_exact_name_no_match(self):
         assert not is_in_target_modules("dense3", ["dense1", "dense2"])
+
+    def test_packed_parent_matches_child_target_modules(self):
+        assert is_in_target_modules(
+            "model.layers.0.mlp.gate_up_proj",
+            ["gate_proj", "up_proj"],
+            {"gate_up_proj": ["gate_proj", "up_proj"]},
+        )
+
+    def test_packed_child_matches_parent_target_modules(self):
+        assert is_in_target_modules(
+            "model.layers.0.mlp.gate_proj",
+            ["gate_up_proj"],
+            {"gate_up_proj": ["gate_proj", "up_proj"]},
+        )
+
+    def test_fused_parent_matches_child_target_modules(self):
+        assert is_in_target_modules(
+            "model.layers.0.self_attn.fused_qkv_a_proj",
+            ["q_a_proj", "kv_a_proj_with_mqa"],
+            {"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]},
+        )

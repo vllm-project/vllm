@@ -190,13 +190,27 @@ def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "1")
-    can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "openai/gpt-oss-20b",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--moe-backend",
+            "flashinfer_cutlass",
+            "--quantization-config.moe.activation",
+            "mxfp8",
+        ],
+    )
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
-    can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "openai/gpt-oss-20b",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=[
+            "--quantization-config.moe.activation",
+            "mxfp8",
+        ],
+    )
 
 
 def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
@@ -210,6 +224,13 @@ def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
 ## Qwen3 Next ##
 
 
+@pytest.mark.skip(
+    reason=(
+        "FLASHINFER TRTLLM MoE has a bug with all negative router logits "
+        "for models with RENORMALIZE. This will be re-enabled once the "
+        "issue is fixed in flashinfer."
+    )
+)
 def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",

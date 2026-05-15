@@ -17,6 +17,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
 
 
@@ -112,13 +114,17 @@ class ShortConv(MambaBase, CustomOp):
         # chunked prefill modes; they are computed at top-level model forward
         # since they stay the same and reused for all mamba layers in the same
         # iteration.
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
-            self_kv_cache = self.kv_cache
-            conv_state = self_kv_cache[0].transpose(-1, -2)
+            conv_state = (
+                self.kv_cache[0]
+                if is_conv_state_dim_first()
+                else self.kv_cache[0].transpose(-1, -2)
+            )
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
@@ -218,8 +224,8 @@ class ShortConv(MambaBase, CustomOp):
         )
 
     @property
-    def mamba_type(self) -> str:
-        return "short_conv"
+    def mamba_type(self) -> MambaAttentionBackendEnum:
+        return MambaAttentionBackendEnum.SHORT_CONV
 
 
 def short_conv(

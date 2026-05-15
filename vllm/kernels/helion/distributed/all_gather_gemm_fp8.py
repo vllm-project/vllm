@@ -6,6 +6,7 @@ import helion.language as hl
 import triton
 import triton.language as tl
 
+from vllm.kernels.helion.case_key import CaseKey
 from helion.runtime.triton_helpers import triton_wait_signal
 from vllm.kernels.helion.register import register_kernel
 from typing import Callable, Any
@@ -14,6 +15,7 @@ import logging
 logger = logging.getLogger(__name__)
 from vllm.utils.import_utils import has_helion
 
+_pick_cache: dict[tuple[int, int], CaseKey | None] = {}
 
 @triton.jit
 def _wait_progress_at_idx(progress: tl.tensor, idx: int) -> None:
@@ -28,8 +30,8 @@ if not has_helion():
 
 def pick_helion_matmul_w_progress_fp8_config(
     args: tuple, 
-    config_keys: list[str],
-) -> str | None:
+    config_keys: list[CaseKey],
+) -> CaseKey | None:
     """
     Config picker for helion_matmul_w_progress_fp8.
 
@@ -59,58 +61,61 @@ def pick_helion_matmul_w_progress_fp8_config(
 
     M, _= a.shape
 
-    # Exact match key
-    target_key = (
-        f"rank_{rank}_mperrank_{M_per_rank}"
-        f"_n_{N}_k_{K}_splits_{splits_per_rank}"
-    )
-    logger.debug(
-            "target_key: %s for rank=%d, M=%d, N=%d, K=%d, splits=%d",
-            target_key, rank, M, N, K, splits_per_rank
-        )
-    if target_key in config_keys:
-        logger.debug("Found exact config: %s", target_key)
-        return target_key
 
-    # Collect candidate distances
+    # Check cache
+    cache_key = (rank, M_per_rank, N, K, splits_per_rank)
+    cached = _pick_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Try exact match
+    for k in config_keys:
+        if k.is_default():
+            continue
+        if (k["rank"] == rank and
+            k["mperrank"] == M_per_rank and
+            k["n"] == N and
+            k["k"] == K and
+            k["splits"] == splits_per_rank):
+            logger.debug("Found exact config for rank=%d, M_per_rank=%d, N=%d, K=%d, splits=%d",
+                        rank, M_per_rank, N, K, splits_per_rank)
+            _pick_cache[cache_key] = k
+            return k
+
     candidates = []
-    for key in config_keys:
-        try:
-            parts = key.split("_")
-            candidate_rank = int(parts[1])
-            candidate_mpr = int(parts[3])
-            candidate_N = int(parts[5])
-            candidate_K = int(parts[7])
-            candidate_splits = int(parts[9])
-        except (ValueError, IndexError):
+    for k in config_keys:
+        if k.is_default():
             continue
 
         # Only consider same splits_per_rank
-        if candidate_splits != splits_per_rank:
+        if k["splits"] != splits_per_rank:
             continue
 
         # Weighted Manhattan distance: M_per_rank dominates
-        score = abs(candidate_mpr - M_per_rank) * 1000 \
-                + abs(candidate_N - N) * 10 \
-                + abs(candidate_K - K)
+        score = (abs(k["mperrank"] - M_per_rank) * 1000 +
+                abs(k["n"] - N) * 10 +
+                abs(k["k"] - K))
 
-        candidates.append((score, key))
+        candidates.append((score, k))
 
     if candidates:
-        _, best_key = min(candidates)
+        _, best_key = min(candidates,  key=lambda x: x[0])
         logger.debug(
-            "No exact config found. Using closest match: %s for rank=%d, M=%d, N=%d, K=%d, splits=%d",
-            best_key, rank, M, N, K, splits_per_rank
+            "No exact config found. Using closest match for rank=%d, M_per_rank=%d, N=%d, K=%d, splits=%d",
+            rank, M_per_rank, N, K, splits_per_rank
         )
+        _pick_cache[cache_key] = best_key
         return best_key
 
     # Fallback to default
-    if "default" in config_keys:
-        logger.debug("Falling back to default config")
-        return "default"
+    for k in config_keys:
+        if k.is_default():
+            logger.debug("Falling back to default config")
+            return k
 
     logger.warning("No suitable config found and no default available")
     return None
+
 
 
 @register_kernel(
@@ -246,6 +251,7 @@ def copy_engine_all_gather_w_progress(
     return backend_stream
 
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group, get_symm_mem_workspace
+#import torch.distributed._symmetric_memory as symm_mem. # didn't change to much
 
 def _helion_all_gather_fp8_gemm_runtime(
     a_shared: torch.Tensor,
@@ -257,16 +263,18 @@ def _helion_all_gather_fp8_gemm_runtime(
     a_out: torch.Tensor | None = None,
     SPLITS_PER_RANK: int = 1, 
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    
     # Use get_symm_mem_workspace to reuse persistent P2P buffers, allowing torch.compile 
     # to capture the graph without re-allocation (see: https://github.com/pytorch/pytorch/issues/162859)
-    symm_mem = get_symm_mem_workspace(group_name.group_name, a_shared.nbytes)
-    a_shared_symm = symm_mem.get_buffer(
-        symm_mem.rank, 
+    workspace = get_symm_mem_workspace(group_name.group_name, a_shared.nbytes)
+    a_shared_symm = workspace.get_buffer(
+        workspace.rank, 
         a_shared.shape, 
         a_shared.dtype
     )
     a_shared_symm.copy_(a_shared)
+    #device = a_shared.device
+    #mempool = symm_mem.get_mem_pool(device)
+    #with torch.cuda.use_mem_pool(mempool):
     if a_out is None:
         a_out = torch.empty((a_shared.shape[0] * world_size, a_shared.shape[1]), 
                             dtype=a_shared.dtype, device=a_shared.device)
@@ -276,7 +284,6 @@ def _helion_all_gather_fp8_gemm_runtime(
         dtype=torch.uint32,
         device=a_shared_symm.device,
     )
-
     backend_stream = copy_engine_all_gather_w_progress(
         a_out, a_shared_symm, progress, group_name, SPLITS_PER_RANK
     )
@@ -289,7 +296,7 @@ def _helion_all_gather_fp8_gemm_runtime(
         scale_b,
         progress,
         SPLITS_PER_RANK=SPLITS_PER_RANK,
-        RANK=symm_mem.rank,
+        RANK=workspace.rank,
     )
     assert type(c) is torch.Tensor
     torch.cuda.current_stream().wait_stream(backend_stream)

@@ -14,6 +14,8 @@ from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
 )
 from torch._C._distributed_c10d import _SymmetricMemory
 from vllm.kernels.helion.utils import get_canonical_gpu_name
+from vllm.kernels.helion.config_manager import ConfigManager, CaseKey
+
 platform = get_canonical_gpu_name()
 
 def _helion_all_gather_fp8_gemm_runtime(
@@ -72,7 +74,7 @@ def _helion_all_gather_fp8_gemm_runtime(
         a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
     )
     inputs = (a_out, a_shared_symm, scale_a, b, scale_b, progress,configs["SPLITS_PER_RANK"],configs["RANK"])
-    autotune_effort= "full"
+    autotune_effort= "quick"
     best_config = helion_matmul_w_progress_fp8.run_autotune(inputs, autotune_effort)
     best_config.save("best_config.json")
     print("Best config found:", best_config)
@@ -168,13 +170,16 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
 
                 # Call autotune runtime
                 out, best_config = _helion_all_gather_fp8_gemm_runtime(
-                    a_shared, b, scale_a, scale_b, world_size, dist_group.group_name, SPLITS_PER_RANK=sp
+                    a_shared, b, scale_a, scale_b, world_size, dist_group, SPLITS_PER_RANK=sp
                 )
 
-                config_key = (
-                    f"rank_{rank}_mperrank_{tokens_per_rank}"
-                    f"_n_{N}_k_{hidden_size}_splits_{sp}"
-                )
+                config_key = CaseKey({
+                    "rank": rank,
+                    "mperrank": tokens_per_rank,
+                    "n": N,
+                    "k": hidden_size,
+                    "splits": sp
+                })  
 
                 torch.cuda.synchronize()
 

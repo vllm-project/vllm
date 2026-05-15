@@ -42,6 +42,7 @@ class ExtractHiddenStatesProposer:
         self.model: nn.Module | None = None
         self.attn_layer_names: list[str] = []
         self.attn_metadata_builder: AttentionMetadataBuilder | None = None
+        self.kv_cache_gid: int = -1
 
         # Maximum number of tokens for buffers
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
@@ -145,7 +146,10 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids
+        # On decode steps with spec tokens, sampled_token_ids may have
+        # shape [batch_size, 2] (target + spec verification); slice to
+        # return only the target-sampled column.
+        return sampled_token_ids[:, :1]
 
     def _get_slot_mapping(
         self,
@@ -286,7 +290,6 @@ class ExtractHiddenStatesProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        seq_lens: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -303,7 +306,7 @@ class ExtractHiddenStatesProposer:
         device = sampled_token_ids.device
 
         # Compute backup tokens for discarded / invalid requests
-        seq_lens_list = seq_lens[:num_reqs].tolist()
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         backup_tokens_gpu = torch.tensor(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
@@ -372,9 +375,12 @@ class ExtractHiddenStatesProposer:
         )
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """Validate all drafting layers belong to the same KV cache group.
-
-        With exactly one attention layer (asserted in load_model), this is
-        trivially satisfied.
-        """
+        """Validate all drafting layers belong to the same KV cache group
+        and record the group index for common_attn_metadata selection."""
         assert len(self.attn_layer_names) == 1
+        layer = self.attn_layer_names[0]
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            if layer in group.layer_names:
+                self.kv_cache_gid = gid
+                return
+        raise ValueError(f"Cache-only layer {layer!r} not in any KV cache group")

@@ -1,5422 +1,1466 @@
-{
-  "rank_3_mperrank_32_n_64_k_32_splits_1": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
-        0,
+[
+  {
+    "key": {
+      "rank": 1,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
         1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_32_n_64_k_32_splits_1": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_1_mperrank_32_n_64_k_32_splits_1": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 0,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_0_mperrank_32_n_64_k_32_splits_1": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 2,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_3_mperrank_32_n_64_k_32_splits_2": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 3,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_1_mperrank_32_n_64_k_32_splits_2": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 1,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_2_mperrank_32_n_64_k_32_splits_2": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 3,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_0_mperrank_32_n_64_k_32_splits_2": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 0,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_0_mperrank_32_n_64_k_32_splits_4": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 2,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_1_mperrank_32_n_64_k_32_splits_4": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 1,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_3_mperrank_32_n_64_k_32_splits_4": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 2,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_2_mperrank_32_n_64_k_32_splits_4": {
-    "block_sizes": [
-      8,
-      8,
-      32
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 0,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
+  },
+  {
+    "key": {
+      "rank": 3,
+      "mperrank": 2048,
+      "n": 2560,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
         1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      0
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 1,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_64_n_1024_k_1024_splits_1": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_64_n_1024_k_1024_splits_1": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_64_n_1024_k_1024_splits_1": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_64_n_1024_k_1024_splits_1": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_1024_n_4096_k_2048_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_1024_n_4096_k_2048_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_1024_n_4096_k_2048_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_1024_n_4096_k_2048_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_1024_n_4096_k_2048_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_1024_n_4096_k_2048_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_1024_n_4096_k_2048_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_1024_n_4096_k_2048_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_1024_n_4096_k_2048_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_1024_n_4096_k_2048_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_1024_n_4096_k_2048_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_1024_n_4096_k_2048_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_1024_n_5120_k_5120_splits_1": {
-    "block_sizes": [
-      256,
-      128,
-      64
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_1024_n_5120_k_5120_splits_1": {
-    "block_sizes": [
-      256,
-      128,
-      64
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_1024_n_5120_k_5120_splits_1": {
-    "block_sizes": [
-      256,
-      128,
-      64
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_1024_n_5120_k_5120_splits_1": {
-    "block_sizes": [
-      256,
-      128,
-      64
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_1024_n_5120_k_5120_splits_2": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_1024_n_5120_k_5120_splits_2": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_1024_n_5120_k_5120_splits_2": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_1024_n_5120_k_5120_splits_2": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_1024_n_5120_k_5120_splits_4": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_1024_n_5120_k_5120_splits_4": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_1024_n_5120_k_5120_splits_4": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_1024_n_5120_k_5120_splits_4": {
-    "block_sizes": [
-      256,
-      128,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      ""
-    ],
-    "num_warps": 16,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_2048_n_8192_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_2_mperrank_2048_n_8192_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 0,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        128,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 4,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_3_mperrank_2048_n_8192_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 1,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        128,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 4,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_1_mperrank_2048_n_8192_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 3,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        128,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 4,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_0_mperrank_2048_n_8192_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 2,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 1
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        128,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 4,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 4,
+      "maxnreg": 256
+    }
   },
-  "rank_2_mperrank_2048_n_8192_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 1,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_3_mperrank_2048_n_8192_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 0,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_1_mperrank_2048_n_8192_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 3,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_2_mperrank_2048_n_8192_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 2,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 2
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_0_mperrank_2048_n_8192_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 1,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_1_mperrank_2048_n_8192_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 3,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_3_mperrank_2048_n_8192_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 2,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   },
-  "rank_2_mperrank_64_n_1024_k_1024_splits_2": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_64_n_1024_k_1024_splits_2": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_64_n_1024_k_1024_splits_2": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_64_n_1024_k_1024_splits_2": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_64_n_1024_k_1024_splits_4": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_64_n_1024_k_1024_splits_4": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_64_n_1024_k_1024_splits_4": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_64_n_1024_k_1024_splits_4": {
-    "block_sizes": [
-      64,
-      32,
-      256
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      "last"
-    ],
-    "num_warps": 4,
-    "num_stages": 2,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_512_n_2048_k_1024_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
+  {
+    "key": {
+      "rank": 0,
+      "mperrank": 2048,
+      "n": 14336,
+      "k": 8192,
+      "splits": 4
+    },
+    "config": {
+      "block_sizes": [
+        128,
+        256,
+        128
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        4
+      ],
+      "range_unroll_factors": [
+        2,
+        4
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
         0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_512_n_2048_k_1024_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_512_n_2048_k_1024_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_512_n_2048_k_1024_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_1_mperrank_512_n_2048_k_1024_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_3_mperrank_512_n_2048_k_1024_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_512_n_2048_k_1024_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_2_mperrank_512_n_2048_k_1024_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 1
-  },
-  "rank_0_mperrank_512_n_2048_k_1024_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_1_mperrank_512_n_2048_k_1024_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_3_mperrank_512_n_2048_k_1024_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_2_mperrank_512_n_2048_k_1024_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_0_mperrank_512_n_4096_k_4096_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_1_mperrank_512_n_4096_k_4096_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_3_mperrank_512_n_4096_k_4096_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_2_mperrank_512_n_4096_k_4096_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_2_mperrank_512_n_4096_k_4096_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_0_mperrank_512_n_4096_k_4096_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_1_mperrank_512_n_4096_k_4096_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_3_mperrank_512_n_4096_k_4096_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_1_mperrank_512_n_4096_k_4096_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_3_mperrank_512_n_4096_k_4096_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_0_mperrank_512_n_4096_k_4096_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_2_mperrank_512_n_4096_k_4096_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 1,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 2
-  },
-  "rank_2_mperrank_2048_n_2560_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      1,
-      4
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      2
-    ],
-    "range_multi_buffers": [
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      ""
-    ],
-    "num_warps": 8,
-    "num_stages": 3,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_0_mperrank_2048_n_2560_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      1,
-      4
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      2
-    ],
-    "range_multi_buffers": [
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      ""
-    ],
-    "num_warps": 8,
-    "num_stages": 3,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_1_mperrank_2048_n_2560_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      1,
-      4
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      2
-    ],
-    "range_multi_buffers": [
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      ""
-    ],
-    "num_warps": 8,
-    "num_stages": 3,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_3_mperrank_2048_n_2560_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      1
-    ],
-    "range_unroll_factors": [
-      1,
-      4
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      2
-    ],
-    "range_multi_buffers": [
-      false,
-      true
-    ],
-    "range_flattens": [
-      null,
-      false
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "first",
-      ""
-    ],
-    "num_warps": 8,
-    "num_stages": 3,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_3_mperrank_2048_n_2560_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_2_mperrank_2048_n_2560_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_1_mperrank_2048_n_2560_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_0_mperrank_2048_n_2560_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "tensor_descriptor",
-      "pointer",
-      "pointer",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_2_mperrank_2048_n_2560_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      16
-    ],
-    "range_unroll_factors": [
-      2,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "first",
-      "last",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 4
-  },
-  "rank_3_mperrank_2048_n_2560_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      16
-    ],
-    "range_unroll_factors": [
-      2,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "first",
-      "last",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 4
-  },
-  "rank_1_mperrank_2048_n_2560_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      16
-    ],
-    "range_unroll_factors": [
-      2,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "first",
-      "last",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 4
-  },
-  "rank_0_mperrank_2048_n_2560_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      16
-    ],
-    "range_unroll_factors": [
-      2,
-      1
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      3
-    ],
-    "range_multi_buffers": [
-      null,
-      true
-    ],
-    "range_flattens": [
-      false,
-      null
-    ],
-    "load_eviction_policies": [
-      "last",
-      "first",
-      "last",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 4
-  },
-  "rank_3_mperrank_2048_n_14336_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      2,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_2_mperrank_2048_n_14336_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      2,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_0_mperrank_2048_n_14336_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      2,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_1_mperrank_2048_n_14336_k_8192_splits_1": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      4
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      2,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      null
-    ],
-    "range_flattens": [
-      null,
-      null
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "",
-      "last"
-    ],
-    "num_warps": 8,
-    "num_stages": 6,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer",
-      "pointer"
-    ],
-    "atomic_indexing": [],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 32
-  },
-  "rank_2_mperrank_2048_n_14336_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      false,
-      null
-    ],
-    "range_flattens": [
-      false,
-      false
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 2,
-    "maxnreg": 256
-  },
-  "rank_3_mperrank_2048_n_14336_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      false,
-      null
-    ],
-    "range_flattens": [
-      false,
-      false
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 2,
-    "maxnreg": 256
-  },
-  "rank_0_mperrank_2048_n_14336_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      false,
-      null
-    ],
-    "range_flattens": [
-      false,
-      false
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 2,
-    "maxnreg": 256
-  },
-  "rank_1_mperrank_2048_n_14336_k_8192_splits_2": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        0,
-        1
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      2,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      1,
-      4
-    ],
-    "range_multi_buffers": [
-      false,
-      null
-    ],
-    "range_flattens": [
-      false,
-      false
-    ],
-    "load_eviction_policies": [
-      "first",
-      "",
-      "",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "pointer",
-      "pointer",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_interleaved",
-    "num_sm_multiplier": 2,
-    "maxnreg": 256
-  },
-  "rank_1_mperrank_2048_n_14336_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      true
-    ],
-    "range_flattens": [
-      false,
-      true
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "first",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_2_mperrank_2048_n_14336_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      true
-    ],
-    "range_flattens": [
-      false,
-      true
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "first",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_0_mperrank_2048_n_14336_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      true
-    ],
-    "range_flattens": [
-      false,
-      true
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "first",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
-  },
-  "rank_3_mperrank_2048_n_14336_k_8192_splits_4": {
-    "block_sizes": [
-      128,
-      256,
-      128
-    ],
-    "loop_orders": [
-      [
-        1,
-        0
-      ]
-    ],
-    "l2_groupings": [
-      8
-    ],
-    "range_unroll_factors": [
-      0,
-      0
-    ],
-    "range_warp_specializes": [],
-    "range_num_stages": [
-      0,
-      4
-    ],
-    "range_multi_buffers": [
-      true,
-      true
-    ],
-    "range_flattens": [
-      false,
-      true
-    ],
-    "load_eviction_policies": [
-      "",
-      "first",
-      "first",
-      "first"
-    ],
-    "num_warps": 8,
-    "num_stages": 5,
-    "indexing": [
-      "tensor_descriptor",
-      "tensor_descriptor",
-      "pointer",
-      "tensor_descriptor",
-      "tensor_descriptor"
-    ],
-    "pid_type": "persistent_blocked",
-    "num_sm_multiplier": 16,
-    "maxnreg": 256
+        3
+      ],
+      "range_multi_buffers": [
+        true,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "last",
+        "last",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "atomic_indexing": [],
+      "pid_type": "persistent_interleaved",
+      "num_sm_multiplier": 8,
+      "maxnreg": 256
+    }
   }
-}
+]
