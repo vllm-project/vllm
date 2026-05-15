@@ -136,6 +136,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_fp8_padded_hidden_size,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -562,6 +563,13 @@ class Qwen3_VisionTransformer(nn.Module):
 
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
+
+        # FP8 attention: Q/K/V become independent contiguous tensors
+        # after quantization, so cu_seqlens uses uniform stride (no 3x V).
+        self.fp8_padded_hidden_size = get_fp8_padded_hidden_size(
+            self.num_heads, head_dim
+        )
+
         self.rotary_pos_emb = get_rope(
             head_size=head_dim,
             max_position=8192,
@@ -776,6 +784,7 @@ class Qwen3_VisionTransformer(nn.Module):
             self.hidden_size,
             self.tp_size,
             device,
+            fp8_padded_hidden_size=self.fp8_padded_hidden_size,
         )
 
         return metadata
@@ -1688,7 +1697,7 @@ class Qwen3VLForConditionalGeneration(
         if not get_pp_group().is_first_rank and hasattr(
             config.vision_config, "deepstack_visual_indexes"
         ):
-            assert self.language_model.start_layer >= len(
+            assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (
                 "start_layer should be greater than or equal to "
@@ -1707,11 +1716,6 @@ class Qwen3VLForConditionalGeneration(
             return None  # If vision tower is skipped
         if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
             return None
-        if num_tokens > self.deepstack_input_embeds_num_tokens:
-            raise ValueError(
-                "Requested more deepstack tokens than available in buffer: "
-                f"{num_tokens=} > {self.deepstack_input_embeds_num_tokens=}"
-            )
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1753,12 +1757,6 @@ class Qwen3VLForConditionalGeneration(
 
         # clear deepstack_input_embeds in buffer
         if num_tokens > 0:
-            if num_tokens > self.deepstack_input_embeds_num_tokens:
-                raise ValueError(
-                    "Requested to clear more deepstack tokens than available in "
-                    "buffer: "
-                    f"{num_tokens=} > {self.deepstack_input_embeds_num_tokens=}"
-                )
             for idx in range(self.deepstack_num_level):
                 self.deepstack_input_embeds[idx][:num_tokens].zero_()
             self.deepstack_input_embeds_num_tokens = 0
@@ -1770,14 +1768,12 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        modalities = ["image"]
-        # NOTE: When EVS (Efficient Video Sampling) pruning is enabled, the number
-        # of tokens becomes data-dependent (i.e., the retained tokens are
-        # dynamically selected based on inter-frame differences) and therefore
-        # cannot be captured by CUDA Graphs. As a result, video CUDA Graphs are
-        # only enabled when EVS is disabled.
-        if not self.is_multimodal_pruning_enabled:
-            modalities.append("video")
+        # When EVS pruning is enabled, embed_multimodal post-processes both
+        # image and video embeddings (mrope positions are appended for image,
+        # prune+append for video). The encoder CUDA graph path bypasses that
+        # post-process, producing inconsistent embedding formats vs eager. So
+        # disable CUDA graph for all modalities when pruning is on.
+        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
@@ -1925,7 +1921,10 @@ class Qwen3VLForConditionalGeneration(
         )
 
         spatial_merge_size = self.visual.spatial_merge_size
-        per_mm_item_output = token_budget // max_batch_size
+        # Ceil so the buffer fits the worst case of one item using the full
+        # budget. Floor under-allocates when budget is not a multiple of
+        # max_batch_size.
+        per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
         frames_per_item = max_frames_per_batch // max_batch_size
         if frames_per_item > 1:

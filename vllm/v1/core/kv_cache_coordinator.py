@@ -48,11 +48,11 @@ class KVCacheCoordinator(ABC):
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(
-            kv_cache_config.num_blocks,
-            enable_caching,
-            hash_block_size,
-            enable_kv_cache_events,
-            metrics_collector,
+            num_gpu_blocks=kv_cache_config.num_blocks,
+            enable_caching=enable_caching,
+            hash_block_size=hash_block_size,
+            enable_kv_cache_events=enable_kv_cache_events,
+            metrics_collector=metrics_collector,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
@@ -85,6 +85,7 @@ class KVCacheCoordinator(ABC):
         num_encoder_tokens: int,
         total_computed_tokens: int,
         num_tokens_main_model: int,
+        apply_admission_cap: bool = False,
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -101,6 +102,10 @@ class KVCacheCoordinator(ABC):
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
+            apply_admission_cap: If True, apply the recycling-aware
+                per-request admission cap (SWA / chunked-local). Set only by
+                the full-sequence admission gate; per-step allocation must
+                leave it False so the predictor matches `allocate_new_blocks`.
 
         Returns:
             The number of blocks to allocate.
@@ -111,7 +116,12 @@ class KVCacheCoordinator(ABC):
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
-                    request_id, num_encoder_tokens, [], 0, num_encoder_tokens
+                    request_id,
+                    num_encoder_tokens,
+                    [],
+                    0,
+                    num_encoder_tokens,
+                    apply_admission_cap=apply_admission_cap,
                 )
             else:
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -120,6 +130,7 @@ class KVCacheCoordinator(ABC):
                     new_computed_blocks[i],
                     total_computed_tokens,
                     num_tokens_main_model,
+                    apply_admission_cap=apply_admission_cap,
                 )
         return num_blocks_to_allocate
 
@@ -472,6 +483,22 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for i, (_, group_ids, _) in enumerate(self.attention_groups)
             if any(gid in self.eagle_group_ids for gid in group_ids)
         }
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        # Cache hits in this coordinator are always a multiple of
+        # ``lcm_block_size`` tokens (see ``find_longest_cache_hit``). Within an
+        # aligned region, SWA groups only consult a subset of blocks per
+        # ``lcm_block_size``-segment so the unused blocks also stay out of the
+        # prefix-cache hash map.
+        num_computed_tokens = (
+            num_computed_tokens // self.lcm_block_size * self.lcm_block_size
+        )
+        for manager in self.single_type_managers:
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                alignment_tokens=self.lcm_block_size,
+            )
 
     def find_longest_cache_hit(
         self,
