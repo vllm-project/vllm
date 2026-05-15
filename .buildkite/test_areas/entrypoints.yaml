@@ -43,6 +43,12 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 80
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 2)
   key: entrypoints-integration-api-server-openai-part-2
@@ -55,6 +61,12 @@ steps:
   commands:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   - pytest -v -s entrypoints/test_chat_utils.py
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server openai - Part 3)
   key: entrypoints-integration-api-server-openai-part-3
@@ -67,7 +79,13 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion  --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server 2)
   key: entrypoints-integration-api-server-2
@@ -83,6 +101,11 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Speech to Text)
   key: entrypoints-integration-speech_to_text
