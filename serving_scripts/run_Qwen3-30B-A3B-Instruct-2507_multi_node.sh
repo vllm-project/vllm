@@ -197,7 +197,7 @@ export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
 export NSYS_DELAY="${NSYS_DELAY:-0}"
-export NSYS_PROFILE_SERVER="${NSYS_PROFILE_SERVER:-1}"
+export NSYS_PROFILE_VLLM="${NSYS_PROFILE_VLLM:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
 # === NCCL logs ===
@@ -209,7 +209,7 @@ echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
 echo "NSYS_TRACE=${NSYS_TRACE}"
 echo "NSYS_DELAY=${NSYS_DELAY}"
-echo "NSYS_PROFILE_SERVER=${NSYS_PROFILE_SERVER}"
+echo "NSYS_PROFILE_VLLM=${NSYS_PROFILE_VLLM}"
 echo "NSYS_PROFILE_RAY=${NSYS_PROFILE_RAY}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
@@ -441,7 +441,7 @@ echo "=== vLLM api_server (background process) ==="
 echo "Starting vLLM server on head node..."
 
 VLLM_TRACE_FLAGS=()
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
   VLLM_TRACE_FLAGS+=(
     --ray-workers-use-nsight
     --enable-layerwise-nvtx-tracing
@@ -452,28 +452,21 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
   )
 fi
 
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_SERVER}" = "1" ]; then
-  echo "Profiling vLLM server and Ray workers with Nsight Systems"
-  echo "API-server Nsight output: ${NSYS_DIR}/vllm_api_server_${HEAD_NODE}.nsys-rep"
-
-  nsys profile \
-    --force-overwrite=true \
-    --trace="${NSYS_TRACE}" \
-    --sample=none \
-    --delay="${NSYS_DELAY}" \
-    --output="${NSYS_DIR}/vllm_api_server_${HEAD_NODE}" \
-    python -m vllm.entrypoints.openai.api_server \
-      --model "${MODEL_ID}" \
-      --host "${HOST}" \
-      --port "${PORT}" \
-      --distributed-executor-backend ray \
-      --tensor-parallel-size "${TP}" \
-      --pipeline-parallel-size "${PP}" \
-      --max-model-len "${MAX_MODEL_LEN}" \
-      --enforce-eager \
-      "${VLLM_TRACE_FLAGS[@]}" \
-      --disable-custom-all-reduce &
-else
+if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_VLLM}" = "1" ]; then
+  echo "Starting vLLM server with Ray worker Nsight profiling enabled"
+  echo "Ray worker Nsight reports should appear under /tmp/ray/session_latest/logs/nsight on each node"
+  python -m vllm.entrypoints.openai.api_server \
+    --model "${MODEL_ID}" \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --distributed-executor-backend ray \
+    --tensor-parallel-size "${TP}" \
+    --pipeline-parallel-size "${PP}" \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --enforce-eager \
+    "${VLLM_TRACE_FLAGS[@]}" \
+    --disable-custom-all-reduce &
+  else
   python -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_ID}" \
     --host "${HOST}" \
