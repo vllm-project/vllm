@@ -837,6 +837,7 @@ ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
+    --mount=type=bind,source=tools/resolve_kv_connector_requirements.py,target=/tmp/resolve_kv_connector_requirements.py,ro \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-'); \
     CUDA_HOME=/usr/local/cuda; \
@@ -845,16 +846,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+        python3 /tmp/resolve_kv_connector_requirements.py \
+            --input /tmp/kv_connectors.txt \
+            --output /tmp/kv_connectors.resolved.txt \
+            --cuda-major "${CUDA_MAJOR}" && \
+        ( uv pip install --system -r /tmp/kv_connectors.resolved.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            uv pip install --system -r /tmp/kv_connectors.resolved.txt --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
-        ); \
-        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
+        ) ) && \
         uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
     fi
 
