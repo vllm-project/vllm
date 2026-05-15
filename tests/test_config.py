@@ -1403,6 +1403,7 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig

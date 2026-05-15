@@ -502,20 +502,13 @@ def copy_and_expand_dflash_inputs_kernel(
     ctx_start = tl.load(query_start_loc_ptr + req_idx)
     ctx_end = tl.load(query_start_loc_ptr + req_idx + 1)
     num_ctx = ctx_end - ctx_start
-    total_tokens = num_ctx + num_query_per_req
 
     j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    in_bounds = j < total_tokens
+    in_bounds = j < (num_ctx + num_query_per_req)
     is_ctx = j < num_ctx
     is_query = (~is_ctx) & in_bounds
     query_off = j - num_ctx  # offset within query portion (0-indexed)
 
-    # --- Positions ---
-    # Context: load from target_positions
-    ctx_pos_idx = tl.minimum(ctx_start + j, total_input_tokens - 1)
-    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
-
-    # Query: last_valid_pos + 1 + query_off
     # In padded mode, ctx_end includes rejected tokens; use valid_ctx_end
     # to find the last accepted context position.
     if HAS_NUM_REJECTED:
@@ -523,14 +516,37 @@ def copy_and_expand_dflash_inputs_kernel(
         valid_ctx_end = ctx_end - num_rejected
     else:
         valid_ctx_end = ctx_end
-    last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+
+    valid_num_ctx = valid_ctx_end - ctx_start
+    is_valid_ctx = j < valid_num_ctx
+
+    # --- Positions ---
+    # Context: load from target_positions. Rejected context positions are
+    # don't-care because their slot mappings are masked out below.
+    ctx_pos_idx = tl.minimum(ctx_start + j, total_input_tokens - 1)
+    ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
+
+    # Query: last_valid_pos + 1 + query_off. If the previous sampled output
+    # was discarded, there may be no valid context token from that target pass;
+    # start from the first scheduled position in that case.
+    fallback_last_pos = tl.load(target_positions_ptr + ctx_start) - 1
+    last_valid_pos_idx = tl.maximum(valid_ctx_end - 1, ctx_start)
+    last_pos = tl.load(
+        target_positions_ptr + last_valid_pos_idx,
+        mask=valid_num_ctx > 0,
+        other=fallback_last_pos,
+    )
     query_pos = last_pos + 1 + query_off
 
     positions = tl.where(is_ctx, ctx_pos, query_pos)
 
     # Context and query positions go to separate buffers.
     ctx_pos_out = ctx_start + j
-    tl.store(out_context_positions_ptr + ctx_pos_out, ctx_pos, mask=is_ctx)
+    tl.store(
+        out_context_positions_ptr + ctx_pos_out,
+        tl.where(is_valid_ctx, ctx_pos, 0),
+        mask=is_ctx,
+    )
     query_out = req_idx * num_query_per_req + query_off
     tl.store(out_query_positions_ptr + query_out, query_pos, mask=is_query)
 
@@ -544,7 +560,11 @@ def copy_and_expand_dflash_inputs_kernel(
         other=0,
     ).to(tl.int64)
     slot = block_id * block_size + (positions % block_size)
-    tl.store(out_context_slot_mapping_ptr + ctx_pos_out, slot, mask=is_ctx)
+    tl.store(
+        out_context_slot_mapping_ptr + ctx_pos_out,
+        tl.where(is_valid_ctx, slot, -1),
+        mask=is_ctx,
+    )
     tl.store(out_query_slot_mapping_ptr + query_out, slot, mask=is_query)
 
     # --- Input IDs (query tokens only) ---

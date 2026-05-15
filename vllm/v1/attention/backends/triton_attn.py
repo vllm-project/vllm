@@ -141,8 +141,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.num_heads_q = model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
-        self.headdim = model_config.get_head_size()
+        # Some models (e.g. Gemma4) use different KV/head geometry for
+        # different attention layer groups, so size decode metadata from the
+        # actual KV cache spec instead of the model-wide defaults.
+        self.num_heads_kv = kv_cache_spec.num_kv_heads
+        self.headdim = kv_cache_spec.head_size
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (

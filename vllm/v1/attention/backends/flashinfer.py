@@ -223,7 +223,9 @@ class BatchDCPPrefillWrapper:
         self._context = BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, get_kv_cache_layout()
         )
-        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
+        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
+            workspace_buffer, get_kv_cache_layout()
+        )
 
     def plan(
         self,
@@ -343,6 +345,10 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER"
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
@@ -511,6 +517,7 @@ class FlashInferMetadata:
     num_decode_tokens: int
     num_prefills: int
     num_prefill_tokens: int
+    causal: bool
 
     prefill: FIPrefill | TRTLLMPrefill | None
     """
@@ -551,8 +558,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.attention_config = vllm_config.attention_config
         self._workspace_buffer = None
         self._prefill_wrapper: (
-            BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
+            BatchPrefillWithPagedKVCacheWrapper | None
         ) = None  # Wrapper for prefill/append
+        self._noncausal_prefill_wrapper: (
+            BatchPrefillWithPagedKVCacheWrapper | None
+        ) = None  # Wrapper for non-causal prefill (DFlash)
+        self._dcp_prefill_wrapper: BatchDCPPrefillWrapper | None = None
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         if envs.VLLM_BATCH_INVARIANT:
@@ -758,22 +769,35 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(
         self,
+        causal: bool = True,
     ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
-        if self._prefill_wrapper is None:
-            if self.use_dcp:
-                self._prefill_wrapper = BatchDCPPrefillWrapper(
+        if self.use_dcp:
+            if self._dcp_prefill_wrapper is None:
+                self._dcp_prefill_wrapper = BatchDCPPrefillWrapper(
                     workspace_buffer=self._get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
                 )
-            else:
-                # NVFP4 KV cache requires the trtllm-gen backend inside
-                # the wrapper; fa2/fa3 do not support nvfp4.
+            return self._dcp_prefill_wrapper
+
+        if not causal:
+            if self._noncausal_prefill_wrapper is None:
                 backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
-                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(),
-                    get_kv_cache_layout(),
-                    backend=backend,
+                self._noncausal_prefill_wrapper = (
+                    BatchPrefillWithPagedKVCacheWrapper(
+                        self._get_workspace_buffer(),
+                        get_kv_cache_layout(),
+                        backend=backend,
+                    )
                 )
+            return self._noncausal_prefill_wrapper
+
+        if self._prefill_wrapper is None:
+            backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
+            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                get_kv_cache_layout(),
+                backend=backend,
+            )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
@@ -889,13 +913,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> FlashInferMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
-                require_uniform=True,
+        causal = common_attn_metadata.causal
+        if causal:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=self.reorder_batch_threshold,
+                    require_uniform=True,
+                )
             )
-        )
+        else:
+            # DFlash uses non-causal decoder attention over query-only batches.
+            # Even when the query length matches the speculative decode
+            # threshold, FlashInfer decode/TRTLLM kernels cannot express
+            # bidirectional query-query attention. Treat the whole batch as
+            # prefill so BatchPrefillWithPagedKVCacheWrapper(causal=False)
+            # can attend to all KV (context + query) in the paged cache.
+            num_decodes = 0
+            num_prefills = num_reqs
+            num_decode_tokens = 0
+            num_prefill_tokens = num_actual_tokens
 
         page_size = self.page_size
         max_seq_len = common_attn_metadata.max_seq_len
@@ -910,22 +947,40 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native or TRTLLM)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
-        prefill_use_trtllm = use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_prefill_tokens,
-            max_seq_len,
-            self.dcp_world_size,
-            self.cache_dtype,
-            self.q_data_type,
-            is_prefill=True,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
+        prefill_use_trtllm = (
+            causal
+            and use_trtllm_attention(
+                self.num_qo_heads,
+                self.num_kv_heads,
+                num_prefill_tokens,
+                max_seq_len,
+                self.dcp_world_size,
+                self.cache_dtype,
+                self.q_data_type,
+                is_prefill=True,
+                force_use_trtllm=self.attention_config.use_trtllm_attention,
+                has_sinks=self.has_sinks,
+                has_spec=uses_spec_reorder,
+            )
         )
         decode_use_trtllm = (
-            self.use_trtllm_decode_attention and self.dcp_world_size <= 1
+            causal
+            and self.use_trtllm_decode_attention
+            and self.dcp_world_size <= 1
         )
+
+        if not causal and self.use_dcp:
+            raise NotImplementedError(
+                "FlashInfer non-causal prefill is not supported with DCP yet."
+            )
+        uses_trtllm = (num_prefills > 0 and prefill_use_trtllm) or (
+            num_decodes > 0 and decode_use_trtllm
+        )
+        if not causal and uses_trtllm:
+            raise NotImplementedError(
+                "FlashInfer non-causal attention is not supported with TRTLLM "
+                "kernels yet."
+            )
 
         all_uses_trtllm = (num_prefills == 0 or prefill_use_trtllm) and (
             num_decodes == 0 or decode_use_trtllm
@@ -967,6 +1022,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
+            causal=causal,
             use_cascade=use_cascade,
             prefill=None,
             decode=None,
@@ -980,33 +1036,48 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
 
-        # Adjust seq_lens_cpu for DCP
+        # DCP merged prefill consumes prefix KV from cache and current-step
+        # KV from the explicit key/value tensors. When building paged-KV
+        # metadata for that path, use the cached context length only; including
+        # the current query length would make the context branch read query KV
+        # from cache and double-count it during the merge.
+        # Non-causal single-pass (DFlash without DCP) does NOT need this
+        # reduction: do_kv_cache_update writes query KV to the paged cache
+        # before attention runs, so the full seq_lens correctly covers all KV.
+        needs_context_only_prefill = (
+            seq_lens_cpu is not None
+            and num_prefills > 0
+            and not prefill_use_trtllm
+            and self.use_dcp
+        )
+        if needs_context_only_prefill:
+            qo_indptr_prefill_cpu = (
+                qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
+            )
+            query_lens_prefill_cpu = (
+                qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+            )
+            seq_lens_cpu = seq_lens_cpu.clone()
+            seq_lens_cpu[num_decodes:] -= query_lens_prefill_cpu
+
+        # Adjust seq_lens_cpu for DCP after converting prefill requests from
+        # total sequence lengths to cached-context lengths.
         if self.use_dcp:
             assert seq_lens_cpu is not None
-            if num_prefills > 0:
-                qo_indptr_prefill_cpu = (
-                    qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
-                )
-                query_lens_prefill_cpu = (
-                    qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
-                )
-                seq_lens_cpu[num_decodes:] = (
-                    seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
-                )
-
             seq_lens_cpu = get_dcp_local_seq_lens(
                 seq_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
+
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
+        )
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
@@ -1089,6 +1160,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
             )
             assert qo_indptr_prefill_cpu.shape[0] == num_prefills + 1
+            # FlashInfer's PrefillSplitQOKVIndptr scheduler reads qo_indptr
+            # as int32 host memory. Producers like the dflash drafter feed
+            # `query_start_loc_cpu` derived from `np.arange(...)` (which is
+            # int64 by default), and reinterpreting an int64 buffer as int32
+            # makes the scheduler see `[v, 0, v, 0, ...]` and crash with
+            # "qo_indptr[i+1] - qo_indptr[i] should be non-negative". Force
+            # int32+contiguous here as a defensive guard for both the
+            # batched merged-prefill path and the regular causal path below.
+            if qo_indptr_prefill_cpu.dtype != torch.int32:
+                qo_indptr_prefill_cpu = qo_indptr_prefill_cpu.to(
+                    torch.int32
+                ).contiguous()
 
             if prefill_use_trtllm:
                 # Create GPU versions
@@ -1124,7 +1207,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
-                prefill_wrapper = self._get_prefill_wrapper()
+                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
                     prefill_start:num_reqs
@@ -1140,7 +1223,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
-                        paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
+                        paged_kv_last_page_len_cpu=(
+                            paged_kv_last_page_len_prefill_cpu
+                        ),
                         page_size=self.page_size,
                         num_qo_heads=self.num_qo_heads,
                         dcp_world_size=self.dcp_world_size,
@@ -1174,7 +1259,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_kv_heads=self.num_kv_heads,
                         head_dim_qk=self.head_dim,
                         page_size=self.page_size,
-                        causal=True,
+                        causal=attn_metadata.causal,
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
                         logits_soft_cap=self.logits_soft_cap,
@@ -1288,7 +1373,11 @@ class FlashInferImpl(AttentionImpl):
         )
         self.kv_cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
-        self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
+        self.flashinfer_kv_cache_dtype: torch.dtype | None = None
+        if is_quantized_kv_cache(kv_cache_dtype) and not self.is_kvcache_nvfp4:
+            self.flashinfer_kv_cache_dtype = (
+                FlashInferBackend.get_dtype_for_flashinfer(kv_cache_dtype)
+            )
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -1449,16 +1538,14 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-        # to process the cache when the kv_cache_dtype is fp8
-        if self.kv_sharing_target_layer_name is None and is_quantized_kv_cache(
-            self.kv_cache_dtype
+        # FlashInfer expects the cache tensor to be viewed as the concrete
+        # FP8 dtype selected at plan time, not the storage dtype used by vLLM.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and self.flashinfer_kv_cache_dtype is not None
+            and kv_cache.dtype != self.flashinfer_kv_cache_dtype
         ):
-            torch_dtype = FlashInferBackend.get_dtype_for_flashinfer(
-                self.kv_cache_dtype
-            )
-            kv_cache = kv_cache.view(torch_dtype)
-
+            kv_cache = kv_cache.view(self.flashinfer_kv_cache_dtype)
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
         key = key[:num_actual_tokens]
@@ -1518,13 +1605,19 @@ class FlashInferImpl(AttentionImpl):
                 assert prefill_wrapper is not None
                 if use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
-                    assert prefill_wrapper._context._window_left == self.window_left
+                    assert (
+                        prefill_wrapper._context._window_left
+                        == self.window_left
+                    )
                     assert prefill_wrapper._context._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._context._sm_scale == self.scale
                     assert not prefill_wrapper._context._causal
-                    assert prefill_wrapper._new_tokens._window_left == self.window_left
+                    assert (
+                        prefill_wrapper._new_tokens._window_left
+                        == self.window_left
+                    )
                     assert prefill_wrapper._new_tokens._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
@@ -1548,7 +1641,7 @@ class FlashInferImpl(AttentionImpl):
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal
+                    assert prefill_wrapper._causal == attn_metadata.causal
 
                     if self.is_kvcache_nvfp4:
                         kv_cache_permute = nvfp4_kv_data
