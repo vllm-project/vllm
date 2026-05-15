@@ -115,6 +115,13 @@ async def serve_grpc(args: argparse.Namespace):
     # Bind to address
     host = args.host or "0.0.0.0"
     address = f"{host}:{args.port}"
+    if not args.api_key:
+        logger.warning(
+            "No --api-key set. gRPC server is running without authentication. "
+            "Anyone who can reach this port (%s) has full access to the "
+            "vLLM engine.",
+            address,
+        )
     server.add_insecure_port(address)
 
     try:
@@ -183,6 +190,15 @@ def main():
         type=int,
         default=50051,
         help="Port to bind gRPC server to",
+    )
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        action="append",
+        help="API key(s) for authenticating gRPC requests. "
+        "If provided, clients must include a valid "
+        "'authorization' metadata header.",
     )
     parser = AsyncEngineArgs.add_cli_args(parser)
 
