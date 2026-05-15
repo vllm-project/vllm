@@ -694,6 +694,8 @@ class DelegatingParser(Parser):
                     if delta_message and delta_message.content
                     else ""
                 )
+                delta_text = current_text
+                delta_token_ids = current_token_ids
 
         # Tool call extraction
         if self._in_tool_call_phase(state):

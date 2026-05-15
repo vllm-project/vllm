@@ -195,6 +195,20 @@ def test_parse_delta_reasoning_boundary_no_tool_parser(tokenizer, request_obj):
     assert "get_weather" in content
 
 
+def test_parse_delta_reasoning_only_no_think_leak(tokenizer, request_obj):
+    """Regression: </think> must not leak into content when streaming
+    token-by-token with reasoning=True, tool=False."""
+    parser = make_parser(tokenizer, reasoning=True, tool=False)
+    results = stream_text(
+        parser, tokenizer, MODEL_OUTPUT, request_obj, prompt_token_ids=[]
+    )
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "let me think about this" in reasoning
+    assert "</think>" not in content
+    assert "<think>" not in content
+
+
 def test_parse_delta_reasoning_only_thinking_disabled(tokenizer, request_obj):
     """Regression test for vllm-project/vllm#40466.
 
