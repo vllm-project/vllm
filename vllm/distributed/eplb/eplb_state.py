@@ -749,12 +749,8 @@ class EplbState:
                 else:
                     self.cumulative_logical_load[name] = load_cpu.clone()
             if get_ep_group().device_group.rank() == 0:
-                self._save_logical_load(
-                    self.cumulative_logical_load, Path(save_path)
-                )
-                logger.info(
-                    "Saved EPLB cumulative logical load to %s.", save_path
-                )
+                self._save_logical_load(self.cumulative_logical_load, Path(save_path))
+                logger.info("Saved EPLB cumulative logical load to %s.", save_path)
             # Recording-only mode: skip physical rearrangement so we capture
             # the baseline on the unchanged topology and avoid NCCL p2p OOM
             # from move_to_buffer (the apply path allocates large transfer
