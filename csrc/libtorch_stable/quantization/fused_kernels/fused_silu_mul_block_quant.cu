@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+#ifndef USE_ROCM
 #include <cuda_runtime.h>
+#else
+#include <hip/hip_runtime.h>
+#endif
 #include <optional>
 
 #include <torch/csrc/stable/accelerator.h>
@@ -10,7 +14,6 @@
 #include "libtorch_stable/dispatch_utils.h"
 #include "libtorch_stable/torch_utils.h"
 #include "quantization/fused_kernels/quant_conversions.cuh"
-#include "quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
 
