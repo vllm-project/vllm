@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``_to_hf_tokenizer`` in ``vllm/v1/engine/detokenizer.py``.
+"""Unit tests for ``_to_hf_tokenizer`` in ``vllm/v1/engine/detokenizer.py``."""
 
-The helper exists so ``FastIncrementalDetokenizer`` can keep using HF's
-``DecodeStream`` even when the inner tokenizer is a fastokens shim (or any
-future shim that exposes the same ``to_str()`` JSON-serialization contract).
-We exercise both branches without requiring ``fastokens`` to be installed.
-"""
-
+import pytest
 from tokenizers import Tokenizer
 from transformers import AutoTokenizer
 
@@ -25,21 +20,17 @@ def test_to_hf_tokenizer_passes_real_tokenizer_through():
     assert _to_hf_tokenizer(inner) is inner
 
 
-def test_to_hf_tokenizer_rebuilds_from_to_str_shim():
-    """A shim that only exposes ``to_str()`` is rebuilt into a real Tokenizer."""
+def test_to_hf_tokenizer_rebuilds_from_json_shim():
+    """A shim exposing ``_json`` is rebuilt into a real Tokenizer and cached."""
     json_str = AutoTokenizer.from_pretrained(MODEL)._tokenizer.to_str()
 
     class FakeShim:
-        """Stand-in for ``fastokens._compat._TokenizerShim``.
+        """Stand-in for ``fastokens._compat._TokenizerShim``."""
 
-        The production code only relies on ``to_str()`` returning a tokenizer
-        JSON; any object satisfying that contract should work.
-        """
+        def __init__(self, json_str: str) -> None:
+            self._json = json_str
 
-        def to_str(self) -> str:
-            return json_str
-
-    shim = FakeShim()
+    shim = FakeShim(json_str)
     _rebuilt_hf_tokenizer_cache.clear()
 
     rebuilt = _to_hf_tokenizer(shim)
@@ -49,12 +40,13 @@ def test_to_hf_tokenizer_rebuilds_from_to_str_shim():
     assert _to_hf_tokenizer(shim) is rebuilt
 
 
-def test_to_hf_tokenizer_passes_unknown_object_through():
-    """Objects with no ``to_str`` fall through unchanged — informative error
-    downstream rather than a silent rebuild."""
+def test_to_hf_tokenizer_raises_for_object_without_json():
+    """Objects without a ``_json`` attribute raise ``TypeError`` rather than
+    being silently passed through to ``DecodeStream``, which would surface
+    later as a confusing C-extension error."""
 
     class Mystery:
         pass
 
-    obj = Mystery()
-    assert _to_hf_tokenizer(obj) is obj
+    with pytest.raises(TypeError, match="no ``_json`` attribute"):
+        _to_hf_tokenizer(Mystery())
