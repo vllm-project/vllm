@@ -213,10 +213,11 @@ async fn connect_client_with_ipc(
     config: EngineCoreClientConfig,
     ipc: &IpcNamespace,
 ) -> EngineCoreClient {
-    EngineCoreClient::connect_with_input_output_addresses(
-        config,
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    EngineCoreClient::connect(
+        config.with_local_input_output_addresses(
+            Some(ipc.input_endpoint()),
+            Some(ipc.output_endpoint()),
+        ),
     )
     .await
     .unwrap()
@@ -1433,7 +1434,7 @@ async fn connect_times_out_without_ready_message() {
         let _ = handshake.recv().await.unwrap();
     });
 
-    let result = EngineCoreClient::connect_with_input_output_addresses(
+    let result = EngineCoreClient::connect(
         handshake_test_config(
             handshake_address,
             1,
@@ -1441,9 +1442,8 @@ async fn connect_times_out_without_ready_message() {
             Duration::from_millis(100),
             0,
             None,
-        ),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+        )
+        .with_local_input_output_addresses(Some(ipc.input_endpoint()), Some(ipc.output_endpoint())),
     )
     .await;
 

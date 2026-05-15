@@ -197,12 +197,14 @@ async fn connect_async_llm_with_ipc(
     model_name: &str,
     ipc: &IpcNamespace,
 ) -> Llm {
-    let client = EngineCoreClient::connect_with_input_output_addresses(
+    let client = EngineCoreClient::connect(
         EngineCoreClientConfig::new_single(handshake_address)
             .with_model_name(model_name)
-            .with_client_index(client_index),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+            .with_client_index(client_index)
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .unwrap();

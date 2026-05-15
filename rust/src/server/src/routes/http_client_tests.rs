@@ -259,10 +259,13 @@ async fn http_test_server(
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");

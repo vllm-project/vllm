@@ -140,11 +140,10 @@ async fn connect_chat_llm_with_ipc(
     ipc: &IpcNamespace,
     backend: Arc<dyn ChatTextBackend>,
 ) -> ChatLlm {
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        config,
+    let client = EngineCoreClient::connect(config.with_local_input_output_addresses(
         Some(ipc.input_endpoint()),
         Some(ipc.output_endpoint()),
-    )
+    ))
     .await
     .unwrap();
     ChatLlm::from_shared_backend(

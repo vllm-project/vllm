@@ -262,23 +262,6 @@ impl EngineCoreClient {
         Self::from_connected(config, connected).await
     }
 
-    /// Connect using handshake-owned transport mode while overriding the
-    /// frontend input/output bind addresses.
-    ///
-    /// This helper preserves the previous test-facing API shape. It is only
-    /// valid when `config.transport_mode` is
-    /// `TransportMode::HandshakeOwner`.
-    // TODO: inline this
-    pub async fn connect_with_input_output_addresses(
-        config: EngineCoreClientConfig,
-        local_input_address: Option<String>,
-        local_output_address: Option<String>,
-    ) -> Result<Self> {
-        let config =
-            config.with_local_input_output_addresses(local_input_address, local_output_address);
-        Self::connect(config).await
-    }
-
     /// Create a new client instance from the connected transport state after
     /// the startup handshake completes.
     async fn from_connected(

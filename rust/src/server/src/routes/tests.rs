@@ -589,10 +589,13 @@ async fn test_models_with_engine_outputs_and_backend_inner(
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -652,10 +655,13 @@ where
         move |_dealer, push| script(push),
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -682,10 +688,13 @@ where
         move |dealer, push| script(dealer, push),
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -1021,10 +1030,13 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -1674,10 +1686,13 @@ async fn non_stream_completions_include_logprobs() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -1776,10 +1791,13 @@ async fn non_stream_completions_include_prompt_logprobs() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -1862,10 +1880,13 @@ async fn non_stream_chat_completions_still_succeed() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -1922,10 +1943,13 @@ async fn non_stream_completions_still_succeed() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -1989,10 +2013,13 @@ async fn chat_completions_header_request_id_takes_precedence() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -2086,10 +2113,13 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
@@ -2638,10 +2668,13 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
         },
     ));
 
-    let client = EngineCoreClient::connect_with_input_output_addresses(
-        EngineCoreClientConfig::new_single(handshake_address).with_model_name("test-model"),
-        Some(ipc.input_endpoint()),
-        Some(ipc.output_endpoint()),
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
     )
     .await
     .expect("connect client");
