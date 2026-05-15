@@ -1268,7 +1268,7 @@ class VllmBackend:
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
         )
 
-        execution_code, submod_names = generate_execution_code(self.split_gm)
+        execution_code, submod_names, consts = generate_execution_code(self.split_gm)
         # Use getattr to get correct callables: __dict__ has PiecewiseBackend
         # instances (from PiecewiseCompileInterpreter), _modules has originals.
         # getattr checks __dict__ first, then falls back to _modules.
@@ -1277,7 +1277,7 @@ class VllmBackend:
             for name, _ in self.split_gm.named_children()
         }
         runtime_callable = compile_execution_fn(
-            execution_code, submod_callables, submod_names
+            execution_code, submod_callables, submod_names, consts
         )
 
         if (
@@ -1293,6 +1293,7 @@ class VllmBackend:
                 vllm_backend=self,
                 execution_code=execution_code,
                 submod_names=submod_names,
+                consts=consts,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1326,4 +1327,5 @@ class VllmBackend:
             sym_tensor_indices=sym_tensor_indices,
             execution_code=execution_code,
             submod_names=submod_names,
+            consts=consts,
         )

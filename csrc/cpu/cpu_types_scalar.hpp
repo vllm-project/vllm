@@ -6,6 +6,9 @@
 
 namespace vec_op {
 
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
@@ -145,6 +148,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
   }
 
   void save(void* ptr) const { *reinterpret_cast<f16x32_t*>(ptr) = reg; }
+
+  explicit BF16Vec32(const uint8_t*, fp8_e4m3_tag) : reg{} {}
+  explicit BF16Vec32(const uint8_t*, fp8_e5m2_tag) : reg{} {}
 };
 
 struct FP32Vec4 : public Vec<FP32Vec4> {
@@ -301,6 +307,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const FP16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
 
   FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
+
+  // FP8 stub: dead code on scalar path (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
 
   FP32Vec16 operator*(const FP32Vec16& b) const {
     f32x16_t ret;

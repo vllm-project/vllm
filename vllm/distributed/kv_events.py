@@ -68,6 +68,10 @@ class BlockStored(KVCacheEvent):
     """
 
     group_idx: int | None = None
+    # Store events carry cache-spec metadata so consumers can classify and
+    # filter groups as they are learned. Remove events only need group_idx+hash.
+    kv_cache_spec_kind: str | None = None
+    kv_cache_spec_sliding_window: int | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -80,6 +84,8 @@ class BlockStored(KVCacheEvent):
                 self.medium,
                 tuple(self.extra_keys) if self.extra_keys else None,
                 self.group_idx,
+                self.kv_cache_spec_kind,
+                self.kv_cache_spec_sliding_window,
             )
         )
 
