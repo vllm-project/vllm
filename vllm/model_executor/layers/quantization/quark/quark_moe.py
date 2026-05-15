@@ -449,6 +449,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             w2_bias=layer.w2_bias,
             per_act_token_quant=self.input_qscheme == "per_channel",
             per_out_ch_quant=self.weight_qscheme == "per_channel",
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply(
@@ -941,6 +942,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
             w1_scale=layer.w13_weight_scale_2,
             w2_scale=layer.w2_weight_scale_2,
             per_out_ch_quant=True,
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply(
@@ -1644,7 +1646,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         layer.register_parameter("w2_input_scale_2", w2_input_scale_2)
         set_weight_attrs(w2_input_scale_2, extra_weight_attrs)
 
-    def process_weights_after_loading(self, layer: FusedMoE) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
@@ -1698,12 +1700,11 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.moe_mk = make_nvfp4_moe_kernel(
+            self.moe_kernel = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
-                shared_experts=layer.shared_experts,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
+                routing_tables=layer._expert_routing_tables(),
             )
 
     def get_fused_moe_quant_config(
@@ -1721,14 +1722,15 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        shared_experts_input: Any | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk.apply(
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1738,5 +1740,6 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
