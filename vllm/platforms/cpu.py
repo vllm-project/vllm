@@ -140,12 +140,6 @@ class CpuPlatform(Platform):
         if parallel_config.distributed_executor_backend == "uni":
             parallel_config.distributed_executor_backend = "mp"
 
-        if os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") != "1":
-            logger.warning(
-                "VLLM_ENABLE_V1_MULTIPROCESSING is set, use `uni` distributed backend."
-            )
-            parallel_config.distributed_executor_backend = "uni"
-
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
