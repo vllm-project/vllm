@@ -31,11 +31,13 @@ class Sampler:
         req_states: RequestState,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
+        use_fp64_gumbel: bool = False,
     ):
         if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
+        self.use_fp64_gumbel = use_fp64_gumbel
 
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(req_states)
@@ -192,5 +194,6 @@ class Sampler:
             self.sampling_states.seeds.gpu,
             pos,
             apply_temperature=False,
+            use_fp64=self.use_fp64_gumbel,
         )
         return sampled, processed_logits

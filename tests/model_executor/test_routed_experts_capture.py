@@ -25,10 +25,15 @@ def _capturer_with_buffer(
     num_layers: int = 4,
     num_experts_per_tok: int = 2,
     dp_rank: int = 0,
+    tp_size: int = 1,
 ) -> RoutedExpertsCapturer:
-    c = RoutedExpertsCapturer()
+    # Bypass __init__ so the test can use a CPU buffer and skip the
+    # VllmConfig dependency. The CUDA device-tensor allocation in the
+    # real constructor is not what we are exercising here.
+    c = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
     c.dp_rank = dp_rank
-    c._device_buffer = torch.full(
+    c.tp_size = tp_size
+    c.device_buffer = torch.full(
         (max_tokens, num_layers, num_experts_per_tok),
         -1,
         dtype=torch.int32,
@@ -193,8 +198,8 @@ def test_routed_experts_capturer_single_dp_no_metadata():
     ctx = SimpleNamespace(dp_metadata=None)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
-    assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
-    assert capturer._device_buffer[3, 0, 0].item() == -1
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
+    assert capturer.device_buffer[3, 0, 0].item() == -1
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
@@ -211,7 +216,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks():
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
     want = topk[2:5]
-    assert torch.equal(capturer._device_buffer[:3, 0, :], want)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], want)
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens():
@@ -224,7 +229,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     topk = torch.tensor([[10, 11], [12, 13], [14, 15]], dtype=torch.int32)
     with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
         capturer.capture(layer_id=0, topk_ids=topk)
-    assert torch.equal(capturer._device_buffer[:3, 0, :], topk)
+    assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
 
 
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
@@ -241,4 +246,4 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
         pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
         capturer.capture(layer_id=0, topk_ids=topk)
-    assert capturer._device_buffer[0, 0, 0].item() == -1
+    assert capturer.device_buffer[0, 0, 0].item() == -1
