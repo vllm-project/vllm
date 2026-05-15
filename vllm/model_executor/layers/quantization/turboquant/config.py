@@ -2,8 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TurboQuant configuration."""
 
+from __future__ import annotations
+
+import logging
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+
+logger = logging.getLogger(__name__)
 
 # Named TQ presets: each maps to frozen config parameters.
 # key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
@@ -159,12 +168,34 @@ class TurboQuantConfig:
         return s + (s % 2)  # round up to even
 
     @staticmethod
-    def get_boundary_skip_layers(num_layers: int, n: int = 2) -> list[str]:
-        """Get layer indices to skip TQ compression (boundary protection).
+    def get_boundary_skip_layers(
+        model_config: ModelConfig,
+        n: int = 2,
+    ) -> list[str]:
+        """Layer indices to skip TQ compression (boundary protection).
 
-        Returns first N and last N layer indices as strings, suitable for
-        kv_cache_dtype_skip_layers.
+        For hybrid models (attention + Mamba/linear-attention), boundary
+        protection is disabled — hybrids typically have only 8-12
+        full-attention layers and a hard n=2 on each side would cover
+        ~40 % of them.  The dense GSM8K baselines that motivate n=2
+        don't apply to hybrids.
+
+        For dense models, skips first N and last N attention layers.
+        Empirically required for aggressive presets (k3v4_nc, 3bit_nc)
+        — without it GSM8K drops ~30 points on Qwen3-4B.
         """
+        if model_config.is_hybrid:
+            attn_indices = _get_full_attention_layer_indices(model_config)
+            if not attn_indices:
+                raise NotImplementedError(
+                    "TurboQuant KV cache requires identifiable "
+                    "full-attention layers, but none were found in "
+                    "the hybrid model config."
+                )
+            logger.info("TQ hybrid: full-attention layers %s", attn_indices)
+            return []
+
+        num_layers = model_config.hf_text_config.num_hidden_layers
         if n <= 0 or num_layers <= 0:
             return []
         n = min(n, num_layers // 2)  # don't skip more than half
@@ -175,7 +206,7 @@ class TurboQuantConfig:
         return [str(i) for i in indices]
 
     @staticmethod
-    def from_cache_dtype(cache_dtype: str, head_dim: int) -> "TurboQuantConfig":
+    def from_cache_dtype(cache_dtype: str, head_dim: int) -> TurboQuantConfig:
         """Create config from a named preset.
 
         Valid presets: turboquant_k8v4, turboquant_4bit_nc, etc.
@@ -193,3 +224,31 @@ class TurboQuantConfig:
             value_quant_bits=preset["value_quant_bits"],
             norm_correction=preset["norm_correction"],
         )
+
+
+def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
+    """Global indices of full-attention layers in a hybrid model.
+
+    Covers the conventions used across vLLM: ``layer_types`` (Qwen3.5/Next),
+    ``layers_block_type`` (Jamba/Zamba2), ``attn_type_list`` (Minimax).
+    """
+    text_cfg = model_config.hf_text_config
+    hf_cfg = model_config.hf_config
+
+    layer_types = getattr(text_cfg, "layer_types", None)
+    if layer_types is not None:
+        return [
+            i for i, t in enumerate(layer_types) if t in ("full_attention", "attention")
+        ]
+
+    layers_block_type = getattr(text_cfg, "layers_block_type", None)
+    if layers_block_type is not None:
+        return [
+            i for i, t in enumerate(layers_block_type) if t in ("attention", "hybrid")
+        ]
+
+    attn_type_list = getattr(hf_cfg, "attn_type_list", None)
+    if attn_type_list is not None:
+        return [i for i, t in enumerate(attn_type_list) if t == 1]
+
+    return []
