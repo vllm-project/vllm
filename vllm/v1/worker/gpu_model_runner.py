@@ -5253,6 +5253,9 @@ class GPUModelRunner(
                     weights_not_loaded,
                 )
 
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
+
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
