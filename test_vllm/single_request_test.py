@@ -18,7 +18,7 @@ from typing import Any
 BASE_URL = "http://127.0.0.1:9527"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_FILE = str(SCRIPT_DIR / "single_request_test.log")
-MAX_TOKENS = 3
+MAX_TOKENS = 30
 TEMPERATURE = 0.0
 TOP_P = 1.0
 STREAM = False

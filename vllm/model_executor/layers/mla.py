@@ -296,8 +296,14 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
             )
+            q_c = q_c.contiguous()
             if self.mome_attn is not None:
-                q_c = self.mome_attn(q_c, state_indice=0) + q_c
+                # torch.ops.vllm.piecewise_print(q_c, self.mla_attn.layer_name, "before mome_attn")
+                mome_output = self.mome_attn(q_c, state_indice=0)
+                # torch.ops.vllm.piecewise_print(mome_output, self.mla_attn.layer_name, "mome_attn output")
+                # q_c = self.mome_attn(q_c, state_indice=0) + q_c
+                q_c = mome_output + q_c
+                # torch.ops.vllm.piecewise_print(q_c, self.mla_attn.layer_name, "after mome_attn + q_c")
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
@@ -312,6 +318,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         if self.mome_attn is not None:
+            kv_c = kv_c.contiguous()
             kv_c = self.mome_attn(kv_c, state_indice=1) + kv_c
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
@@ -324,14 +331,14 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
             )
 
         if self.indexer and self.is_sparse:
-            kv_cache, attn_metadata = self._get_indexer_kv_cache_and_metadata()
+            # kv_cache, attn_metadata = self._get_indexer_kv_cache_and_metadata()
             _topk_indices = self.indexer(
                 hidden_states,
                 q_c,
                 positions,
                 self.indexer_rope_emb,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
+                # kv_cache=kv_cache,
+                # attn_metadata=attn_metadata,
                 attn_layer_name=self.mla_attn.layer_name,
             )
 
@@ -348,5 +355,6 @@ class StaticSinkMultiHeadLatentAttentionWrapper(MultiHeadLatentAttentionWrapper)
         )
 
         if self.mome_attn is not None:
+            attn_out = attn_out.contiguous()
             attn_out = self.mome_attn(attn_out, state_indice=2) + attn_out
         return self.o_proj(attn_out)[0]

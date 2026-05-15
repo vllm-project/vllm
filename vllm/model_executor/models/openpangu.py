@@ -239,98 +239,112 @@ class MomeAttention(MambaBase, CustomOp):
 
     def forward(self, hidden_states: torch.Tensor,
                 state_indice: int) -> torch.Tensor:
-        forward_context = get_forward_context()
-        if forward_context.attn_metadata is None:
-            return hidden_states
-        return torch.ops.vllm.mome_attention(hidden_states, state_indice,
-                                             self.prefix)
+        output = torch.ones_like(hidden_states)
+        torch.ops.vllm.mome_attention(hidden_states, 
+                                            self.qa_conv.weight,
+                                            self.compresskv_conv.weight,
+                                            self.o_conv.weight,
+                                            self.q_lora_rank,
+                                            self.kv_lora_rank,
+                                            self.o_dim,
+                                            self.kernel_size,
+                                            state_indice,
+                                            self.prefix,
+                                            output)
+        return output
 
-    def _forward_impl(self, hidden_states: torch.Tensor,
-                      state_indice: int) -> torch.Tensor:
-        print(f"[DEBUG] MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.sum(): {hidden_states.sum()}")
-        if "model.layers.0" in self.prefix and state_indice == 0:
-            print(f"[DEBUG] first layer MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.sum(): {hidden_states.sum()}")
-        forward_context = get_forward_context()
-        mome_metadata = forward_context.attn_metadata[self.prefix]
-        self_kv_cache = self.kv_cache
+    # def _forward_impl(self, hidden_states: torch.Tensor,
+    #                   state_indice: int) -> torch.Tensor:
+    #     # print(f"[DEBUG] MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.sum(): {hidden_states.sum()}")
+    #     # if "model.layers.0" in self.prefix:
+    #     #     print(f"[DEBUG] before first layer MoME forward, state_indice: {state_indice}, hidden_states.shape: {hidden_states.shape}, hidden_states.float().sum(): {hidden_states.float().sum()}")
+    #     forward_context = get_forward_context()
+    #     if forward_context.attn_metadata is None:
+    #         return hidden_states
+    #     mome_metadata = forward_context.attn_metadata[self.prefix]
+    #     self_kv_cache = self.kv_cache[forward_context.virtual_engine]
 
-        def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
-            # MOME only needs one persistent state slot per request.
-            # When prefix caching is globally enabled, vLLM may pass the full
-            # block table here; we use the first block as the request state.
-            if state_indices.ndim > 1:
-                return state_indices[:, 0]
-            return state_indices
+    #     def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
+    #         # MOME only needs one persistent state slot per request.
+    #         # When prefix caching is globally enabled, vLLM may pass the full
+    #         # block table here; we use the first block as the request state.
+    #         if state_indices.ndim > 1:
+    #             return state_indices[:, 0]
+    #         return state_indices
 
-        if state_indice == 0:
-            conv_weight = self.qa_conv.weight
-            cache = self_kv_cache[0]
-            hidden_size = self.q_lora_rank
-        elif state_indice == 1:
-            conv_weight = self.compresskv_conv.weight
-            cache = self_kv_cache[1]
-            hidden_size = self.kv_lora_rank
-        else:
-            conv_weight = self.o_conv.weight
-            cache = self_kv_cache[2]
-            hidden_size = self.o_dim
+    #     if state_indice == 0:
+    #         conv_weight = self.qa_conv.weight
+    #         cache = self_kv_cache[0]
+    #         hidden_size = self.q_lora_rank
+    #     elif state_indice == 1:
+    #         conv_weight = self.compresskv_conv.weight
+    #         cache = self_kv_cache[1]
+    #         hidden_size = self.kv_lora_rank
+    #     else:
+    #         conv_weight = self.o_conv.weight
+    #         cache = self_kv_cache[2]
+    #         hidden_size = self.o_dim
 
-        conv_weight = conv_weight.to(hidden_states.dtype)
-        output_chunks = []
+    #     conv_weight = conv_weight.to(hidden_states.dtype)
+    #     output_chunks = []
 
-        num_decode_tokens = mome_metadata.num_decode_tokens
-        num_decodes = mome_metadata.num_decodes
-        if num_decode_tokens > 0:
-            decode_output = hidden_states.new_zeros(
-                (num_decode_tokens, hidden_size))
-            decode_hidden_states = hidden_states[:num_decodes]
-            decode_state_indices = _get_request_state_indices(
-                mome_metadata.state_indices_tensor_d)
-            if num_decodes > 0:
-                prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
-                    hidden_states.dtype)
-                conv_input = torch.cat(
-                    [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
-                conv_output = torch.nn.functional.conv1d(
-                    conv_input.permute(0, 2, 1),
-                    conv_weight,
-                    groups=hidden_size,
-                )
-                cache[decode_state_indices, :self.kernel_size -
-                      1] = conv_input[:, -(self.kernel_size - 1):]
-                decode_output[:num_decodes] = conv_output.permute(
-                    0, 2, 1).reshape(-1, hidden_size)
-            output_chunks.append(decode_output)
+    #     num_decode_tokens = mome_metadata.num_decode_tokens
+    #     num_decodes = mome_metadata.num_decodes
+    #     if num_decode_tokens > 0:
+    #         decode_output = hidden_states.new_zeros(
+    #             (num_decode_tokens, hidden_size))
+    #         decode_hidden_states = hidden_states[:num_decodes]
+    #         decode_state_indices = _get_request_state_indices(
+    #             mome_metadata.state_indices_tensor[:num_decodes])
+    #         if num_decodes > 0:
+    #             prev_cache = cache[decode_state_indices, :self.kernel_size - 1].to(
+    #                 hidden_states.dtype)
+    #             conv_input = torch.cat(
+    #                 [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
+    #             conv_output = torch.nn.functional.conv1d(
+    #                 conv_input.permute(0, 2, 1),
+    #                 conv_weight,
+    #                 groups=hidden_size,
+    #             )
+    #             cache[decode_state_indices, :self.kernel_size -
+    #                   1] = conv_input[:, -(self.kernel_size - 1):]
+    #             decode_output[:num_decodes] = conv_output.permute(
+    #                 0, 2, 1).reshape(-1, hidden_size)
+    #         output_chunks.append(decode_output)
 
-        if mome_metadata.num_prefills > 0:
-            query_start_loc = mome_metadata.query_start_loc_p
-            assert query_start_loc is not None
-            prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
-                                                  mome_metadata.num_prefill_tokens]
-            prefill_state_indices = _get_request_state_indices(
-                mome_metadata.state_indices_tensor_p)
-            conv_output_list = []
-            for i in range(mome_metadata.num_prefills):
-                s = query_start_loc[i]
-                e = query_start_loc[i + 1]
-                local_input = prefill_hidden_states[s:e]
-                state_idx = prefill_state_indices[i]
-                prev_cache = cache[state_idx, :self.kernel_size - 1].to(
-                    hidden_states.dtype)
-                conv_input = torch.cat([prev_cache, local_input], dim=0)
-                conv_output = torch.nn.functional.conv1d(
-                    conv_input.transpose(1, 0).unsqueeze(0),
-                    conv_weight,
-                    groups=hidden_size,
-                ).squeeze(0).transpose(1, 0)
-                cache[state_idx, :self.kernel_size - 1] = conv_input[
-                    -(self.kernel_size - 1):]
-                conv_output_list.append(conv_output)
-            output_chunks.append(torch.cat(conv_output_list, dim=0))
+    #     if mome_metadata.num_prefills > 0:
+    #         query_start_loc = mome_metadata.query_start_loc_p
+    #         assert query_start_loc is not None
+    #         prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
+    #                                               mome_metadata.num_prefill_tokens]
+    #         prefill_state_indices = _get_request_state_indices(
+    #             mome_metadata.state_indices_tensor[
+    #                 num_decode_tokens:num_decode_tokens + mome_metadata.num_prefills])
+    #         conv_output_list = []
+    #         for i in range(mome_metadata.num_prefills):
+    #             s = query_start_loc[i]
+    #             e = query_start_loc[i + 1]
+    #             local_input = prefill_hidden_states[s:e]
+    #             state_idx = prefill_state_indices[i]
+    #             prev_cache = cache[state_idx, :self.kernel_size - 1].to(
+    #                 hidden_states.dtype)
+    #             conv_input = torch.cat([prev_cache, local_input], dim=0)
+    #             conv_output = torch.nn.functional.conv1d(
+    #                 conv_input.transpose(1, 0).unsqueeze(0),
+    #                 conv_weight,
+    #                 groups=hidden_size,
+    #             ).squeeze(0).transpose(1, 0)
+    #             cache[state_idx, :self.kernel_size - 1] = conv_input[
+    #                 -(self.kernel_size - 1):]
+    #             conv_output_list.append(conv_output)
+    #         output_chunks.append(torch.cat(conv_output_list, dim=0))
 
-        if len(output_chunks) == 1:
-            return output_chunks[0]
-        return torch.cat(output_chunks, dim=0)
+    #     if len(output_chunks) == 1:
+    #         result = output_chunks[0]
+    #     else:
+    #         result = torch.cat(output_chunks, dim=0)
+    #     # torch.ops.vllm.piecewise_print(result, self.prefix, "inside mome_attn")
+    #     return result
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
         tp_rank = get_tensor_model_parallel_rank()
@@ -346,30 +360,150 @@ class MomeAttention(MambaBase, CustomOp):
 
 def mome_attention(
     hidden_states: torch.Tensor,
+    q_conv_weight: torch.Tensor,
+    compresskv_conv_weight: torch.Tensor,
+    o_conv_weight: torch.Tensor,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    o_dim: int,
+    kernel_size: int,
     state_indice: int,
     layer_name: str,
-) -> torch.Tensor:
+    output: torch.Tensor,
+) -> None:
     forward_context = get_forward_context()
     layer = forward_context.no_compile_layers[layer_name]
-    return cast(MomeAttention, layer)._forward_impl(hidden_states, state_indice)
+    if forward_context.attn_metadata is None:
+        output.fill_(0)
+        return
+    mome_metadata = forward_context.attn_metadata[layer_name]
+    self_kv_cache = layer.kv_cache[forward_context.virtual_engine]
+
+    def _get_request_state_indices(state_indices: torch.Tensor) -> torch.Tensor:
+        # MOME only needs one persistent state slot per request.
+        # When prefix caching is globally enabled, vLLM may pass the full
+        # block table here; we use the first block as the request state.
+        if state_indices.ndim > 1:
+            return state_indices[:, 0]
+        return state_indices
+
+    if state_indice == 0:
+        conv_weight = q_conv_weight
+        cache = self_kv_cache[0]
+        hidden_size = q_lora_rank
+    elif state_indice == 1:
+        conv_weight = compresskv_conv_weight
+        cache = self_kv_cache[1]
+        hidden_size = kv_lora_rank
+    else:
+        conv_weight = o_conv_weight
+        cache = self_kv_cache[2]
+        hidden_size = o_dim
+
+    conv_weight = conv_weight.to(hidden_states.dtype)
+    output_chunks = []
+
+    num_decode_tokens = mome_metadata.num_decode_tokens
+    num_decodes = mome_metadata.num_decodes
+    if num_decode_tokens > 0:
+        decode_output = hidden_states.new_zeros(
+            (num_decode_tokens, hidden_size))
+        decode_hidden_states = hidden_states[:num_decodes]
+        decode_state_indices = _get_request_state_indices(
+            mome_metadata.state_indices_tensor[:num_decodes])
+        if num_decodes > 0:
+            prev_cache = cache[decode_state_indices, :kernel_size - 1].to(
+                hidden_states.dtype)
+            conv_input = torch.cat(
+                [prev_cache, decode_hidden_states.unsqueeze(1)], dim=1)
+            conv_output = torch.nn.functional.conv1d(
+                conv_input.permute(0, 2, 1),
+                conv_weight,
+                groups=hidden_size,
+            )
+            cache[decode_state_indices, :kernel_size -
+                    1] = conv_input[:, -(kernel_size - 1):]
+            decode_output[:num_decodes] = conv_output.permute(
+                0, 2, 1).reshape(-1, hidden_size)
+        output_chunks.append(decode_output)
+
+    if mome_metadata.num_prefills > 0:
+        query_start_loc = mome_metadata.query_start_loc_p
+        assert query_start_loc is not None
+        prefill_hidden_states = hidden_states[num_decode_tokens:num_decode_tokens +
+                                                mome_metadata.num_prefill_tokens]
+        prefill_state_indices = _get_request_state_indices(
+            mome_metadata.state_indices_tensor[
+                num_decode_tokens:num_decode_tokens + mome_metadata.num_prefills])
+        conv_output_list = []
+        for i in range(mome_metadata.num_prefills):
+            s = query_start_loc[i]
+            e = query_start_loc[i + 1]
+            local_input = prefill_hidden_states[s:e]
+            state_idx = prefill_state_indices[i]
+            prev_cache = cache[state_idx, :kernel_size - 1].to(
+                hidden_states.dtype)
+            conv_input = torch.cat([prev_cache, local_input], dim=0)
+            conv_output = torch.nn.functional.conv1d(
+                conv_input.transpose(1, 0).unsqueeze(0),
+                conv_weight,
+                groups=hidden_size,
+            ).squeeze(0).transpose(1, 0)
+            cache[state_idx, :kernel_size - 1] = conv_input[
+                -(kernel_size - 1):]
+            conv_output_list.append(conv_output)
+        output_chunks.append(torch.cat(conv_output_list, dim=0))
+
+    if len(output_chunks) == 1:
+        result = output_chunks[0]
+    else:
+        result = torch.cat(output_chunks, dim=0)
+    # torch.ops.vllm.piecewise_print(result, layer_name, "inside mome_attn")
+    output[:result.shape[0]] = result
+    # if "model.layers.0" in layer_name:
+    #     print(f"[DEBUG] {layer_name}, output.shape: {output.shape}, output.float().sum(): {output.float().sum()}, output[:5]: {output.flatten()[:5]}")
+    # return output
 
 
 def mome_attention_fake(
     hidden_states: torch.Tensor,
+    q_conv_weight: torch.Tensor,
+    compresskv_conv_weight: torch.Tensor,
+    o_conv_weight: torch.Tensor,
+    q_lora_rank: int,
+    kv_lora_rank: int,
+    o_dim: int,
+    kernel_size: int,
     state_indice: int,
     layer_name: str,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
+    output: torch.Tensor,
+) -> None:
+    return
 
 
 direct_register_custom_op(
     op_name="mome_attention",
     op_func=mome_attention,
-    mutates_args=[],
+    mutates_args=["output"],
     fake_impl=mome_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
 )
 
+
+def piecewise_print(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
+    if "model.layers.0" in prefix:
+        print(f"[DEBUG] {name}, tensor.shape: {tensor.shape}, tensor.float().sum(): {tensor.float().sum()}, tensor.ptr: {tensor.data_ptr()}, tensor[:5]: {tensor.flatten()[:5]}")
+    return tensor
+
+def piecewise_print_fake(tensor: torch.Tensor, prefix: str, name: str) -> torch.Tensor:
+    return torch.empty_like(tensor)
+
+direct_register_custom_op(
+    op_name="piecewise_print",
+    op_func=piecewise_print,
+    mutates_args=[],
+    fake_impl=piecewise_print_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
 
 class PanguIndexer(nn.Module):
     """
@@ -433,18 +567,32 @@ class PanguIndexer(nn.Module):
         qr: torch.Tensor,
         positions,
         rotary_emb,
-        kv_cache: Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
-        attn_metadata: Optional[Any] = None,
+        # kv_cache: tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        # attn_metadata: Optional[Any] = None,
         attn_layer_name: str = "",
     ) -> torch.Tensor:
-        num_actual_toks = None
-        if attn_metadata is not None:
-            num_actual_toks = getattr(attn_metadata, "num_actual_tokens", None)
-            if num_actual_toks is not None:
-                hidden_states = hidden_states[:num_actual_toks]
-                qr = qr[:num_actual_toks]
-                if isinstance(positions, torch.Tensor):
-                    positions = positions[:num_actual_toks]
+        # forward_context = get_forward_context()
+        # attn_metadata = forward_context.attn_metadata
+        # if isinstance(attn_metadata, dict):
+        #     attn_metadata = attn_metadata[self.mla_attn.layer_name]
+        # indexer_kv_cache = getattr(self.indexer, "kv_cache", None)
+        # if indexer_kv_cache is not None:
+        #     kv_cache = indexer_kv_cache[forward_context.virtual_engine]
+        # else:
+        #     kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+        
+        # if "model.layers.0" in self.prefix:
+        #     print(f"[DEBUG] before first layer PanguIndexer forward, hidden_states.shape: {hidden_states.shape}, qr.shape: {qr.shape}"
+        #         f"hidden_states.sum(): {hidden_states.sum()}, qr.sum(): {qr.sum()}")
+        
+        # num_actual_toks = None
+        # if attn_metadata is not None:
+        #     num_actual_toks = getattr(attn_metadata, "num_actual_tokens", None)
+        #     if num_actual_toks is not None:
+        #         hidden_states = hidden_states[:num_actual_toks]
+        #         qr = qr[:num_actual_toks]
+        #         if isinstance(positions, torch.Tensor):
+        #             positions = positions[:num_actual_toks]
 
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
@@ -469,37 +617,38 @@ class PanguIndexer(nn.Module):
         weights, _ = self.weights_proj(hidden_states)
         weights = weights * self.softmax_scale * self.n_head**-0.5
 
-        if attn_metadata is None:
-            return self.topk_indices_buffer
+        # if attn_metadata is None:
+        #     return self.topk_indices_buffer
         
-        if kv_cache is None:
-            forward_context = get_forward_context()
-            kv_cache = self.kv_cache
+        # if kv_cache is None:
+        #     forward_context = get_forward_context()
+        #     kv_cache = self.kv_cache[forward_context.virtual_engine]
 
-        if isinstance(kv_cache, (list, tuple)):
-            assert len(kv_cache) >= 2, (
-                "PanguIndexer expects indexer K cache at kv_cache[1], "
-                f"but got {len(kv_cache)} cache tensors."
-            )
-            indexer_cache = kv_cache[1]
-        else:
-            indexer_cache = kv_cache
+        # if isinstance(kv_cache, (list, tuple)):
+            # assert len(kv_cache) >= 2, (
+            #     "PanguIndexer expects indexer K cache at kv_cache[1], "
+            #     f"but got {len(kv_cache)} cache tensors."
+            # )
+            # indexer_cache = kv_cache[1]
+        # else:
+        #     indexer_cache = kv_cache
 
-        if self.topk_indices_buffer is not None and indexer_cache is not None:
-            return torch.ops.vllm.pangu_sparse_attn_indexer(
-                hidden_states,
-                attn_layer_name,
-                indexer_cache,
-                q,
-                k,
-                weights,
-                self.topk_tokens,
-                self.head_dim,
-                self.vllm_config.cache_config.block_size,
-                self.sink_len,
-                self.num_sink_blocks,
-                self.topk_indices_buffer,
-            )
+        # if self.topk_indices_buffer is not None and indexer_cache is not None:
+        # indexer_cache = list(kv_cache)
+        return torch.ops.vllm.pangu_sparse_attn_indexer(
+            hidden_states,
+            attn_layer_name,
+            # indexer_cache,
+            q,
+            k,
+            weights,
+            self.topk_tokens,
+            self.head_dim,
+            self.vllm_config.cache_config.block_size,
+            self.sink_len,
+            self.num_sink_blocks,
+            self.topk_indices_buffer,
+        )
 
         if indexer_cache is not None:
             # Multi-dimensional indexing is robust to padding between blocks.
@@ -520,7 +669,7 @@ class PanguIndexer(nn.Module):
             weights=weights,
             attn_metadata=attn_metadata,
         )
-
+       
         return self.topk_indices_buffer[:bs]
 
     def _apply_indexer(
@@ -601,7 +750,7 @@ class PanguIndexer(nn.Module):
 def pangu_sparse_attn_indexer(
     hidden_states: torch.Tensor,
     attn_layer_name: str,
-    kv_cache: torch.Tensor,
+    # kv_cache: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
     weights: torch.Tensor,
@@ -613,21 +762,41 @@ def pangu_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
 ) -> torch.Tensor:
     attn_metadata = get_forward_context().attn_metadata
-    if not isinstance(attn_metadata, dict):
-        return pangu_sparse_attn_indexer_fake(
-            hidden_states,
-            attn_layer_name,
-            kv_cache,
-            query,
-            key,
-            weights,
-            topk_tokens,
-            head_dim,
-            block_size,
-            sink_len,
-            num_sink_blocks,
-            topk_indices_buffer,
-        )
+    if attn_metadata is None:
+        return topk_indices_buffer
+    # if "model.layers.0" in attn_layer_name:
+    #     print(f"[DEBUG] before first layer PanguIndexer forward, hidden_states.shape: {hidden_states.shape}, hidden_states.float().sum(): {hidden_states.float().sum()} "
+    #         f"query.shape: {query.shape}, query.float().sum(): {query.float().sum()}, query[0, :5, :5]: {query[0, :5, :5]} "
+    #         f"key.shape: {key.shape}, key.float().sum(): {key.float().sum()} "
+    #         f"weights.shape: {weights.shape}, weights.float().sum(): {weights.float().sum()}")
+
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[attn_layer_name]
+    kv_cache = attn_layer.indexer.kv_cache[forward_context.virtual_engine]
+    # if "model.layers.0" in attn_layer_name:
+    #     print(f"[DEBUG] before first layer PanguIndexer forward, kv_cache.shape: {kv_cache.shape}, kv_cache.float().sum(): {kv_cache.float().sum()}")
+
+    # assert len(kv_cache) >= 2, (
+    #     "PanguIndexer expects indexer K cache at kv_cache[1], "
+    #     f"but got {len(kv_cache)} cache tensors."
+    # )
+    # kv_cache = kv_cache[1]
+
+    # if not isinstance(attn_metadata, dict):
+    #     return pangu_sparse_attn_indexer_fake(
+    #         hidden_states,
+    #         attn_layer_name,
+    #         kv_cache,
+    #         query,
+    #         key,
+    #         weights,
+    #         topk_tokens,
+    #         head_dim,
+    #         block_size,
+    #         sink_len,
+    #         num_sink_blocks,
+    #         topk_indices_buffer,
+    #     )
 
     attn_metadata = attn_metadata[attn_layer_name]
     num_actual_toks = getattr(attn_metadata, "num_actual_tokens", query.shape[0])
@@ -698,13 +867,15 @@ def pangu_sparse_attn_indexer(
             _, indices = torch.topk(total_scores, k)
             topk_indices[i, num_sink_tokens:num_sink_tokens + k] = (
                 indices.to(torch.int32) + sink_len)
+    # if "model.layers.0" in attn_layer_name:
+    #     print(f"[DEBUG] after first layer PanguIndexer forward, topk_indices_buffer.shape: {topk_indices_buffer.shape}, topk_indices_buffer.sum(): {topk_indices_buffer.sum()}")
     return topk_indices_buffer
 
 
 def pangu_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     attn_layer_name: str,
-    kv_cache: torch.Tensor,
+    # kv_cache: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
     weights: torch.Tensor,
@@ -721,7 +892,7 @@ def pangu_sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="pangu_sparse_attn_indexer",
     op_func=pangu_sparse_attn_indexer,
-    mutates_args=["kv_cache", "topk_indices_buffer"],
+    mutates_args=["topk_indices_buffer"],
     fake_impl=pangu_sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -1816,6 +1987,7 @@ class OpenPanguDecoderLayer(nn.Module):
         self.has_block_post_layernorm = layer_idx in getattr(config, "block_post_layernorm_idx", [])
         if self.has_block_post_layernorm:
             self.block_post_layernorm = RMSNorm(block_post_layernorm_hidden_size, eps=config.rms_norm_eps)
+        self.layer_name = prefix
 
     def forward(
         self,
@@ -1893,7 +2065,9 @@ class OpenPanguDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         residual = hidden_states
 
+        # torch.ops.vllm.piecewise_print(hidden_states, self.layer_name, "hidden_states")
         hidden_states, h_post, h_res = self.attn_mhc_module.hc_pre(hidden_states)
+        # torch.ops.vllm.piecewise_print(hidden_states, self.layer_name, "hidden_states after attn_mhc_module.hc_pre")
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
             positions=positions,

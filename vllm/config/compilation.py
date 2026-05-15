@@ -761,6 +761,7 @@ class CompilationConfig:
         "vllm::deepseek_v4_attention",
         "vllm::pangu_sparse_attn_indexer",
         "vllm::mome_attention",
+        "vllm::piecewise_print",
     ]
 
     def compute_hash(self) -> str:
