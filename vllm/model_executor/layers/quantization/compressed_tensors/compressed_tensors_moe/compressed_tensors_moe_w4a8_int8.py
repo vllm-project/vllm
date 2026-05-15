@@ -11,13 +11,12 @@ from compressed_tensors.quantization import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
+    SharedExperts,
 )
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
 from vllm.model_executor.layers.fused_moe.oracle.w4a8_int8 import (
     convert_to_w4a8_int8_moe_format,
     make_w4a8_int8_moe_kernel,
@@ -209,8 +208,7 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     # post-load packing to dyn-4bit KleidiAI kernel's format
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """Pack INT4 weights to KleidiAI format using oracle utility."""
-        # Use oracle to pack weights (computation only, no parameter management)
+        # Use oracle to pack weights.
         w13_packed, w2_packed, w13_weight_scale, w2_weight_scale, w13_bias, w2_bias = (
             convert_to_w4a8_int8_moe_format(
                 w13_weight=layer.w13_weight,
@@ -278,17 +276,12 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        """Create FusedMoEQuantConfig using oracle utility."""
         # Determine block shape from group_size
         # group_size=-1 means channel-wise: (-1, 1)
         # group_size=N means group-wise: (1, N)
         block_shape = (-1, 1) if self.group_size == -1 else (1, self.group_size)
 
         return make_w4a8_int8_moe_quant_config(block_shape=block_shape)
-
-    @property
-    def is_monolithic(self) -> bool:
-        return True
 
     def apply_monolithic(
         self,
@@ -297,43 +290,43 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert layer.activation in (
-            MoEActivation.SILU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-        ), "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
-        assert layer.expert_map is None, """expert_map/EP not implemented
-        for CPU dyn-4bit MoE."""
-
-        def _act_kind(s: MoEActivation) -> int:
-            # 0 = SwiGLU_Gu (SiLU(g)*u), 1 = SwiGLU_Ug (SiLU(u)*g), 2 = SiLU
-            if s == MoEActivation.SWIGLUSTEP:
-                return 0
-            if s == MoEActivation.SWIGLUOAI:
-                return 1
-            if s == MoEActivation.SILU:
-                return 2
-            raise ValueError(f"Unknown activation '{s}'")
-
-        # Apply topk softmax on router output
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=layer.top_k,
-            use_grouped_topk=layer.use_grouped_topk,
-            renormalize=layer.renormalize,
-        )
-
-        return torch.ops._C.dynamic_4bit_int_moe(
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             x,
-            topk_ids.to(torch.long),
-            topk_weights,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
-            layer.w2_out_features,
-            layer.w2_in_features,
-            layer.w13_out_features,
-            layer.group_size,
-            layer.apply_router_weight_on_input,
-            int(_act_kind(layer.activation)),
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+        )
+
+    def apply(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            x,
+            layer.w13_weight_packed,
+            layer.w2_weight_packed,
+            topk_weights,
+            topk_ids,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
+            shared_experts_input=shared_experts_input,
         )

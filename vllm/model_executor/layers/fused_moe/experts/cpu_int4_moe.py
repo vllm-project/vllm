@@ -182,6 +182,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.RenormalizeNaive,
         )
 
+        # TODO(bnell): this could be factored into a CPURouter class and
+        # turn this into a modular kernel
         # Perform topk selection
         topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
