@@ -1246,6 +1246,40 @@ class VllmConfig:
             if self.model_config is None or self.model_config.is_moe
             else 1
         )
+        use_unwrapped_native_dp_ep = (
+            envs.VLLM_FUSED_MOE_WRAP_MODE == "unwrapped"
+            and effective_dp_size > 1
+            and self.parallel_config.enable_expert_parallel
+        )
+        if (
+            use_unwrapped_native_dp_ep
+            and self.compilation_config.inductor_compile_config.get(
+                "benchmark_combo_kernel"
+            )
+        ):
+            logger.info_once(
+                "Disabling Inductor combo-kernel benchmarking for unwrapped MoE "
+                "with native DP+EP because token dispatch/combine sizes are "
+                "symbolic during compilation."
+            )
+            self.compilation_config.inductor_compile_config[
+                "benchmark_combo_kernel"
+            ] = False
+        if (
+            use_unwrapped_native_dp_ep
+            and not self.compilation_config.inductor_compile_config.get(
+                "force_disable_caches"
+            )
+        ):
+            logger.info_once(
+                "Disabling vLLM torch.compile cache for unwrapped MoE with "
+                "native DP+EP because standalone Inductor artifacts are not "
+                "serializable for this graph."
+            )
+            self.compilation_config.inductor_compile_config["force_disable_caches"] = (
+                True
+            )
+
         self.compilation_config.set_splitting_ops_for_v1(
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,

@@ -43,15 +43,14 @@ def _cuda_platform(monkeypatch: pytest.MonkeyPatch) -> None:
         envs.__getattr__.cache_clear()
 
 
-def test_unwrapped_rejects_native_dp_ep(
+def test_unwrapped_allows_native_dp_ep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("VLLM_FUSED_MOE_WRAP_MODE", "unwrapped")
 
     runner = _make_runner(dp_size=2, use_ep=True)
 
-    with pytest.raises(NotImplementedError, match=r"native DP\+EP is enabled"):
-        runner._determine_forward_mode()
+    assert runner._determine_forward_mode() == "unwrapped"
 
 
 def test_unwrapped_rejects_unsupported_quant_method(
@@ -87,7 +86,6 @@ def test_unwrapped_reports_all_blockers(monkeypatch: pytest.MonkeyPatch) -> None
     assert "shared experts are enabled" in message
     assert "DBO is enabled" in message
     assert "TestMoEMethod is not supported" in message
-    assert "native DP+EP is enabled" in message
 
 
 def test_wrapped_allows_otherwise_unsupported_configuration(
