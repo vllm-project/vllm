@@ -37,7 +37,7 @@ jobs:
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
+      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
       VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
@@ -122,7 +122,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/vllm-ascend-hust.git" "$VLLM_ASCEND_HUST_REPO"
+          clone_with_retry "git@github.com:vLLM-HUST/vllm-ascend-hust.git" "$VLLM_ASCEND_HUST_REPO"
 
       - name: Checkout ascend-runtime-manager repo
         run: |
@@ -149,7 +149,7 @@ jobs:
             return 1
           }
 
-          clone_with_retry "https://github.com/vLLM-HUST/ascend-runtime-manager.git" "$HUST_ASCEND_MANAGER_REPO"
+          clone_with_retry "git@github.com:vLLM-HUST/ascend-runtime-manager.git" "$HUST_ASCEND_MANAGER_REPO"
 
       - name: Resolve Ascend Python runtime
         run: |
