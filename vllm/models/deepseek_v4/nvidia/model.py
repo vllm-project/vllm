@@ -1331,10 +1331,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def skip_weight_name_before_load(self, name: str) -> bool:
-        mapped_names = self.hf_to_vllm_mapper.apply_list([name])
-        if not mapped_names:
-            return True
-        return all("mtp." in mapped_name for mapped_name in mapped_names)
+        mapped = self.hf_to_vllm_mapper._map_name(name)
+        return mapped is None or "mtp." in mapped
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
