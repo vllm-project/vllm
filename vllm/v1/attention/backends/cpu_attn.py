@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -34,6 +35,7 @@ _CPU_ARCH_PREFER_MIXED_BATCH = (
     CpuArchEnum.X86,
     CpuArchEnum.ARM,
     CpuArchEnum.S390X,
+    CpuArchEnum.RISCV,
     CpuArchEnum.POWERPC,
 )
 
@@ -506,6 +508,29 @@ def _make_sliding_window_bias(
     return attn_biases
 
 
+@functools.lru_cache(maxsize=1)
+def _riscv_supports_rvv_vlen128() -> bool:
+    """Whether the C++ RVV attention path (hardcoded to VLEN==128) is usable.
+
+    The kernel in csrc/cpu/cpu_attn_rvv.hpp uses riscv_rvv_vector_bits(128)
+    typedefs and m1/m2 intrinsics with vl=8; CMake's auto-detect picks the
+    largest zvl<N>b advertised by /proc/cpuinfo, so the binary contains the
+    RVV path only when the build host advertised exactly zvl128b. Mirror
+    that here so the Python dispatch doesn't request ISA::RVV on builds
+    where it wasn't compiled in (would TORCH_CHECK at first attention call).
+    """
+    try:
+        with open("/proc/cpuinfo") as f:
+            cpuinfo = f.read()
+    except OSError:
+        return False
+    if "zvl128b" not in cpuinfo:
+        return False
+    # CMake auto-detect picks the largest advertised VLEN; if the host
+    # advertises zvl256b or higher, the build skipped the RVV-128 path.
+    return all(f"zvl{n}b" not in cpuinfo for n in (256, 512, 1024))
+
+
 def _get_attn_isa(
     dtype: torch.dtype,
     block_size: int,
@@ -523,6 +548,7 @@ def _get_attn_isa(
     arch = current_platform.get_cpu_architecture()
     supports_arm = arch == CpuArchEnum.ARM
     supports_vxe = arch == CpuArchEnum.S390X
+    supports_riscv = arch == CpuArchEnum.RISCV
     supports_vsx = arch == CpuArchEnum.POWERPC
     supports_avx512 = torch.cpu._is_avx512_supported()
     if fp8_kv and not supports_amx and not supports_avx512:
@@ -535,6 +561,8 @@ def _get_attn_isa(
         if supports_arm:
             # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
             return "neon"
+        elif supports_riscv and _riscv_supports_rvv_vlen128():
+            return "rvv"
         elif supports_vxe:
             return "vxe"
         elif supports_vsx:
