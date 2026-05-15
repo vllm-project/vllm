@@ -219,7 +219,12 @@ def run_with_expert_maps(
             ),
             inplace=False,
         )
-        out_tensor = out_tensor + kernel.apply(**kwargs)
+        out_tensor = out_tensor + kernel.apply(
+            **kwargs,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            apply_router_weight_on_input=False,
+        )
 
     return out_tensor
 
@@ -279,7 +284,13 @@ def run_8_bit(
             ),
             inplace=False,
         )
-        return kernel.apply(**kwargs)
+        return kernel.apply(
+            **kwargs,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
 
     assert num_local_experts is not None
     return run_with_expert_maps(
