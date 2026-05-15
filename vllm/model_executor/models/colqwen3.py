@@ -20,7 +20,6 @@ Target models:
 """
 
 from collections.abc import Iterable, Mapping
-from typing import ClassVar, Literal
 
 import torch
 import torch.nn as nn
@@ -31,6 +30,7 @@ from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from .interfaces import SupportsLateInteraction
 from .interfaces_base import default_pooling_type
 from .qwen2_vl import Qwen2VLMultiModalDataParser
 from .qwen3_vl import (
@@ -113,9 +113,7 @@ class ColQwen3ProcessingInfo(Qwen3VLProcessingInfo):
     info=ColQwen3ProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
-class ColQwen3Model(
-    Qwen3VLForConditionalGeneration,
-):
+class ColQwen3Model(Qwen3VLForConditionalGeneration, SupportsLateInteraction):
     """ColQwen3 late interaction model for multi-modal retrieval/reranking.
 
     This model extends Qwen3VLForConditionalGeneration with a ColBERT-style
@@ -132,15 +130,10 @@ class ColQwen3Model(
 
     Attributes:
         custom_text_proj: Linear projection from hidden_size to embed_dim
-        supports_late_interaction: Flag indicating this model uses late
-            interaction scoring
     """
 
     # Mark this as a pooling model so vLLM routes to pooler path
     is_pooling_model = True
-
-    # Mark this model as supporting late interaction scoring
-    supports_late_interaction: ClassVar[Literal[True]] = True
 
     # Override hf_to_vllm_mapper to handle ColQwen3 weight naming.
     # NOTE: WeightsMapper applies ALL matching prefix rules sequentially

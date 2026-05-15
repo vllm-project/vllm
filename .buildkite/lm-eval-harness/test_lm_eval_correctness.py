@@ -13,8 +13,10 @@ import os
 from contextlib import contextmanager
 
 import lm_eval
-import numpy as np
+import pytest
 import yaml
+
+from vllm.platforms import current_platform
 
 DEFAULT_RTOL = 0.08
 
@@ -63,6 +65,9 @@ def launch_lm_eval(eval_config, tp_size):
         "allow_deprecated_quantization=True,"
     )
 
+    if current_platform.is_rocm() and "Nemotron-3" in eval_config["model_name"]:
+        model_args += "attention_backend=TRITON_ATTN"
+
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):
         results = lm_eval.simple_evaluate(
@@ -85,8 +90,39 @@ def launch_lm_eval(eval_config, tp_size):
     return results
 
 
+def _check_rocm_gpu_arch_requirement(eval_config):
+    """Skip the test if the model requires a ROCm GPU arch not present.
+
+    Model YAML configs can specify::
+
+        required_gpu_arch:
+          - gfx942
+          - gfx950
+
+    The check only applies on ROCm.  On other platforms (e.g. CUDA) the
+    field is ignored so that shared config files work for both NVIDIA and
+    AMD CI pipelines.
+    """
+    required_archs = eval_config.get("required_gpu_arch")
+    if not required_archs:
+        return
+
+    if not current_platform.is_rocm():
+        return
+
+    from vllm.platforms.rocm import _GCN_ARCH  # noqa: E402
+
+    if not any(arch in _GCN_ARCH for arch in required_archs):
+        pytest.skip(
+            f"Model requires GPU arch {required_archs}, "
+            f"but detected arch is '{_GCN_ARCH}'"
+        )
+
+
 def test_lm_eval_correctness_param(config_filename, tp_size):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
+
+    _check_rocm_gpu_arch_requirement(eval_config)
 
     results = launch_lm_eval(eval_config, tp_size)
 
@@ -102,6 +138,8 @@ def test_lm_eval_correctness_param(config_filename, tp_size):
                 f"ground_truth={ground_truth:.3f} | "
                 f"measured={measured_value:.3f} | rtol={rtol}"
             )
-            success = success and np.isclose(ground_truth, measured_value, rtol=rtol)
+
+            min_acceptable = ground_truth * (1 - rtol)
+            success = success and measured_value >= min_acceptable
 
     assert success

@@ -175,6 +175,9 @@ class RequestState:
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
+        # Routed experts accumulation (prompt + sample chunks)
+        self.routed_experts_chunks: list[np.ndarray] = []
+
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
@@ -273,7 +276,6 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
-        routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -314,9 +316,7 @@ class RequestState:
                 finished,
             )
 
-        output = self._new_completion_output(
-            new_token_ids, finish_reason, stop_reason, routed_experts
-        )
+        output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
 
         if self.parent_req is None:
             outputs = [output]
@@ -378,7 +378,6 @@ class RequestState:
         token_ids: list[int],
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
-        routed_experts: np.ndarray | None = None,
     ) -> CompletionOutput:
         assert self.detokenizer is not None
         assert self.logprobs_processor is not None
@@ -394,6 +393,11 @@ class RequestState:
         logprobs = self.logprobs_processor.logprobs
         if delta and logprobs:
             logprobs = logprobs[-len(token_ids) :]
+
+        # Concatenate routed experts on finish
+        routed_experts = None
+        if finished and self.routed_experts_chunks:
+            routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
         return CompletionOutput(
             index=self.request_index,
@@ -429,19 +433,12 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
-        self._requests_drained = asyncio.Event()
-        self._requests_drained.set()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
-
-    async def wait_for_requests_to_drain(self) -> None:
-        if not self.request_states:
-            return
-        await self._requests_drained.wait()
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
@@ -510,8 +507,6 @@ class OutputProcessor:
                     child_reqs = self.abort_requests(child_reqs, internal=True)
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
-        if not self.request_states:
-            self._requests_drained.set()
         return request_ids_to_abort
 
     def add_request(
@@ -538,8 +533,6 @@ class OutputProcessor:
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
         )
-        if self._requests_drained.is_set():
-            self._requests_drained.clear()
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
@@ -627,9 +620,17 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
-            routed_experts = engine_core_output.routed_experts
-            req_state.num_cached_tokens = engine_core_output.num_cached_tokens
-            req_state.is_prefilling = False
+            if engine_core_output.routed_experts is not None:
+                req_state.routed_experts_chunks.append(
+                    engine_core_output.routed_experts
+                )
+
+            if req_state.is_prefilling:
+                if engine_core_output.prefill_stats is not None:
+                    req_state.num_cached_tokens = (
+                        engine_core_output.prefill_stats.num_cached_tokens
+                    )
+                req_state.is_prefilling = False
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None
@@ -653,7 +654,6 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
-                routed_experts,
             ):
                 if req_state.streaming_input:
                     request_output.finished = False
@@ -705,9 +705,6 @@ class OutputProcessor:
         parent_req = req_state.parent_req
         if parent_req and not parent_req.child_requests:
             self.parent_requests.pop(parent_req.request_id, None)
-
-        if not self.request_states:
-            self._requests_drained.set()
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)
@@ -790,7 +787,6 @@ class OutputProcessor:
             engine_core_output,
             engine_core_timestamp,
             req_state.is_prefilling,
-            req_state.prompt_len,
             req_state.stats,
             self.lora_states,
             req_state.lora_name,
@@ -809,6 +805,7 @@ class OutputProcessor:
         assert req_state.stats is not None
         iteration_stats.update_from_finished_request(
             finish_reason=finish_reason,
+            request_id=req_state.external_req_id,
             num_prompt_tokens=req_state.prompt_len,
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,

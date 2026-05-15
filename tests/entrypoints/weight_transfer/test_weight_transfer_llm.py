@@ -90,6 +90,10 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
 
+    def trainer_send_weights(self, *args, **kwargs):
+        """Mock method to simulate trainer sending weights."""
+        pass
+
 
 def mock_create_engine(config, parallel_config):
     """Mock factory function that returns our mock engine."""
@@ -102,7 +106,7 @@ def mock_create_engine(config, parallel_config):
 @create_new_process_for_each_test()
 def test_get_world_size_tp1():
     """Test world_size is correctly configured for TP=1."""
-    if torch.cuda.device_count() < 1:
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     llm = LLM(
@@ -121,7 +125,7 @@ def test_get_world_size_tp1():
 def test_init_weight_transfer_engine_calls_engine():
     """Test that init_weight_transfer_engine calls the engine's
     init_transfer_engine method."""
-    if torch.cuda.device_count() < 1:
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     # Run in-process so mock.patch works (spawn won't inherit the mock)
@@ -170,7 +174,7 @@ def test_init_weight_transfer_engine_calls_engine():
 @create_new_process_for_each_test()
 def test_update_weights_calls_engine():
     """Test that update_weights calls the engine's receive_weights method."""
-    if torch.cuda.device_count() < 1:
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     # Run in-process so mock.patch works (spawn won't inherit the mock)
@@ -194,6 +198,9 @@ def test_update_weights_calls_engine():
         llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "init"})
         )
+
+        # Start weight update (required before update_weights)
+        llm.start_weight_update(is_checkpoint_format=True)
 
         # Call update_weights
         test_names = ["layer.weight", "layer.bias"]
@@ -225,11 +232,15 @@ def test_update_weights_calls_engine():
             assert dtypes == test_dtypes
             assert shapes == test_shapes
 
+        # Finish weight update
+        llm.finish_weight_update()
+
 
 @create_new_process_for_each_test()
 def test_full_weight_transfer_flow():
-    """Test the complete weight transfer flow: init -> update."""
-    if torch.cuda.device_count() < 1:
+    """Test the complete weight transfer flow:
+    init -> start -> update -> finish."""
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     # Run in-process so mock.patch works (spawn won't inherit the mock)
@@ -249,12 +260,15 @@ def test_full_weight_transfer_flow():
             weight_transfer_config=WeightTransferConfig(backend="nccl"),
         )
 
-        # Step 1: Initialize
+        # Step 1: Initialize weight transfer engine
         llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "flow_test"})
         )
 
-        # Step 2: Update weights
+        # Step 2: Start weight update
+        llm.start_weight_update(is_checkpoint_format=True)
+
+        # Step 3: Update weights
         llm.update_weights(
             WeightTransferUpdateRequest(
                 update_info={
@@ -264,6 +278,9 @@ def test_full_weight_transfer_flow():
                 }
             )
         )
+
+        # Step 4: Finish weight update
+        llm.finish_weight_update()
 
         # Verify the full flow completed
         def check_flow(self):
@@ -290,7 +307,7 @@ def test_full_weight_transfer_flow():
 @create_new_process_for_each_test()
 def test_weight_transfer_config_backend():
     """Test that WeightTransferConfig backend is properly configured."""
-    if torch.cuda.device_count() < 1:
+    if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
     # Test with nccl backend

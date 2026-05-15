@@ -17,7 +17,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
-        copy_event: torch.cuda.Event,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -25,7 +24,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_event = copy_event
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -67,6 +66,41 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        return self.model_runner_output
+
+
+class AsyncPoolingOutput(AsyncModelRunnerOutput):
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        pooler_output: torch.Tensor,
+        is_valid: torch.Tensor | None,
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ):
+        self.model_runner_output = model_runner_output
+        self.pooler_output = pooler_output
+        self.is_valid = is_valid
+        self.copy_event = torch.cuda.Event()
+
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self.pooler_output_cpu = self.pooler_output.to("cpu", non_blocking=True)
+            if self.is_valid is not None:
+                self.is_valid_cpu = self.is_valid.to("cpu", non_blocking=True)
+            else:
+                self.is_valid_cpu = None
+            self.copy_event.record(copy_stream)
+
+    def get_output(self) -> ModelRunnerOutput:
+        pooler_output = list(self.pooler_output_cpu.unbind(dim=0))
+        self.copy_event.synchronize()
+        if self.is_valid_cpu is not None:
+            is_valid_cpu = self.is_valid_cpu.tolist()
+            for i, is_valid in enumerate(is_valid_cpu):
+                if not is_valid:
+                    pooler_output[i] = None
+        self.model_runner_output.pooler_output = pooler_output
         return self.model_runner_output
 
 

@@ -39,7 +39,8 @@ async def _convert_stream_to_sse_events(
         event_type = getattr(event, "type", "unknown")
         # https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#event_stream_format
         event_data = (
-            f"event: {event_type}\ndata: {event.model_dump_json(indent=None)}\n\n"
+            f"event: {event_type}\ndata: "
+            f"{event.model_dump_json(indent=None, by_alias=True)}\n\n"
         )
         yield event_data
 
@@ -59,21 +60,17 @@ async def _convert_stream_to_sse_events(
 async def create_responses(request: ResponsesRequest, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Responses API"
-        )
-    try:
-        generator = await handler.create_responses(request, raw_request)
-    except Exception as e:
-        generator = handler.create_error_response(e)
+        raise NotImplementedError("The model does not support Responses API")
+
+    generator = await handler.create_responses(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
+            content=generator.model_dump(mode="json", by_alias=True),
+            status_code=generator.error.code,
         )
     elif isinstance(generator, ResponsesResponse):
-        return JSONResponse(content=generator.model_dump())
+        return JSONResponse(content=generator.model_dump(mode="json", by_alias=True))
 
     return StreamingResponse(
         content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
@@ -90,26 +87,21 @@ async def retrieve_responses(
 ):
     handler = responses(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Responses API"
-        )
+        raise NotImplementedError("The model does not support Responses API")
 
-    try:
-        response = await handler.retrieve_responses(
-            response_id,
-            starting_after=starting_after,
-            stream=stream,
-        )
-    except Exception as e:
-        response = handler.create_error_response(e)
+    response = await handler.retrieve_responses(
+        response_id,
+        starting_after=starting_after,
+        stream=stream,
+    )
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
+            content=response.model_dump(mode="json", by_alias=True),
+            status_code=response.error.code,
         )
     elif isinstance(response, ResponsesResponse):
-        return JSONResponse(content=response.model_dump())
+        return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
     return StreamingResponse(
         content=_convert_stream_to_sse_events(response), media_type="text/event-stream"
     )
@@ -120,21 +112,16 @@ async def retrieve_responses(
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Responses API"
-        )
+        raise NotImplementedError("The model does not support Responses API")
 
-    try:
-        response = await handler.cancel_responses(response_id)
-    except Exception as e:
-        response = handler.create_error_response(e)
+    response = await handler.cancel_responses(response_id)
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
+            content=response.model_dump(mode="json", by_alias=True),
+            status_code=response.error.code,
         )
-    return JSONResponse(content=response.model_dump())
+    return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
 
 
 def attach_router(app: FastAPI):

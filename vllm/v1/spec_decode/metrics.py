@@ -9,6 +9,7 @@ import prometheus_client
 
 from vllm.config import SpeculativeConfig
 from vllm.logger import init_logger
+from vllm.v1.metrics.utils import create_metric_per_engine
 
 logger = init_logger(__name__)
 
@@ -155,7 +156,7 @@ class SpecDecodingProm:
             documentation="Number of spec decoding drafts.",
             labelnames=labelnames,
         )
-        self.counter_spec_decode_num_drafts = make_per_engine(
+        self.counter_spec_decode_num_drafts = create_metric_per_engine(
             counter_drafts, per_engine_labelvalues
         )
 
@@ -164,7 +165,7 @@ class SpecDecodingProm:
             documentation="Number of draft tokens.",
             labelnames=labelnames,
         )
-        self.counter_spec_decode_num_draft_tokens = make_per_engine(
+        self.counter_spec_decode_num_draft_tokens = create_metric_per_engine(
             counter_draft_tokens, per_engine_labelvalues
         )
 
@@ -173,7 +174,7 @@ class SpecDecodingProm:
             documentation="Number of accepted tokens.",
             labelnames=labelnames,
         )
-        self.counter_spec_decode_num_accepted_tokens = make_per_engine(
+        self.counter_spec_decode_num_accepted_tokens = create_metric_per_engine(
             counter_accepted_tokens, per_engine_labelvalues
         )
 
@@ -212,14 +213,3 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos[engine_idx]
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
-
-
-def make_per_engine(
-    counter: prometheus_client.Counter,
-    per_engine_labelvalues: dict[int, list[object]],
-):
-    """Create a counter for each label value."""
-    return {
-        idx: counter.labels(*labelvalues)
-        for idx, labelvalues in per_engine_labelvalues.items()
-    }

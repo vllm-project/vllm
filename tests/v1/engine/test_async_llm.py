@@ -17,9 +17,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
@@ -259,8 +256,10 @@ async def test_multi_abort(output_kind: RequestOutputKind):
                 )
             )
 
-        # Let requests start
-        await asyncio.sleep(0.5)
+        # Let requests start generating, use a longer sleep to ensure all
+        # requests have exited prefill and produced at least one
+        # decode token before we abort.
+        await asyncio.sleep(1.0)
 
         # Use multi-abort to abort multiple requests at once
         abort_request_ids = [request_ids[i] for i in REQUEST_IDS_TO_ABORT]
@@ -372,9 +371,10 @@ async def test_mid_stream_cancellation(
         # Wait for all tasks to complete
         results = await asyncio.gather(*tasks)
 
-        # Verify all tasks were cancelled at the expected point
+        # Verify all tasks were cancelled at the expected point.
+        # Uses >= because the cancel check is `count >= cancel_after`.
         for num_generated_tokens, request_id in results:
-            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+            assert num_generated_tokens >= NUM_EXPECTED_TOKENS, (
                 f"{request_id} generated {num_generated_tokens} tokens but "
                 f"expected to cancel after {NUM_EXPECTED_TOKENS}"
             )
@@ -511,11 +511,24 @@ async def test_header_dp_rank_argument():
             base_model_paths=BASE_MODEL_PATHS,
         )
 
+        # Create render serving instance (required by OpenAIServingChat)
+        from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+        serving_render = OpenAIServingRender(
+            model_config=engine.model_config,
+            renderer=engine.renderer,
+            model_registry=models.registry,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+
         # Create serving chat instance
         serving_chat = OpenAIServingChat(
             engine_client=engine,
             models=models,
             response_role="assistant",
+            openai_serving_render=serving_render,
             chat_template=None,
             chat_template_content_format="auto",
             request_logger=None,
@@ -542,11 +555,9 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should return ErrorResponse for out-of-range rank
-        response2 = await serving_chat.create_chat_completion(req, mock_raw_request)
-        assert isinstance(response2, ErrorResponse), (
-            "Expected an ErrorResponse for out-of-range DP rank"
-        )
+        # should raise ValueError for out-of-range rank
+        with pytest.raises(ValueError):
+            await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
 @pytest.mark.asyncio

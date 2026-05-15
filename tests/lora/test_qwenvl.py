@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 
+import pytest
+from packaging.version import Version
+from transformers import __version__ as TRANSFORMERS_VERSION
+
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 
 
@@ -18,15 +23,25 @@ class TestConfig:
     enable_tower_connector_lora: bool = False
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.85
-    mm_processor_kwargs: dict[str, int] | None = None
+    mm_processor_kwargs: dict[str, object] | None = None
     mm_processor_cache_gb: float = 4
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
-            self.mm_processor_kwargs = {
-                "min_pixels": 28 * 28,
-                "max_pixels": 1280 * 28 * 28,
-            }
+            # There is a bug in transformers v4 where size is ignored by
+            # `Qwen2VLProcessor.__call__`
+            if Version(TRANSFORMERS_VERSION) < Version("5.2.0"):
+                self.mm_processor_kwargs = {
+                    "min_pixels": 28 * 28,
+                    "max_pixels": 1280 * 28 * 28,
+                }
+            else:
+                self.mm_processor_kwargs = {
+                    "size": {
+                        "shortest_edge": 28 * 28,
+                        "longest_edge": 1280 * 28 * 28,
+                    }
+                }
 
 
 class Qwen2VLTester:
@@ -193,6 +208,9 @@ def test_qwen2vl_lora_beam_search(qwen2vl_lora_files):
         )
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 def test_qwen25vl_lora(qwen25vl_lora_files):
     """Test Qwen 2.5 VL model with LoRA"""
     config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)
@@ -203,6 +221,9 @@ def test_qwen25vl_lora(qwen25vl_lora_files):
         tester.run_test(TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=lora_id)
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
     config = TestConfig(
         model_path=QWEN25VL_MODEL_PATH,

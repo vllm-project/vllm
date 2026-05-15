@@ -23,7 +23,7 @@ def _get_expected_num_patches(
     min_num: int,
     max_num: int,
 ):
-    from vllm.model_executor.models.nemotron_vl import (
+    from vllm.transformers_utils.processors.nemotron_vl import (
         calculate_nemotron_vl_targets,
         get_nemotron_vl_target_ratios,
     )
@@ -68,7 +68,7 @@ def _run_check(
         for image in images
     )
     print(total_expected_num_patches)
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs=mm_processor_kwargs,
