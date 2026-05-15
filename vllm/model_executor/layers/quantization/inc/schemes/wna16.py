@@ -4,8 +4,8 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -100,8 +100,8 @@ class INCWna16Scheme(INCScheme):
 
 
 def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
-    from vllm.model_executor.layers.quantization.gptq_marlin import (
-        GPTQMarlinMoEMethod,
+    from vllm.model_executor.layers.quantization.auto_gptq import (
+        AutoGPTQMoEMethod,
     )
     from vllm.model_executor.layers.quantization.moe_wna16 import (
         MoeWNA16Config,
@@ -125,8 +125,8 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
-        return GPTQMarlinMoEMethod(
-            GPTQMarlinConfig(
+        return AutoGPTQMoEMethod(
+            AutoGPTQConfig(
                 weight_bits=layer_config.bits,
                 group_size=layer_config.group_size,
                 desc_act=False,

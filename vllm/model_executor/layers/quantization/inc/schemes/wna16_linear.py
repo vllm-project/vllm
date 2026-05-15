@@ -3,10 +3,9 @@
 
 from typing import TYPE_CHECKING
 
+from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
 )
@@ -54,12 +53,12 @@ class INCWNA16LinearScheme(INCLinearScheme):
             )
 
         if use_marlin:
-            from vllm.model_executor.layers.quantization.gptq_marlin import (
-                GPTQMarlinLinearMethod,
+            from vllm.model_executor.layers.quantization.auto_gptq import (
+                AutoGPTQLinearMethod,
             )
 
-            return GPTQMarlinLinearMethod(
-                GPTQMarlinConfig(
+            return AutoGPTQLinearMethod(
+                AutoGPTQConfig(
                     weight_bits=self.layer_config.bits,
                     group_size=self.layer_config.group_size,
                     desc_act=False,
@@ -70,16 +69,11 @@ class INCWNA16LinearScheme(INCLinearScheme):
                 )
             )
 
-        from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
-
-        return GPTQLinearMethod(
-            GPTQConfig(
-                weight_bits=self.layer_config.bits,
-                group_size=self.layer_config.group_size,
-                desc_act=False,
-                lm_head_quantized=False,
-                dynamic={},
-            )
+        raise NotImplementedError(
+            f"INC quantization with bits={self.layer_config.bits}, "
+            f"sym={self.layer_config.sym} is not supported. "
+            "Only 4-bit and 8-bit symmetric quantization is supported "
+            "with Marlin kernels."
         )
 
     def _build_awq_method(self):

@@ -12,6 +12,7 @@ import pytest
 
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.resolver import INCLayerConfig
@@ -370,7 +371,9 @@ def test_wna16_cpu_gptq_prefers_ark_when_available(monkeypatch) -> None:
     assert isinstance(method.scheme, INCARKLinearMethod)
 
 
-def test_wna16_cpu_gptq_falls_back_when_ark_unavailable(monkeypatch) -> None:
+def test_wna16_cpu_gptq_raises_when_ark_and_marlin_unavailable(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
     monkeypatch.setattr(
@@ -382,15 +385,44 @@ def test_wna16_cpu_gptq_falls_back_when_ark_unavailable(monkeypatch) -> None:
         lambda *args, **kwargs: False,
     )
 
-    method = INCWna16Scheme().get_linear_method(
-        make_config(),
-        object(),
-        "layer",
-        make_layer_config(),
+    with pytest.raises(NotImplementedError, match="Only 4-bit and 8-bit symmetric"):
+        INCWna16Scheme().get_linear_method(
+            make_config(),
+            object(),
+            "layer",
+            make_layer_config(),
+        )
+
+
+def test_wna16_linear_gptq_uses_auto_gptq_when_supported(monkeypatch) -> None:
+    captured = {}
+
+    class DummyMethod:
+        def __init__(self, cfg):
+            captured["cfg"] = cfg
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.schemes.wna16_linear."
+        "check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.auto_gptq.AutoGPTQLinearMethod",
+        DummyMethod,
     )
 
-    assert isinstance(method, INCLinearMethod)
-    assert isinstance(method.scheme, INCWNA16LinearScheme)
+    scheme = INCWNA16LinearScheme(make_layer_config())
+
+    assert isinstance(scheme.inner_method, DummyMethod)
+    assert isinstance(captured["cfg"], AutoGPTQConfig)
+    assert captured["cfg"].weight_bits == 4
+    assert captured["cfg"].group_size == 128
+    assert captured["cfg"].is_sym is True
+
+
+def test_wna16_linear_gptq_unsupported_config_raises() -> None:
+    with pytest.raises(NotImplementedError, match="Only 4-bit and 8-bit symmetric"):
+        INCWNA16LinearScheme(make_layer_config(sym=False))
 
 
 def test_wna16_xpu_unsupported_config_still_raises(monkeypatch) -> None:
@@ -529,6 +561,43 @@ def test_resolve_gptq_moe_falls_back_to_moe_wna16(monkeypatch) -> None:
         "lm_head": False,
     }
     assert captured["cfg"] is built_config
+    assert captured["moe"] is DummyLayer.moe_config
+
+
+def test_resolve_gptq_moe_uses_auto_gptq_when_supported(monkeypatch) -> None:
+    captured = {}
+
+    class DummyMoeConfig:
+        pass
+
+    class DummyLayer:
+        moe_config = DummyMoeConfig()
+
+    class DummyMethod:
+        def __init__(self, cfg, moe):
+            captured["cfg"] = cfg
+            captured["moe"] = moe
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils.check_marlin_supported",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.marlin_utils."
+        "check_moe_marlin_supports_layer",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.auto_gptq.AutoGPTQMoEMethod",
+        DummyMethod,
+    )
+
+    _resolve_gptq_moe(DummyLayer(), make_layer_config())
+
+    assert isinstance(captured["cfg"], AutoGPTQConfig)
+    assert captured["cfg"].weight_bits == 4
+    assert captured["cfg"].group_size == 128
+    assert captured["cfg"].is_sym is True
     assert captured["moe"] is DummyLayer.moe_config
 
 
