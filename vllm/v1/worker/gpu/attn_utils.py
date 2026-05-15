@@ -22,7 +22,11 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    bind_kv_cache,
+    select_common_block_size,
+)
 
 
 @dataclass(frozen=True)
@@ -93,10 +97,16 @@ def init_attn_backend(
 
         groups = [group_map[key] for key in group_order]
         for group in groups:
+            if isinstance(group.kv_cache_spec, AttentionSpec):
+                kernel_block_size = select_common_block_size(
+                    group.kv_cache_spec.block_size, [group.backend]
+                )
+            else:
+                kernel_block_size = None
             group.create_metadata_builders(
                 vllm_config=vllm_config,
                 device=device,
-                kernel_block_size=None,
+                kernel_block_size=kernel_block_size,
                 num_metadata_builders=1,
             )
             builder = group.get_metadata_builder(0)
@@ -164,9 +174,21 @@ def _reshape_kv_cache(
             if isinstance(kv_cache_spec, AttentionSpec):
                 has_attn = True
                 attn_backend = attn_backends[layer_name]
+
+                kernel_block_size = select_common_block_size(
+                    kv_cache_spec.block_size, [attn_backend]
+                )
+                num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+                kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
+                if kv_cache_spec.storage_block_size != kv_cache_spec.block_size:
+                    shape_block_size = kv_cache_spec.storage_block_size
+                else:
+                    shape_block_size = kernel_block_size
+
                 kv_cache_shape = attn_backend.get_kv_cache_shape(
-                    num_blocks,
-                    kv_cache_spec.storage_block_size,
+                    kernel_num_blocks,
+                    shape_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype_str=cache_dtype,
