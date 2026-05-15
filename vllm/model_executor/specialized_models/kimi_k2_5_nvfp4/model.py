@@ -70,6 +70,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV2MLP,
+    DeepseekV2MoE,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.interfaces import (
@@ -353,8 +354,6 @@ def _get_kimi_nvfp4_specialization_rejection_reason(
     parallel_config = vllm_config.parallel_config
     tensor_parallel_size = parallel_config.tensor_parallel_size
 
-    if get_node_count() > 1:
-        return "the specialized Kimi-K2.5 path requires single-node TP"
     if tensor_parallel_size not in _KIMI_TRTLLM_AR_WORLD_SIZES:
         return (
             "the specialized Kimi-K2.5 path requires TP size in "
@@ -391,10 +390,11 @@ def _get_kimi_nvfp4_specialization_rejection_reason(
         return "the specialized Kimi-K2.5 MoE path requires Blackwell CUDA"
     if not has_flashinfer_trtllm_fused_moe():
         return "FlashInfer TRTLLM fused NVFP4 MoE is unavailable"
-    if not _has_flashinfer_comm_kernel("trtllm_allreduce_fusion"):
-        return "FlashInfer TRTLLM all-reduce fusion is unavailable"
-    if not _has_flashinfer_comm_kernel("trtllm_moe_finalize_allreduce_fusion"):
-        return "FlashInfer TRTLLM MoE finalize all-reduce fusion is unavailable"
+    if get_node_count() <= 1:
+        if not _has_flashinfer_comm_kernel("trtllm_allreduce_fusion"):
+            return "FlashInfer TRTLLM all-reduce fusion is unavailable"
+        if not _has_flashinfer_comm_kernel("trtllm_moe_finalize_allreduce_fusion"):
+            return "FlashInfer TRTLLM MoE finalize all-reduce fusion is unavailable"
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4") and not (
         envs.VLLM_USE_FLASHINFER_MOE_FP4
     ):
@@ -2878,10 +2878,19 @@ class KimiK25Nvfp4DecoderLayer(nn.Module):
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % moe_layer_freq == 0
         )
-        if self.is_moe:
+        if self.is_moe and get_node_count() <= 1:
             self.mlp = KimiK25Nvfp4MoE(
                 vllm_config=vllm_config,
                 config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+            )
+        elif self.is_moe:
+            # Multi-node TP uses the generic MoE path because the custom
+            # FlashInfer TRTLLM finalize/allreduce kernel is single-node only.
+            self.mlp = DeepseekV2MoE(
+                config=config,
+                parallel_config=vllm_config.parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
@@ -2953,6 +2962,16 @@ class KimiK25Nvfp4DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if get_node_count() > 1:
+            # Keep allreduce + RMSNorm visible to torch.compile so the generic
+            # FlashInfer allreduce-RMS fusion pass can optimize multi-node TP.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states,
+                residual,
+            )
+            return hidden_states, residual
+
         torch.ops.vllm.kimi_k25_nvfp4_attention_allreduce_norm(
             hidden_states,
             residual,
@@ -2964,6 +2983,8 @@ class KimiK25Nvfp4DecoderLayer(nn.Module):
 
     def fuse_shared_expert_act_quant(self) -> None:
         if not self.is_moe:
+            return
+        if not isinstance(self.mlp, KimiK25Nvfp4MoE):
             return
 
         shared_experts = self.mlp.shared_experts
@@ -3109,7 +3130,7 @@ class KimiK25Nvfp4TextForCausalLM(DeepseekV2ForCausalLM):
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, KimiK25Nvfp4DecoderLayer) and isinstance(
-                layer.mlp, KimiK25Nvfp4MoE
+                layer.mlp, (KimiK25Nvfp4MoE, DeepseekV2MoE)
             ):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
