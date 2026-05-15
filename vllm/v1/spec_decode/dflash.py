@@ -310,8 +310,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         super().dry_run_helper_kernels()
 
         # ``self.block_size`` is set by ``initialize_attn_backend`` which
-        # runs before ``warmup_kernels``; guard for completeness in case
-        # this is invoked from a code path that skipped backend init.
+        # runs before ``_warmup_spec_decode_helpers``; guard for completeness
+        # in case this is invoked from a code path that skipped backend init.
         if self.block_size <= 0:
             return
 

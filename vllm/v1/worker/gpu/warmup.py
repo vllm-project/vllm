@@ -145,18 +145,6 @@ def warmup_kernels(
         worker_execute_model(decode_output)
         worker_sample_tokens(None)
 
-    # Warm spec-decode helper kernels that ``execute_model`` (above) does NOT
-    # exercise: the per-step Triton kernels in ``vllm/v1/spec_decode/utils.py``
-    # only run inside ``drafter.propose()``, which is skipped here because
-    # ``scheduled_spec_decode_tokens`` only simulates the verification side.
-    # Without this, the first real request pays the full JIT cost
-    # (vllm-project/vllm#39790). ``update_num_computed_tokens_for_batch_change``
-    # is V1-only, so it is warmed in ``Worker._warmup_spec_decode_helpers``
-    # rather than here.
-    drafter = getattr(model_runner, "drafter", None)
-    if drafter is not None and hasattr(drafter, "dry_run_helper_kernels"):
-        drafter.dry_run_helper_kernels()
-
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)

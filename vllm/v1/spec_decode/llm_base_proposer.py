@@ -1542,9 +1542,12 @@ class SpecDecodeBaseProposer:
         per-step slot-mapping kernel and copy/expand kernel; DFlashProposer's
         fused first-pass kernel).
 
-        Called once from ``warmup_kernels()`` in
-        ``vllm/v1/worker/gpu/warmup.py`` after the existing prefill+decode
-        warmup steps complete.
+        Called once from ``Worker._warmup_spec_decode_helpers()`` in
+        ``vllm/v1/worker/gpu_worker.py`` after the V1 ``_dummy_run`` +
+        ``_dummy_sampler_run`` steps complete. V2 (``VLLM_USE_V2_MODEL_RUNNER=1``)
+        does not call this: its ``warmup_kernels()`` runs a real
+        ``execute_model`` step which naturally JIT-compiles V2's separate
+        spec-decode kernels in ``vllm/v1/worker/gpu/spec_decode/``.
         """
         device = self.device
         num_reqs = 1
