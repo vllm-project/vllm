@@ -12,7 +12,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -28,9 +28,12 @@ from ..vllm_inductor_pass import (
     VllmInductorPass,
     VllmPatternMatcherPass,
     VllmPatternReplacement,
+    _fx_view_to_reshape,
+    fold_consecutive_reshapes,
 )
 from .matcher_utils import (
     MatcherQuantFP8,
+    MatcherRMSNormGated,
     MatcherSiluAndMul,
 )
 from .rms_quant_fusion import (
@@ -449,6 +452,97 @@ class DoubleAiterRMSFp8GroupQuantViewPattern(AiterRMSNormQuantPattern):
         )
 
 
+class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
+    """
+    Matches decomposed RMSNormGated + reshape + group FP8 quant and replaces
+    with rocm_aiter_fused_rms_gated_fp8_group_quant.
+
+    The norm operates per-head on (N*H, D) tensors. The compiler folds the
+    reshape chain so after norm the result goes through reshape->merge->quant.
+    The pattern reshapes from (N*H, D) to (N, H*D) before calling
+    MatcherQuantFP8 so that _quantize_group_native sees the full hidden dim
+    and computes the correct num_groups.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_fused_rms_gated_fp8_group_quant_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        num_heads: int,
+        head_dim: int,
+        match_aiter_quant: bool = True,
+        symmetric: bool = True,
+    ) -> None:
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        super().__init__(epsilon, key, match_aiter_quant)
+        self.rmsnorm_gated_matcher = MatcherRMSNormGated(epsilon)
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        num_heads = self.num_heads
+        head_dim = self.head_dim
+        hidden_dim = num_heads * head_dim
+        quant_matcher = self.quant_matcher
+
+        def pattern(
+            x: torch.Tensor,
+            z: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            normed = self.rmsnorm_gated_matcher(x, z, weight)
+            merged = normed.reshape(-1, hidden_dim)
+            quant_out, scales_out = quant_matcher(merged)
+            return quant_out, scales_out
+
+        def replacement(
+            x: torch.Tensor,
+            z: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            fused = self.FUSED_OP(
+                x=x,
+                weight=weight,
+                bias=None,
+                z=z,
+                eps=self.epsilon,
+                norm_before_gate=True,
+                activation="silu",
+                group_size=head_dim,
+            )
+            fp8_out = fused[0]
+            scales_out = fused[1]
+            fp8_reshaped = fp8_out.reshape(-1, hidden_dim)
+            scales_reshaped = scales_out.reshape(-1, num_heads)
+            return fp8_reshaped, scales_reshaped
+
+        n_tokens = 2
+        x = self.empty(n_tokens * num_heads, head_dim)
+        z = self.empty(n_tokens * num_heads, head_dim)
+        w = self.empty(head_dim)
+
+        def trace_fn(*args, **kwargs):
+            gm = pm.fwd_only(*args, **kwargs)
+            _fx_view_to_reshape(gm)
+            fold_consecutive_reshapes(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            [x, z, w],
+            trace_fn,
+            pm_pass,
+        )
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses aiter rms_norm & vllm/aiter quant custom ops
@@ -463,6 +557,19 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="rocm_aiter_rms_norm_quant_fusion_pass"
         )
+
+        # Discover (num_heads, head_dim) pairs for gated RMSNorm patterns
+        # from GatedDeltaNetAttention layers in static_forward_context.
+        from vllm.model_executor.layers.mamba.gdn_linear_attn import (
+            GatedDeltaNetAttention,
+        )
+
+        gdn_layers = get_layers_from_vllm_config(config, GatedDeltaNetAttention)
+        gated_norm_shapes: set[tuple[int, int]] = set()
+        for layer in gdn_layers.values():
+            gated_norm_shapes.add(
+                (layer.num_v_heads // layer.tp_size, layer.head_v_dim)
+            )
 
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops.
@@ -517,6 +624,21 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
                     epsilon, FP8_DTYPE, match_aiter_quant=match_aiter_quant
                 ).register(self.patterns)
 
+            # Fuse decomposed RMSNormGated + group fp8 quant.
+            # The replacement op (fused_rms_gated_fp8_group_quant) requires
+            # an aiter version that includes the GDN triton kernel renames.
+            if gated_norm_shapes and rocm_aiter_ops.are_gdn_triton_kernels_available():
+                for num_heads, head_dim in gated_norm_shapes:
+                    if head_dim != 128:
+                        continue
+                    AiterRMSNormGatedFp8GroupQuantPattern(
+                        epsilon,
+                        FP8_DTYPE,
+                        GroupShape(1, 128),
+                        num_heads=num_heads,
+                        head_dim=head_dim,
+                    ).register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -534,6 +656,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
+            AiterRMSNormGatedFp8GroupQuantPattern,
         ]
         return self.hash_source(self, *fusion_patterns)
 
