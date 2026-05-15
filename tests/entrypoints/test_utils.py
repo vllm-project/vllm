@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+
 import pytest
+from fastapi import Body, FastAPI, Request
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.utils import (
     get_max_tokens,
     sanitize_message,
     should_include_usage,
+    with_cancellation,
 )
 
 
@@ -118,3 +122,68 @@ class TestGetMaxTokens:
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
+
+
+def test_with_cancellation_no_200_null():
+    """Regression test for https://github.com/vllm-project/vllm/issues/42794
+
+    When the client disconnects before the handler completes,
+    with_cancellation must not return None (which FastAPI serialises as
+    HTTP 200 with JSON body 'null').
+    """
+
+    app = FastAPI()
+
+    @app.post("/test")
+    @with_cancellation
+    async def handler(raw_request: Request, payload: dict = Body(...)):
+        await asyncio.sleep(10)
+        return {"ok": True}
+
+    body = b"{}"
+    request_messages = [
+        {"type": "http.request", "body": body, "more_body": False},
+        {"type": "http.disconnect"},
+    ]
+    response_messages = []
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/test",
+        "raw_path": b"/test",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+        "root_path": "",
+    }
+
+    async def receive():
+        if request_messages:
+            return request_messages.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        response_messages.append(message)
+
+    asyncio.run(app(scope, receive, send))
+
+    status = None
+    body_parts = []
+    for msg in response_messages:
+        if msg["type"] == "http.response.start":
+            status = msg["status"]
+        elif msg["type"] == "http.response.body":
+            body_parts.append(msg.get("body", b""))
+
+    assert not (status == 200 and b"".join(body_parts) == b"null"), (
+        "with_cancellation returned None, causing HTTP 200 + JSON null"
+    )
