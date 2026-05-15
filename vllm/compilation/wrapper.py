@@ -12,7 +12,6 @@ from typing import Any, ParamSpec, TypeVar
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.aot_utils import should_use_aot_compile
 from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
@@ -136,7 +135,7 @@ class TorchCompileWithNoGuardsWrapper:
         _apply_constrain_to_fx_strides_patch()
 
         aot_context = nullcontext()
-        if should_use_aot_compile(vllm_config):
+        if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):
                 aot_context = torch._dynamo.config.patch(enable_aot_compile=True)
             else:
