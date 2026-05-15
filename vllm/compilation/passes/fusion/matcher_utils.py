@@ -11,8 +11,7 @@ from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.layernorm import RMSNormGated
+from vllm.model_executor.layers.layernorm import RMSNorm, RMSNormGated
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -175,8 +174,6 @@ class MatcherRMSNorm(MatcherCustomOp):
     whatever impl actually appears in the target graph at runtime; callers
     therefore do not need to register per-backend variants.
     """
-class MatcherRMSNormGated(MatcherCustomOp):
-    """Matches RMSNormGated with norm_before_gate=True and group_size=None."""
 
     def __init__(
         self,
@@ -207,6 +204,15 @@ class MatcherRMSNormGated(MatcherCustomOp):
         weight: torch.Tensor,
     ) -> torch.Tensor:
         return ir.ops.rms_norm(input, weight, self.epsilon)
+
+
+class MatcherRMSNormGated(MatcherCustomOp):
+    """Matches RMSNormGated with norm_before_gate=True and group_size=None."""
+
+    def __init__(
+        self,
+        epsilon: float,
+        enabled: bool | None = None,
         norm_before_gate: bool = True,
         group_size: int | None = None,
     ) -> None:
