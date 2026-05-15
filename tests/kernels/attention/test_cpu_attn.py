@@ -49,15 +49,14 @@ def get_attn_isa(
     block_size: int | None = None,
     dtype: torch.dtype | None = None,
 ):
-    if block_size and dtype:
-        return _get_attn_isa(dtype, block_size)
-    else:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
-        elif torch.cpu._is_amx_tile_supported():
-            return "amx"
-        else:
-            return "vec"
+    # Delegate to _get_attn_isa so the fallback path applies the same arch
+    # gating (e.g. RISC-V RVV is only chosen when the build's hardcoded
+    # VLEN=128 kernel is actually present; on VLEN=256 / scalar hosts it
+    # correctly falls through to vec/vec16).
+    return _get_attn_isa(
+        dtype if dtype is not None else torch.bfloat16,
+        block_size if block_size else 32,
+    )
 
 
 # rand number generation takes too much time, cache rand tensors
@@ -580,6 +579,52 @@ def test_varlen_with_paged_kv_normal_neon(
         use_alibi=use_alibi,
         use_sink=use_sink,
         isa=isa,
+    )
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3"])
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", [96, 128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", QTYPES)
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["rvv"])
+@pytest.mark.skipif(
+    current_platform.get_cpu_architecture() != CpuArchEnum.RISCV,
+    reason="Not a RISC-V CPU.",
+)
+def test_varlen_with_paged_kv_normal_rvv(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+    kv_cache_dtype: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
 
