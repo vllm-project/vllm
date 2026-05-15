@@ -695,7 +695,14 @@ def init_nvfp4_linear_kernel(use_marlin: bool = False) -> NvFp4LinearKernel:
             "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
             "emulation backend for deterministic execution."
         )
+    if envs.VLLM_BATCH_INVARIANT:
+        logger.info_once(
+            "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+            "emulation backend for deterministic execution."
+        )
         force_kernel = EmulationNvFp4LinearKernel
+    elif use_marlin:  # force marlin if running weight-only quantization
+        force_kernel = MarlinNvFp4LinearKernel
     elif envs.VLLM_USE_FBGEMM:
         force_kernel = FbgemmNvFp4LinearKernel
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
