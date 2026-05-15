@@ -941,17 +941,14 @@ class RocmPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
+        # Aiter rms norm performs best when CUDA Graph capture is enabled.
         # TODO(luka/TJ) remove env vars completely
-        if (
+        use_aiter = (
             cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        ):
-            rms_norm = ["aiter"] + default
-        else:
-            rms_norm = default
-
+        )
+        rms_norm = ["aiter"] + default if use_aiter else default
         return IrOpPriorityConfig.with_default(
             default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
         )

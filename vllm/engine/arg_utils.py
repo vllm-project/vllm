@@ -8,7 +8,7 @@ import functools
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
+from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
 from typing import (
@@ -2084,20 +2084,20 @@ class EngineArgs:
             kernel_config.moe_backend = self.moe_backend
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
-        for op_name, op_priority in asdict(self.ir_op_priority).items():
+        for op_name, op_priority in self.ir_op_priority.priorities.items():
             # Empty means unset
             if not op_priority:
                 continue
 
             # Priority cannot be set 2x for the same op
-            if getattr(kernel_config.ir_op_priority, op_name):
+            if kernel_config.ir_op_priority.priorities.get(op_name):
                 raise ValueError(
                     f"Op priority for {op_name} specified via both ir_op_priority "
                     f"and KernelConfig.ir_op_priority, only one allowed at a time."
                 )
 
-            # Set the attribute
-            setattr(kernel_config.ir_op_priority, op_name, op_priority)
+            # Set the priority
+            kernel_config.ir_op_priority.priorities[op_name] = op_priority
 
         load_config = self.create_load_config()
 

@@ -1280,7 +1280,7 @@ def test_fusion_pass_op_priority():
     # soon this will be resolved.
     cfg3 = VllmConfig(
         kernel_config=KernelConfig(
-            ir_op_priority=IrOpPriorityConfig(rms_norm=["vllm_c"])
+            ir_op_priority=IrOpPriorityConfig(priorities={"rms_norm": ["vllm_c"]})
         )
     )
     assert cfg3.compilation_config.pass_config.fuse_norm_quant
@@ -1409,61 +1409,135 @@ def test_ir_op_priority_default():
 
     # Assert default is applied to ops
     priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
-    assert priority_config.rms_norm == ["vllm_c", "native"]
-    assert priority_config.fused_add_rms_norm == ["vllm_c", "native"]
+    assert priority_config.priorities["rms_norm"] == ["vllm_c", "native"]
+    assert priority_config.priorities["fused_add_rms_norm"] == ["vllm_c", "native"]
 
     # Assert single ops override the default
     priority_config = IrOpPriorityConfig.with_default(
         ["native"], rms_norm=["oink", "native"]
     )
-    assert priority_config.rms_norm == ["oink", "native"]
-    assert priority_config.fused_add_rms_norm == ["native"]
+    assert priority_config.priorities["rms_norm"] == ["oink", "native"]
+    assert priority_config.priorities["fused_add_rms_norm"] == ["native"]
 
 
 def test_ir_op_priority_str():
     """Test that passing a comma-delimited string works"""
     from vllm.config.kernel import IrOpPriorityConfig
 
-    priority_config = IrOpPriorityConfig(rms_norm="vllm_c")
-    assert priority_config.rms_norm == ["vllm_c"]
+    priority_config = IrOpPriorityConfig(priorities={"rms_norm": ["vllm_c"]})
+    assert priority_config.priorities["rms_norm"] == ["vllm_c"]
 
-    priority_config = IrOpPriorityConfig(rms_norm="vllm_c,native")
-    assert priority_config.rms_norm == ["vllm_c", "native"]
+    priority_config = IrOpPriorityConfig(priorities={"rms_norm": ["vllm_c", "native"]})
+    assert priority_config.priorities["rms_norm"] == ["vllm_c", "native"]
 
-    priority_config = IrOpPriorityConfig(rms_norm=" native, vllm_c ")
-    assert priority_config.rms_norm == ["native", "vllm_c"]
+    # Test string conversion via validator
+    priority_config = IrOpPriorityConfig(priorities={"rms_norm": " native, vllm_c "})
+    assert priority_config.priorities["rms_norm"] == ["native", "vllm_c"]
 
     with pytest.raises(pydantic.ValidationError):
         # must be list of only strings
-        priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
+        priority_config = IrOpPriorityConfig(
+            priorities={"rms_norm": ["vllm_c", 4, "native"]}
+        )
 
 
 def test_ir_op_priority_ctx():
     """Test that the priority-setting context sets priority correctly."""
     from vllm import ir
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.ir.op import IrOp
 
-    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllm_c"])
+    # Dynamically check which implementations are available
+    rms_norm_impls = set(IrOp.registry["rms_norm"].impls.keys())
+    fused_impls = set(IrOp.registry["fused_add_rms_norm"].impls.keys())
+
+    # Use first available non-native impl if present, otherwise just use "native"
+    rms_priority = sorted(rms_norm_impls - {"native"}) + ["native"]
+    fused_priority = sorted(fused_impls - {"native"}) + ["native"]
+
+    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=rms_priority)
     priority2 = IrOpPriorityConfig.with_default(
-        ["native"], fused_add_rms_norm=["vllm_c"]
+        ["native"], fused_add_rms_norm=fused_priority
     )
     with priority.set_priority():
-        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.rms_norm.get_priority() == rms_priority
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
         with priority2.set_priority():
             assert ir.ops.rms_norm.get_priority() == ["native"]
-            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == fused_priority
 
         # context restored
-        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.rms_norm.get_priority() == rms_priority
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
 
         with pytest.raises(ValueError), priority2.set_priority():
             assert ir.ops.rms_norm.get_priority() == ["native"]
-            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == fused_priority
 
             raise ValueError
 
         # context restored even after exception
-        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.rms_norm.get_priority() == rms_priority
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+def test_ir_op_priority_invalid_key():
+    """Test that passing an invalid op name raises KeyError."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    with pytest.raises(KeyError, match="Unknown IR op 'nonexistent_op'"):
+        IrOpPriorityConfig.with_default(["native"], nonexistent_op=["vllm_c"])
+
+
+def test_ir_op_priority_compute_hash():
+    """Test that compute_hash produces a consistent hash."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    config1 = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllc_c"])
+    config2 = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllc_c"])
+    config3 = IrOpPriorityConfig.with_default(["native"], rms_norm=["native"])
+
+    # Same config should produce same hash
+    assert config1.compute_hash() == config2.compute_hash()
+    # Different config should produce different hash
+    assert config1.compute_hash() != config3.compute_hash()
+
+
+def test_ir_op_priority_with_default_auto_filter():
+    """Test that with_default() auto-filters overrides matching default."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    # When override equals default, it should still work correctly
+    # (the override is filtered out internally, but the op still gets the default)
+    config = IrOpPriorityConfig.with_default(
+        ["native"],
+        rms_norm=["native"],  # Same as default
+        fused_add_rms_norm=["native"],  # Same as default
+    )
+    # rms_norm should still have the default value
+    assert config.priorities["rms_norm"] == ["native"]
+    assert config.priorities["fused_add_rms_norm"] == ["native"]
+
+
+def test_ir_op_priority_partial_override():
+    """Test that un-overridden ops get the default value."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    # Only override one op, others should get the default
+    config = IrOpPriorityConfig.with_default(
+        ["native"],
+        rms_norm=["oink", "native"],
+    )
+    assert config.priorities["rms_norm"] == ["oink", "native"]
+    # fused_add_rms_norm was not overridden, should use default
+    assert config.priorities["fused_add_rms_norm"] == ["native"]
+
+
+def test_ir_op_priority_empty_overrides():
+    """Test with_default() with no overrides."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
+    # All ops should get the default value
+    assert config.priorities["rms_norm"] == ["vllm_c", "native"]
+    assert config.priorities["fused_add_rms_norm"] == ["vllm_c", "native"]
