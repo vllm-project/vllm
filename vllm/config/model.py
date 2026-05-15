@@ -233,6 +233,10 @@ class ModelConfig:
     Processed means the values after applying all processors, including
     temperature and top_k/top_p.
     """
+    use_fp64_gumbel: bool = False
+    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
+    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
+    of significantly lower kernel throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -365,6 +369,7 @@ class ModelConfig:
             "spec_target_max_model_len",
             "enforce_eager",
             "logprobs_mode",
+            "use_fp64_gumbel",
             "disable_cascade_attn",
             "skip_tokenizer_init",
             "served_model_name",
