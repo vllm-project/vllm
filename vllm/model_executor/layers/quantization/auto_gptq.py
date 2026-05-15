@@ -41,7 +41,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    check_marlin_supported,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
@@ -60,7 +59,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -69,7 +67,7 @@ logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: "GPTQMarlinConfig",
+    config: "AutoGPTQConfig",
     layer: RoutedExperts,
     prefix: str,
     moe_method_cls: type,
@@ -94,8 +92,8 @@ def get_moe_quant_method(
     return moe_method_cls(cloned_config, layer.moe_config)
 
 
-class GPTQMarlinConfig(QuantizationConfig):
-    """Config class for GPTQ Marlin"""
+class AutoGPTQConfig(QuantizationConfig):
+    """Config class for AutoGPTQ quantization using Marlin kernels."""
 
     # (num_bits, is_sym) -> quant_type
     TYPE_MAP = {
@@ -167,7 +165,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def __repr__(self) -> str:
         return (
-            f"GPTQMarlinConfig(quant_type={self.quant_type}, "
+            f"AutoGPTQConfig(quant_type={self.quant_type}, "
             f"group_size={self.group_size}, "
             f"desc_act={self.desc_act}, "
             f"lm_head_quantized={self.lm_head_quantized}, "
@@ -177,7 +175,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
-        return "gptq_marlin"
+        return "auto_gptq"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
@@ -185,14 +183,14 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 60
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "GPTQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> "AutoGPTQConfig":
         dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
         dynamic = {} if dynamic is None else dynamic
 
@@ -219,27 +217,22 @@ class GPTQMarlinConfig(QuantizationConfig):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
-        can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
+        """Override to use AutoGPTQ for compatible GPTQ models."""
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
-        is_valid_user_quant = (
-            user_quant is None or user_quant == "marlin" or user_quant == "gptq_marlin"
+        if quant_method != "gptq":
+            return None
+
+        is_valid_user_quant = user_quant is None or user_quant in (
+            "gptq",
+            "gptq_marlin",
+            "auto_gptq",
+            "marlin",
         )
 
-        if can_convert and is_valid_user_quant:
-            msg = (
-                "The model is convertible to {} during runtime."
-                " Using {} kernel.".format(cls.get_name(), cls.get_name())
-            )
-            logger.info(msg)
+        if is_valid_user_quant:
             return cls.get_name()
 
-        if can_convert and user_quant == "gptq":
-            logger.info(
-                "Detected that the model can run with gptq_marlin"
-                ", however you specified quantization=gptq explicitly,"
-                " so forcing gptq. Use quantization=gptq_marlin for"
-                " faster inference"
-            )
         return None
 
     def get_quant_method(
@@ -257,7 +250,7 @@ class GPTQMarlinConfig(QuantizationConfig):
                     layer, prefix
                 )
             moe_quant_method = get_moe_quant_method(
-                self, layer, prefix, GPTQMarlinMoEMethod
+                self, layer, prefix, AutoGPTQMoEMethod
             )
             if moe_quant_method is None:
                 return None
@@ -265,37 +258,12 @@ class GPTQMarlinConfig(QuantizationConfig):
             return moe_quant_method
 
         quant_method = get_linear_quant_method(
-            self, layer, prefix, GPTQMarlinLinearMethod
+            self, layer, prefix, AutoGPTQLinearMethod
         )
         if quant_method is None:
             return None
         quant_method.input_dtype = get_marlin_input_dtype(prefix)
         return quant_method
-
-    @classmethod
-    def is_gptq_marlin_compatible(cls, quant_config: dict[str, Any]):
-        quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits")
-        group_size = quant_config.get("group_size")
-        sym = quant_config.get("sym")
-        desc_act = quant_config.get("desc_act")
-
-        if not (current_platform.is_cuda() or current_platform.is_cpu()):
-            return False
-
-        if quant_method != "gptq":
-            return False
-
-        # Marlin conversion is only valid if required properties are found
-        if num_bits is None or group_size is None or sym is None or desc_act is None:
-            return False
-
-        if (num_bits, sym) not in cls.TYPE_MAP:
-            return False
-
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[(num_bits, sym)], group_size=group_size
-        )
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper):
         if self.modules_in_block_to_quantize is not None:
@@ -331,16 +299,16 @@ class GPTQMarlinConfig(QuantizationConfig):
         self.modules_in_block_to_quantize = list(quant_layers)
 
 
-class GPTQMarlinLinearMethod(LinearMethodBase):
-    """Linear method for GPTQ Marlin.
+class AutoGPTQLinearMethod(LinearMethodBase):
+    """Linear method for AutoGPTQ using Marlin kernels.
 
     Args:
-        quant_config: The GPTQ Marlin quantization config.
+        quant_config: The AutoGPTQ quantization config.
     """
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+    def __init__(self, quant_config: AutoGPTQConfig) -> None:
         self.quant_config = quant_config
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
@@ -382,7 +350,7 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for GPTQMarlinLinearMethod", kernel_type.__name__)
+            logger.info("Using %s for AutoGPTQLinearMethod", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # Normalize group_size
@@ -492,12 +460,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
         return self.kernel.apply_weights(layer, x, bias)
 
 
-class GPTQMarlinMoEMethod(FusedMoEMethodBase):
+class AutoGPTQMoEMethod(FusedMoEMethodBase):
     """MoE Marlin method with quantization."""
 
     def __init__(
         self,
-        quant_config: GPTQMarlinConfig,
+        quant_config: AutoGPTQConfig,
         moe: FusedMoEConfig,
     ) -> None:
         super().__init__(moe)
@@ -509,7 +477,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             quant_type = scalar_types.uint8b128
             scale = kInt8StaticGroupScale
         else:
-            raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
+            raise ValueError("AutoGPTQMoEMethod only supports int4 and int8 now.")
         self.input_dtype = None
         self.use_marlin = True
         weight_key = QuantKey(quant_type, scale)
