@@ -34,6 +34,8 @@ th {
 | HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
 | HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
+| HuggingFace-HumanEval | ✅ | ✅ | `openai/openai_humaneval` |
+| HuggingFace-GSM8K | ✅ | ✅ | `openai/gsm8k` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
 | HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
@@ -440,6 +442,26 @@ vllm bench serve \
     --model Qwen/QwQ-32B \
     --dataset-name hf \
     --dataset-path philschmid/mt-bench \
+    --num-prompts 80
+```
+
+`openai/openai_humaneval`:
+
+``` bash
+vllm bench serve \
+    --model NousResearch/Hermes-3-Llama-3.1-8B \
+    --dataset-name hf \
+    --dataset-path openai/openai_humaneval \
+    --num-prompts 80
+```
+
+`openai/gsm8k`:
+
+``` bash
+vllm bench serve \
+    --model NousResearch/Hermes-3-Llama-3.1-8B \
+    --dataset-name hf \
+    --dataset-path openai/gsm8k \
     --num-prompts 80
 ```
 
