@@ -72,8 +72,8 @@ def map_w4a8_int8_backend(runner_backend: MoEBackend) -> W4A8Int8MoeBackend:
 
 def select_w4a8_int8_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None = None,
-    activation_key: QuantKey | None = None,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
 ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """
     Select the primary W4A8 Int8 MoE backend.
@@ -188,9 +188,127 @@ def make_w4a8_int8_moe_quant_config(
     )
 
 
+def pack_int4_weights_for_kleidi(
+    int4_as_int8: torch.Tensor,
+    scales: torch.Tensor,
+    bias: torch.Tensor | None,
+    in_features: int,
+    out_features: int,
+    group_size: int,
+) -> torch.Tensor:
+    """
+    Pack INT4 weights (stored as int8 in [-8,7]) to KleidiAI format.
+
+    Args:
+        int4_as_int8: [out, in] int8 tensor with values in [-8, 7]
+        scales: [out, in//group_size] or [out, 1] for channel-wise
+        bias: [out] optional bias
+        in_features: Input dimension
+        out_features: Output dimension
+        group_size: Quantization group size (-1 for channel-wise)
+
+    Returns:
+        Packed weight tensor in KleidiAI format
+    """
+    # Shift to unsigned nibble [0, 15]
+    tmp = int4_as_int8.add(8)
+    # Pack pairs along input dimension
+    uint8_nibbles = ((tmp[:, 1::2] << 4) | tmp[:, ::2]).to(torch.uint8)
+
+    # Determine scale dtype based on group_size
+    # KleidiAI groupwise kernels accept bfloat16 scales
+    # KleidiAI channelwise kernels accept float32 scales
+    scale_dtype = torch.float32 if group_size == -1 else torch.bfloat16
+    scales_typed = scales.to(scale_dtype)
+    bias_typed = None if bias is None else bias.to(torch.float32)
+
+    # Pack using KleidiAI op
+    actual_group_size = in_features if group_size == -1 else group_size
+    return torch.ops.aten._dyn_quant_pack_4bit_weight(
+        uint8_nibbles,
+        scales_typed,
+        bias_typed,
+        actual_group_size,
+        in_features,
+        out_features,
+    )
+
+
+def convert_to_w4a8_int8_moe_format(
+    layer: torch.nn.Module,
+    group_size: int,
+    has_bias: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Pack INT4 MoE weights to KleidiAI format.
+
+    This function packs the INT4 weights (stored as int8 values) into
+    the format expected by the KleidiAI dynamic_4bit_int_moe kernel.
+
+    Args:
+        layer: The MoE layer with w13_weight, w2_weight, scales, and biases
+        group_size: Quantization group size (-1 for channel-wise)
+        has_bias: Whether biases are present
+
+    Expected layer attributes:
+        - w13_weight: [E, 2*IN, H] int8 tensor
+        - w2_weight: [E, H, IN] int8 tensor
+        - w13_weight_scale: [E, 2*IN, H/g or 1] scale tensor
+        - w2_weight_scale: [E, H, IN/g or 1] scale tensor
+        - w13_bias (optional): [E, 2*IN] bias tensor
+        - w2_bias (optional): [E, H] bias tensor
+        - w13_in_features, w13_out_features, w2_in_features, w2_out_features: ints
+
+    Returns:
+        Tuple of (w13_packed, w2_packed) tensors
+    """
+    E = layer.w13_weight.shape[0]
+    H = layer.w13_in_features
+    I2 = layer.w13_out_features
+    IN = layer.w2_in_features
+
+    has_w13_bias = (
+        has_bias and hasattr(layer, "w13_bias") and layer.w13_bias is not None
+    )
+    has_w2_bias = has_bias and hasattr(layer, "w2_bias") and layer.w2_bias is not None
+
+    # Pack per expert
+    w13_packed_list = []
+    w2_packed_list = []
+
+    for e in range(E):
+        w13_packed_list.append(
+            pack_int4_weights_for_kleidi(
+                layer.w13_weight[e],  # [2I, H]
+                layer.w13_weight_scale[e],  # [2I, H/g or 1]
+                layer.w13_bias[e] if has_w13_bias else None,  # [2I]
+                H,
+                I2,
+                group_size,
+            )
+        )
+        w2_packed_list.append(
+            pack_int4_weights_for_kleidi(
+                layer.w2_weight[e],  # [H, IN]
+                layer.w2_weight_scale[e],  # [H, IN/g or 1]
+                layer.w2_bias[e] if has_w2_bias else None,  # [H]
+                IN,
+                layer.w2_out_features,  # in_features=IN, out_features=H
+                group_size,
+            )
+        )
+
+    # Stack all experts
+    w13_packed = torch.stack(w13_packed_list, dim=0)
+    w2_packed = torch.stack(w2_packed_list, dim=0)
+
+    return w13_packed, w2_packed
+
+
 def make_w4a8_int8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
+    backend: W4A8Int8MoeBackend,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
