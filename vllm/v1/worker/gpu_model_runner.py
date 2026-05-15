@@ -5169,6 +5169,11 @@ class GPUModelRunner(
             dflash_config = getattr(hf_config, "dflash_config", None)
             if dflash_config and isinstance(dflash_config, dict):
                 layer_ids = dflash_config.get("target_layer_ids")
+                # DFlash stores 0-based target layer indices (e.g. [1, 10, 19]).
+                # vLLM's _maybe_add_hidden_state checks `layer_idx + 1 in set`,
+                # so a target layer N maps to N+1 in the set.
+                if layer_ids:
+                    layer_ids = [x + 1 for x in layer_ids]
 
         if layer_ids and isinstance(layer_ids, (list, tuple)):
             return tuple(layer_ids)
