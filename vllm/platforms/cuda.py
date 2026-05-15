@@ -7,6 +7,7 @@ pynvml. However, it should not initialize cuda context.
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -802,6 +803,22 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Query NVML for GPU index -> PCI bus ID mapping."""
+        out: dict[int, str] = {}
+        for idx in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+            pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+            bus_id = pci_info.busId
+            if isinstance(bus_id, bytes):
+                bus_id = bus_id.decode("utf-8")
+            out[idx] = bus_id.rstrip("\x00")
+        if not out:
+            raise RuntimeError("NVML returned no GPU PCI bus ID rows")
+        return out
+
+    @classmethod
+    @with_nvml_context
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
@@ -849,6 +866,40 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     def get_all_device_numa_nodes(cls) -> list[int] | None:
         return None
+
+    @classmethod
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Query nvidia-smi for GPU index -> PCI bus ID mapping.
+
+        Uses subprocess because pynvml is not available on this
+        platform (e.g. Jetson), while nvidia-smi is still present.
+        """
+        proc = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,pci.bus_id",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"nvidia-smi failed (exit {proc.returncode}): "
+                f"{proc.stderr.strip()}"
+            )
+        out: dict[int, str] = {}
+        for line in proc.stdout.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            idx_part, pci_part = line.split(",", 1)
+            out[int(idx_part.strip())] = pci_part.strip()
+        if not out:
+            raise RuntimeError("nvidia-smi returned no GPU PCI bus ID rows")
+        return out
 
 
 # Autodetect either NVML-enabled or non-NVML platform
