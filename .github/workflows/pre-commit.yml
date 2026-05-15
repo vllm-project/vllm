@@ -52,14 +52,15 @@ jobs:
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.11"
-    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-      with:
-        go-version: "1.24"
     - name: Install actionlint
       run: |
         mkdir -p "$HOME/.local/bin"
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-        GOBIN="$HOME/.local/bin" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+        curl -fsSL \
+          https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
+          -o /tmp/actionlint.tar.gz
+        tar -xzf /tmp/actionlint.tar.gz -C /tmp
+        install -m 0755 /tmp/actionlint "$HOME/.local/bin/actionlint"
     - name: Install shellcheck
       run: |
         sudo apt-get update
