@@ -1197,7 +1197,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
 # the external module is unavailable (e.g. older lmcache version that does
 # not ship this submodule, or any import error), fall back to the builtin
 # implementation defined above.
-if os.environ.get("VLLM_USE_UPSTREAM_LMCACHE_MP"):
+if os.environ.get("LMCACHE_USE_UPSTREAM_MP"):
     logger.info(
         "Force use builtin LMCacheMPConnectorUpstream in vLLM.",
     )
