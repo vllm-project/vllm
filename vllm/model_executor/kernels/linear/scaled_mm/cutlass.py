@@ -181,9 +181,7 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         weight = getattr(layer, weight_name)
 
         # keep the logical output width so runtime can slice away static padding.
-        self.logical_output_size = getattr(
-            layer, "output_size_per_partition", weight.shape[1]
-        )
+        self.logical_output_size = weight.shape[1]
 
         pad_k = (16 - weight.shape[0] % 16) % 16
         pad_n = (16 - weight.shape[1] % 16) % 16
