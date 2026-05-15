@@ -329,6 +329,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def reload_weights(self, *args, **kwargs) -> None:
+        # TODO(Wentao): Use full version instead of import when fully migrated to v2
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
+
+        GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
+        self.reset_encoder_cache()
+        self.reset_mm_cache()
+
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
         # Cache the default CUDA stream to avoid lookup overhead.
