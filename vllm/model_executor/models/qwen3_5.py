@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
+import os
 import typing
 from collections.abc import Callable, Iterable
 
@@ -104,6 +105,11 @@ from .utils import (
 
 logger = init_logger(__name__)
 
+# Opt-in: fuse GDN linear_attn's qkv|z|b|a into a single GEMM
+# (collapses the 2 GEMMs qkvz + ba per GDN layer into 1). Reduces kernel
+# launch overhead and lets cuBLASLt pick a better tile by enlarging N.
+_VLLM_GDN_FUSE_QKVZBA = bool(int(os.environ.get("VLLM_GDN_FUSE_QKVZBA", "0")))
+
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
     def get_hf_config(self):
@@ -138,6 +144,13 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
+                # Fully-fuse qkv|z|b|a into a single GEMM (opt-in via env
+                # var). Disabled with LoRA — adapter routing assumes the
+                # default in_proj_qkvz / in_proj_ba split.
+                create_in_proj_qkvzba=(
+                    _VLLM_GDN_FUSE_QKVZBA
+                    and vllm_config.lora_config is None
+                ),
             )
         elif self.layer_type == "full_attention":
             self.self_attn = Qwen3NextAttention(
@@ -272,11 +285,36 @@ class Qwen3_5Model(Qwen3NextModel):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        # In QKVZBA mode (opt-in via env var), all 4 GDN in_proj_* checkpoint
+        # shards land in the single fused in_proj_qkvzba weight.
+        # Output_sizes layout: [q, k, v, z, b, a] = [key, key, value, value, n_v, n_v].
+        # We detect the mode by checking whether any GDN layer was built
+        # with in_proj_qkvzba (avoids referencing self.enable_lora which is
+        # only set on Qwen3_5ForCausalLMBase, not on Qwen3_5Model).
+        _use_qkvzba = _VLLM_GDN_FUSE_QKVZBA and any(
+            hasattr(getattr(layer, "linear_attn", None), "in_proj_qkvzba")
+            for layer in self.layers
+        )
+        if _use_qkvzba:
+            gdn_mapping = [
+                ("in_proj_qkvzba", "in_proj_qkv", (0, 1, 2)),
+                ("in_proj_qkvzba", "in_proj_z", 3),
+                ("in_proj_qkvzba", "in_proj_b", 4),
+                ("in_proj_qkvzba", "in_proj_a", 5),
+            ]
+        else:
+            # Keep the original mapping: in_proj_qkvz packs q/k/v/z and
+            # in_proj_ba packs b/a as separate fused weights.
+            gdn_mapping = [
+                ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
+                ("in_proj_qkvz", "in_proj_z", 3),
+                ("in_proj_ba", "in_proj_b", 0),
+                ("in_proj_ba", "in_proj_a", 1),
+            ]
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             # GDN
-            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-            ("in_proj_qkvz", "in_proj_z", 3),
+            *gdn_mapping,
             # self attention
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
@@ -284,8 +322,6 @@ class Qwen3_5Model(Qwen3NextModel):
             # mlp
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("in_proj_ba", "in_proj_b", 0),
-            ("in_proj_ba", "in_proj_a", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -442,9 +478,20 @@ class Qwen3_5ForCausalLMBase(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
-        # GDN fused projections.
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        # GDN fused projections — switched at module-load time based on
+        # VLLM_GDN_FUSE_QKVZBA env var.
+        **(
+            {
+                "in_proj_qkvzba": [
+                    "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a",
+                ],
+            }
+            if _VLLM_GDN_FUSE_QKVZBA
+            else {
+                "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+                "in_proj_ba": ["in_proj_b", "in_proj_a"],
+            }
+        ),
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -467,6 +514,24 @@ class Qwen3_5ForCausalLMBase(
         self.model = Qwen3_5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+
+        # When LoRA + QKVZBA env var are both set, the QKVZBA fusion is
+        # disabled at the layer level (LoRA needs per-shard adapters), so
+        # the runtime layer is in_proj_qkvz/in_proj_ba — restore the
+        # corresponding packed_modules_mapping so the LoRA loader finds
+        # the right targets.
+        if vllm_config.lora_config and _VLLM_GDN_FUSE_QKVZBA:
+            self.packed_modules_mapping = {
+                k: list(v)
+                for k, v in Qwen3_5ForCausalLMBase.packed_modules_mapping.items()
+            }
+            self.packed_modules_mapping.pop("in_proj_qkvzba", None)
+            self.packed_modules_mapping["in_proj_qkvz"] = [
+                "in_proj_qkv", "in_proj_z",
+            ]
+            self.packed_modules_mapping["in_proj_ba"] = [
+                "in_proj_b", "in_proj_a",
+            ]
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
@@ -552,10 +617,18 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     # Qwen3.5 does not support multimodal pruning (EVS).
     supports_multimodal_pruning = False
 
-    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
-        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
-        "in_proj_ba": ["in_proj_b", "in_proj_a"],
-    }
+    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | (
+        {
+            "in_proj_qkvzba": [
+                "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a",
+            ],
+        }
+        if _VLLM_GDN_FUSE_QKVZBA
+        else {
+            "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+            "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
@@ -570,6 +643,21 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         # Qwen3.5 does not support multimodal pruning (EVS).
         self.is_multimodal_pruning_enabled = False
+
+        # When LoRA + QKVZBA env var are both set, the QKVZBA fusion is
+        # disabled at the layer level (see Qwen3_5DecoderLayer); restore
+        # the per-shard packed mapping so the LoRA loader finds the
+        # in_proj_qkvz / in_proj_ba targets.
+        if vllm_config.lora_config and _VLLM_GDN_FUSE_QKVZBA:
+            base = Qwen3_5ForConditionalGeneration.packed_modules_mapping
+            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
+            self.packed_modules_mapping.pop("in_proj_qkvzba", None)
+            self.packed_modules_mapping["in_proj_qkvz"] = [
+                "in_proj_qkv", "in_proj_z",
+            ]
+            self.packed_modules_mapping["in_proj_ba"] = [
+                "in_proj_b", "in_proj_a",
+            ]
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
@@ -784,6 +872,20 @@ class Qwen3_5MoeForConditionalGeneration(
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         # Qwen3.5 does not support multimodal pruning (EVS).
         self.is_multimodal_pruning_enabled = False
+
+        # When LoRA + QKVZBA env var are both set, the QKVZBA fusion is
+        # disabled at the layer level; restore the per-shard packed
+        # mapping so the LoRA loader finds in_proj_qkvz / in_proj_ba.
+        if vllm_config.lora_config and _VLLM_GDN_FUSE_QKVZBA:
+            base = Qwen3_5ForConditionalGeneration.packed_modules_mapping
+            self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
+            self.packed_modules_mapping.pop("in_proj_qkvzba", None)
+            self.packed_modules_mapping["in_proj_qkvz"] = [
+                "in_proj_qkv", "in_proj_z",
+            ]
+            self.packed_modules_mapping["in_proj_ba"] = [
+                "in_proj_b", "in_proj_a",
+            ]
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
