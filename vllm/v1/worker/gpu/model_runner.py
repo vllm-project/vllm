@@ -343,6 +343,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         GPUModelRunnerV1.update_config(self, *args, **kwargs)  # type: ignore[arg-type]
 
+        # v2 reads config via self.vllm_config (e.g. in load_model), so keep it
+        # in sync with the attributes the v1 helper just replaced.
+        self.vllm_config.model_config = self.model_config
+        self.vllm_config.load_config = self.load_config
+
     @functools.cached_property
     def main_stream(self) -> torch.cuda.Stream:
         # Cache the default CUDA stream to avoid lookup overhead.
