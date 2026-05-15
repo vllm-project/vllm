@@ -1605,6 +1605,12 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         scale_regex = {
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
+            # Anchored top-level head/embed rules: prevent the broad
+            # suffix match from re-firing on already-canonical
+            # lm_head.weight / model.embed_tokens.weight (both end with
+            # the bare suffix form).
+            re.compile(r"^head\.weight$"): "lm_head.weight",
+            re.compile(r"^embed\.weight$"): "model.embed_tokens.weight",
         }
     else:
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
@@ -1612,6 +1618,8 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         # there.
         scale_regex = {
             re.compile(r"\.scale$"): ".weight_scale_inv",
+            re.compile(r"^head\.weight$"): "lm_head.weight",
+            re.compile(r"^embed\.weight$"): "model.embed_tokens.weight",
         }
     return WeightsMapper(
         orig_to_new_prefix={
@@ -1623,8 +1631,6 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
         },
         orig_to_new_regex=scale_regex,
         orig_to_new_suffix={
-            "head.weight": "lm_head.weight",
-            "embed.weight": "embed_tokens.weight",
             # Pre-MoE norm + gate are now owned by ``DeepseekV4MoE.norm_gate``
             # (see NormGatedLinear).
             ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
