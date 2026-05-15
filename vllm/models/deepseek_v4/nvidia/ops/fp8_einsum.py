@@ -5,16 +5,13 @@
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    _upcast_e8m0_to_fp32,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import fp8_einsum
 from vllm.utils.torch_utils import direct_register_custom_op
-
-
-def _upcast_e8m0_to_fp32(scale: torch.Tensor) -> torch.Tensor:
-    exp_bits = scale.view(torch.uint8).to(torch.int32)
-    fp32_bits = exp_bits << 23
-    return fp32_bits.view(torch.float32)
 
 
 @triton.jit
