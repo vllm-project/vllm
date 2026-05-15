@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for SimpleCPUOffloadConnector metrics."""
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadingOperationMetrics,
@@ -11,6 +13,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector i
     SimpleCPUOffloadConnectorStats,
 )
 from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_build_kv_connector_stats_with_none():

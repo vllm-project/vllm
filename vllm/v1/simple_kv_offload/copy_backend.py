@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import queue
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -28,10 +29,45 @@ class DmaCopyEvent:
     end_event: torch.Event
     num_bytes: int
     is_store: bool
+    release: Callable[[], None] | None = None
+
+
+class _EventPairPool:
+    """Thread-local pool for CUDA timing event pairs.
+
+    ``torch.Event(enable_timing=True)`` can be relatively expensive to allocate.
+    The copy thread records one pair per DMA operation, then the worker returns
+    that pair to this pool after it has queried timing metrics.
+    """
+
+    def __init__(self, initial_size: int) -> None:
+        self._pool: queue.SimpleQueue[tuple[torch.Event, torch.Event]] = (
+            queue.SimpleQueue()
+        )
+        for _ in range(initial_size):
+            self._pool.put(self._new_pair())
+
+    @staticmethod
+    def _new_pair() -> tuple[torch.Event, torch.Event]:
+        return (
+            torch.Event(enable_timing=True),
+            torch.Event(enable_timing=True),
+        )
+
+    def acquire(self) -> tuple[torch.Event, torch.Event]:
+        try:
+            return self._pool.get_nowait()
+        except queue.Empty:
+            return self._new_pair()
+
+    def release(self, start_event: torch.Event, end_event: torch.Event) -> None:
+        self._pool.put((start_event, end_event))
 
 
 class DmaCopyBackend:
     """cuMemcpyBatchAsync copy backend (background thread)."""
+
+    _EVENT_POOL_INITIAL_SIZE = 16
 
     def __init__(self) -> None:
         self._store_params: BatchMemcpyParams | None = None
@@ -104,6 +140,7 @@ class DmaCopyBackend:
         store_stream: torch.cuda.Stream,
     ) -> None:
         current_platform.set_device(device)
+        event_pool = _EventPairPool(DmaCopyBackend._EVENT_POOL_INITIAL_SIZE)
         while True:
             item = q.get()
             if item is None:
@@ -118,8 +155,7 @@ class DmaCopyBackend:
                 num_bytes,
             ) = item
             stream = store_stream if is_store else load_stream
-            start_event = torch.Event(enable_timing=True)
-            end_event = torch.Event(enable_timing=True)
+            start_event, end_event = event_pool.acquire()
             start_event.record(stream)
             copy_blocks(src_blocks, dst_blocks, params)
             end_event.record(stream)
@@ -130,5 +166,10 @@ class DmaCopyBackend:
                     end_event=end_event,
                     num_bytes=num_bytes,
                     is_store=is_store,
+                    release=(
+                        lambda start_event=start_event, end_event=end_event: (
+                            event_pool.release(start_event, end_event)
+                        )
+                    ),
                 )
             )

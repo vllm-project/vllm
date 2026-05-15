@@ -295,12 +295,14 @@ class SimpleCPUOffloadWorker:
         for copy_event in self._load_events:
             copy_event.end_event.synchronize()
             self._record_copy_event(copy_event)
+            self._release_copy_event(copy_event)
             self._load_hwm = copy_event.event_idx
         self._load_events.clear()
 
         for copy_event in self._store_events:
             copy_event.end_event.synchronize()
             self._record_copy_event(copy_event)
+            self._release_copy_event(copy_event)
             self._store_hwm = copy_event.event_idx
         self._store_events.clear()
 
@@ -313,6 +315,7 @@ class SimpleCPUOffloadWorker:
             if not copy_event.end_event.query():
                 break
             self._record_copy_event(copy_event)
+            self._release_copy_event(copy_event)
             hwm = copy_event.event_idx
             events.pop(0)
         if is_store:
@@ -321,13 +324,17 @@ class SimpleCPUOffloadWorker:
             self._load_hwm = hwm
         return hwm
 
+    @staticmethod
+    def _release_copy_event(copy_event: DmaCopyEvent) -> None:
+        if copy_event.release is not None:
+            copy_event.release()
+            copy_event.release = None
+
     def _record_copy_event(self, copy_event: DmaCopyEvent) -> None:
         transfer_type: TransferType = (
             ("GPU", "CPU") if copy_event.is_store else ("CPU", "GPU")
         )
-        transfer_time = (
-            copy_event.start_event.elapsed_time(copy_event.end_event) * 1e-3
-        )
+        transfer_time = copy_event.start_event.elapsed_time(copy_event.end_event) * 1e-3
         self.kv_connector_stats.record_transfer(
             copy_event.num_bytes, transfer_time, transfer_type
         )
