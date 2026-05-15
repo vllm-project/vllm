@@ -2,6 +2,7 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
+    types: [opened, reopened, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -78,7 +79,15 @@ jobs:
           echo "Skipping Ascend benchmark on fork PRs because this workflow requires a self-hosted Ascend runner and trusted execution." >> "$GITHUB_STEP_SUMMARY"
 
   ascend-benchmark:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    if: >-
+      github.event_name != 'pull_request' ||
+      (
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready') ||
+          contains(github.event.pull_request.labels.*.name, 'verified')
+        )
+      )
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
