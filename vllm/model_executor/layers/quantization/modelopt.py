@@ -81,7 +81,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     requantize_with_max_scale,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -128,6 +132,10 @@ class ModelOptQuantConfigBase(QuantizationConfig):
     LinearMethodCls: type = LinearMethodBase
     FusedMoEMethodCls: type = FusedMoEMethodBase
     KVCacheMethodCls: type = BaseKVCacheMethod
+    # Subclasses override this to quantize VocabParallelEmbedding layers.
+    # Default keeps embeddings unquantized — the historical behavior before
+    # any ModelOpt format supported embedding quantization.
+    EmbeddingMethodCls: type = UnquantizedEmbeddingMethod
 
     def __init__(
         self,
@@ -212,6 +220,16 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             if getattr(quant_method, "backend", "") == "marlin":
                 quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
+        elif type(layer) is VocabParallelEmbedding:
+            # Only the bare input embedding — ParallelLMHead (a subclass) is
+            # used as a matmul and would need the linear path to handle
+            # quantized weights; tied embeddings have their own pitfalls.
+            # Return None for the default (UnquantizedEmbeddingMethod) so the
+            # embedding layer's constructor installs the fallback itself —
+            # mirrors the LinearBase exclusion path above.
+            if self.EmbeddingMethodCls is UnquantizedEmbeddingMethod:
+                return None
+            return self.EmbeddingMethodCls(self)
 
         return None
 
@@ -385,6 +403,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         # Select LinearMethod implementation based on quant_algo.
         if self.quant_method == "FP8":
             self.LinearMethodCls = ModelOptFp8LinearMethod
+            self.EmbeddingMethodCls = ModelOptFp8EmbeddingMethod
         elif self.quant_method == "FP8_PER_CHANNEL_PER_TOKEN":
             self.LinearMethodCls = ModelOptFp8PcPtLinearMethod
         elif self.quant_method == "FP8_PB_WO":
@@ -528,6 +547,89 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)
+
+
+class ModelOptFp8EmbeddingMethod(QuantizeMethodBase):
+    """FP8 weight-only embedding for ModelOpt checkpoints.
+
+    Layout (per VocabParallelEmbedding partition):
+        weight        float8_e4m3fn, [vocab_per_partition, hidden]
+        weight_scale  float32,       per-tensor
+        input_scale   float32,       per-tensor (loaded but unused —
+                                      no activation to quantize)
+    """
+
+    def __init__(self, quant_config: ModelOptFp8Config) -> None:
+        self.quant_config = quant_config
+        self.out_dtype = torch.get_default_dtype()
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+
+        weight_dtype = (
+            torch.float8_e4m3fn
+            if self.quant_config.is_checkpoint_fp8_serialized
+            else params_dtype
+        )
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=weight_dtype,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        if self.quant_config.is_checkpoint_fp8_serialized:
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+            weight_scale[:] = torch.finfo(torch.float32).min
+            layer.register_parameter("weight_scale", weight_scale)
+            # input_scale is accepted (so the loader sees the same key set
+            # as the linear path) but unused in embedding().
+            input_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
+            input_scale[:] = torch.finfo(torch.float32).min
+            layer.register_parameter("input_scale", input_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight = layer.weight
+        max_w_scale = layer.weight_scale.max()
+        if not (layer.weight_scale == layer.weight_scale[0]).all():
+            max_w_scale, weight = requantize_with_max_scale(
+                layer.weight, layer.weight_scale, layer.logical_widths
+            )
+        # Keep weight as [vocab, hidden] — no transpose (unlike the linear
+        # path), since torch.embedding gathers along dim 0.
+        layer.weight = Parameter(weight, requires_grad=False)
+        layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+        if hasattr(layer, "input_scale") and layer.input_scale is not None:
+            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        rows = torch.embedding(layer.weight, input_)
+        return rows.to(self.out_dtype) * layer.weight_scale
 
 
 class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
@@ -1034,6 +1136,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
         if quant_method == "NVFP4":
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
+            self.EmbeddingMethodCls = ModelOptNvFp4EmbeddingMethod
         elif quant_method == "W4A16_NVFP4":
             self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
         else:
@@ -1230,6 +1333,129 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+
+
+class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
+    """NVFP4 weight-only embedding for ModelOpt checkpoints.
+
+    Layout (per VocabParallelEmbedding partition):
+        weight          uint8,            [vocab_per_part, hidden/2]   (2 fp4/byte)
+        weight_scale    float8_e4m3fn,    [vocab_per_part, hidden/16]  (per block)
+        weight_scale_2  float32,          scalar global scale
+
+    Embedding is a row gather: we index_select packed rows + matching scale
+    rows, then dequantize. No GEMM kernel is initialized and no Marlin
+    repack is applied — that path destroys row-indexability.
+    """
+
+    def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
+        self.quant_config = quant_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        if not self.quant_config.is_checkpoint_nvfp4_serialized:
+            raise ValueError("NVFP4 embedding requires a serialized NVFP4 checkpoint.")
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+
+        if input_size_per_partition % self.quant_config.group_size != 0:
+            raise ValueError(
+                "NVFP4 embedding hidden size "
+                f"({input_size_per_partition}) must be a multiple of group "
+                f"size ({self.quant_config.group_size})."
+            )
+
+        self.params_dtype = params_dtype
+
+        # Two fp4 values are packed into one uint8 along the hidden dim.
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // 2,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight", weight)
+
+        # Per-block fp8 scale.
+        weight_scale = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition // self.quant_config.group_size,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
+
+        # Per-tensor fp32 global scale.
+        weight_global_scale = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("weight_scale_2", weight_global_scale)
+
+        # input_scale is accepted (so the loader sees the same key set as
+        # the linear path) but unused — embeddings have no activation.
+        input_global_scale = PerTensorScaleParameter(
+            data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("input_scale", input_global_scale)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Collapse the per-shard global scale to a scalar (matches the
+        # linear path at modelopt.py:1314). Embedding has a single shard,
+        # but this keeps behavior uniform with the loader.
+        weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
+        layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        del layer.weight_scale_2
+
+        # input_scale is unused; collapse and keep it as a scalar so the
+        # tensor isn't holding per-partition garbage.
+        if hasattr(layer, "input_scale") and layer.input_scale is not None:
+            layer.input_scale = Parameter(
+                layer.input_scale.max().to(torch.float32), requires_grad=False
+            )
+
+    def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
+        # Import here to avoid pulling triton at module import time.
+        from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+            dequantize_to_dtype,
+        )
+
+        flat = input_.flatten()
+        packed_rows = torch.index_select(layer.weight, 0, flat)
+        scale_rows = torch.index_select(layer.weight_scale, 0, flat)
+        # ModelOpt emits embedding scales in linear (un-swizzled) layout
+        # because we skip the Marlin repack. If a future checkpoint stores
+        # them swizzled, set swizzle=True here.
+        out = dequantize_to_dtype(
+            packed_rows,
+            scale_rows,
+            layer.weight_global_scale,
+            dtype=self.params_dtype,
+            block_size=self.quant_config.group_size,
+            swizzle=False,
+        )
+        return out.view(*input_.shape, -1)
 
 
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):

@@ -516,3 +516,211 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
     assert config.w4a16_nvfp4_config.LinearMethodCls is m.ModelOptNvFp4W4A16LinearMethod
+
+
+# ---------------------------------------------------------------------------
+# Embedding-quantization dispatch + functional tests
+# ---------------------------------------------------------------------------
+
+
+class _StubLayer(torch.nn.Module):
+    """Minimal stand-in for VocabParallelEmbedding param registration."""
+
+
+def test_modelopt_fp8_config_dispatches_embedding_method():
+    """Per-tensor FP8 (`quant_method="FP8"`) wires the new
+    ``ModelOptFp8EmbeddingMethod`` so VocabParallelEmbedding gets a
+    weight-only FP8 gather. PC_PT / PB_WO variants keep the default
+    unquantized embedding."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8Config,
+        ModelOptFp8EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+
+    cfg = ModelOptFp8Config(
+        quant_method="FP8",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    assert cfg.EmbeddingMethodCls is ModelOptFp8EmbeddingMethod
+
+    cfg_pcpt = ModelOptFp8Config(
+        quant_method="FP8_PER_CHANNEL_PER_TOKEN",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    assert cfg_pcpt.EmbeddingMethodCls is UnquantizedEmbeddingMethod
+
+
+def test_modelopt_nvfp4_config_dispatches_embedding_method():
+    """NVFP4 (W4A4) wires ``ModelOptNvFp4EmbeddingMethod``. W4A16_NVFP4
+    keeps the default unquantized embedding because its weight is stored
+    Marlin-prepacked and is not row-indexable."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        UnquantizedEmbeddingMethod,
+    )
+
+    cfg = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert cfg.EmbeddingMethodCls is ModelOptNvFp4EmbeddingMethod
+
+    cfg_w4a16 = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    assert cfg_w4a16.EmbeddingMethodCls is UnquantizedEmbeddingMethod
+
+
+def test_modelopt_get_quant_method_dispatches_vocab_embedding():
+    """``ModelOptQuantConfigBase.get_quant_method`` returns the new
+    embedding method for a bare ``VocabParallelEmbedding`` but returns
+    ``None`` for ``ParallelLMHead`` (a subclass we don't quantize) and
+    for prefixes listed in ``exclude_modules``."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8Config,
+        ModelOptFp8EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.vocab_parallel_embedding import (
+        ParallelLMHead,
+        VocabParallelEmbedding,
+    )
+
+    cfg = ModelOptFp8Config(
+        quant_method="FP8",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=["model.lm_head"],
+    )
+
+    # Construct a minimal embedding without going through the
+    # quant-method-installing branch — we just need an isinstance match.
+    embed = VocabParallelEmbedding.__new__(VocabParallelEmbedding)
+    assert isinstance(
+        cfg.get_quant_method(embed, prefix="model.embed_tokens"),
+        ModelOptFp8EmbeddingMethod,
+    )
+
+    # Excluded prefix -> None (falls back to UnquantizedEmbeddingMethod
+    # in the layer constructor).
+    assert cfg.get_quant_method(embed, prefix="model.lm_head") is None
+
+    # ParallelLMHead is a subclass; we intentionally don't dispatch it.
+    lm_head = ParallelLMHead.__new__(ParallelLMHead)
+    assert cfg.get_quant_method(lm_head, prefix="model.lm_head_out") is None
+
+
+def test_modelopt_fp8_embedding_matches_reference():
+    """FP8 embedding gather + cast + scale equals the manual reference
+    on the same inputs."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptFp8Config,
+        ModelOptFp8EmbeddingMethod,
+    )
+
+    torch.manual_seed(0)
+    vocab, hidden = 32, 64
+    cfg = ModelOptFp8Config(
+        quant_method="FP8",
+        is_checkpoint_fp8_serialized=True,
+        kv_cache_quant_method=None,
+        exclude_modules=[],
+    )
+    method = ModelOptFp8EmbeddingMethod(cfg)
+
+    layer = _StubLayer()
+    method.create_weights(
+        layer,
+        input_size_per_partition=hidden,
+        output_partition_sizes=[vocab],
+        input_size=hidden,
+        output_size=vocab,
+        params_dtype=torch.bfloat16,
+    )
+
+    # Populate weight as a real fp8 tensor and a per-tensor scale.
+    raw = torch.randn(vocab, hidden) * 4.0
+    fp8_weight = raw.to(torch.float8_e4m3fn)
+    layer.weight.data.copy_(fp8_weight)
+    layer.weight_scale.data.fill_(0.125)
+    layer.input_scale.data.fill_(0.0)
+
+    method.process_weights_after_loading(layer)
+
+    ids = torch.tensor([[0, 5, 7], [31, 16, 3]], dtype=torch.long)
+    out = method.embedding(layer, ids)
+
+    expected = torch.embedding(fp8_weight, ids).to(method.out_dtype) * 0.125
+    torch.testing.assert_close(out, expected, atol=0.0, rtol=0.0)
+    assert out.shape == (*ids.shape, hidden)
+
+
+def test_modelopt_nvfp4_embedding_matches_full_dequant():
+    """NVFP4 embedding gather equals the rows of the full table dequant."""
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+        ModelOptNvFp4EmbeddingMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+        dequantize_to_dtype,
+    )
+
+    torch.manual_seed(0)
+    vocab, hidden, block = 16, 64, 16
+    cfg = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+        group_size=block,
+    )
+    method = ModelOptNvFp4EmbeddingMethod(cfg)
+
+    layer = _StubLayer()
+    method.create_weights(
+        layer,
+        input_size_per_partition=hidden,
+        output_partition_sizes=[vocab],
+        input_size=hidden,
+        output_size=vocab,
+        params_dtype=torch.bfloat16,
+    )
+
+    # Random packed weights and block scales.
+    packed = torch.randint(0, 256, (vocab, hidden // 2), dtype=torch.uint8)
+    scale = (torch.rand(vocab, hidden // block) * 0.5 + 0.25).to(torch.float8_e4m3fn)
+    layer.weight.data.copy_(packed)
+    layer.weight_scale.data.copy_(scale)
+    layer.weight_scale_2.data.fill_(1.0)
+    layer.input_scale.data.fill_(0.0)
+
+    method.process_weights_after_loading(layer)
+
+    ids = torch.tensor([0, 5, 9, 15, 1, 1])
+    out = method.embedding(layer, ids)
+
+    full = dequantize_to_dtype(
+        packed,
+        scale,
+        torch.tensor(1.0),
+        dtype=torch.bfloat16,
+        block_size=block,
+        swizzle=False,
+    )
+    expected = full[ids]
+    torch.testing.assert_close(out, expected, atol=0.0, rtol=0.0)
+    assert out.shape == (ids.shape[0], hidden)
