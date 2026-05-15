@@ -67,3 +67,13 @@
     constexpr bool const_expr = false;                   \
     __VA_ARGS__();                                       \
   }
+
+// Per-block / per-group sizes used by fused activation quant kernels.
+#define VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, const_group_size, ...) \
+  if ((group_size) == 128) {                                                \
+    constexpr int const_group_size = 128;                                   \
+    __VA_ARGS__();                                                          \
+  } else if ((group_size) == 64) {                                          \
+    constexpr int const_group_size = 64;                                    \
+    __VA_ARGS__();                                                          \
+  }
