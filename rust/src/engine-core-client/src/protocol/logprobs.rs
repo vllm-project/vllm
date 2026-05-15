@@ -11,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use self::wire::*;
 use super::{EngineCoreOutput, EngineCoreOutputs, decode_msgpack};
 use crate::error::{Error, Result, bail_ext_value_decode, ext_value_decode};
+use crate::protocol::tensor_wire::{WireArrayData, WireNdArray};
 
 /// One token candidate and its logprob metadata for a single sequence position.
 ///

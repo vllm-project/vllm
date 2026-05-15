@@ -9,6 +9,7 @@ test-util = ["dep:tempfile"]
 
 [dependencies]
 arc-swap.workspace = true
+bytemuck.workspace = true
 byteorder.workspace = true
 bytes.workspace = true
 enum-as-inner.workspace = true

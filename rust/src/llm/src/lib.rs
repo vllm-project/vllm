@@ -13,7 +13,7 @@ pub use output::{
     GenerateOutputStreamExt, GeneratePromptInfo,
 };
 pub use request::GenerateRequest;
-pub use vllm_engine_core_client::protocol::{Logprobs, PositionLogprobs, TokenLogprob};
+pub use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs, TokenLogprob};
 
 use crate::log_stats::StatsLogger;
 use crate::request_metrics::RequestMetricsTracker;

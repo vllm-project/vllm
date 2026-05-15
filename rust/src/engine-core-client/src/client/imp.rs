@@ -174,6 +174,8 @@ impl ClientInner {
     where
         T: serde::Serialize + std::fmt::Debug,
     {
+        // TODO: for `EngineCoreRequest`, split outbound tensor raw views into aux
+        // frames instead of always producing a single msgpack frame.
         let payload = encode_msgpack(payload)?;
         let mut input_send = self.input_send.clone();
         transport::send_message(&mut input_send, engine_id, request_type.to_frame(), payload)

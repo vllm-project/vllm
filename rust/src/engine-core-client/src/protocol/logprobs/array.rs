@@ -4,7 +4,7 @@ use byteorder::{BigEndian, LittleEndian, NativeEndian, ReadBytesExt};
 use itertools::Itertools as _;
 
 use crate::error::{Error, Result, ext_value_decode};
-use crate::protocol::logprobs::wire::{WireArrayData, WireNdArray};
+use crate::protocol::tensor_wire::{WireArrayData, WireNdArray};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScalarType {

@@ -17,11 +17,17 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
+use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::multimodal::{
+    MultiModalFeatureSpec, MultiModalField, MultiModalFieldElem, MultiModalFlatField,
+    MultiModalSlice, NestedTensorValue, PlaceholderRange, SliceSpec,
+};
 use crate::protocol::stats::SchedulerStats;
+use crate::protocol::tensor_wire::WireTensor;
 use crate::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreRequestType, EngineCoreSamplingParams, MaybeWireLogprobs, UtilityOutput,
-    UtilityResultEnvelope, decode_engine_core_outputs,
+    EngineCoreRequestType, EngineCoreSamplingParams, UtilityOutput, UtilityResultEnvelope,
+    decode_engine_core_outputs,
 };
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_connections,
@@ -150,6 +156,45 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
+        ..EngineCoreRequest::default()
+    }
+}
+
+fn sample_multimodal_request() -> EngineCoreRequest {
+    EngineCoreRequest {
+        request_id: "req-mm".to_string(),
+        prompt_token_ids: Some(vec![101, 102, 103, 104]),
+        mm_features: Some(vec![MultiModalFeatureSpec {
+            data: Some(BTreeMap::from([(
+                "pixel_values".to_string(),
+                MultiModalFieldElem {
+                    data: Some(NestedTensorValue::Tensor(
+                        WireTensor::from_f32(vec![2, 2], vec![1.0, 2.0, 3.5, 4.25])
+                            .expect("valid tensor shape"),
+                    )),
+                    field: MultiModalField::Flat(MultiModalFlatField {
+                        slices: vec![MultiModalSlice::Slice(SliceSpec {
+                            start: Some(0),
+                            stop: Some(2),
+                            step: None,
+                        })],
+                        dim: 0,
+                        keep_on_cpu: false,
+                    }),
+                },
+            )])),
+            modality: "image".to_string(),
+            identifier: "mm-cache-key".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 1,
+                length: 2,
+                is_embed: None,
+            },
+            mm_hash: Some("processor-hash".to_string()),
+        }]),
+        sampling_params: None,
+        pooling_params: None,
+        arrival_time: 43.5,
         ..EngineCoreRequest::default()
     }
 }
@@ -2089,6 +2134,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
     let request_hex = lines.next().expect("missing request fixture line");
+    let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
     let multipart_logprobs_frames = lines.next().expect("missing multipart logprobs fixture line");
@@ -2097,11 +2143,32 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         lines.next().expect("missing multipart prompt logprobs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
+    let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
     assert_eq!(decoded_request, expected_request);
+
+    let decoded_multimodal_request: EngineCoreRequest =
+        rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
+    assert_eq!(decoded_multimodal_request, sample_multimodal_request());
+
+    // The decode assertion above proves Python wire -> Rust struct. Also compare
+    // Rust struct -> wire for the multimodal subtree, which is the frontend's
+    // production direction when sending requests to Python EngineCore.
+    let expected_multimodal_request = sample_multimodal_request();
+    let decode_value = |bytes: &[u8]| {
+        rmpv::decode::read_value(&mut Cursor::new(bytes)).expect("decode msgpack value")
+    };
+    let extract_mm_features = |value: Value| match value {
+        Value::Array(items) => items.get(2).cloned().expect("request mm_features slot"),
+        other => panic!("request should encode as tuple array, got {other:?}"),
+    };
+    let python_mm_features = extract_mm_features(decode_value(&multimodal_request_bytes));
+    let rust_mm_features =
+        decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
+    assert_eq!(python_mm_features, rust_mm_features);
 
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     expect_test::expect![[r#"

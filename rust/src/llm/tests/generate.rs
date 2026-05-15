@@ -6,11 +6,13 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::logprobs::{
+    Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
+};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::protocol::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
-    EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams, Logprobs, MaybeWireLogprobs,
-    PositionLogprobs, TokenLogprob,
+    EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};

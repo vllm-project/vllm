@@ -12,9 +12,11 @@ use vllm_chat::{
     FinishReason, GenerationPromptMode, NewChatOutputProcessorOptions, ParserSelection,
     RenderedPrompt, SamplingParams,
 };
+use vllm_engine_core_client::protocol::logprobs::{
+    Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
+};
 use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
-    MaybeWireLogprobs, PositionLogprobs, StopReason, TokenLogprob,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};

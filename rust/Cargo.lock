@@ -5545,6 +5545,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "bytemuck",
  "byteorder",
  "bytes",
  "clap",

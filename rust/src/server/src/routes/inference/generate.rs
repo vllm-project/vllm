@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
 use tracing::info;
 use tracing_futures::Instrument as _;
-use vllm_engine_core_client::protocol::{Logprobs, PositionLogprobs};
+use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_llm::{CollectedGenerateOutput, GenerateOutputStreamExt as _};
 
 use self::convert::prepare_generate_request;

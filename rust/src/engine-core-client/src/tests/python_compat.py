@@ -132,6 +132,45 @@ request = EngineCoreRequest(
     client_index=0,
 )
 
+multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
+multimodal_features = [
+    {
+        "data": {
+            "pixel_values": {
+                "data": [
+                    "float32",
+                    [2, 2],
+                    msgpack.ExtType(3, multimodal_tensor.tobytes()),
+                ],
+                "field": [
+                    "flat",
+                    {
+                        "slices": [[0, 2, None]],
+                        "dim": 0,
+                        "keep_on_cpu": False,
+                    },
+                ],
+            }
+        },
+        "modality": "image",
+        "identifier": "mm-cache-key",
+        "mm_position": {
+            "offset": 1,
+            "length": 2,
+            "is_embed": None,
+        },
+        "mm_hash": "processor-hash",
+    }
+]
+multimodal_request_wire = [
+    "req-mm",
+    [101, 102, 103, 104],
+    multimodal_features,
+    None,
+    None,
+    43.5,
+]
+
 outputs = EngineCoreOutputs(
     outputs=[
         EngineCoreOutput(
@@ -248,6 +287,7 @@ multipart_prompt_logprobs = engine_outputs_wire(
 )
 
 print(msgspec.msgpack.encode(request).hex())
+print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
 print(msgspec.msgpack.encode(outputs).hex())
 print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
 print(
