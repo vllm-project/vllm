@@ -9,6 +9,7 @@ from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
@@ -374,7 +375,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         """Returns True if the layer can be replaced by this LoRA layer."""
 
         # source_layer is FusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
+        moe_cls = maybe_get_oot_by_class(FusedMoE)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 2
 
 
 class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
@@ -537,4 +539,5 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
         # source_layer is FusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
+        moe_cls = maybe_get_oot_by_class(FusedMoE)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 1
