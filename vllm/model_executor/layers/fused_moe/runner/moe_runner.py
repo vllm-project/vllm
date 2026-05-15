@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
     MoERunnerInterface,
 )
@@ -37,6 +38,8 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
@@ -265,6 +268,10 @@ class MoERunner(MoERunnerInterface):
 
         self._forward_entry = self._select_forward()
 
+        # When True, skip the allreduce in _maybe_reduce_final_output
+        # and let the model fuse it with the next layer's input layernorm.
+        self.defer_allreduce: bool = False
+
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -411,6 +418,32 @@ class MoERunner(MoERunnerInterface):
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
+            if self.defer_allreduce and self.moe_config.ep_size <= 1:
+                # Only defer for decode batches within Lamport one-shot
+                # limit (≤128 tokens).  For prefill / large batches the
+                # model won't do the deferred allreduce, so we must
+                # allreduce here to preserve correctness.
+                if states.shape[0] <= 128:
+                    if not torch.compiler.is_compiling():
+                        logger.info_once(
+                            "MoE defer_allreduce: skipping cross_device_reduce_1stage "
+                            "for layer=%s, num_tokens=%s, tp=%s, ep=%s",
+                            getattr(self, "layer_name", "?"),
+                            states.shape[0],
+                            self.moe_config.tp_size,
+                            self.moe_config.ep_size,
+                            scope="moe_defer_allreduce",
+                        )
+                    return states[..., :trunc_size]
+                else:
+                    if not torch.compiler.is_compiling():
+                        logger.warning_once(
+                            "MoE defer_allreduce: batch too large (%s > 128), "
+                            "falling back to internal allreduce for layer=%s",
+                            states.shape[0],
+                            getattr(self, "layer_name", "?"),
+                            scope="moe_defer_skipped",
+                        )
             states = tensor_model_parallel_all_reduce(states)
 
         return states[..., :trunc_size]

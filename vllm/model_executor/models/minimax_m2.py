@@ -37,7 +37,9 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -72,6 +74,8 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 
 class MiniMaxM2MoE(nn.Module):
@@ -272,6 +276,10 @@ class MiniMaxM2DecoderLayer(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
 
         self.layer_idx = layer_idx
+        # When True, do explicit TP allreduce on hidden_states before
+        # input_layernorm, so torch.compile Pattern 1 can fuse AR +
+        # fused_add_rms_norm into trtllm_allreduce_fusion.
+        self._defer_ar: bool = False
         self.self_attn = MiniMaxM2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -303,12 +311,29 @@ class MiniMaxM2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
+        # Deferred AR: the previous MoE skipped cross_device_reduce_1stage,
+        # so hidden_states is partial.  Do the TP allreduce here right
+        # before input_layernorm, so torch.compile Pattern 1
+        # (AllReduceFusedAddRMSNormPattern) can fuse AR + residual + RMSNorm
+        # into trtllm_allreduce_fusion(kARResidualRMSNorm).
+        if self._defer_ar and residual is not None and hidden_states.shape[0] <= 128:
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            if not torch.compiler.is_compiling():
+                logger.info_once(
+                    "MoE deferred AR in decoder layer %s: allreduce before "
+                    "input_layernorm, num_tokens=%s",
+                    self.layer_idx,
+                    hidden_states.shape[0],
+                    scope="moe_defer_layer_forward",
+                )
+
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -334,6 +359,8 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+
+        self._fuse_moe_allreduce = vllm_config.compilation_config.pass_config.fuse_moe_allreduce
 
         self.vocab_size = config.vocab_size
 
@@ -367,6 +394,28 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        if self._fuse_moe_allreduce:
+            for layer in islice(self.layers, self.start_layer, self.end_layer):
+                runner = layer.block_sparse_moe.experts.runner
+                if runner.moe_config.ep_size <= 1:
+                    runner.defer_allreduce = True
+                    layer._defer_ar = True
+            # Disable fusion when EP is active — the runner keeps its
+            # own AR because deferral isn't safe across EP all-to-all.
+            self._fuse_moe_allreduce = self.layers[
+                self.start_layer
+            ].block_sparse_moe.experts.runner.defer_allreduce
+            logger.info_once(
+                "MoE deferred AR: fuse_moe_allreduce=%s, tp_size=%s, ep_size=%s, "
+                "num_layers=%s, hidden_size=%s",
+                self._fuse_moe_allreduce,
+                get_tensor_model_parallel_world_size(),
+                self.layers[self.start_layer].block_sparse_moe.experts.runner.moe_config.ep_size,
+                self.end_layer - self.start_layer,
+                self.config.hidden_size,
+                scope="moe_defer_init",
+            )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -389,18 +438,35 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
             self._maybe_add_hidden_state(
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
+
+        # Fuse the last deferred MoE AR with self.norm.
+        last_layer_fused = (
+            self._fuse_moe_allreduce
+            and hidden_states.shape[0] <= 128
+            and get_pp_group().is_last_rank
+        )
+        if last_layer_fused:
+            # Do the deferred allreduce before self.norm; Pattern 1
+            # fuses allreduce + fused_add_rms_norm into a single kernel.
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:

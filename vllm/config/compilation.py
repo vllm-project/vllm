@@ -136,6 +136,11 @@ class PassConfig:
     """Enable flashinfer allreduce fusion."""
     fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
+    fuse_moe_allreduce: bool = None  # type: ignore[assignment]
+    """Enable deferred MoE allreduce fusion for MiniMax-M2 decode
+    (≤128 tokens). The MoE skips its internal allreduce; the next
+    layer's input layernorm fuses AR + residual + RMSNorm in one
+    Lamport cluster kernel."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -227,6 +232,7 @@ class PassConfig:
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
+        "fuse_moe_allreduce",
         "fuse_act_padding",
         "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
