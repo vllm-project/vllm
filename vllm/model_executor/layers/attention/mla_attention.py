@@ -211,7 +211,10 @@ from vllm.distributed.parallel_state import (
     get_dcp_group,
     is_global_first_rank,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
@@ -460,7 +463,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
+        self._decode_fn = getattr(self.impl, "_forward_decode", self.impl.forward_mqa)
         self.use_direct_call = not current_platform.opaque_attention_op()
+        self.exposed_split = envs.VLLM_MLA_EXPOSED_SPLIT and not self.use_direct_call
 
         vllm_config = get_current_vllm_config()
         compilation_config = vllm_config.compilation_config
@@ -504,6 +509,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
 
+        # Weight matrices set by process_weights_after_loading
+        # For non-aiter path:
+        self.W_UV: torch.Tensor | None = None
+        self.W_UK_T: torch.Tensor | None = None
+        # For aiter fp8 path:
+        self.W_K: torch.Tensor | None = None
+        self.W_K_scale: torch.Tensor | None = None
+        self.W_V: torch.Tensor | None = None
+        self.W_V_scale: torch.Tensor | None = None
+
+        # Lazy-initialized in forward_exposed_split
+        self.dcp_world_size: int | None = None
+
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
         self._chunked_prefill_workspace_size: int | None = None
@@ -543,6 +561,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _encode_layer_name(self.layer_name),
             )
 
+        if output_shape is None:
+            output_shape = torch.Size((q.shape[0], self.num_heads * self.v_head_dim))
+
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata_raw = forward_context.attn_metadata
@@ -580,6 +601,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
         else:
+            # Exposed split path: exposes prefill/decode split to
+            # torch.compile for better fusion opportunities on
+            # surrounding GEMMs.
+            if self.exposed_split:
+                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+                # Exposed path still routes through forward_impl so there is a
+                # single entry point for MLA forward logic.
+                return self.forward_impl(
+                    q,
+                    kv_c_normed,
+                    k_pe,
+                    kv_cache=None,
+                    attn_metadata=None,
+                    output=output,
+                )
+
             encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
@@ -589,6 +626,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
             )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
                 kv_c_normed,
@@ -605,7 +643,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
-        attn_metadata: "MLACommonMetadata",
+        attn_metadata: "MLACommonMetadata | None",
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -632,6 +670,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 dtype=q.dtype,
                 device=output.device,
             )
+
+        if self.exposed_split:
+            return self.forward_exposed_split(q, k_c_normed, k_pe, output)
+
+        assert kv_cache is not None
 
         if attn_metadata is None:
             # During the profile run try to simulate to worse case output size
@@ -738,6 +781,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
                 N, B, P = mqa_q_nope.shape
+                assert self.W_UK_T is not None
                 _, _, L = self.W_UK_T.shape
 
                 if self.q_pad_num_heads is not None:
@@ -989,19 +1033,169 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
-            # Convert from (B, N * V) to (N, B, V)
-            out = out.transpose(0, 1)
+            mat = torch.bmm(x, self.W_UV)  # (N, B, V) contiguous
+            out.view(-1, self.num_heads, self.v_head_dim).transpose(0, 1).copy_(mat)
 
-            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            torch.bmm(x, self.W_UV, out=out)  # Reuse "out" to make it "hot"
+    def _v_up_proj_functional(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            out = x.new_empty(x.shape[0], x.shape[1], self.v_head_dim)
+            out = rocm_aiter_ops.batched_gemm_a16wfp4(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                out,
+                transpose_bm=True,
+                prequant=True,
+                y_scale=None,
+            )
+            return out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            out = x.new_empty(x.shape[0], x.shape[1], self.v_head_dim)
+            rocm_aiter_ops.triton_fp8_bmm(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                group_size=128,
+                transpose_bm=True,
+                YQ=out,
+            )
+            return out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        else:
+            mat = torch.bmm(x, self.W_UV)
+            return mat.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
 
-            # Convert from (N, B, V) to (B, N * V)
-            out_new = out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+    def _concat_k_nope_k_pe(
+        self, k_nope: torch.Tensor, k_pe: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Efficiently concatenate k_nope and k_pe tensors along the last dimension.
 
-            # Adjust output buffer shape back to the original (B, N * V)
-            N, B, V = out.shape
-            out.resize_((B, N * V))
-            out.copy_(out_new)  # Copy result
+        This function avoids the performance penalty of torch.cat with expanded
+        non-contiguous tensors by pre-allocating the output and using direct copies.
+
+        Args:
+            k_nope: Tensor of shape [..., nope_dim]
+            k_pe: Tensor to broadcast and concatenate, typically shape [..., 1, pe_dim]
+                or [..., pe_dim]
+
+        Returns:
+            Tensor of shape [..., nope_dim + pe_dim]
+        """
+        return self.impl._concat_k_nope_k_pe(k_nope, k_pe)
+
+    # Property accessors for impl methods
+    @property
+    def _run_prefill_context_chunk(self):
+        return getattr(self.impl, "_run_prefill_context_chunk", None)
+
+    @property
+    def _run_prefill_new_tokens(self):
+        return getattr(self.impl, "_run_prefill_new_tokens", None)
+
+    def _forward_decode(self, *args, **kwargs):
+        # Older MLA implementations used _forward_decode; current backends
+        # expose forward_mqa. Support both during the refactor transition.
+        return self._decode_fn(*args, **kwargs)
+
+    def forward_exposed_split(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward with exposed prefill/decode split for torch.compile."""
+
+        if self.dcp_world_size is None:
+            self.dcp_world_size = get_dcp_group().world_size
+
+        if self.impl.dcp_world_size == -1:
+            self.impl.dcp_world_size = get_dcp_group().world_size
+
+        # Write to KV cache via custom op
+        dummy_tensor = torch.ops.vllm.mla_write_kv_cache(
+            kv_c_normed,
+            k_pe,
+            self.layer_name,
+        )
+
+        num_decode_tokens = torch.ops.vllm.mla_split_batch(q, self.layer_name)
+        torch._constrain_as_size(num_decode_tokens, min=0)
+
+        # Prefill path
+        prefill_kv_c = kv_c_normed.narrow(
+            0, num_decode_tokens, kv_c_normed.size(0) - num_decode_tokens
+        )
+        prefill_k_pe = k_pe.narrow(
+            0, num_decode_tokens, k_pe.size(0) - num_decode_tokens
+        )
+
+        # Prefill path: kv_b_proj GEMM on prefill tokens only (OPTIMIZED)
+        kv_nope = self.kv_b_proj(prefill_kv_c)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k = self._concat_k_nope_k_pe(k_nope, prefill_k_pe)
+        prefill_q = q.narrow(0, num_decode_tokens, q.size(0) - num_decode_tokens)
+        # Prefill attention (cudagraph_unsafe): writes directly into
+        # output[num_decode_tokens:] — no intermediate buffer needed.
+        torch.ops.vllm.mla_attention_prefill_with_output(
+            prefill_q,  # Pre-sliced to prefill portion
+            k,  # Already prefill-only (from kv_b_proj)
+            v,  # Already prefill-only (from kv_b_proj)
+            num_decode_tokens,
+            output,
+            dummy_tensor,
+            self.layer_name,
+        )
+
+        # Decode path
+        # Only process decode tokens (eliminates wasted computation on prefill tokens)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        decode_q_nope = q_nope.narrow(0, 0, num_decode_tokens)
+        decode_q_pe = q_pe.narrow(0, 0, num_decode_tokens)
+
+        decode_q_nope = decode_q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
+        decode_q_nope = decode_q_nope.transpose(0, 1)
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                decode_q_nope,
+                self.W_K,
+                self.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            assert self.W_UK_T is not None
+            ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+            ql_nope = ql_nope.transpose(0, 1)
+
+        attn_out, lse = torch.ops.vllm.mla_attention_decode(
+            ql_nope,
+            decode_q_pe,
+            num_decode_tokens,
+            self.num_heads,
+            self.kv_lora_rank,
+            dummy_tensor,
+            self.layer_name,
+        )
+
+        # V up-projection writes directly into output[0:D] — decode and
+        # prefill slices are non-overlapping so no merge op is needed.
+        decode_output = output.narrow(0, 0, num_decode_tokens)
+        self._v_up_proj(attn_out, out=decode_output)
+
+        return output
+
+
+def _get_mla_context(
+    layer_name: str,
+) -> tuple["MLACommonMetadata", "MLAAttention", torch.Tensor]:
+    """Shared runtime context lookup for MLA custom ops."""
+    attn_metadata, attn_layer, kv_cache, _ = get_attention_context(layer_name)
+    return attn_metadata, cast("MLAAttention", attn_layer), kv_cache
 
 
 def unified_mla_kv_cache_update(
@@ -1067,7 +1261,7 @@ def unified_mla_attention_with_output(
     # attention forward.
     del kv_cache_dummy_dep
     layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache = _get_mla_context(layer_name)
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -1108,6 +1302,254 @@ direct_register_custom_op(
     fake_impl=unified_mla_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.flexible_layout,),
+)
+
+
+# =====================================================================
+# Custom ops for exposed MLA prefill/decode split (VLLM_MLA_EXPOSED_SPLIT)
+# =====================================================================
+
+
+torch.library.define(
+    "vllm::mla_split_batch",
+    "(Tensor q, str layer_name) -> SymInt",
+    tags=torch.Tag.pt2_compliant_tag,
+)
+
+
+@torch.library.impl("vllm::mla_split_batch", "cuda")
+def mla_split_batch_cuda(q: torch.Tensor, layer_name: str) -> int:
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    if attn_metadata is None:
+        return 0
+    return attn_metadata.num_decode_tokens
+
+
+@torch.library.register_fake("vllm::mla_split_batch")
+def mla_split_batch_fake(q: torch.Tensor, layer_name: str) -> int:
+    """Fake implementation for FakeTensor mode and shape inference."""
+    ctx = torch.library.get_ctx()
+    return ctx.new_dynamic_size()
+
+
+def mla_write_kv_cache(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """Write KV data to cache.
+
+    This custom op writes the compressed KV and positional embeddings to the
+    KV cache. It's marked cudagraph_unsafe because slot_mapping is
+    data-dependent. Returns a dummy tensor to maintain dependency ordering
+    for torch.compile.
+    """
+    attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
+
+    if attn_metadata is not None and kv_cache.numel() > 0:
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            attn_metadata.slot_mapping.flatten(),
+            kv_cache_dtype=attn_layer.kv_cache_dtype,
+            scale=attn_layer._k_scale,
+        )
+
+    return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
+
+
+def mla_write_kv_cache_fake(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """Fake implementation for torch.compile."""
+    return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
+
+
+direct_register_custom_op(
+    op_name="mla_write_kv_cache",
+    op_func=mla_write_kv_cache,
+    mutates_args=[],
+    fake_impl=mla_write_kv_cache_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch._C.Tag.cudagraph_unsafe,),
+)
+
+
+def mla_attention_decode(
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    num_decode_tokens: int,
+    num_heads: int,
+    kv_lora_rank: int,
+    dummy_tensor: torch.Tensor,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode attention - handles cat/FP8/DCP internally."""
+    attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
+    fp8_attention = attn_layer.kv_cache_dtype.startswith("fp8")
+    if fp8_attention:
+        kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+    if num_decode_tokens == 0:
+        return (
+            ql_nope.new_zeros(0, num_heads, kv_lora_rank),
+            ql_nope.new_zeros(0, num_heads, dtype=torch.float32),
+        )
+
+    decode_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    if fp8_attention and attn_layer.impl.supports_quant_query_input:
+        decode_q = attn_layer._decode_concat_quant_fp8_op(
+            ql_nope, q_pe, attn_layer._q_scale
+        )
+    else:
+        decode_q = (ql_nope, q_pe)
+
+    if attn_layer.dcp_world_size is not None and attn_layer.dcp_world_size > 1:
+        assert not fp8_attention, "DCP not support fp8 kvcache now."
+        if isinstance(decode_q, tuple):
+            decode_q = torch.cat(decode_q, dim=-1)
+        decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+
+    attn_out, lse = attn_layer._forward_decode(
+        decode_q, kv_cache, attn_metadata, attn_layer
+    )
+
+    if attn_layer.dcp_world_size is not None and attn_layer.dcp_world_size > 1:
+        assert lse is not None
+        attn_out = cp_lse_ag_out_rs(
+            attn_out,
+            lse,
+            get_dcp_group(),
+            is_lse_base_on_e=not getattr(attn_layer, "_use_fi_prefill", False),
+        )
+
+    if lse is None:
+        lse = ql_nope.new_empty(num_decode_tokens, num_heads, dtype=torch.float32)
+
+    return attn_out, lse
+
+
+def mla_attention_decode_fake(
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
+    num_decode_tokens: int,
+    num_heads: int,
+    kv_lora_rank: int,
+    dummy_tensor: torch.Tensor,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile - returns tuple."""
+    attn_out = ql_nope.new_empty(num_decode_tokens, num_heads, kv_lora_rank)
+    lse = ql_nope.new_empty(num_decode_tokens, num_heads, dtype=torch.float32)
+    return attn_out, lse
+
+
+direct_register_custom_op(
+    op_name="mla_attention_decode",
+    op_func=mla_attention_decode,
+    mutates_args=[],
+    fake_impl=mla_attention_decode_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch._C.Tag.cudagraph_unsafe,),
+)
+
+
+def mla_attention_prefill_with_output(
+    q: torch.Tensor,  # NOTE: prefill portion only (sliced by caller)
+    k: torch.Tensor,  # NOTE: prefill portion only (from kv_b_proj optimization)
+    v: torch.Tensor,  # NOTE: prefill portion only (from kv_b_proj optimization)
+    num_decode_tokens: int,
+    output: torch.Tensor,
+    dummy_tensor: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """
+    Prefill attention with direct output writes.
+    """
+    attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
+    if attn_layer.kv_cache_dtype.startswith("fp8"):
+        kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+    # Optimization 1.1: Inputs are already prefill-only, no slicing needed!
+    num_prefill = q.shape[0]
+    if attn_metadata is None or num_prefill == 0:
+        return
+    if attn_metadata.prefill is None or attn_metadata.num_prefills == 0:
+        return
+    assert attn_metadata.prefill is not None
+    prefill_metadata = attn_metadata.prefill
+    has_context = prefill_metadata.chunked_context is not None
+    assert attn_layer._run_prefill_new_tokens is not None
+    output_prefill = attn_layer._run_prefill_new_tokens(
+        prefill=prefill_metadata,
+        q=q,
+        k=k,
+        v=v,
+        return_softmax_lse=has_context,
+    )
+    prefill_out = output[num_decode_tokens : num_decode_tokens + num_prefill]
+    if has_context:
+        suffix_output, suffix_lse = output_prefill
+        assert attn_layer.dcp_world_size is not None
+        if attn_layer.dcp_world_size > 1:
+            context_output, context_lse = (
+                attn_layer._context_parallel_compute_prefill_context(
+                    q,
+                    kv_cache,
+                    attn_metadata,
+                    k_scale=None,
+                    dcp_world_size=attn_layer.dcp_world_size,
+                )
+            )
+        else:
+            context_output, context_lse = attn_layer.impl._compute_prefill_context(
+                q, kv_cache, attn_metadata, attn_layer._k_scale
+            )
+        if attn_layer.impl._pad_v:
+            context_output = context_output[..., : v.shape[-1]]
+            suffix_output = suffix_output[..., : v.shape[-1]]
+
+        prefill_out_reshaped = prefill_out.view(
+            num_prefill, attn_layer.num_heads, attn_layer.v_head_dim
+        )
+        merge_attn_states(
+            output=prefill_out_reshaped,
+            prefix_output=context_output,
+            prefix_lse=context_lse,
+            suffix_output=suffix_output,
+            suffix_lse=suffix_lse,
+        )
+    else:
+        assert isinstance(output_prefill, torch.Tensor)
+        prefill_out.copy_(output_prefill[..., : v.shape[-1]].flatten(start_dim=-2))
+
+
+def mla_attention_prefill_with_output_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    num_decode_tokens: int,
+    output: torch.Tensor,
+    dummy_tensor: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Fake implementation for torch.compile."""
+    return
+
+
+direct_register_custom_op(
+    op_name="mla_attention_prefill_with_output",
+    op_func=mla_attention_prefill_with_output,
+    mutates_args=["output"],
+    fake_impl=mla_attention_prefill_with_output_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch._C.Tag.cudagraph_unsafe,),
 )
 
 
@@ -2023,19 +2465,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
         """
-        k = torch.empty(
-            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
-            dtype=k_nope.dtype,
-            device=k_nope.device,
-        )
-
         if self._use_flashinfer_concat_mla_k:
+            k = torch.empty(
+                (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+                dtype=k_nope.dtype,
+                device=k_nope.device,
+            )
             torch.ops.vllm.flashinfer_concat_mla_k(k, k_nope, k_pe)
+            return k
         else:
-            # Fallback: Direct copies with efficient broadcasting
-            k[..., : k_nope.shape[-1]] = k_nope
-            k[..., k_nope.shape[-1] :] = k_pe
-        return k
+            # Compile-friendly concatenation with broadcasting
+            k_pe_expanded = k_pe.expand(*k_nope.shape[:-1], k_pe.shape[-1])
+            return torch.cat([k_nope, k_pe_expanded], dim=-1)
 
     def _compute_prefill_context(
         self,
