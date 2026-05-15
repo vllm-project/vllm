@@ -218,6 +218,10 @@ class OffloadingManager(ABC):
         """
         return ()
 
+    def reset_cache(self) -> None:
+        """Evict all tracked blocks and reset internal state."""
+        return
+
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
         return

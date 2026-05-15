@@ -960,10 +960,23 @@ class CompilationSettings(BaseSettings):
             "parameters in custom ops. Defaults to enabled on torch >= 2.11."
         ),
     )
-    use_v2_model_runner: bool = Field(
-        default=False,
-        description="Flag to enable v2 model runner.",
+    use_v2_model_runner: bool | None = Field(
+        default=None,
+        description=(
+            "Flag to control the v2 model runner. Tri-state: ``1`` forces "
+            "the v2 runner on, ``0`` forces it off, and unset (default) "
+            "lets the config decide based on model and platform support."
+        ),
     )
+
+    @field_validator("use_v2_model_runner", mode="before")
+    @classmethod
+    def _parse_use_v2_model_runner(cls, v: Any) -> Any:
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return {"1": True, "0": False}.get(v.strip())
+        return v
 
     @model_validator(mode="after")
     def _apply_aot_compile_defaults(self) -> "CompilationSettings":
