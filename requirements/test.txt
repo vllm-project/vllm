@@ -55,7 +55,6 @@ attrs==24.2.0
     #   aiohttp
     #   fiona
     #   hypothesis
-    #   jsonlines
     #   jsonschema
     #   pytest-subtests
     #   rasterio
@@ -397,8 +396,6 @@ jsonargparse==4.46.0
     # via
     #   lightning
     #   terratorch
-jsonlines==4.0.0
-    # via lm-eval
 jsonnet==0.21.0
     # via jsonargparse
 jsonpointer==3.0.0
@@ -446,7 +443,7 @@ lightning-utilities==0.14.3
     #   torchmetrics
 llvmlite==0.44.0
     # via numba
-lm-eval==0.4.11
+lm-eval==0.4.12
     # via -r requirements/test.in
 lxml==5.3.0
     # via
@@ -1330,5 +1327,3 @@ yarl==1.17.1
     #   schemathesis
 zipp==3.23.0
     # via importlib-metadata
-zstandard==0.23.0
-    # via lm-eval
