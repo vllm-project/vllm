@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -40,7 +41,6 @@ from .deepseek_mtp import SharedHead
 from .deepseek_v2 import get_spec_layer_idx_from_weight_name
 from .deepseek_v4 import (
     DeepseekV4DecoderLayer,
-    hc_head,
     make_deepseek_v4_expert_params_mapping,
 )
 from .utils import maybe_prefix
@@ -119,6 +119,8 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             aux_stream_list=aux_stream_list,
         )
 
+        self.hc_head_op = HCHeadOp()
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -141,8 +143,11 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
-        hidden_states = self.mtp_block(
+        hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
+        )
+        hidden_states = self.mtp_block.hc_post(
+            hidden_states, residual, post_mix, res_mix
         )
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
@@ -230,7 +235,7 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
         hidden_states = hidden_states.view(
             -1, mtp_layer.hc_mult, mtp_layer.config.hidden_size
         )
-        hidden_states = hc_head(
+        hidden_states = self.hc_head_op(
             hidden_states,
             mtp_layer.hc_head_fn,
             mtp_layer.hc_head_scale,
@@ -285,6 +290,11 @@ class DeepSeekV4MTP(nn.Module):
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
             ".norm.weight": ".shared_head.norm.weight",
+            # Pre-MoE norm + gate are now owned by
+            # ``DeepseekV4MoE.norm_gate`` (see NormGatedLinear).
+            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
+            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
+            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -432,7 +442,12 @@ class DeepSeekV4MTP(nn.Module):
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
                     if name.endswith(".ffn.gate.bias"):
-                        name = name.replace(".bias", ".e_score_correction_bias")
+                        # ``e_score_correction_bias`` lives on
+                        # ``norm_gate`` directly (not on the inner gate).
+                        name = name.replace(
+                            ".ffn.gate.bias",
+                            ".ffn.norm_gate.e_score_correction_bias",
+                        )
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader

@@ -60,6 +60,11 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
+try:
+    import soundfile as sf
+except ImportError:
+    sf = PlaceholderModule("soundfile")
+
 
 logger = logging.getLogger(__name__)
 
@@ -438,6 +443,27 @@ def process_video(video: Any) -> Mapping[str, Any]:
 
     raise ValueError(
         f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
+    )
+
+
+def process_audio(audio: Any) -> tuple:
+    """
+    Process a single audio input and return a (array, sample_rate) tuple.
+
+    Supports:
+    1. String: treated as a file path, loaded with soundfile.
+    2. Dict with 'array' and 'sampling_rate' keys: HuggingFace audio format.
+    3. Tuple (array, sr): passed through directly.
+    """
+    if isinstance(audio, str):
+        return sf.read(audio)
+    if isinstance(audio, dict) and "array" in audio and "sampling_rate" in audio:
+        return audio["array"], audio["sampling_rate"]
+    if isinstance(audio, tuple) and len(audio) == 2:
+        return audio
+    raise ValueError(
+        f"Invalid audio input {audio}. Must be a file path string, "
+        "a dict with 'array' and 'sampling_rate', or a (array, sr) tuple."
     )
 
 
@@ -1399,6 +1425,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random-rerank",
             "hf",
             "custom",
+            "custom_audio",
+            "custom_image",
             "custom_mm",
             "prefix_repetition",
             "spec_bench",
@@ -1816,8 +1844,28 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
         )
 
-    elif args.dataset_name == "custom_mm":
-        dataset = CustomMMDataset(
+    elif args.dataset_name in ("custom_image", "custom_mm"):
+        if args.dataset_name == "custom_mm":
+            logger.warning(
+                "Dataset name 'custom_mm' is deprecated and will be removed in v0.24. "
+                "Use '--dataset-name custom_image' instead."
+            )
+        dataset = CustomImageDataset(
+            dataset_path=args.dataset_path,
+            disable_shuffle=args.disable_shuffle,
+            random_seed=args.seed,
+        )
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
+            enable_multimodal_chat=args.enable_multimodal_chat,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+
+    elif args.dataset_name == "custom_audio":
+        dataset = CustomAudioDataset(
             dataset_path=args.dataset_path,
             disable_shuffle=args.disable_shuffle,
             random_seed=args.seed,
@@ -2249,9 +2297,9 @@ class CustomDataset(BenchmarkDataset):
         return sampled_requests
 
 
-class CustomMMDataset(CustomDataset):
+class CustomImageDataset(CustomDataset):
     """
-    Implements the Custom MultiModal dataset. Loads data from a JSONL file and generates
+    Implements the Custom image dataset. Loads data from a JSONL file and generates
     sample requests based on conversation turns. E.g.,
     ```
     {
@@ -2325,6 +2373,104 @@ class CustomMMDataset(CustomDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
 
+        return sampled_requests
+
+
+class CustomAudioDataset(CustomDataset):
+    """
+    Custom dataset for audio benchmarking. Loads data from a JSONL file. E.g.,
+    {"prompt": "Transcribe the audio.", "audio": "/path/to/audio.wav"}
+
+    Supports both:
+    - Dedicated ASR models (e.g. Whisper) via openai-audio & /v1/audio/transcriptions
+    - Chat-based audio models (e.g. Qwen2-Audio) via openai-chat & /v1/chat/completions
+    """
+
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        output_len: int | None = None,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        skip_chat_template: bool = False,
+        enable_multimodal_chat: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        self.num_available_samples = len(self.data)
+        if num_requests <= 0:
+            num_requests = self.num_available_samples
+        sampled_requests = []
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item.get("prompt", "")
+            if tokenizer is None:
+                prompt_len = 1
+                new_output_len = output_len if output_len not in (None, -1) else 256
+                mm_content = None
+            else:
+                use_chat_template = (
+                    not skip_chat_template
+                    and hasattr(tokenizer, "chat_template")
+                    and tokenizer.chat_template is not None
+                )
+                if enable_multimodal_chat:
+                    # Chat-based audio models (e.g., Qwen2-Audio):
+                    # encode audio as base64; serve.py assembles the chat message
+                    # as: {"role": "user", "content": [
+                    #     {"type": "text", "text": prompt},
+                    #     {"type": "input_audio", "input_audio": {...}}
+                    # ]}
+                    y, sr = process_audio(item["audio"])
+                    buf = io.BytesIO()
+                    sf.write(buf, y, sr, format="WAV")
+                    audio_base64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+                    mm_content = {
+                        "type": "input_audio",
+                        "input_audio": {
+                            "data": audio_base64,
+                            "format": "wav",
+                        },
+                    }
+                    # prompt stays as plain string; serve.py handles wrapping
+                else:
+                    # Whisper-style models: load audio array locally
+                    y, sr = process_audio(item["audio"])
+                    mm_content = {"audio": (y, sr)}
+                    if use_chat_template:
+                        # ASR models with a chat template but not multimodal chat
+                        prompt = tokenizer.apply_chat_template(
+                            [{"role": "user", "content": prompt}],
+                            add_generation_prompt=True,
+                            tokenize=False,
+                        )
+                    # else: plain prompt for Whisper-style models
+                prompt_len = (
+                    len(tokenizer(prompt).input_ids) if isinstance(prompt, str) else 1
+                )
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    new_output_len = int(item["output_tokens"])
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
         return sampled_requests
 
 

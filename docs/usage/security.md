@@ -333,6 +333,43 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 - **Do not copy cache contents from untrusted sources.** If you distribute cache artifacts between environments, ensure they originate from a trusted build pipeline.
 - **Container deployments:** If mounting cache directories into containers, ensure the volume source is trusted.
 
+## FIPS Compatibility
+
+FIPS compliance depends on many factors, so a vLLM deployment is not automatically FIPS compliant. Recent changes have improved vLLM's *tolerance* of FIPS-enabled hosts — that is, avoiding crashes when non-approved algorithms are blocked — but tolerance is not the same as compliance. Whether a deployment satisfies FIPS requirements depends on the host operating system, the OpenSSL provider backing Python's `hashlib` and `ssl` modules, and which optional dependencies are installed.
+
+### FIPS-relevant configuration
+
+Operators running vLLM on FIPS-enabled hosts should select FIPS-approved algorithms via the following knobs:
+
+- **Multimodal input hashing** — `VLLM_MM_HASHER_ALGORITHM` defaults to `blake3`, which is not FIPS-approved. Set it to `sha256` or `sha512` in FIPS-enabled environments.
+- **Prefix-cache hashing** — set `--prefix-caching-hash-algo` (config field `prefix_caching_hash_algo`) to `sha256` or `sha256_cbor`. The `xxhash` and `xxhash_cbor` options are not FIPS-approved.
+- **TLS ciphers** — use `--ssl-ciphers` to restrict the API server's TLS handshake to FIPS-approved cipher suites that match your environment's policy.
+
+### Automatic fallback for non-security MD5 use
+
+vLLM uses MD5 in a few places to derive non-security cache keys (for example, configuration hashes). These call sites pass `usedforsecurity=False` and additionally fall back to SHA-256 when the underlying OpenSSL provider refuses MD5 outright (see `safe_hash()` in `vllm/utils/hashing.py`). No user action is required; this behavior is documented so that auditors and security reviewers can identify the MD5 references and understand their purpose.
+
+### Dependencies that provide non-FIPS hash implementations
+
+Some dependencies expose hash implementations that are not FIPS-approved. vLLM only invokes them when the corresponding algorithm is selected, but operators with strict cryptographic controls may want to ensure the code paths are not exercised — and, where policy requires, that the packages themselves are absent:
+
+- `blake3` — currently listed in `requirements/common.txt`, so a standard install pulls it in. It is imported lazily and only used when `VLLM_MM_HASHER_ALGORITHM=blake3` (the default). Setting `VLLM_MM_HASHER_ALGORITHM` to `sha256` or `sha512` is sufficient to keep the non-FIPS code path dormant. If your policy additionally forbids the package being present, uninstall it after `pip install` (`pip uninstall blake3`); vLLM will continue to function as long as `VLLM_MM_HASHER_ALGORITHM` is set to a non-blake3 value.
+- `xxhash` — a true optional dependency (not in `requirements/common.txt`). It is only imported when an `xxhash`-based prefix-cache algorithm is selected. Leave it uninstalled and select a `sha256`-based prefix-cache algorithm.
+
+### Beyond hashing: other FIPS considerations
+
+Hashing is the area where vLLM has explicit FIPS-aware code, but a FIPS-compliant deployment depends on several factors that sit outside vLLM itself. Operators should evaluate the following with their platform and security teams:
+
+- **Host crypto provider.** Python's `hashlib` and `ssl` modules are FIPS-aware only when Python is linked against a FIPS-validated OpenSSL (or equivalent) provider supplied by the host OS. vLLM inherits whatever provider the host configures — it does not bundle one.
+- **API server TLS.** TLS termination for the OpenAI-compatible API server uses the host's OpenSSL via Python's `ssl` module. Restrict the cipher suite with `--ssl-ciphers` to match your environment's FIPS policy, and ensure server certificates are issued with FIPS-approved algorithms and key sizes.
+- **Outbound HTTPS.** Model and asset downloads (for example, via `huggingface_hub`) use the same host TLS stack. The same provider/cipher considerations apply.
+- **Inter-node communication is unencrypted by default.** As described in [Inter-Node Communication](#inter-node-communication), PyTorch Distributed, KV-cache transfer, and data-parallel channels do not encrypt traffic. FIPS environments that require FIPS-approved cryptography for data in transit must provide that protection externally — for example, via an mTLS sidecar or IPsec terminated by a FIPS-validated module — since vLLM's internal channels cannot satisfy the requirement on their own. Network isolation alone is not cryptography and does not meet a "FIPS-approved cryptography for data in transit" requirement, though it remains a useful defense-in-depth measure.
+- **Dependencies that bundle their own OpenSSL.** Some Python wheels statically link OpenSSL builds that fail the kernel FIPS self-test on FIPS-enabled hosts (`FATAL FIPS SELFTEST FAILURE`). `opencv-python-headless` is a known example; other manylinux wheels may behave similarly. Audit your installed wheels for bundled crypto libraries when troubleshooting FIPS startup failures.
+- **Accelerator and ML libraries.** PyTorch, CUDA, cuDNN, NCCL, and similar components have their own crypto and FIPS posture independent of vLLM. NVIDIA publishes FIPS-validated builds for some libraries; vLLM does not pin to those builds, so selecting and validating them is the operator's responsibility.
+- **What is *not* a FIPS concern in vLLM.** Random number generation used for token sampling (Python/NumPy/PyTorch RNGs) is not a cryptographic use and is out of scope for FIPS. Pickled cache artifacts are a separate security concern covered under [Cache Directory Security](#cache-directory-security).
+
+In short: the configuration knobs above let vLLM avoid non-approved algorithms, and the automatic fallbacks let it run without crashing on FIPS-enabled hosts. End-to-end FIPS compliance, however, is a property of the full deployment — host OS, crypto provider, transitive dependencies, and network architecture — not of vLLM alone.
+
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).

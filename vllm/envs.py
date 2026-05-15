@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_TRITON_ATTN_USE_TD: bool | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -202,7 +203,6 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
-    VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -248,7 +248,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_USE_V2_MODEL_RUNNER: bool | None = None
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -526,6 +526,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Use tensor descriptors for Q/K/V loads and output stores in the
+    # Triton unified-attention kernel.  Enables HW 2D block reads on
+    # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
+    # compile time so other platforms see no overhead.  Tri-state override:
+    # unset (default) lets the `triton_attn` backend auto-select per
+    # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
+    # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
+    "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -1465,13 +1475,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_NVFP4_CT_EMULATIONS": lambda: bool(
         int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))
     ),
-    # Time (in seconds) after which the KV cache on the producer side is
-    # automatically cleared if no READ notification is received from the
-    # consumer. This is only applicable when using NixlConnector in a
-    # disaggregated decode-prefill setup.
-    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT": lambda: int(
-        os.getenv("VLLM_NIXL_ABORT_REQUEST_TIMEOUT", "480")
-    ),
     # Controls the read mode for the Mori-IO connector
     "VLLM_MORIIO_CONNECTOR_READ_MODE": lambda: (
         os.getenv("VLLM_MORIIO_CONNECTOR_READ_MODE", "False").lower() in ("true", "1")
@@ -1707,9 +1710,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable v2 model runner.
-    "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
-        int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    # Flag to control the v2 model runner. If unset, use config defaults.
+    "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
+        os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model
@@ -1788,6 +1791,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
     ),
+    # If set to 1, use Python spinloop extension to poll in a more efficient
+    # way when using the mp backend.
+    "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
 }
 
 
@@ -1884,6 +1890,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
+        "VLLM_NIXL_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
