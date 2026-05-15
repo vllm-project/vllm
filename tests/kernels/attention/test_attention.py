@@ -9,6 +9,7 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
@@ -452,9 +453,18 @@ def test_num_heads_not_divisible_by_num_kv_heads(attention_cls: type) -> None:
     num_heads = 16
     num_kv_heads = 5
     with pytest.raises(AssertionError):
-        _ = attention_cls(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-        )
+        if attention_cls is Attention:
+            _ = attention_cls(
+                num_heads,
+                head_size,
+                scale,
+                VllmConfig(),
+                num_kv_heads=num_kv_heads,
+            )
+        else:
+            _ = attention_cls(
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads=num_kv_heads,
+            )
