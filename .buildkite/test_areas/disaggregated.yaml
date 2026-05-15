@@ -123,7 +123,7 @@ steps:
 - label: DSv4-Flash Disaggregated DP EP
   key: dsv4-flash-disaggregated
   timeout_in_minutes: 60
-  device: h100
+  device: h200
   optional: true
   working_dir: "/vllm-workspace/tests"
   num_devices: 8
