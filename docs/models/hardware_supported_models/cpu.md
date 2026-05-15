@@ -1,5 +1,8 @@
 # CPU - Intel® Xeon®
 
+!!! note "AMD Zen CPUs"
+    On AMD Zen 4 / Zen 5 CPUs, AMD Zen optimizations are auto-enabled when the [`zentorch`](https://github.com/amd/ZenDNN-pytorch-plugin) package is installed. See [AMD Zen optimizations](../../getting_started/installation/cpu.md#amd-zen-optimizations) for details.
+
 ## Validated Hardware
 
 | Hardware |

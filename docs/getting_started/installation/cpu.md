@@ -142,6 +142,10 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
 
+## AMD Zen optimizations {#amd-zen-optimizations}
+
+--8<-- "docs/getting_started/installation/cpu.x86.inc.md:amd-zen-optimizations"
+
 ## Related runtime environment variables
 
 - `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GiB space for KV cache), larger setting will allow vLLM to run more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users. Default value is `0`.
@@ -149,12 +153,39 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 - `VLLM_CPU_NUM_OF_RESERVED_CPU`: specify the number of CPU cores which are not dedicated to the OpenMP threads for each rank. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. Default value is `None`. If the value is not set and use `auto` thread binding, no CPU will be reserved for `world_size == 1`, 1 CPU per rank will be reserved for `world_size > 1`.
 - `CPU_VISIBLE_MEMORY_NODES`: specify visible NUMA memory nodes for vLLM CPU workers, similar to ```CUDA_VISIBLE_DEVICES```. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. The variable provides more control for the auto thread-binding feature, such as masking nodes and changing nodes binding sequence.
 - `VLLM_CPU_SGL_KERNEL` (x86 only, Experimental): whether to use small-batch optimized kernels for linear layer and MoE layer, especially for low-latency requirements like online serving. The kernels require AMX instruction set, BFloat16 weight type and weight shapes divisible by 32. Default is `0` (False).
+- `VLLM_ZENTORCH_WEIGHT_PREPACK` (AMD Zen only): when `ZenCpuPlatform` is active, eagerly prepack linear weights into ZenDNN's blocked layout at model load time, eliminating per-inference layout conversion overhead. Default is `1` (enabled). See [AMD Zen optimizations](#amd-zen-optimizations).
 
 ## FAQ
 
 ### Which `dtype` should be used?
 
 - Currently, vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
+
+### How do I enable AMD Zen optimizations?
+
+On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so
+vLLM pulls the tested `zentorch` version for that release:
+
+```bash
+export VLLM_VERSION=0.20.2
+pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}%2Bcpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+This is safer than installing `zentorch` separately, because the `zen` extra
+keeps the vLLM wheel and ZenDNN plugin on the tested version combination.
+
+vLLM auto-detects the platform and routes linear layers through
+ZenDNN-optimized kernels - no flag needed. To verify it is engaged, run with
+INFO-level logs and look for the activation banner:
+
+```bash
+VLLM_LOGGING_LEVEL=INFO vllm serve facebook/opt-125m --dtype bfloat16 \
+    2>&1 | grep -E "ZenCpuPlatform activated|CPU unquantized GEMM dispatch"
+```
+
+See [AMD Zen optimizations](#amd-zen-optimizations) for details on detection
+rules, supported dtypes, and the `VLLM_ZENTORCH_WEIGHT_PREPACK` knob.
 
 ### How to launch a vLLM service on CPU?
 

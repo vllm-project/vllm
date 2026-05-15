@@ -2,11 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for CPU unquantized GEMM dispatch behavior."""
 
+import sys
+import types
+
 import pytest
 import torch
 
 from vllm.model_executor.layers import utils
 from vllm.platforms import current_platform
+from vllm.platforms import zen_cpu
 
 
 @pytest.fixture(scope="module")
@@ -66,3 +70,67 @@ def test_dispatch_cpu_unquantized_gemm_zen_remove_weight(monkeypatch):
     utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     assert layer.weight.numel() == 0
+
+
+@pytest.mark.usefixtures("_mock_zentorch_linear_unary")
+def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
+    expected_prepacked = bool(utils.envs.VLLM_ZENTORCH_WEIGHT_PREPACK) and hasattr(
+        torch.ops.zentorch, "zentorch_weight_prepack_for_linear"
+    )
+
+    log_calls = []
+    monkeypatch.setattr(utils.logger, "info_once", lambda *args: log_calls.append(args))
+
+    layer = torch.nn.Linear(16, 8, bias=True)
+    utils.dispatch_cpu_unquantized_gemm(layer, remove_weight=False)
+
+    assert log_calls == [
+        (
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary "
+            "(prepacked=%s)",
+            expected_prepacked,
+        )
+    ]
+
+
+def test_zen_cpu_platform_logs_activation(monkeypatch):
+    fake_zentorch = types.SimpleNamespace(
+        __version__="5.2.1",
+        __config__="zentorch build config",
+    )
+    monkeypatch.setitem(sys.modules, "zentorch", fake_zentorch)
+    monkeypatch.setattr(zen_cpu.envs, "VLLM_ZENTORCH_WEIGHT_PREPACK", 1)
+    monkeypatch.setattr(zen_cpu.torch.cpu, "_is_avx512_supported", lambda: True)
+    monkeypatch.setattr(
+        zen_cpu.torch.cpu, "_is_avx512_bf16_supported", lambda: False
+    )
+
+    log_calls = []
+    monkeypatch.setattr(
+        zen_cpu.logger, "info_once", lambda *args: log_calls.append(args)
+    )
+
+    def fake_check_and_update_config(cls, vllm_config):
+        pass
+
+    monkeypatch.setattr(
+        zen_cpu.CpuPlatform,
+        "check_and_update_config",
+        classmethod(fake_check_and_update_config),
+    )
+
+    zen_cpu.ZenCpuPlatform.check_and_update_config(object())
+
+    assert log_calls == [
+        (
+            "ZenCpuPlatform activated | zentorch=%s | "
+            "VLLM_ZENTORCH_WEIGHT_PREPACK=%d | "
+            "AVX-512=%s | AVX-512_BF16=%s",
+            "5.2.1",
+            1,
+            True,
+            False,
+        ),
+        ("zentorch build config: %s", "zentorch build config"),
+    ]

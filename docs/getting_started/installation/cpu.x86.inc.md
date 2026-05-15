@@ -1,7 +1,15 @@
 <!-- markdownlint-disable MD041 -->
 --8<-- [start:installation]
 
-vLLM supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16.
+vLLM supports basic model inferencing and serving on x86 CPU platform, with
+data types FP32 and BF16.
+
+On AMD Zen 4 / Zen 5 (Genoa, Bergamo, Turin) CPUs, vLLM auto-activates a
+`ZenCpuPlatform` when a compatible
+[`zentorch`](https://github.com/amd/ZenDNN-pytorch-plugin) package is
+available. For release wheels, install the CPU wheel with the `zen` extra so
+vLLM pulls the tested `zentorch` version for that release. See
+[AMD Zen optimizations](#amd-zen-optimizations) below.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -216,5 +224,69 @@ docker run --rm \
 ```
 
 --8<-- [end:build-image-from-source]
+--8<-- [start:amd-zen-optimizations]
+
+On AMD Zen CPUs, vLLM auto-selects `ZenCpuPlatform` (a subclass of the default
+`CpuPlatform`) which dispatches linear layers through
+[`zentorch`](https://github.com/amd/ZenDNN-pytorch-plugin)'s ZenDNN-optimized
+kernels.
+
+#### Install
+
+```bash
+export VLLM_VERSION=0.20.2
+pip install "vllm[zen] @ https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}%2Bcpu-cp38-abi3-manylinux_2_35_x86_64.whl" \
+    --extra-index-url https://download.pytorch.org/whl/cpu
+```
+
+This keeps the vLLM CPU wheel and `zentorch` on the tested version combination,
+instead of installing `zentorch` separately and risking dependency skew.
+That's it - no flag or env var is required. vLLM's platform discovery picks up
+`ZenCpuPlatform` automatically the next time `vllm` is imported.
+
+#### Detection rules
+
+`ZenCpuPlatform` is selected when **all** of the following hold:
+
+- vLLM is built for CPU
+- `/proc/cpuinfo` reports `AuthenticAMD` and `avx512`.
+- `import zentorch` succeeds.
+
+Otherwise, vLLM falls back to the default `CpuPlatform` (oneDNN/sgl-kernel
+paths).
+
+#### Supported dtypes
+
+`ZenCpuPlatform.supported_dtypes` advertises only `bfloat16` and `float32`.
+Models declared with `torch_dtype=float16` are auto-downcast to `bfloat16` at
+load time with the standard
+`"Your device 'cpu' doesn't support torch.float16. Falling back to torch.bfloat16 for compatibility."`
+warning emitted from `vllm/config/model.py`.
+
+#### Verify it is engaged
+
+Run any model with INFO-level logs and grep for the activation banner:
+
+```bash
+VLLM_LOGGING_LEVEL=INFO vllm serve facebook/opt-125m --dtype bfloat16 \
+    2>&1 | grep -E "ZenCpuPlatform activated|CPU unquantized GEMM dispatch"
+```
+
+You should see one line confirming `ZenCpuPlatform activated` (with the
+`zentorch` version, `VLLM_ZENTORCH_WEIGHT_PREPACK` value, and AVX-512 /
+AVX-512_BF16 capability flags) and one line confirming each unquantized linear
+layer is routed through `zentorch_linear_unary`.
+
+#### Environment variables
+
+- `VLLM_ZENTORCH_WEIGHT_PREPACK` (default `1`): when set, eagerly prepacks
+  linear weights into ZenDNN's blocked layout at model load time, eliminating
+  per-inference layout conversion overhead. Set to `0` to disable.
+
+#### Reference
+
+For the design rationale, see [RFC #35089: In-Tree AMD Zen CPU Backend via zentorch](https://github.com/vllm-project/vllm/issues/35089).
+
+--8<-- [end:amd-zen-optimizations]
 --8<-- [start:extra-information]
 --8<-- [end:extra-information]
