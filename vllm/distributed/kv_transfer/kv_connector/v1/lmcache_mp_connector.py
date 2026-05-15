@@ -1207,6 +1207,7 @@ else:
         from lmcache.integration.vllm.lmcache_mp_connector import (  # type: ignore[no-redef]  # noqa: E501
             LMCacheMPConnector,
         )
+
         logger.info(
             "Using external LMCacheMPConnector from "
             "lmcache.integration.vllm.lmcache_mp_connector"
