@@ -31,10 +31,6 @@ repos:
     language_version: lts
     args: [--fix]
     exclude: ^CLAUDE\.md$
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
-  hooks:
-  - id: actionlint
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:
@@ -172,6 +168,12 @@ repos:
     entry: tools/pre_commit/shellcheck.sh
     language: script
     types: [shell]
+  - id: actionlint
+    name: Lint GitHub Actions workflows
+    entry: tools/pre_commit/actionlint.sh
+    language: script
+    files: ^\.github/(workflows/.*\.(yml|yaml)|actionlint\.yaml)$
+    pass_filenames: false
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/pre_commit/png-lint.sh

@@ -270,9 +270,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_prefills = common.num_prefills
         num_decode_tokens = common.num_decode_tokens
 
-        num_computed_tokens_cpu = (
-            common_attn_metadata.compute_num_computed_tokens().cpu()
-        )
+        num_computed_tokens_cpu = common_attn_metadata.get_num_computed_tokens_cpu()
         num_computed_tokens_p_cpu = num_computed_tokens_cpu[
             num_reqs - num_prefills : num_reqs
         ]
