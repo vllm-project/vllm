@@ -79,6 +79,14 @@ from .utils import (
     maybe_prefix,
 )
 
+# PROBE: module-level state used by qwen3._dump_subop_out to (a) suppress
+# dumps on forward calls that don't contain the failing token, and (b) tag
+# each dump with a monotonic trigger index so logs can be aligned across
+# configs (baseline vs failing) by trigger_idx rather than absolute call
+# order. Populated in Qwen2Model.forward; consumed in qwen3.py.
+_probe_target_positions: list[int] = []
+_probe_trigger_idx: int = 0
+
 
 class Qwen2MLP(nn.Module):
     def __init__(
@@ -400,6 +408,28 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         import os as _os
 
         _DUMP = _os.environ.get("VLLM_DEBUG_DUMP_HS", "") == "1"
+        _DET = _os.environ.get("VLLM_DET_CHECK", "") == "1"
+
+        # PROBE: set/clear module-level state read by qwen3._dump_subop_out.
+        # If input_ids contains token 2701 in this forward call, capture all
+        # positions and bump a monotonic trigger counter so cross-config
+        # alignment is possible. Otherwise clear to suppress sub-op dumps on
+        # decode/unrelated-prefill calls.
+        global _probe_target_positions, _probe_trigger_idx
+        if _DET and input_ids is not None and input_ids.ndim == 1:
+            try:
+                _positions_2701 = (
+                    (input_ids == 2701).nonzero(as_tuple=False).flatten().tolist()
+                )
+            except Exception:
+                _positions_2701 = []
+            if _positions_2701:
+                _probe_target_positions = _positions_2701
+                _probe_trigger_idx += 1
+            else:
+                _probe_target_positions = []
+        elif _DET:
+            _probe_target_positions = []
 
         def _dump(name, t, input_ids_local):
             if not _DUMP or input_ids_local is None or t is None:

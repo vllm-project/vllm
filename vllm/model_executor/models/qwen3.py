@@ -56,34 +56,44 @@ from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe
 logger = init_logger(__name__)
 
 
-# PROBE: dump sub-op outputs at layer 0 position 1 for ACROSS-PASS comparison.
-# Previous within-call _det_check_call showed all sub-ops bit-deterministic
-# within a single forward pass. But that doesn't catch ACROSS-GENERATE
-# non-determinism (e.g., cuBLAS algo caching changes between generates).
-# This dump captures the value at position 1 of each sub-op output every
-# time the forward pass contains token 2701 (the failing prompt position).
-# Post-process: extract per-pid-per-pass values and compare pass 6 vs pass 7
-# within the same config to find the FIRST sub-op whose output differs
-# across passes — that's the actual non-deterministic op.
+# PROBE: dump sub-op outputs at the position(s) of token 2701 in the current
+# forward call, tagged by a monotonic trigger index, for cross-config and
+# cross-call comparison. Filtering is gated by qwen2 module-level state set
+# in Qwen2Model.forward, which only marks a forward call as "interesting"
+# when input_ids actually contains 2701. This eliminates noise from warmup,
+# decode-only forwards, and forwards that prefill other prompts.
+#
+# Post-process: the same trigger_idx in baseline vs failing config dumps the
+# same logical prefill (greedy + same prompt order ensures determinism in
+# scheduling). For each (trigger_idx, op, pos) tuple, compare first8 across
+# configs to find the first op whose output differs.
 def _dump_subop_out(name: str, output):
     import os as _os
 
     if _os.environ.get("VLLM_DET_CHECK", "") != "1":
         return
+    from . import qwen2 as _qwen2
+
+    positions = _qwen2._probe_target_positions
+    if not positions:
+        return
     t = output[0] if isinstance(output, tuple) else output
     if not isinstance(t, torch.Tensor):
         return
-    if t.ndim >= 2 and t.shape[0] >= 2:
-        flat = t[1].detach().reshape(-1)[:8].cpu().float().tolist()
-    else:
+    if t.ndim < 2:
         return
+    trigger = _qwen2._probe_trigger_idx
     import sys as _sys
 
-    print(
-        f"[SUBOP_OUT] layer0 op={name} pos=1 first8={flat}",
-        file=_sys.stderr,
-        flush=True,
-    )
+    for pos in positions[:2]:
+        if pos >= t.shape[0]:
+            continue
+        flat = t[pos].detach().reshape(-1)[:8].cpu().float().tolist()
+        print(
+            f"[SUBOP_OUT] trigger={trigger} op={name} pos={pos} first8={flat}",
+            file=_sys.stderr,
+            flush=True,
+        )
 
 
 # Wrapper that calls fn once and dumps its output. Replaces the old
