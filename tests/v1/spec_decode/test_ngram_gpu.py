@@ -576,4 +576,4 @@ def test_speculator_construction_validates_speculative_config():
     # No-op hooks must not raise.
     spec.load_model(target_model=None)
     spec.set_attn()
-    spec.capture_model()
+    spec.capture()

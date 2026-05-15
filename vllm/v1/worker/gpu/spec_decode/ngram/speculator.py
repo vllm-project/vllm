@@ -178,7 +178,7 @@ class NgramGPUSpeculator:
         """N-gram kernel is torch.compile-managed; no explicit CG capture."""
         pass
 
-    def capture(self) -> None:
+    def capture(self, *args: Any, **kwargs: Any) -> None:
         """No graph capture phase required."""
         pass
 
