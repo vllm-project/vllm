@@ -379,6 +379,16 @@ class XPUPlatform(Platform):
                 )
 
     @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        super().verify_quantization(quant)
+        if quant == "awq" and not envs.VLLM_USE_TRITON_AWQ:
+            logger.warning(
+                "Using AWQ quantization with XPU, but VLLM_USE_TRITON_AWQ "
+                "is not set, enabling VLLM_USE_TRITON_AWQ."
+            )
+            os.environ["VLLM_USE_TRITON_AWQ"] = "1"
+
+    @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
 
