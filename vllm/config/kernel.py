@@ -137,6 +137,8 @@ LinearBackend = Literal[
     "aiter",
     "machete",
     "fbgemm",
+    "conch",
+    "exllama",
     "emulation",
 ]
 
@@ -188,6 +190,8 @@ class KernelConfig:
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "machete": Use Machete kernels (mixed-precision)
     - "fbgemm": Use FBGEMM kernels
+    - "conch": Use Conch mixed-precision kernels
+    - "exllama": Use Exllama mixed-precision kernels
     - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
 
     @field_validator("moe_backend", mode="before")

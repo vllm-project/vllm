@@ -190,6 +190,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         FlashInferCutlassMxfp8LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
+        FlashInferMxFp4LinearKernel,
     },
     "flashinfer_trtllm": {
         FlashInferTrtllmNvFp4LinearKernel,
@@ -202,6 +203,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         MarlinLinearKernel,
         MarlinMxfp8LinearKernel,
         MarlinNvFp4LinearKernel,
+        MarlinMxFp4LinearKernel,
     },
     "triton": {
         TritonInt8ScaledMMLinearKernel,
@@ -219,12 +221,20 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "aiter": {
         AiterInt8ScaledMMLinearKernel,
         AiterFp8BlockScaledMMKernel,
+        AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
     },
     "machete": {
         MacheteLinearKernel,
     },
     "fbgemm": {
         FbgemmNvFp4LinearKernel,
+    },
+    "conch": {
+        ConchLinearKernel,
+    },
+    "exllama": {
+        ExllamaLinearKernel,
     },
     "emulation": {
         EmulationMxfp8LinearKernel,
@@ -714,8 +724,10 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
 def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform."""
+    linear_backend = _get_linear_backend()
+
     force_kernel: type[MxFp4LinearKernel] | None = None
-    if envs.VLLM_MXFP4_USE_MARLIN:
+    if linear_backend == "auto" and envs.VLLM_MXFP4_USE_MARLIN:
         force_kernel = MarlinMxFp4LinearKernel
 
     if force_kernel is not None:
@@ -729,7 +741,17 @@ def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
         return force_kernel(MxFp4LinearLayerConfig())
 
     platform = current_platform._enum
-    possible = _POSSIBLE_MXFP4_KERNELS.get(platform, [])
+    possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for MXFP4 layers."
+            )
+        possible = filtered
 
     failure_reasons = []
     for kernel_cls in possible:
