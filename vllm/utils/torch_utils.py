@@ -51,12 +51,9 @@ STR_DTYPE_TO_TORCH_DTYPE = {
 }
 
 FLOAT8_DTYPES = frozenset(
-    {
-        torch.float8_e5m2,
-        torch.float8_e4m3fn,
-        torch.float8_e4m3fnuz,
-        torch.float8_e5m2fnuz,
-    }
+    getattr(torch, name)
+    for name in ["float8_e5m2", "float8_e4m3fn", "float8_e4m3fnuz", "float8_e5m2fnuz"]
+    if hasattr(torch, name)
 )
 
 
