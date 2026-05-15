@@ -363,6 +363,7 @@ def test_resolve_chat_template_kwargs_with_template_name():
         ("microsoft/Phi-3.5-vision-instruct", "string"),
         ("Qwen/Qwen2-VL-2B-Instruct", "openai"),
         ("Qwen/Qwen2.5-VL-3B-Instruct", "openai"),
+        ("Qwen/Qwen3.5-4B", "openai"),
         ("fixie-ai/ultravox-v0_5-llama-3_2-1b", "string"),
         ("Qwen/Qwen2-Audio-7B-Instruct", "openai"),
         ("meta-llama/Llama-Guard-3-1B", "openai"),
