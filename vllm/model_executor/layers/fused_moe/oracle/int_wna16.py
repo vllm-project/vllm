@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from compressed_tensors.quantization import (
@@ -34,9 +34,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
@@ -524,22 +521,25 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
-        # GPTQ Marlin
-        from vllm.model_executor.layers.quantization.gptq_marlin import (
-            GPTQMarlinConfig,
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
         )
 
-        if isinstance(quant_config, GPTQMarlinConfig):
+        if isinstance(quant_config, AutoGPTQConfig):
             num_bits = quant_config.quant_type.size_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
             actorder = "group" if quant_config.desc_act else None
-        else:
-            assert isinstance(quant_config, QuantizationArgs)
+        elif isinstance(quant_config, QuantizationArgs):
             num_bits = quant_config.num_bits
             pack_factor = 32 // quant_config.num_bits
             group_size = quant_config.group_size
             actorder = quant_config.actorder
+        else:
+            raise TypeError(
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig or "
+                f"QuantizationArgs, got {type(quant_config).__name__}."
+            )
 
         return _process_weights_marlin(
             layer,
