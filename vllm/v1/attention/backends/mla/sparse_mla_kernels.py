@@ -1128,8 +1128,13 @@ def _accumulate_gathered_attention_chunk_kernel(
     running_denom = tl.load(denom_ptr + state_offset)
     running_acc = tl.load(acc_ptr + acc_offset, mask=dim_mask, other=0.0).to(tl.float32)
     valid_len = tl.load(lens_ptr + token_idx)
+    # Per-token early-loop-exit (see indexed kernel comment).
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(valid_len - candidate_offset, 0),
+    )
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         is_valid = (candidate_offset + candidate_idx) < valid_len
         if HAS_SLOT_IDS:
             slot_id = tl.load(
@@ -1289,8 +1294,21 @@ def _accumulate_indexed_attention_chunk_kernel(
     running_denom = tl.load(denom_ptr + state_offset)
     running_acc = tl.load(acc_ptr + acc_offset, mask=dim_mask, other=0.0).to(tl.float32)
     valid_len = tl.load(lens_ptr + token_idx)
+    # Per-token early-loop-exit: the combine_topk_swa_indices kernel writes
+    # ``[topk_len_t | swa_len_t | -1 padding]`` and stores
+    # ``lens[t] = topk_len_t + swa_len_t``. The existing ``is_valid`` guard
+    # already gates the heavy work past ``valid_len``, but the outer loop
+    # still iterates the full ``num_candidates`` (= chunk width). Capping
+    # the loop at ``min(num_candidates, valid_len - candidate_offset)``
+    # saves the per-iteration index load + compare overhead on the dead
+    # tail. CUDA-graph-safe because ``lens_ptr`` is a stable address and
+    # the loaded value updates per call from the metadata builder.
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(valid_len - candidate_offset, 0),
+    )
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         kv_index = tl.load(
             indices_ptr
             + token_idx * stride_indices_t
@@ -1445,12 +1463,17 @@ def _accumulate_fp8ds_global_slots_attention_chunk_kernel(
     running_denom = tl.load(denom_ptr + state_offset)
     running_acc = tl.load(acc_ptr + acc_offset, mask=dim_mask, other=0.0).to(tl.float32)
     valid_len = tl.load(lens_ptr + token_idx)
+    # Per-token early-loop-exit (see indexed kernel comment).
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(valid_len - candidate_offset, 0),
+    )
 
     fp8_mask = offsets < fp8_dim
     rope_mask = (offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(offsets - fp8_dim, 0)
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         slot_id = tl.load(
             slot_ids_ptr + token_idx * stride_slot_t + candidate_idx * stride_slot_c
         )
@@ -1645,12 +1668,21 @@ def _accumulate_fp8ds_global_slots_attention_chunk_multihead_kernel(
         tl.float32
     )
     valid_len = tl.load(lens_ptr + token_idx)
+    # Per-token early-loop-exit: ``lens[t] = topk_len_t + swa_len_t`` (set
+    # by combine_topk_swa_indices). Iterating past ``valid_len`` only
+    # incurs the per-iter index-load + compare cost on padding-tail; cap
+    # the outer loop at ``valid_len - candidate_offset`` to skip the dead
+    # tail. CUDA-graph-safe because ``lens_ptr`` is a stable address.
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(valid_len - candidate_offset, 0),
+    )
 
     fp8_mask = dim_offsets < fp8_dim
     rope_mask = (dim_offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(dim_offsets - fp8_dim, 0)
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         slot_id = tl.load(
             slot_ids_ptr + token_idx * stride_slot_t + candidate_idx * stride_slot_c
         )
@@ -1851,8 +1883,13 @@ def _accumulate_fp8ds_paged_attention_chunk_kernel(
     fp8_mask = offsets < fp8_dim
     rope_mask = (offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(offsets - fp8_dim, 0)
+    # Per-token early-loop-exit (see indexed kernel comment).
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(gather_len - candidate_offset, 0),
+    )
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         gather_idx = candidate_offset + candidate_idx
         is_valid = gather_idx < gather_len
 
@@ -2054,8 +2091,17 @@ def _accumulate_fp8ds_paged_attention_chunk_multihead_kernel(
     fp8_mask = dim_offsets < fp8_dim
     rope_mask = (dim_offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(dim_offsets - fp8_dim, 0)
+    # Per-token early-loop-exit: ``gather_len`` is the per-token count of
+    # cached entries available for this paged read; the existing
+    # ``is_valid`` guard skips heavy work past that, but we can also skip
+    # the per-iter index load + branch by capping the loop. CUDA-graph-
+    # safe because ``gather_lens_ptr`` is a stable address.
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(gather_len - candidate_offset, 0),
+    )
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         gather_idx = candidate_offset + candidate_idx
         is_valid = gather_idx < gather_len
 
@@ -2247,8 +2293,17 @@ def _fp8ds_paged_attention_with_sink_multihead_kernel(
     fp8_mask = dim_offsets < fp8_dim
     rope_mask = (dim_offsets >= fp8_dim) & dim_mask
     rope_offsets = tl.maximum(dim_offsets - fp8_dim, 0)
+    # Per-token early-loop-exit: ``gather_len`` is the per-token count of
+    # cached entries available for this paged read; the existing
+    # ``is_valid`` guard skips heavy work past that, but we can also skip
+    # the per-iter index load + branch by capping the loop. CUDA-graph-
+    # safe because ``gather_lens_ptr`` is a stable address.
+    local_eff = tl.minimum(
+        num_candidates,
+        tl.maximum(gather_len - candidate_offset, 0),
+    )
 
-    for candidate_idx in range(0, num_candidates):
+    for candidate_idx in range(0, local_eff):
         gather_idx = candidate_offset + candidate_idx
         is_valid = gather_idx < gather_len
         if is_valid:
