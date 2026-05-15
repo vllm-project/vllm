@@ -744,7 +744,11 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
     total_bytes = input_.numel() * input_.element_size()
     hidden_dim = input_.shape[-1]
     token_num = input_.shape[0]
-    hidden_ok = hidden_dim in (512, 1024, 2048, 4096, 7168)
+    if input_.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // input_.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
     token_ok = token_num <= 80
     world_size = aiter_ar.world_size
     full_nvlink = aiter_ar.fully_connected
