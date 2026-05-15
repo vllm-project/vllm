@@ -107,29 +107,27 @@ class UnicodeFilterMiddleware:
     POST requests whose path matches :attr:`ROUTES_TO_FILTER` are
     inspected; all other traffic passes through unchanged.
 
-    Pass ``use_translation_table=True`` to filter via ``str.translate``
-    with a precomputed table, which can be faster than the regex on
-    large payloads.
+    Filtering is performed directly on UTF-8 bytes: every codepoint in
+    the Tags block encodes to a 4-byte sequence with one of two 3-byte
+    prefixes (``F3 A0 80`` or ``F3 A0 81``), so a single bytes-regex
+    covers the entire block without a decode/encode round-trip, and the
+    common (clean) case is ruled out by two ``in`` checks that skip the
+    regex when neither prefix is present.
     """
 
     ROUTES_TO_FILTER: ClassVar[frozenset[str]] = frozenset(
         {"/v1/chat/completions", "/v1/completions"}
     )
 
-    # Unicode "Tags" block (U+E0020 - U+E007F).
-    UNICODE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"[\U000E0020-\U000E007F]")
-    _TRANSLATION_TABLE: ClassVar[dict[int, None]] = dict.fromkeys(
-        range(0xE0020, 0xE0080)
+    # UTF-8 encodings of U+E0020..U+E007F:
+    #   U+E0020..U+E003F -> F3 A0 80 [A0-BF]
+    #   U+E0040..U+E007F -> F3 A0 81 [80-BF]
+    TAGS_BLOCK_PATTERN: ClassVar[re.Pattern[bytes]] = re.compile(
+        b"\xf3\xa0(?:\x80[\xa0-\xbf]|\x81[\x80-\xbf])"
     )
 
-    def __init__(self, app: ASGIApp, use_translation_table: bool = False) -> None:
+    def __init__(self, app: ASGIApp) -> None:
         self.app = app
-        self.use_translation_table = use_translation_table
-
-    def _filter_text(self, text: str) -> str:
-        if self.use_translation_table:
-            return text.translate(self._TRANSLATION_TABLE)
-        return self.UNICODE_PATTERN.sub("", text)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("method") != "POST":
@@ -137,7 +135,7 @@ class UnicodeFilterMiddleware:
             return
 
         root_path = scope.get("root_path", "")
-        path = URL(scope=scope).path.removeprefix(root_path)
+        path = scope["path"].removeprefix(root_path)
         if path not in self.ROUTES_TO_FILTER:
             await self.app(scope, receive, send)
             return
@@ -164,19 +162,14 @@ class UnicodeFilterMiddleware:
             return
 
         body_bytes = bytes(body)
-        try:
-            decoded = body_bytes.decode("utf-8")
-        except UnicodeDecodeError:
-            # Leave non-UTF-8 bodies alone; downstream will reject them.
-            decoded = None
-        if decoded is not None:
-            filtered = self._filter_text(decoded)
-            if filtered != decoded:
+        if b"\xf3\xa0\x80" in body_bytes or b"\xf3\xa0\x81" in body_bytes:
+            filtered = self.TAGS_BLOCK_PATTERN.sub(b"", body_bytes)
+            if filtered != body_bytes:
                 logger.debug(
                     "UnicodeFilterMiddleware stripped tag-block characters from %s",
                     path,
                 )
-                body_bytes = filtered.encode("utf-8")
+                body_bytes = filtered
 
         # Keep Content-Length consistent with the (possibly rewritten) body.
         new_headers = [

@@ -271,10 +271,7 @@ def build_app(
     if envs.VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE:
         from vllm.entrypoints.openai.server_utils import UnicodeFilterMiddleware
 
-        app.add_middleware(
-            UnicodeFilterMiddleware,
-            use_translation_table=envs.VLLM_ENABLE_UNICODE_FILTERING_TRANSLATION_TABLE,
-        )
+        app.add_middleware(UnicodeFilterMiddleware)
 
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware

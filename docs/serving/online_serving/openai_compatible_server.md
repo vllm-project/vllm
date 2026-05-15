@@ -111,7 +111,7 @@ with `--enable-request-id-headers`.
 
 ## Unicode Tag-Block Filtering
 
-The following environment variables control sanitization of incoming request payloads. They are intended to clean up requests from clients that emit unwanted Unicode content — specifically, characters in the Unicode "Tags" block (`U+E0020`-`U+E007F`), which are invisible to humans but are tokenized by language models and can cause unpredictable responses. When enabled, these characters are stripped from the bodies of `POST /v1/chat/completions` and `POST /v1/completions` requests. All other endpoints, methods, and Unicode characters (including emojis) are unaffected.
+The following environment variable controls sanitization of incoming request payloads. It is intended to clean up requests from clients that emit unwanted Unicode content — specifically, characters in the Unicode "Tags" block (`U+E0020`-`U+E007F`), which are invisible to humans but are tokenized by language models and can cause unpredictable responses. When enabled, these characters are stripped from the bodies of `POST /v1/chat/completions` and `POST /v1/completions` requests. All other endpoints, methods, and Unicode characters (including emojis) are unaffected.
 
 To enable it, set the following environment variable before starting the server:
 
@@ -119,15 +119,7 @@ To enable it, set the following environment variable before starting the server:
 VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE=true vllm serve ...
 ```
 
-For large request bodies you can switch from regex-based filtering to a precomputed `str.translate` table, which can be faster:
-
-```bash
-VLLM_ENABLE_UNICODE_FILTERING_MIDDLEWARE=true \
-VLLM_ENABLE_UNICODE_FILTERING_TRANSLATION_TABLE=true \
-vllm serve ...
-```
-
-Both flags default to off, so existing deployments are unaffected unless explicitly enabled.
+Filtering operates directly on UTF-8 bytes: every codepoint in the Tags block encodes to a 4-byte sequence sharing the `F3 A0` prefix, so a single bytes-regex covers the entire block and a quick prefix check rules out clean payloads with no decode overhead. The flag defaults to off, so existing deployments are unaffected unless explicitly enabled.
 
 ## API Reference
 

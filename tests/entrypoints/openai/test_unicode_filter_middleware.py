@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.server_utils import UnicodeFilterMiddleware
 TAG_CHARS = "".join(chr(c) for c in (0xE0020, 0xE0024, 0xE0041, 0xE007F))
 
 
-def _build_app(use_translation_table: bool = False) -> FastAPI:
+def _build_app() -> FastAPI:
     """A FastAPI app whose routes echo the bytes they received."""
     app = FastAPI()
 
@@ -41,10 +41,7 @@ def _build_app(use_translation_table: bool = False) -> FastAPI:
     async def chat_completions_get() -> dict:
         return {"ok": True}
 
-    app.add_middleware(
-        UnicodeFilterMiddleware,
-        use_translation_table=use_translation_table,
-    )
+    app.add_middleware(UnicodeFilterMiddleware)
     return app
 
 
@@ -61,12 +58,9 @@ async def _post(app: FastAPI, path: str, payload: str) -> httpx.Response:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("use_translation_table", [False, True])
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/completions"])
-async def test_strips_tag_block_characters(
-    use_translation_table: bool, path: str
-) -> None:
-    app = _build_app(use_translation_table=use_translation_table)
+async def test_strips_tag_block_characters(path: str) -> None:
+    app = _build_app()
     payload = f"Hello{TAG_CHARS}World"
 
     response = await _post(app, path, payload)
@@ -76,11 +70,8 @@ async def test_strips_tag_block_characters(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("use_translation_table", [False, True])
-async def test_emojis_preserved_on_filtered_routes(
-    use_translation_table: bool,
-) -> None:
-    app = _build_app(use_translation_table=use_translation_table)
+async def test_emojis_preserved_on_filtered_routes() -> None:
+    app = _build_app()
     payload = f"Hello! 😀🌟🎉 {TAG_CHARS} World"
 
     response = await _post(app, "/v1/chat/completions", payload)
@@ -147,24 +138,17 @@ async def test_content_length_updated_when_body_shrinks() -> None:
     assert data["content_length"] == "6"
 
 
-@pytest.mark.asyncio
-async def test_translation_table_matches_regex() -> None:
-    payload = f"Hello{TAG_CHARS}World 😀{TAG_CHARS}!"
-
-    regex_app = _build_app(use_translation_table=False)
-    table_app = _build_app(use_translation_table=True)
-
-    regex_resp = await _post(regex_app, "/v1/chat/completions", payload)
-    table_resp = await _post(table_app, "/v1/chat/completions", payload)
-
-    assert regex_resp.json() == table_resp.json()
-
-
-def test_unicode_pattern_covers_full_tags_block() -> None:
-    """Spot-check the boundaries and a sample of the regex range."""
-    pattern = UnicodeFilterMiddleware.UNICODE_PATTERN
-    for cp in (0xE0020, 0xE0021, 0xE0050, 0xE007E, 0xE007F):
-        assert pattern.match(chr(cp)) is not None, hex(cp)
-    # Just outside the range.
+def test_tags_block_pattern_covers_full_block() -> None:
+    """The bytes pattern must match every codepoint in the Tags block and
+    nothing immediately outside it."""
+    pattern = UnicodeFilterMiddleware.TAGS_BLOCK_PATTERN
+    # Every codepoint in U+E0020..U+E007F encodes to a 4-byte UTF-8
+    # sequence that the pattern should fully match.
+    for cp in range(0xE0020, 0xE0080):
+        encoded = chr(cp).encode("utf-8")
+        match = pattern.fullmatch(encoded)
+        assert match is not None, hex(cp)
+    # Just outside the range, plus ASCII and an emoji: must not match.
     for cp in (0xE001F, 0xE0080, ord("a"), ord("😀")):
-        assert pattern.match(chr(cp)) is None, hex(cp)
+        encoded = chr(cp).encode("utf-8")
+        assert pattern.match(encoded) is None, hex(cp)
