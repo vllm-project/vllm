@@ -2,7 +2,7 @@ name: Ascend Benchmark Leaderboard
 
 on:
   pull_request:
-    types: [opened, reopened, labeled]
+    types: [opened, reopened, synchronize, labeled]
   push:
     branches: [main]
   workflow_dispatch:
@@ -81,13 +81,7 @@ jobs:
   ascend-benchmark:
     if: >-
       github.event_name != 'pull_request' ||
-      (
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        (
-          contains(github.event.pull_request.labels.*.name, 'ready') ||
-          contains(github.event.pull_request.labels.*.name, 'verified')
-        )
-      )
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
