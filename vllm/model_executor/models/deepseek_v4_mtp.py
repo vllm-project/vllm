@@ -290,6 +290,11 @@ class DeepSeekV4MTP(nn.Module):
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
             ".norm.weight": ".shared_head.norm.weight",
+            # Pre-MoE norm + gate are now owned by
+            # ``DeepseekV4MoE.norm_gate`` (see NormGatedLinear).
+            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
+            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
+            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -437,7 +442,12 @@ class DeepSeekV4MTP(nn.Module):
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
                     if name.endswith(".ffn.gate.bias"):
-                        name = name.replace(".bias", ".e_score_correction_bias")
+                        # ``e_score_correction_bias`` lives on
+                        # ``norm_gate`` directly (not on the inner gate).
+                        name = name.replace(
+                            ".ffn.gate.bias",
+                            ".ffn.norm_gate.e_score_correction_bias",
+                        )
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
