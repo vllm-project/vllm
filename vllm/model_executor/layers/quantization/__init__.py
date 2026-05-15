@@ -133,8 +133,10 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .modelopt import (
         ModelOptFp8Config,
         ModelOptMixedPrecisionConfig,
-        ModelOptMxFp8Config,
         ModelOptNvFp4Config,
+    )
+    from .modelopt_mxfp8 import (
+        ModelOptMxFp8Config,
     )
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config

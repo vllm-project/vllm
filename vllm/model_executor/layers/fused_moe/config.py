@@ -886,6 +886,8 @@ def int4_w4a16_moe_quant_config(
 def fp8_w8a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -896,10 +898,10 @@ def fp8_w8a16_moe_quant_config(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w1_scale, None, None
+            current_platform.fp8_dtype(), group_shape, w1_scale, w1_bias, None
         ),
         _w2=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w2_scale, None, None
+            current_platform.fp8_dtype(), group_shape, w2_scale, w2_bias, None
         ),
     )
 
@@ -909,6 +911,8 @@ def int8_w8a16_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_zp: torch.Tensor | None,
     w2_zp: torch.Tensor | None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -918,8 +922,8 @@ def int8_w8a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
         _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp),
+        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, w1_bias, w1_zp),
+        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, w2_bias, w2_zp),
     )
 
 
