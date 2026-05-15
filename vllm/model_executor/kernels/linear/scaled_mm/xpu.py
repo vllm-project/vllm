@@ -92,10 +92,14 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
             return False, "XPUFp8BlockScaledMM only support on XPU"
-        if (not hasattr(torch.ops, "_xpu_C")
-                or not hasattr(torch.ops._xpu_C, "fp8_gemm")):
-            return False, "XPUFp8BlockScaledMM requires torch.ops._xpu_C.fp8_gemm"
         return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        super().process_weights_after_loading(layer)
+        scale_attr = "weight_scale_inv" if hasattr(layer, "weight_scale_inv") \
+            else "weight_scale"
+        scale = getattr(layer, scale_attr)
+        replace_parameter(layer, scale_attr, scale.data.t().contiguous())
 
     def apply_block_scaled_mm(
         self,
@@ -111,5 +115,5 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             self.config.out_dtype,
             As,
             Bs,
-            None,
+            torch.Tensor(),
         )
