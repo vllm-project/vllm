@@ -148,7 +148,8 @@ class CpuPlatform(Platform):
             parallel_config.enable_dbo = False
 
         if torch.cpu._is_amx_tile_supported() and (
-            model_config.get_num_layers_by_block_type(
+            model_config is not None
+            and model_config.get_num_layers_by_block_type(
                 parallel_config, "linear_attention"
             )
             > 0
