@@ -30,7 +30,11 @@ inline Fp8KVCacheDataType get_fp8_kv_cache_data_type(
   } else if (dtype_str == "fp8_e5m2") {
     return Fp8KVCacheDataType::kFp8E5M2;
   }
+#if defined(STD_TORCH_CHECK)
   STD_TORCH_CHECK(false, "Unsupported fp8 kv cache data type: ", dtype_str);
+#else
+  TORCH_CHECK(false, "Unsupported fp8 kv cache data type: ", dtype_str);
+#endif
 }
 
 // fp8 vector types for quantization of kv cache
