@@ -486,6 +486,10 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
 
+  // FP8 stub: dead code on ARM (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : Base() {}
+
   explicit FP32Vec16(const FP16Vec16& v) {
     reg.val[0] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[0])));
     reg.val[1] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[0])));

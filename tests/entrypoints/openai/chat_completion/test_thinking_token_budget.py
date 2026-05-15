@@ -287,3 +287,47 @@ async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_
                 f"index {i}: reasoning decode token ids ({n_reason}) != "
                 f"thinking_token_budget ({expected_budget})"
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
+async def test_streaming_with_thinking_disabled_stays_in_content(
+    client: openai.AsyncOpenAI,
+):
+    request_kwargs = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Which is larger, 4 or 12?"
+                " Output exactly one token: 4 or 12.",
+            }
+        ],
+        "max_tokens": 16,
+        "temperature": 0.0,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+
+    response = await client.chat.completions.create(**request_kwargs)
+    message = response.choices[0].message
+    assert message.content is not None and message.content.strip() != ""
+    assert getattr(message, "reasoning", None) in (None, "")
+
+    stream = await client.chat.completions.create(
+        **request_kwargs,
+        stream=True,
+    )
+
+    content_chunks = []
+    reasoning_chunks = []
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if getattr(delta, "content", None):
+            content_chunks.append(delta.content)
+        if getattr(delta, "reasoning", None):
+            reasoning_chunks.append(delta.reasoning)
+
+    assert "".join(content_chunks).strip() != ""
+    assert reasoning_chunks == []

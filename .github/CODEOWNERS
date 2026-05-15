@@ -6,8 +6,8 @@
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
-/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye
+/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
 /vllm/model_executor/layers/mamba/gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/layers/rotary_embedding.py @vadiklyutiy
@@ -18,7 +18,8 @@
 /vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
-CMakeLists.txt @tlrmchlsmth @LucasWilkinson
+/CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
+/cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
@@ -30,8 +31,8 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
 /vllm/entrypoints/mcp @heheda12345
 /vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
-/vllm/entrypoints/openai/realtime @njhill
-/vllm/entrypoints/openai/speech_to_text @NickLucche
+/vllm/entrypoints/speech_to_text/realtime @njhill
+/vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
 /vllm/entrypoints/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
@@ -70,6 +71,10 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/worker/gpu @WoosukKwon @njhill
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
+# CI & building
+/.buildkite @Harry-Chen
+/docker/Dockerfile @Harry-Chen
+
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin 
 /tests/distributed/test_multi_node_assignment.py @youkaichao
@@ -77,11 +82,11 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/distributed/test_same_node.py @youkaichao
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
 /tests/evals @mgoin @vadiklyutiy
-/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
+/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye
 /tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
-/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
+/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
@@ -146,6 +151,12 @@ mkdocs.yaml @hmellor
 
 # MTP-specific files
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
+
+# DeepseekV4-specific files
+/vllm/v1/attention/ops/deepseek_v4_ops @zyongye
+/vllm/model_executor/layers/deepseek_compressor.py @zyongye
+/vllm/model_executor/layers/deepseek_v4_attention.py @zyongye
+/vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
 
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten

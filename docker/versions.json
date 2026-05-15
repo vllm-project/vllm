@@ -16,6 +16,9 @@
     "FINAL_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.2-base-ubuntu22.04"
     },
+    "BUILD_OS": {
+      "default": "ubuntu"
+    },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
     },

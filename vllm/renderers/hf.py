@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import copy
 import inspect
 import itertools
 import weakref
@@ -42,7 +43,7 @@ from vllm.multimodal.processing.processor import (
     apply_token_matches,
     find_mm_placeholders,
 )
-from vllm.tokenizers.hf import HfTokenizer
+from vllm.tokenizers.hf import HfTokenizer, maybe_make_thread_pool
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
@@ -401,6 +402,7 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
     ]
 
     # Search for {%- for content in message['content'] -%} loops
+    # or {%- for item in content -%} loops
     for loop_ast in root.find_all(jinja2.nodes.For):
         loop_iter = loop_ast.iter
         loop_target = loop_ast.target
@@ -410,6 +412,10 @@ def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
                 assert isinstance(loop_target, jinja2.nodes.Name)
                 yield loop_ast, loop_target.name
                 break
+
+        if isinstance(loop_iter, jinja2.nodes.Name) and loop_iter.name == "content":
+            assert isinstance(loop_target, jinja2.nodes.Name)
+            yield loop_ast, loop_target.name
 
 
 def _try_extract_ast(chat_template: str) -> jinja2.nodes.Template | None:
@@ -785,6 +791,14 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         config: VllmConfig,
         tokenizer: HfTokenizer | None,
     ) -> None:
+        # Ensure the og tokenizer is never modified by maybe_make_thread_pool
+        tokenizer = copy.copy(tokenizer)
+        if (
+            # Skip for mock configs and tokenizers
+            getattr(config.model_config, "enable_prompt_embeds", False)
+            and isinstance(tokenizer, HfTokenizer)
+        ):
+            _ensure_prompt_embeds_placeholder_token(tokenizer)
         super().__init__(config, tokenizer)
 
         self.use_unified_vision_chunk = getattr(
@@ -794,6 +808,11 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._executor
         )
+
+        if self.tokenizer is not None:
+            maybe_make_thread_pool(
+                self.tokenizer, config.model_config.renderer_num_workers + 1
+            )
 
     def render_messages(
         self,

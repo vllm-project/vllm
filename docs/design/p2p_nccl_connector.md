@@ -88,7 +88,7 @@ pip install "vllm>=0.9.2"
 #### Proxy (e.g. 10.0.1.1)
 
 ```shell
-cd {your vllm directory}/examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/
+cd {your vllm directory}/examples/disaggregated/p2p_nccl_xpyd/
 python3 disagg_proxy_p2p_nccl_xpyd.py &
 ```
 
@@ -181,7 +181,7 @@ python3 disagg_proxy_p2p_nccl_xpyd.py &
 #### Proxy (e.g. 10.0.1.1)
 
 ```shell
-cd {your vllm directory}/examples/online_serving/disaggregated_serving_p2p_nccl_xpyd/
+cd {your vllm directory}/examples/disaggregated/p2p_nccl_xpyd/
 python3 disagg_proxy_p2p_nccl_xpyd.py &
 ```
 

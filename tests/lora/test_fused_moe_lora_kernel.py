@@ -647,6 +647,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
         rank=local_rank,
         local_rank=local_rank,
         distributed_init_method=init_method,
+        backend=current_platform.dist_backend,
     )
     with ensure_current_vllm_config():
         initialize_model_parallel(world_size, 1)

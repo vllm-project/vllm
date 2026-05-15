@@ -7,6 +7,7 @@ import torch
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -111,6 +112,12 @@ class DeepseekSparseSWABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekSparseSWAMetadataBuilder"]:
+        if current_platform.is_rocm():
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse_dsv4 import (
+                DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+            )
+
+            return DeepseekV4ROCMAiterSparseSWAMetadataBuilder
         return DeepseekSparseSWAMetadataBuilder
 
     @staticmethod
@@ -360,7 +367,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             _LAYER_TYPE_C4A: None,
             _LAYER_TYPE_C128A: None,
         }
-        if num_decode_tokens == 0:
+        if num_decode_tokens == 0 or current_platform.is_rocm():
             return out
         for layer_type in self._layer_types:
             # get_mla_metadata() is the official FlashMLA entry point that
