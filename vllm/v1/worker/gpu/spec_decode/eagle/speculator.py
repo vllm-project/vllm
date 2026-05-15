@@ -106,7 +106,7 @@ class EagleSpeculator:
             )
 
         self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "gumbel":
+        if self.speculative_config.draft_sample_method == "probabilistic":
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,

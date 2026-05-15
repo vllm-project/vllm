@@ -199,7 +199,10 @@ COPY requirements/cuda.txt requirements/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY pyproject.toml pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' requirements/cuda.txt; \
+    fi \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
@@ -626,6 +629,9 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 COPY requirements/common.txt /tmp/common.txt
 COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
+        sed -i 's/^nvidia-cutlass-dsl\[cu13\]>=/nvidia-cutlass-dsl>=/' /tmp/requirements-cuda.txt; \
+    fi && \
     uv pip install --system -r /tmp/requirements-cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
@@ -839,9 +845,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            uv pip install --system nixl-cu13; \
-        fi; \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
@@ -851,6 +854,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
         ); \
+        # Force-reinstall the matching CUDA wheel so the correct nixl_ep_cpp.so is installed.
+        uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
     fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
