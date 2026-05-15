@@ -686,6 +686,7 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    "vllm/spinloop.abi3.so",
                     # ROCm-specific libraries
                     "vllm/_rocm_C.abi3.so",
                 ]
@@ -693,6 +694,12 @@ class precompiled_wheel_utils:
                 flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # __init__.py and flash_attn_interface.py are source-controlled
+                # in vllm and should not be overwritten (matches cmake exclusions)
+                flash_attn_files_to_skip = {
+                    "vllm/vllm_flash_attn/__init__.py",
+                    "vllm/vllm_flash_attn/flash_attn_interface.py",
+                }
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
@@ -705,7 +712,11 @@ class precompiled_wheel_utils:
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
                 file_members += list(
-                    filter(lambda x: flash_attn_regex.match(x.filename), wheel.filelist)
+                    filter(
+                        lambda x: flash_attn_regex.match(x.filename)
+                        and x.filename not in flash_attn_files_to_skip,
+                        wheel.filelist,
+                    )
                 )
                 file_members += list(
                     filter(
@@ -917,7 +928,9 @@ def get_vllm_version() -> str:
     elif _is_tpu():
         version += f"{sep}tpu"
     elif _is_cpu():
-        if envs.VLLM_TARGET_DEVICE == "cpu":
+        # Check the local VLLM_TARGET_DEVICE (may be set by auto-detect above),
+        # not envs.VLLM_TARGET_DEVICE, so CPU-only hosts still get `+cpu`.
+        if VLLM_TARGET_DEVICE == "cpu":
             version += f"{sep}cpu"
     elif _is_xpu():
         version += f"{sep}xpu"
@@ -957,6 +970,9 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
+                # [cu13] extra is the default; strip it on CUDA 12 builds.
+                req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
@@ -980,6 +996,8 @@ if _is_cuda() or _is_hip():
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
+
+ext_modules.append(CMakeExtension(name="vllm.spinloop"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -1075,7 +1093,9 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": ["zentorch"],
+        "zen": [
+            "zentorch-weekly==5.2.1.dev20260408"
+        ],  # Zentorch has weekly releases. This pulls the known-good version.
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
@@ -1083,7 +1103,6 @@ setup(
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
-            "resampy",
             "scipy",
             "soundfile",
             "mistral_common[audio]",
@@ -1094,9 +1113,9 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==0.3.3"],
+        "helion": ["helion==1.0.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
-        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

@@ -72,7 +72,7 @@ def _get_cross_slot_mapping(
 
 @functools.lru_cache
 def create_cross_attention_backend(
-    underlying_attn_backend: AttentionBackend,
+    underlying_attn_backend: type[AttentionBackend],
 ) -> type[AttentionBackend]:
     prefix = "CrossAttention_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -87,17 +87,26 @@ def create_cross_attention_backend(
         ) -> AttentionMetadata:
             new_metadata = copy(common_attn_metadata)
             new_metadata.causal = False
+            assert new_metadata.encoder_seq_lens_cpu is not None
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Any computed tokens indicated decode step>1 (no chunked prefill)
-            num_cache_decodes = (
-                (common_attn_metadata.num_computed_tokens_cpu > 0).sum().item()
+            # Any computed tokens indicates decode step>1 (no chunked prefill).
+            # The upper bound is exact for this `> 0` test - prefill rows have
+            # num_computed == 0 and decode rows have num_computed > 0.
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
             )
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            num_computed_tokens_cpu = (
+                common_attn_metadata.seq_lens_cpu_upper_bound - query_lens_cpu
+            )
+            num_cache_decodes = (num_computed_tokens_cpu > 0).sum().item()
             if num_cache_decodes > 0:
                 # CrossAttn KV cache has already been populated on first decoder step,
                 # skip slot_mapping calculation for requests that do not need
                 # reshape_and_cache.
-                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
+                num_tokens = num_computed_tokens_cpu.numpy()
                 new_metadata.encoder_seq_lens_cpu = np.where(
                     num_tokens > 0, 0, new_metadata.encoder_seq_lens_cpu
                 )
@@ -118,7 +127,7 @@ def create_cross_attention_backend(
                 self.device,
             )
             attn_metadata = super().build(common_prefix_len, new_metadata, fast_build)
-            attn_metadata.slot_mapping = slot_mapping
+            attn_metadata.slot_mapping = slot_mapping  # type: ignore[attr-defined]
             return attn_metadata
 
     # NOTE(Lucas): we need a custom impl so we can use the slot-mapping computed by
@@ -144,8 +153,12 @@ def create_cross_attention_backend(
                 and key is not None
                 and value is not None
             ):
-                self.do_kv_cache_update(
-                    layer, key, value, kv_cache, attn_metadata.slot_mapping
+                self.do_kv_cache_update(  # type: ignore[attr-defined]
+                    layer,
+                    key,
+                    value,
+                    kv_cache,
+                    attn_metadata.slot_mapping,  # type: ignore[attr-defined]
                 )
 
             return super().forward(
