@@ -435,6 +435,10 @@ _MULTIMODAL_MODELS = {
         "interns1_pro",
         "InternS1ProForConditionalGeneration",
     ),
+    "InternS2PreviewForConditionalGeneration": (
+        "interns2_preview",
+        "InternS2PreviewForConditionalGeneration",
+    ),
     "Idefics3ForConditionalGeneration": (
         "idefics3",
         "Idefics3ForConditionalGeneration",
