@@ -128,7 +128,7 @@ firewall configuration instructions.
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**, and other similar `/v2`, `/inference` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
@@ -154,6 +154,9 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/rerank` - Reranking API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/inference/v1/generate` - Generate completions
+- `/v2/embed` - Cohere Embed API
+- `/v2/rerank` - Cohere Rerank API
 
 ### Unprotected Endpoints (No API Key Required)
 
@@ -162,7 +165,6 @@ The following endpoints **do not require authentication** even when `--api-key` 
 **Inference endpoints:**
 
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
-- `/inference/v1/generate` - Generate completions
 - `/generative_scoring` - Generative scoring API
 - `/pooling` - Pooling API
 - `/classify` - Classification API
