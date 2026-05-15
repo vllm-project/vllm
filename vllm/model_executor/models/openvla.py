@@ -4,10 +4,8 @@
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import numpy as np
 import torch
 import torch.nn as nn
-from PIL import Image
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
@@ -37,6 +35,7 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    InputProcessingContext,
     PromptIndexTargets,
     PromptInsertion,
     PromptUpdate,
@@ -45,6 +44,7 @@ from vllm.multimodal.processing import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import OpenVLAConfig
+from vllm.transformers_utils.processors.openvla import OpenVLAProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
@@ -264,8 +264,18 @@ class PrismaticProjector(nn.Module):
 
 
 class OpenVLAProcessingInfo(BaseProcessingInfo):
+    def __init__(self, ctx: InputProcessingContext) -> None:
+        super().__init__(ctx)
+        self.hf_processor = OpenVLAProcessor(
+            tokenizer=self.get_tokenizer(),
+            image_size=self.get_hf_config().image_sizes[0],
+        )
+
     def get_hf_config(self) -> OpenVLAConfig:
         return self.ctx.get_hf_config(OpenVLAConfig)
+
+    def get_hf_processor(self) -> OpenVLAProcessor:
+        return self.hf_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
@@ -324,66 +334,6 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
     channels 0-2 are DINOv2-normalized and channels 3-5 are SigLIP-normalized.
     """
 
-    IMAGENET_MEAN = np.array([0.484375, 0.455078125, 0.40625], dtype=np.float32)
-    IMAGENET_STD = np.array([0.228515625, 0.2236328125, 0.224609375], dtype=np.float32)
-    SIGLIP_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-    SIGLIP_STD = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-
-    @staticmethod
-    def _to_rgb_image(image: object) -> Image.Image:
-        if isinstance(image, Image.Image):
-            return image.convert("RGB")
-
-        if isinstance(image, torch.Tensor):
-            image = image.detach().cpu().numpy()
-
-        if isinstance(image, np.ndarray):
-            if image.ndim != 3:
-                raise ValueError(
-                    "OpenVLA image input must have 3 dimensions, "
-                    f"got shape {image.shape}"
-                )
-
-            if image.shape[0] in (1, 3):
-                image = np.moveaxis(image, 0, -1)
-
-            if image.shape[-1] == 1:
-                image = np.repeat(image, 3, axis=-1)
-            elif image.shape[-1] != 3:
-                raise ValueError(
-                    "OpenVLA image input must have 1 or 3 channels, "
-                    f"got shape {image.shape}"
-                )
-
-            if image.dtype != np.uint8:
-                image = image.astype(np.float32)
-                if image.max(initial=0.0) <= 1.0:
-                    image = image * 255.0
-                image = np.clip(image, 0, 255).astype(np.uint8)
-
-            return Image.fromarray(image).convert("RGB")
-
-        raise TypeError(
-            "OpenVLA image input must be a PIL image, numpy array, or torch tensor; "
-            f"got {type(image)}"
-        )
-
-    def _preprocess_image(self, image: object) -> torch.Tensor:
-        image = self._to_rgb_image(image)
-        image_size = self.info.get_hf_config().image_sizes[0]
-        image = image.resize(
-            (image_size, image_size),
-            Image.Resampling.BICUBIC,
-        )
-
-        raw = np.asarray(image, dtype=np.float32) / 255.0
-        dinov2_pixels = ((raw - self.IMAGENET_MEAN) / self.IMAGENET_STD).transpose(
-            2, 0, 1
-        )
-        siglip_pixels = ((raw - self.SIGLIP_MEAN) / self.SIGLIP_STD).transpose(2, 0, 1)
-        pixel_values = np.concatenate([dinov2_pixels, siglip_pixels], axis=0)
-        return torch.from_numpy(pixel_values)
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -391,24 +341,11 @@ class OpenVLAMultiModalProcessor(BaseMultiModalProcessor[OpenVLAProcessingInfo])
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-        prompt_ids = tokenizer.encode(prompt, **tok_kwargs)
-
-        images = mm_data.get("images")
-        if images is None:
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-        if not isinstance(images, Sequence) or isinstance(images, (str, bytes)):
-            images = [images]
-        if len(images) == 0:
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        pixel_values = torch.stack(
-            [self._preprocess_image(image) for image in images],
-            dim=0,
-        )
-        return BatchFeature(
-            dict(input_ids=[prompt_ids], pixel_values=pixel_values),
-            tensor_type="pt",
+        processor = self.info.get_hf_processor()
+        return processor(
+            prompt,
+            images=mm_data.get("images"),
+            tok_kwargs=tok_kwargs,
         )
 
     def _get_mm_fields_config(

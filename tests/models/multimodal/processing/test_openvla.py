@@ -15,6 +15,15 @@ from vllm.model_executor.models.openvla import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.transformers_utils.configs.openvla import OpenVLAConfig
+from vllm.transformers_utils.processors.openvla import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    SIGLIP_MEAN,
+    SIGLIP_STD,
+    OpenVLAProcessor,
+    preprocess_openvla_image,
+    to_rgb_image,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -100,9 +109,7 @@ def test_openvla_to_rgb_image(
     expected_size: tuple[int, int],
     expected_pixel: tuple[int, int, int],
 ) -> None:
-    processor = _make_processor()
-
-    rgb_image = processor._to_rgb_image(image)
+    rgb_image = to_rgb_image(image)
 
     assert rgb_image.mode == "RGB"
     assert rgb_image.size == expected_size
@@ -110,24 +117,17 @@ def test_openvla_to_rgb_image(
 
 
 def test_openvla_preprocess_image_matches_expected_normalization() -> None:
-    processor = _make_processor()
     image = Image.fromarray(
         np.arange(12 * 10 * 3, dtype=np.uint8).reshape(10, 12, 3),
         mode="RGB",
     )
 
-    pixel_values = processor._preprocess_image(image)
+    pixel_values = preprocess_openvla_image(image, image_size=224)
 
     resized = image.resize((224, 224), Image.Resampling.BICUBIC)
     raw = np.asarray(resized, dtype=np.float32) / 255.0
-    expected_dinov2 = (
-        (raw - OpenVLAMultiModalProcessor.IMAGENET_MEAN)
-        / OpenVLAMultiModalProcessor.IMAGENET_STD
-    ).transpose(2, 0, 1)
-    expected_siglip = (
-        (raw - OpenVLAMultiModalProcessor.SIGLIP_MEAN)
-        / OpenVLAMultiModalProcessor.SIGLIP_STD
-    ).transpose(2, 0, 1)
+    expected_dinov2 = ((raw - IMAGENET_MEAN) / IMAGENET_STD).transpose(2, 0, 1)
+    expected_siglip = ((raw - SIGLIP_MEAN) / SIGLIP_STD).transpose(2, 0, 1)
     expected = np.concatenate([expected_dinov2, expected_siglip], axis=0)
 
     assert pixel_values.shape == (6, 224, 224)
@@ -136,14 +136,13 @@ def test_openvla_preprocess_image_matches_expected_normalization() -> None:
 
 
 def test_openvla_processor_outputs_pixel_values() -> None:
-    processor = _make_processor()
+    processor = OpenVLAProcessor(tokenizer=_FakeTokenizer(), image_size=224)
     image = Image.new("RGB", (8, 8), color=(255, 0, 0))
 
-    batch = processor._call_hf_processor(
+    batch = processor(
         "In: test\nOut:",
-        {"images": image},
-        {},
-        {"add_special_tokens": True},
+        images=image,
+        tok_kwargs={"add_special_tokens": True},
     )
 
     assert batch["input_ids"].tolist() == [[1, 10, 11]]
