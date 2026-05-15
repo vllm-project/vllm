@@ -237,7 +237,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             hidden_states,
             w1,
             intermediate_cache1,
-            a1q_scale,
+            a1q_scale if a1q_scale is not None else self.a1_scale,
             self.w1_scale,
             None,  # topk_weights
             sorted_token_ids,
