@@ -325,15 +325,18 @@ def create_shuffle_view_k(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
     """
     Create K cache tensor view with SHUFFLE layout.
 
-    Transforms NHD layout [num_blocks, block_size, num_kv_heads, head_size]
-    to SHUFFLE layout [num_blocks, num_kv_heads, head_size//X, block_size, X]
+    IMPORTANT: The physical memory is ALREADY in SHUFFLE format (written by C++ kernel).
+    We need to create a tensor with the correct strides to access that memory.
+
+    Physical SHUFFLE layout: [num_blocks, num_kv_heads, head_size//X, block_size, X]
+    Logical view we receive: [num_blocks, block_size, num_kv_heads, head_size]
 
     Args:
-        cache_tensor: K cache in NHD layout (4D)
+        cache_tensor: K cache physical pointer (logical 4D view)
         dtype: Tensor dtype (determines X packing factor)
 
     Returns:
-        5D tensor view in SHUFFLE layout
+        5D tensor with correct strides for SHUFFLE memory
     """
     num_blocks, block_size, num_kv_heads, head_size = cache_tensor.shape
 
@@ -347,32 +350,44 @@ def create_shuffle_view_k(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
 
     assert head_size % X == 0, f"head_size {head_size} not divisible by X={X}"
 
-    # Create template with SHUFFLE shape
-    k_template = torch.empty(
-        [num_blocks, num_kv_heads, head_size // X, block_size, X],
-        dtype=cache_tensor.dtype,
-        device="meta",
-    )
+    # Physical SHUFFLE layout strides
+    # Shape: [num_blocks, num_kv_heads, head_size//X, block_size, X]
+    # The memory is contiguous in this order (C++ wrote it this way)
+    dim_groups = head_size // X
 
-    # Use view_as() to create SHUFFLE view with inferred strides
-    return cache_tensor.view_as(k_template)
+    # Compute strides for physical SHUFFLE layout (last dim is 1 for contiguous)
+    stride_4 = 1                           # X (innermost)
+    stride_3 = X                           # block_size
+    stride_2 = block_size * X              # head_size//X
+    stride_1 = dim_groups * block_size * X # num_kv_heads
+    stride_0 = num_kv_heads * stride_1     # num_blocks (outermost)
+
+    # Create tensor with correct shape and strides
+    return torch.as_strided(
+        cache_tensor,
+        size=(num_blocks, num_kv_heads, dim_groups, block_size, X),
+        stride=(stride_0, stride_1, stride_2, stride_3, stride_4),
+    )
 
 
 def create_shuffle_view_v(cache_tensor: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     """
     Create V cache tensor view with SHUFFLE layout.
 
-    Transforms NHD layout [num_blocks, block_size, num_kv_heads, head_size]
-    to SHUFFLE layout [num_blocks, num_kv_heads, block_size//X, head_size, X]
+    IMPORTANT: The physical memory is ALREADY in SHUFFLE format (written by C++ kernel).
+    We need to create a tensor with the correct strides to access that memory.
+
+    Physical SHUFFLE layout: [num_blocks, num_kv_heads, block_size//X, head_size, X]
+    Logical view we receive: [num_blocks, block_size, num_kv_heads, head_size]
 
     Note: V has different dimension ordering than K.
 
     Args:
-        cache_tensor: V cache in NHD layout (4D)
+        cache_tensor: V cache physical pointer (logical 4D view)
         dtype: Tensor dtype (determines X packing factor)
 
     Returns:
-        5D tensor view in SHUFFLE layout
+        5D tensor with correct strides for SHUFFLE memory
     """
     num_blocks, block_size, num_kv_heads, head_size = cache_tensor.shape
 
@@ -386,15 +401,24 @@ def create_shuffle_view_v(cache_tensor: torch.Tensor, dtype: torch.dtype) -> tor
 
     assert block_size % X == 0, f"block_size {block_size} not divisible by X={X}"
 
-    # Create template with SHUFFLE shape (different from K!)
-    v_template = torch.empty(
-        [num_blocks, num_kv_heads, block_size // X, head_size, X],
-        dtype=cache_tensor.dtype,
-        device="meta",
-    )
+    # Physical SHUFFLE layout strides
+    # Shape: [num_blocks, num_kv_heads, block_size//X, head_size, X]
+    # The memory is contiguous in this order (C++ wrote it this way)
+    block_tokens = block_size // X
 
-    # Use view_as() to create SHUFFLE view with inferred strides
-    return cache_tensor.view_as(v_template)
+    # Compute strides for physical SHUFFLE layout (last dim is 1 for contiguous)
+    stride_4 = 1                           # X (innermost)
+    stride_3 = X                           # head_size
+    stride_2 = head_size * X               # block_size//X
+    stride_1 = block_tokens * head_size * X # num_kv_heads
+    stride_0 = num_kv_heads * stride_1      # num_blocks (outermost)
+
+    # Create tensor with correct shape and strides
+    return torch.as_strided(
+        cache_tensor,
+        size=(num_blocks, num_kv_heads, block_tokens, head_size, X),
+        stride=(stride_0, stride_1, stride_2, stride_3, stride_4),
+    )
 
 
 @dataclass
