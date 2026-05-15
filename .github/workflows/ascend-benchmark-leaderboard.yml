@@ -117,6 +117,7 @@ jobs:
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_PR == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
       TARGET_REPO_URL: https://github.com/${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
+      HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
       - name: Checkout target repo with retry
@@ -241,6 +242,33 @@ jobs:
           }
 
           clone_with_retry "https://github.com/vLLM-HUST/vllm-ascend-hust.git" "$GITHUB_WORKSPACE/vllm-ascend-hust"
+
+      - name: Checkout ascend-runtime-manager repo
+        run: |
+          clone_with_retry() {
+            local repo_url=$1
+            local target_dir=$2
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            rm -rf "$target_dir"
+            while [[ "$try" -le "$attempts" ]]; do
+              if git clone --depth 1 "$repo_url" "$target_dir"; then
+                return 0
+              fi
+              echo "Clone failed ($try/$attempts): $repo_url" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+            done
+
+            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
+            return 1
+          }
+
+          clone_with_retry "https://github.com/vLLM-HUST/ascend-runtime-manager.git" "$GITHUB_WORKSPACE/ascend-runtime-manager"
 
       - name: Prepare Hugging Face cache directories
         run: |
