@@ -4,6 +4,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import Executor
+from contextlib import asynccontextmanager
 from http import HTTPStatus
 from time import time_ns
 from typing import ClassVar
@@ -31,9 +32,11 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.tracing.otel import (
+    TO_MS,
     get_span_context,
     get_status_error,
     init_otel_trace_provider,
+    maybe_start_span, maybe_start_span_async,
 )
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async, merge_async_iterators
@@ -78,6 +81,7 @@ class PoolingServingBase(ABC):
 
         # Observability
         self.is_tracing_enabled = is_tracing_enabled
+
         if self.is_tracing_enabled:
             from opentelemetry.trace.propagation.tracecontext import (
                 TraceContextTextMapPropagator,
@@ -107,94 +111,91 @@ class PoolingServingBase(ABC):
                 },
             )
 
+    @asynccontextmanager
+    async def maybe_tracing(
+        self,
+        ctx: PoolingServeContext,
+        raw_request: Request | None = None,
+    ):
+        raw_trace_headers = await self._get_trace_headers(raw_request)
+
+        if not self.is_tracing_enabled:
+            yield
+            return
+
+        request_tracer = self.request_trace_provider.get_tracer("vllm.request")
+        entrypoint_tracer = self.entrypoint_trace_provider.get_tracer("vllm.entrypoint")
+        trace_context = self.propagator.extract(raw_trace_headers)
+
+        request_span = request_tracer.start_span(
+            "vllm.request", context=trace_context, start_time=ctx.arrival_time
+        )
+        request_span_context = get_span_context(request_span)
+
+        trace_headers = {}
+        self.propagator.inject(trace_headers, context=request_span_context)
+
+        ctx.trace_headers = trace_headers
+        ctx.entrypoint_tracer = entrypoint_tracer
+        ctx.request_span_context = request_span_context
+
+        try:
+            yield
+
+            request_span.set_attributes(
+                {
+                    SpanAttributes.GEN_AI_LATENCY_PREPROCESSING: (
+                        ctx.preprocessing_finished - ctx.arrival_time
+                    )
+                    / TO_MS,
+                    SpanAttributes.GEN_AI_LATENCY_ENGINE_CALL: (
+                        ctx.engine_call_finished - ctx.preprocessing_finished
+                    )
+                    / TO_MS,
+                    SpanAttributes.GEN_AI_LATENCY_POSTPROCESSING: (
+                        ctx.postprocessing_finished - ctx.engine_call_finished
+                    )
+                    / TO_MS,
+                }
+            )
+
+        except Exception as e:
+            request_span.set_status(get_status_error())
+            request_span.record_exception(e)
+            raise e
+        finally:
+            end_time = time_ns()
+            request_span.end(end_time)
+
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        if not self.is_tracing_enabled:
-            io_processor = self.get_io_processor(request)
-            trace_headers = await self._get_trace_headers(raw_request)
-            ctx = await self._init_ctx(
-                io_processor, request, raw_request, trace_headers
-            )
+        arrival_time = time_ns()
+
+        io_processor = self.get_io_processor(request)
+        ctx = await self._init_ctx(io_processor, request, raw_request)
+        ctx.arrival_time = arrival_time
+
+        async with self.maybe_tracing(ctx, raw_request):
             await self._preprocessing_async(io_processor, ctx)
-            await self._prepare_generators(ctx)
-            await self._collect_batch(ctx)
-            return await self._postprocessing_async(io_processor, ctx)
-        else:
-            arrival_time = time_ns()
 
-            trace_headers = await self._get_trace_headers(raw_request)
-            request_tracer = self.request_trace_provider.get_tracer("vllm.request")
-            entrypoint_tracer = self.entrypoint_trace_provider.get_tracer(
-                "vllm.entrypoint"
-            )
+            if self.is_tracing_enabled:
 
-            trace_context = self.propagator.extract(trace_headers)
-            request_span = request_tracer.start_span(
-                "vllm.request", context=trace_context, start_time=arrival_time
-            )
-            request_span_context = get_span_context(request_span)
+                ctx.preprocessing_finished = time_ns()
 
-            try:
-                # preprocessing
-                preprocessing_span = entrypoint_tracer.start_span(
-                    "vllm.entrypoint.preprocessing",
-                    context=request_span_context,
-                    start_time=arrival_time,
-                )
+            await self._engine_call(ctx)
 
-                io_processor = self.get_io_processor(request)
-                ctx = await self._init_ctx(
-                    io_processor, request, raw_request, trace_headers
-                )
-                await self._preprocessing_async(io_processor, ctx)
-                preprocessing_finished = time_ns()
-                preprocessing_span.end(preprocessing_finished)
+            if self.is_tracing_enabled:
+                ctx.engine_call_finished = time_ns()
 
-                # engine_call
-                engine_call_span = entrypoint_tracer.start_span(
-                    "vllm.entrypoint.engine_call",
-                    context=request_span_context,
-                    start_time=preprocessing_finished,
-                )
+            response = await self._postprocessing_async(io_processor, ctx)
 
-                await self._prepare_generators(ctx)
-                await self._collect_batch(ctx)
-                engine_call_finished = time_ns()
-                engine_call_span.end(engine_call_finished)
+            if self.is_tracing_enabled:
+                ctx.postprocessing_finished = time_ns()
 
-                # postprocessing
-                postprocessing_span = entrypoint_tracer.start_span(
-                    "vllm.entrypoint.postprocessing",
-                    context=request_span_context,
-                    start_time=engine_call_finished,
-                )
-
-                response = await self._postprocessing_async(io_processor, ctx)
-                postprocessing_finished = time_ns()
-                if self.is_tracing_enabled:
-                    postprocessing_span.end(postprocessing_finished)
-
-                request_span.set_attributes(
-                    {
-                        SpanAttributes.GEN_AI_LATENCY_PREPROCESSING: preprocessing_finished
-                        - arrival_time,
-                        SpanAttributes.GEN_AI_LATENCY_ENGINE_CALL: engine_call_finished
-                        - preprocessing_finished,
-                        SpanAttributes.GEN_AI_LATENCY_POSTPROCESSING: postprocessing_finished
-                        - engine_call_finished,
-                    }
-                )
-
-                return response
-            except Exception as e:
-                request_span.set_status(get_status_error())
-                request_span.record_exception(e)
-                raise e
-            finally:
-                request_span.end()
+            return response
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
@@ -204,21 +205,39 @@ class PoolingServingBase(ABC):
     def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        return io_processor.pre_process_online(ctx)
+        with maybe_start_span(
+            ctx.entrypoint_tracer,
+            "vllm.entrypoint.preprocessing",
+            context=ctx.request_span_context,
+        ):
+            return io_processor.pre_process_online(ctx)
 
     @torch.inference_mode()
     def _postprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        io_processor.post_process_online(ctx)
-        return self._build_response(ctx)
+        with maybe_start_span(
+            ctx.entrypoint_tracer,
+            "vllm.entrypoint.postprocessing",
+            context=ctx.request_span_context,
+        ):
+            io_processor.post_process_online(ctx)
+            return self._build_response(ctx)
+
+    async def _engine_call(self, ctx):
+        async with maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            "vllm.entrypoint.engine_call",
+            context=ctx.request_span_context,
+        ):
+            await self._prepare_generators(ctx)
+            await self._collect_batch(ctx)
 
     async def _init_ctx(
         self,
         io_processor: PoolingIOProcessor,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
-        trace_headers: Mapping[str, str] | None = None,
     ):
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
@@ -230,7 +249,6 @@ class PoolingServingBase(ABC):
             model_name=model_name,
             pooling_params=pooling_params,
             request_id=request_id,
-            trace_headers=trace_headers,
         )
 
         self._validate_request(ctx)

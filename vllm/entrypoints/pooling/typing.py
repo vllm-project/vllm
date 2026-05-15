@@ -10,6 +10,7 @@ from pydantic import ConfigDict
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.tracing.otel import Tracer
 
 from .classify.protocol import (
     ClassificationChatRequest,
@@ -82,7 +83,14 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
     # for Observability
-    trace_headers: Mapping[str, str] | None
+    trace_headers: Mapping[str, str] | None = None
+    entrypoint_tracer: Tracer | None = None
+    request_span_context: Any | None = None
+    # timestamp time_ns
+    arrival_time: int = 0
+    preprocessing_finished: int = 0
+    engine_call_finished: int = 0
+    postprocessing_finished: int = 0
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence[EngineInput] | None = None

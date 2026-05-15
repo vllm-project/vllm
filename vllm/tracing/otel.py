@@ -7,7 +7,8 @@ import inspect
 import os
 import traceback
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, asynccontextmanager
+from time import time_ns
 from typing import Any
 
 from vllm.logger import init_logger
@@ -55,6 +56,7 @@ except ImportError:
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
     NonRecordingSpan = Any  # type: ignore
+    TracerProvider = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
@@ -269,6 +271,10 @@ def propagate_trace_to_env():
                 os.environ[key] = original_value
 
 
+TO_S = 1000_000_000
+TO_MS = 1000_000
+
+
 def init_otel_trace_provider(
     otlp_traces_endpoint: str,
     extra_attributes: dict[str, str] | None = None,
@@ -300,3 +306,27 @@ def get_span_context(span):
 
 def get_status_error():
     return Status(StatusCode.ERROR)
+
+
+@contextmanager
+def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
+    if tracer is None:
+        yield
+    else:
+        start_time = time_ns()
+        span = tracer.start_span(*args, start_time=start_time, **kwargs)
+        yield
+        end_time = time_ns()
+        span.end(end_time)
+
+
+@asynccontextmanager
+async def maybe_start_span_async(tracer: Tracer | None, *args, **kwargs):
+    if tracer is None:
+        yield
+    else:
+        start_time = time_ns()
+        span = tracer.start_span(*args, start_time=start_time, **kwargs)
+        yield
+        end_time = time_ns()
+        span.end(end_time)
