@@ -90,11 +90,12 @@ def try_get_optimal_moe_lora_config(
     top_k: int,
     dtype: str | None,
     M: int,
-    block_shape: list[int] | None = None,
 ) -> dict[str, int | None]:
-    config = try_get_optimal_moe_config(
-        w1_shape, w2_shape, top_k, dtype, M, block_shape
-    ).copy()
+    # LoRA shrink/expand operates on bf16/fp16 adapters regardless of the
+    # base MoE weight's block-wise quantization, so block_shape is omitted
+    # from the config lookup — the non-quantized branch in get_default_config
+    # ignores it anyway.
+    config = try_get_optimal_moe_config(w1_shape, w2_shape, top_k, dtype, M).copy()
     if op_type in [
         "fused_moe_lora_w13_shrink",
         "fused_moe_lora_w2_shrink",

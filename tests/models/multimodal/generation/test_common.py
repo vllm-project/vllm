@@ -316,7 +316,15 @@ VLM_TEST_SETTINGS = {
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
-        marks=[large_gpu_mark(min_gb=64)],
+        marks=[
+            pytest.mark.skip(
+                reason="Aria needs to update for latest transformers, "
+                "must have a vision_processor.py."
+                "An issue has been filed:"
+                "https://huggingface.co/rhymes-ai/Aria/discussions/23"
+            ),
+            large_gpu_mark(min_gb=64),
+        ],
     ),
     "aya_vision": VLMTestInfo(
         models=["CohereLabs/aya-vision-8b"],
@@ -468,7 +476,14 @@ VLM_TEST_SETTINGS = {
         max_tokens=8,
         num_logprobs=10,
         auto_cls=AutoModelForCausalLM,
-        marks=[large_gpu_mark(min_gb=32)],
+        marks=[
+            pytest.mark.skip(
+                reason="The code for this model has a bug."
+                "Please see the issue here:"
+                "https://huggingface.co/zai-org/glm-4v-9b/discussions/46."
+            ),
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     "glm4_1v": VLMTestInfo(
         models=["zai-org/GLM-4.1V-9B-Thinking"],
@@ -513,7 +528,14 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=32)],
+        marks=[
+            pytest.mark.skip(
+                reason="This test fails on both AMD and NV"
+                "hardware. please see the issue:"
+                "https://github.com/vllm-project/vllm/issues/42016"
+            ),
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     "granite4_vision": VLMTestInfo(
         models=["ibm-granite/granite-vision-4.1-4b"],
@@ -805,6 +827,32 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "moondream3": VLMTestInfo(
+        models=["moondream/moondream3-preview"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=identity,
+        img_idx_to_prompt=lambda idx: "<|endoftext|><image>",
+        # Common-image coverage here targets query/caption. The native
+        # detect/point skills are not exposed by vLLM.
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image><|md_reserved_0|>query<|md_reserved_1|>What is this sign?<|md_reserved_2|>",  # noqa: E501
+                "cherry_blossom": (
+                    "<vlm_image><|md_reserved_0|>query<|md_reserved_1|>What season is shown?<|md_reserved_2|>"  # noqa: E501
+                ),
+            }
+        ),
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        hf_processor=model_utils.moondream3_processor,
+        patch_hf_runner=model_utils.moondream3_patch_hf_runner,
+        # Single size factor to avoid GPU OOM when running multiple test
+        # cases sequentially (9B MoE model uses ~18 GiB per instance).
+        image_size_factors=[(1.0,)],
+        # Moondream3 is 9B params with MoE, needs significant GPU memory
+        marks=[large_gpu_mark(min_gb=48)],
+    ),
     "ovis1_6-gemma2": VLMTestInfo(
         models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -902,6 +950,16 @@ VLM_TEST_SETTINGS = {
             ),
         ],
     ),
+    "qianfan_ocr": VLMTestInfo(
+        models=["baidu/Qianfan-OCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModelForImageTextToText,
+        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
+    ),
     "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -921,6 +979,7 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
+        num_logprobs=10,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],

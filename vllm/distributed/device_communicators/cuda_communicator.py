@@ -270,7 +270,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         input_tensor = input_.movedim(0, dim).contiguous()
 
         if sizes is not None:
-            assert len(sizes) == world_size
+            assert len(sizes) == world_size, f"{len(sizes)} == {world_size}"
             assert input_tensor.shape[0] == sum(sizes)
             chunk_size = sizes[self.rank_in_group]
         else:
