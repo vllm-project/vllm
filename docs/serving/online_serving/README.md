@@ -48,7 +48,7 @@ For further details on pooling models, please refer to [this page](../../models/
     - Only applicable to [classification models](../../models/pooling_models/classify.md).
 - Embedding Usages
     - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
-    - [Openai-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - [OpenAI-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - Scoring Usages
     - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
