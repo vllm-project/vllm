@@ -130,7 +130,7 @@ def test_per_token_group_quant_fp8_packed(
         )
 
     # Triton reference (row-major float32 scales, UE8M0)
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
@@ -161,7 +161,8 @@ def test_per_token_group_quant_fp8_packed(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+    not current_platform.is_cuda_alike(),
+    reason="DeepGEMM not available on this platform",
 )
 def test_per_token_group_quant_fp8_packed_all_zero():
     """All-zero input must produce well-defined UE8M0 scale bytes via the eps
@@ -220,7 +221,8 @@ def test_per_token_group_quant_fp8_packed_all_zero():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+    not current_platform.is_cuda_alike(),
+    reason="DeepGEMM not available on this platform",
 )
 def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
@@ -248,7 +250,7 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
         use_ue8m0=True,
     )
 
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
