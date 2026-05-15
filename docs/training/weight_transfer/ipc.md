@@ -38,11 +38,15 @@ trainer_args = IPCTrainerSendWeightsArgs(
     mode="ray",
     llm_handle=llm_actor_handle,
 )
-
+# start
+ray.get(llm_actor_handle.start_weight_update.remote(is_checkpoint_format=True))
+# send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
+# finish
+ray.get(llm_actor_handle.finish_weight_update.remote())
 ```
 
 In Ray mode, the engine calls `llm_handle.update_weights.remote(...)` directly, passing the IPC handles via Ray's serialization.
@@ -57,17 +61,27 @@ trainer_args = IPCTrainerSendWeightsArgs(
     url="http://localhost:8000",
 )
 
+# start
+base_url = "http://localhost:8000"
+url = f"{base_url}/start_weight_update"
+response = requests.post(url, json={"is_checkpoint_format": True}, timeout=60)
+response.raise_for_status()
+# send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
+# finish
+url = f"{base_url}/finish_weight_update"
+response = requests.post(url, json={}, timeout=60)
+response.raise_for_status()
 ```
 
-In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint.
+In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. As with Ray mode, you must call `start_weight_update` before and `finish_weight_update` after.
 
 See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/ipc_engine.py) for the full list of configurable fields.
 
 ## Examples
 
-- [RLHF with IPC weight syncing (offline, Ray)](../../examples/rl/rlhf_ipc.md) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
-- [RLHF with IPC weight syncing (online serving, HTTP)](../../examples/rl/rlhf_http_ipc.md) - Weight transfer with a vLLM HTTP server where both server and trainer share the same GPU
+- [RLHF with IPC weight syncing (offline, Ray)](../../../examples/rl/rlhf_ipc.py) - Colocated training and inference on a single GPU using Ray placement groups and CUDA IPC handles
+- [RLHF with IPC weight syncing (online serving, HTTP)](../../../examples/rl/rlhf_http_ipc.py) - Weight transfer with a vLLM HTTP server where both server and trainer share the same GPU
