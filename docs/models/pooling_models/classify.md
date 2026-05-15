@@ -77,7 +77,7 @@ The following [pooling parameters][vllm.PoolingParams] are supported.
 
 ### `LLM.classify`
 
-The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
+The [classify][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.classify] method outputs a probability vector for each prompt.
 
 ```python
 from vllm import LLM
@@ -93,7 +93,7 @@ A code example can be found here: [examples/basic/offline_inference/classify.py]
 
 ### `LLM.encode`
 
-The [encode][vllm.LLM.encode] method is available to all pooling models in vLLM.
+The [encode][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.encode] method is available to all pooling models in vLLM.
 
 Set `pooling_task="classify"` when using `LLM.encode` for classification Models:
 
