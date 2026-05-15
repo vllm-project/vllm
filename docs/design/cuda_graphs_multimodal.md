@@ -136,6 +136,9 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen3_5ForConditionalGeneration` | `Qwen3.5` | ✅︎ | ✅︎ | ❌︎ |
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ❌︎ |
+| `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ |
+| `MiniCPMV` | `MiniCPMV2.6` | ✅︎ | ✅︎ |
+| `MiniCPMV` | `MiniCPMV4.0` | ✅︎ | ✅︎ |
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
