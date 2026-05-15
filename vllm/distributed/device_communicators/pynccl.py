@@ -210,11 +210,14 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
+        nccl_dtype = ncclDataTypeEnum.from_torch(
+            torch.uint8 if is_float8_dtype(input_tensor.dtype) else input_tensor.dtype
+        )
         self.nccl.ncclAllGather(
             buffer_type(input_tensor.data_ptr()),
             buffer_type(output_tensor.data_ptr()),
             input_tensor.numel(),
-            ncclDataTypeEnum.from_torch(input_tensor.dtype),
+            nccl_dtype,
             self.comm,
             cudaStream_t(stream.cuda_stream),
         )
@@ -238,6 +241,9 @@ class PyNcclCommunicator:
         if stream is None:
             stream = current_stream()
         assert output_tensor.shape[0] == sum(sizes)
+        nccl_dtype = ncclDataTypeEnum.from_torch(
+            torch.uint8 if is_float8_dtype(input_tensor.dtype) else input_tensor.dtype
+        )
         split_offset = 0
         self.nccl.ncclGroupStart()
         for root, split_size in enumerate(sizes):
@@ -246,7 +252,7 @@ class PyNcclCommunicator:
                 buffer_type(input_tensor.data_ptr()),
                 buffer_type(dst_slice.data_ptr()),
                 dst_slice.numel(),
-                ncclDataTypeEnum.from_torch(input_tensor.dtype),
+                nccl_dtype,
                 root,
                 self.comm,
                 cudaStream_t(stream.cuda_stream),
