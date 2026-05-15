@@ -182,10 +182,16 @@ class CudagraphDispatcher:
             lora_count for lora_count in lora_cases if lora_count
         ]
 
+        spec_config = self.vllm_config.speculative_config
+        skip_full = spec_config is not None and spec_config.use_dflash()
+
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
-        if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+        mixed_mode = cudagraph_mode.mixed_mode()
+        if skip_full and mixed_mode == CUDAGraphMode.FULL:
+            mixed_mode = CUDAGraphMode.NONE
+        if mixed_mode != CUDAGraphMode.NONE:
             assert self.compilation_config.cudagraph_capture_sizes is not None, (
                 "Cudagraph capture sizes must be set when mixed mode is enabled."
             )
@@ -197,15 +203,16 @@ class CudagraphDispatcher:
                 )
                 # Only relax for PIECEWISE mode. FULL mode needs exact num_reqs
                 # because FA3's scheduler_metadata computation depends on it.
-                if cudagraph_mode.mixed_mode() == CUDAGraphMode.PIECEWISE:
+                if mixed_mode == CUDAGraphMode.PIECEWISE:
                     batch_desc = replace(batch_desc, num_reqs=None, uniform=False)
-                self.add_cudagraph_key(cudagraph_mode.mixed_mode(), batch_desc)
+                self.add_cudagraph_key(mixed_mode, batch_desc)
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and cudagraph_mode.separate_routine()
+            and not skip_full
         ):
             max_num_tokens = (
                 uniform_decode_query_len
