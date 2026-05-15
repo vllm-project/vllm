@@ -817,6 +817,12 @@ class Step3p5Model(nn.Module):
 
 
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+    # Required so quantization exclude lists match fused module prefixes.
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".share_expert.": ".moe.share_expert."}
     )
