@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Sequence
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -150,6 +152,12 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        self.logical_output_size: int | None = None
+        super().__init__(c, layer_param_names)
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -215,7 +223,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         padded_k, padded_n = B.shape
-        output_size = getattr(self, "logical_output_size", output_shape[-1])
+        output_size = self.logical_output_size
+        assert output_size is not None
         pad_k = padded_k - A.shape[1]
         pad_n = padded_n - output_size
 
