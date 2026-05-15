@@ -298,16 +298,45 @@ class KVCacheManager:
         When caching is enabled, we free the blocks in reverse order so that
         the tail blocks are evicted first.
 
+        KVConnector_V1 eviction-policy hook: if the registered KV transfer
+        group implements ``get_eviction_order``, the connector returns a
+        policy-driven ordering of the request's blocks (front of returned
+        list = evicted first). This lets a connector backed by a learned
+        attention-demand predictor reorder eviction-priority so that blocks
+        with high predicted future-use survive longer in the free queue for
+        prefix-cache reuse by later requests. Falls back to the default
+        reverse-order heuristic on any failure.
+
         Args:
             request: The request to free the blocks.
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         blocks = self.req_to_blocks.pop(request.request_id, [])
-        ordered_blocks: Iterable[KVCacheBlock] = blocks
         if self.enable_caching:
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
-            ordered_blocks = reversed(blocks)
+            ordered_blocks: list = list(reversed(blocks))
+        else:
+            ordered_blocks = list(blocks)
+
+        # KVConnector_V1 eviction-policy hook.
+        try:
+            from vllm.distributed.kv_transfer import (
+                get_kv_transfer_group, has_kv_transfer_group,
+                is_v1_kv_transfer_group)
+            if (has_kv_transfer_group() and is_v1_kv_transfer_group()
+                    and ordered_blocks):
+                _conn = get_kv_transfer_group()
+                if hasattr(_conn, "get_eviction_order"):
+                    _reordered = _conn.get_eviction_order(
+                        request, list(ordered_blocks))
+                    if _reordered is not None and len(_reordered) == len(
+                            ordered_blocks):
+                        ordered_blocks = list(_reordered)
+        except Exception:  # noqa: BLE001
+            # Never break vLLM's free path on a connector error;
+            # fall back to the default ordering above.
+            pass
 
         self.block_pool.free_blocks(ordered_blocks)
         self.num_cached_block.pop(request.request_id, None)
