@@ -1488,6 +1488,7 @@ def make_mxfp4_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=None,
+            gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.MARLIN,
