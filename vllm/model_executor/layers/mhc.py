@@ -94,6 +94,31 @@ class MHCPreOp(CustomOp):
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_pre is not available")
 
+    def forward_xpu(
+        self,
+        residual: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        n_splits: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return mhc_kernels.mhc_pre_torch(
+            residual,
+            fn,
+            hc_scale,
+            hc_base,
+            rms_eps,
+            hc_pre_eps,
+            hc_sinkhorn_eps,
+            hc_post_mult_value,
+            sinkhorn_repeat,
+        )
+
 
 # --8<-- [start:mhc_post]
 @CustomOp.register("mhc_post")
@@ -151,7 +176,19 @@ class MHCPostOp(CustomOp):
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of mhc_post is not available")
 
-
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+    ) -> torch.Tensor:
+        return mhc_kernels.mhc_post_torch(
+            x,
+            residual,
+            post_layer_mix,
+            comb_res_mix,
+        )
 # --8<-- [start:hc_head]
 @CustomOp.register("hc_head")
 class HCHeadOp(CustomOp):
@@ -229,6 +266,36 @@ class HCHeadOp(CustomOp):
 
     def forward_native(self, *args, **kwargs):
         raise NotImplementedError("Native implementation of hc_head is not available")
+
+    def forward_xpu(
+        self,
+        hidden_states: torch.Tensor,
+        hc_fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_norm_eps: float,
+        hc_eps: float,
+    ) -> torch.Tensor:
+        hc_mult, hidden_size = hidden_states.shape[-2:]
+        outer_shape = hidden_states.shape[:-2]
+        hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
+        num_tokens = hs_flat.shape[0]
+
+        out = torch.empty(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
+        )
+        torch.ops.vllm.hc_head_triton(
+            hs_flat,
+            hc_fn,
+            hc_scale,
+            hc_base,
+            out,
+            hidden_size,
+            rms_norm_eps,
+            hc_eps,
+            hc_mult,
+        )
+        return out.view(*outer_shape, hidden_size)
 
 
 # --8<-- [start:mhc_fused_post_pre]

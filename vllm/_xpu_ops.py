@@ -550,6 +550,16 @@ class xpu_ops:
         # kv_cache: [num_block, block_size, head_dim + 4]
         kv_cache.view(-1, kv_cache.shape[-1]).index_copy_(0, slot_mapping, k)
 
+        if not hasattr(xpu_ops, '_insert_debug_count'):
+            xpu_ops._insert_debug_count = 0
+        xpu_ops._insert_debug_count += 1
+        if xpu_ops._insert_debug_count <= 3:
+            print(f"[XPU indexer_k_quant_and_cache] tokens={k_fp8.shape[0]} "
+                  f"head_dim={head_dim} quant_block_size={quant_block_size} "
+                  f"scale_range=[{k_scale.min().item():.6f}, {k_scale.max().item():.6f}] "
+                  f"scale_fmt={scale_fmt} "
+                  f"kv_cache_shape={kv_cache.shape} slot_mapping[:5]={slot_mapping[:5].tolist()}")
+
     @staticmethod
     def cp_gather_indexer_k_quant_cache(
         kv_cache: torch.Tensor,
@@ -559,67 +569,256 @@ class xpu_ops:
         cu_seq_lens: torch.Tensor,
     ) -> None:
         """
-        Args:
-            kv_cache: [num_blocks, block_size, cache_stride] - quantized KV cache
-                    Layout per block: [k_values, scale_values]
-                    - k_values: [block_size * head_dim]
-                    - scale_values: [block_size * head_dim * 4 / quant_block_size]
-            dst_k: [num_tokens, head_dim] - output tensor for K values
-            dst_scale: [num_tokens, head_dim / quant_block_size * 4]
-                - output tensor for scale values
-            block_table: [batch_size, num_blocks] - block table for indexing
-            cu_seq_lens: [batch_size + 1] - cumulative sequence lengths
+        Gather K and scale from quantized indexer cache.
+
+        Cache layout is BLOCK-PACKED (same as CUDA):
+          kv_cache: [num_blocks, block_size, head_dim + scale_per_token] uint8
+          But physically, the Triton compressor writes:
+            FP8 data at: block_start + pos * head_dim
+            Scale at: block_start + block_size * head_dim + pos * 4
+          This is equivalent to viewing the block as:
+            k_region: cache_flat[block_start : block_start + bs*dim]
+            scale_region: cache_flat[block_start + bs*dim : block_start + bs*(dim+4)]
         """
         batch_size = block_table.size(0)
         num_tokens = dst_k.size(0)
         head_dim = dst_k.size(1)
         cache_block_size = kv_cache.size(1)
-        quant_block_size = head_dim * 4 // dst_scale.size(1)
+        scale_per_token = dst_scale.size(1)  # = 4
+        block_stride = kv_cache.stride(0)  # bytes per block (may include padding)
+        head_dim = dst_k.size(1)  # = TOKEN_STRIDE used by Triton compressor
+        cache_block_size = kv_cache.size(1)
+        scale_per_token = dst_scale.size(1)  # = 4
 
-        # For each token, find which batch it belongs to using searchsorted
-        token_indices = torch.arange(num_tokens, device=dst_k.device) + 1
-        # cu_seq_lens is [batch_size + 1], we need to find which interval each
-        # token belongs to
-        batch_indices = torch.searchsorted(cu_seq_lens, token_indices) - 1
+        # The cache uses BLOCK-PACKED layout where Triton kernels write with
+        # raw pointer math:
+        #   K for pos j: block_start + j * head_dim
+        #   Scale for pos j: block_start + block_size * head_dim + j * scale_per_token
+        # block_start = physical_block_idx * block_stride
+        # The tensor may have inter-block padding (stride(0) > block_size * width).
+        # Use as_strided to create a flat byte view of the full storage range.
+        num_blocks = kv_cache.size(0)
+        total_bytes = num_blocks * block_stride
+        cache_flat = torch.as_strided(kv_cache, (total_bytes,), (1,))
+
+        # For each token index [0, num_tokens), find batch and in-seq position
+        token_indices = torch.arange(num_tokens, device=dst_k.device)
+        batch_indices = (
+            torch.searchsorted(cu_seq_lens, token_indices, right=True) - 1
+        )
         batch_indices = torch.clamp(batch_indices, 0, batch_size - 1)
 
-        # Calculate the in-batch sequence index for each token
-        inbatch_seq_indices = token_indices - cu_seq_lens[batch_indices]
+        # In-batch sequence position (0-based)
+        inbatch_seq_pos = token_indices - cu_seq_lens[batch_indices]
 
-        # Find which block each token belongs to
-        block_indices_in_table = inbatch_seq_indices // cache_block_size
-        physical_block_indices = block_table[batch_indices, block_indices_in_table]
+        # Block index in table and in-block offset
+        block_indices_in_table = inbatch_seq_pos // cache_block_size
+        inblock_offsets = inbatch_seq_pos % cache_block_size
 
-        # Calculate the offset within each block
-        inblock_offsets = (inbatch_seq_indices - 1) % cache_block_size
+        # Physical block indices
+        physical_block_indices = block_table[
+            batch_indices, block_indices_in_table
+        ]
 
-        # Calculate strides
-        block_stride = kv_cache.stride(0)  # stride for each block
+        # Compute byte offsets in block-packed layout
+        block_starts = physical_block_indices.to(torch.int64) * block_stride
+        # FP8 K at: block_start + pos * head_dim
+        k_offsets = block_starts + inblock_offsets.to(torch.int64) * head_dim
+        # Scale at: block_start + block_size * head_dim + pos * 4
+        scale_offsets = (
+            block_starts
+            + cache_block_size * head_dim
+            + inblock_offsets.to(torch.int64) * scale_per_token
+        )
 
-        # Flatten kv_cache for easier indexing
-        kv_cache_flat = kv_cache.view(-1)
-
-        # Calculate source offset for K values for all tokens (vectorized)
-        src_block_offsets = physical_block_indices * block_stride
-        src_k_offsets = src_block_offsets + inblock_offsets * head_dim
-
-        # Gather K values using advanced indexing
-        # Create indices for all elements we need to gather
-        k_indices = src_k_offsets.unsqueeze(1) + torch.arange(
+        # Gather K bytes [num_tokens, head_dim]
+        k_byte_indices = k_offsets[:, None] + torch.arange(
             head_dim, device=dst_k.device
-        )
-        dst_k[:] = kv_cache_flat[k_indices]
+        )[None, :]
+        k_bytes = cache_flat[k_byte_indices.flatten()].view(num_tokens, head_dim)
+        dst_k_uint8 = dst_k.view(torch.uint8).view(-1, head_dim)
+        dst_k_uint8[:] = k_bytes
 
-        # Calculate source offset for scale values (vectorized)
-        # Scales are stored after all K values for each block
-        scale_size = head_dim * 4 // quant_block_size
-        src_scale_offsets = src_block_offsets + head_dim + inblock_offsets * scale_size
-
-        # Gather scale values
-        scale_indices = src_scale_offsets.unsqueeze(1) + torch.arange(
-            scale_size, device=dst_scale.device
+        # Gather scale bytes [num_tokens, 4]
+        scale_byte_indices = scale_offsets[:, None] + torch.arange(
+            scale_per_token, device=dst_k.device
+        )[None, :]
+        scale_bytes = cache_flat[scale_byte_indices.flatten()].view(
+            num_tokens, scale_per_token
         )
-        dst_scale[:] = kv_cache_flat[scale_indices]
+        dst_scale[:] = scale_bytes
+
+    @staticmethod
+    def fp8_mqa_logits(
+        q: torch.Tensor,
+        kv: tuple[torch.Tensor, torch.Tensor],
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute FP8 MQA logits (non-paged, for prefill indexer).
+
+        Pure PyTorch implementation for XPU. Adapted from ROCm fallback.
+
+        Args:
+            q: [M, H, D] fp8 query
+            kv: (k_fp8 [N, D] fp8, k_scales [N] float32)
+            weights: [M, H] float32 routing weights
+            cu_seqlen_ks: [M] int32 start indices (inclusive)
+            cu_seqlen_ke: [M] int32 end indices (exclusive)
+
+        Returns:
+            logits: [M, N] float32
+        """
+        k_fp8, scale = kv
+        seq_len_kv = k_fp8.shape[0]
+        k = k_fp8.to(torch.bfloat16)
+        q_bf16 = q.to(torch.bfloat16)
+        device = q.device
+
+        mask_lo = (
+            torch.arange(seq_len_kv, device=device)[None, :]
+            >= cu_seqlen_ks[:, None]
+        )
+        mask_hi = (
+            torch.arange(seq_len_kv, device=device)[None, :]
+            < cu_seqlen_ke[:, None]
+        )
+        mask = mask_lo & mask_hi
+
+        # score: [H, M, N] = einsum("mhd,nd->hmn")
+        score = torch.einsum("mhd,nd->hmn", q_bf16, k).float() * scale
+        # weights: [M, H] -> [H, M, 1]
+        logits = (
+            score.relu() * weights.unsqueeze(-1).transpose(0, 1)
+        ).sum(dim=0)
+        logits = logits.masked_fill(~mask, float("-inf"))
+
+        return logits
+
+    @staticmethod
+    def fp8_paged_mqa_logits(
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        weights: torch.Tensor,
+        seq_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        schedule_metadata: torch.Tensor | None,
+        max_model_len: int,
+    ) -> torch.Tensor:
+        """Compute FP8 paged MQA logits (for decode indexer).
+
+        Pure PyTorch, handles BLOCK-PACKED cache layout:
+          kv_cache: [num_blocks, block_size, head_dim + 4] uint8
+          But physically, within each block:
+            FP8 K at: block_start + pos * head_dim
+            Scale at: block_start + block_size * head_dim + pos * 4
+
+        Args:
+            q: [B, next_n, H, D] or [B*next_n, H, D] bf16/fp8 query
+            kv_cache: [num_blocks, block_size, head_dim + 4] uint8 (may be 4D)
+            weights: [B*next_n, H] float32
+            seq_lens: [B, next_n] or [B] int32 context lengths
+            block_table: [B, max_blocks_per_seq] int32
+            schedule_metadata: unused on XPU
+            max_model_len: int
+
+        Returns:
+            logits: [B*next_n, max_model_len] float32
+        """
+        from vllm.utils.math_utils import cdiv
+
+        fp8_dtype = current_platform.fp8_dtype()
+        # kv_cache may be 4D [num_blocks, block_size, 1, head_width] after unsqueeze
+        if kv_cache.ndim == 4:
+            kv_cache = kv_cache.squeeze(2)
+        block_size = kv_cache.shape[1]
+        dim = kv_cache.shape[2] - 4  # head_dim
+        block_stride = kv_cache.stride(0)  # bytes per block
+
+        # Handle q shape
+        if q.ndim == 4:
+            batch_size, next_n = q.shape[0], q.shape[1]
+        elif q.ndim == 3:
+            batch_size = q.shape[0]
+            next_n = 1
+            q = q.unsqueeze(1)
+        else:
+            raise ValueError(f"Unexpected q shape: {q.shape}")
+
+        # Handle seq_lens
+        if seq_lens.ndim == 2:
+            context_lens = seq_lens[:, -1]  # [B]
+        else:
+            context_lens = seq_lens  # [B]
+
+        device = q.device
+        logits = torch.full(
+            [batch_size * next_n, max_model_len],
+            float("-inf"),
+            device=device,
+            dtype=torch.float32,
+        )
+
+        # Flatten cache for raw byte access (block-packed layout)
+        num_cache_blocks = kv_cache.shape[0]
+        total_bytes = num_cache_blocks * block_stride
+        cache_flat = torch.as_strided(kv_cache, (total_bytes,), (1,))
+
+        for i in range(batch_size):
+            seq_len = int(context_lens[i].item())
+            if seq_len <= 0:
+                continue
+            num_pages = cdiv(seq_len, block_size)
+            pages = block_table[i, :num_pages]
+            padded_seq_len = num_pages * block_size
+
+            # Gather K and scale from block-packed layout
+            # For each page, K region: [page_start, page_start + bs*dim)
+            # Scale region: [page_start + bs*dim, page_start + bs*dim + bs*4)
+            page_starts = pages.to(torch.int64) * block_stride
+
+            # K indices: for each page p, for each pos j: page_start + j*dim + d
+            pos_offsets = torch.arange(block_size, device=device)
+            dim_offsets = torch.arange(dim, device=device)
+            # [num_pages, block_size, dim]
+            k_indices = (
+                page_starts[:, None, None]
+                + pos_offsets[None, :, None] * dim
+                + dim_offsets[None, None, :]
+            )
+            k_uint8 = cache_flat[k_indices.reshape(-1)].reshape(
+                padded_seq_len, dim
+            )
+            k_fp8 = k_uint8.view(fp8_dtype).to(torch.float32)
+
+            # Scale indices: for each page p, for each pos j:
+            #   page_start + bs*dim + j*4 + byte
+            scale_byte_offsets = torch.arange(4, device=device)
+            scale_indices = (
+                page_starts[:, None, None]
+                + block_size * dim
+                + pos_offsets[None, :, None] * 4
+                + scale_byte_offsets[None, None, :]
+            )
+            scale_uint8 = cache_flat[scale_indices.reshape(-1)].reshape(
+                padded_seq_len, 4
+            )
+            k_scale = scale_uint8.view(torch.float32)  # [padded_seq_len, 1]
+
+            for n in range(next_n):
+                q_i = q[i, n].to(torch.float32)  # [H, D]
+                w_i = weights[i * next_n + n]  # [H]
+
+                # Compute per-head scores: [H, padded_seq_len]
+                scores = torch.mm(q_i, k_fp8[:padded_seq_len].T)  # [H, S]
+                scores = scores * k_scale[:padded_seq_len].T  # broadcast scale
+                scores = torch.relu(scores)
+                # Weight and sum over heads
+                weighted = (scores * w_i[:, None]).sum(dim=0)  # [S]
+                logits[i * next_n + n, :seq_len] = weighted[:seq_len]
+
+        return logits
 
     @staticmethod
     def top_k_per_row_prefill(
@@ -668,7 +867,22 @@ class xpu_ops:
         )
         row_indices = torch.arange(padded_num_tokens, device=device) // next_n
         next_n_offset = torch.arange(padded_num_tokens, device=device) % next_n
-        index_end_pos = (seq_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
+
+        # seq_lens can be 1D [B] or 2D [B, next_n]. Normalize to per-token
+        # context lengths.
+        if seq_lens.ndim == 2:
+            # 2D: each row has per-spec-token context lengths
+            # Gather the correct context_len for each (batch, spec_pos) pair
+            seq_lens_flat = seq_lens.reshape(-1)  # [B * next_n]
+            # Each padded token i maps to seq_lens[i // next_n, i % next_n]
+            per_token_lens = seq_lens_flat[
+                row_indices * next_n + next_n_offset
+            ]  # [padded_num_tokens]
+            index_end_pos = (per_token_lens - 1).unsqueeze(1)
+        else:
+            index_end_pos = (
+                seq_lens[row_indices] - next_n + next_n_offset
+            ).unsqueeze(1)
         # index_end_pos: [B * N, 1]
         mask = positions <= index_end_pos
         # mask: [B * N, L]

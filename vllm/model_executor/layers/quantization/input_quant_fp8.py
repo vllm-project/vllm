@@ -173,7 +173,12 @@ class QuantFP8(CustomOp):
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # XPU can use same code path as CUDA.
+        # For dynamic group quantization, use the registered custom op so that
+        # torch.compile treats it as opaque and doesn't try to compile the
+        # underlying Triton kernel (Intel Triton can't handle fp8e4nv types).
+        if self.is_group_quant and not self.static:
+            return torch.ops.vllm.triton_per_token_group_quant_fp8(
+                x, self.group_size)
         return self.forward_cuda(x, scale, scale_ub, use_triton)
 
     def forward_native(

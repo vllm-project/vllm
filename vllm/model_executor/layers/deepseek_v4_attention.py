@@ -201,10 +201,14 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Pick fp8_einsum recipe based on GPU arch:
         # SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128
         # SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1
-        cap = current_platform.get_device_capability()
-        assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-        self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-        self._tma_aligned_scales = cap.major >= 10
+        if current_platform.is_xpu():
+            self._einsum_recipe = (1, 128, 128)
+            self._tma_aligned_scales = False
+        else:
+            cap = current_platform.get_device_capability()
+            assert cap is not None, "DeepseekV4 attention requires a CUDA device"
+            self._einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
+            self._tma_aligned_scales = cap.major >= 10
 
         self.rotary_emb = mla_modules.rotary_emb
         self.indexer_rotary_emb = mla_modules.indexer_rotary_emb
@@ -228,7 +232,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
         # before post-GEMM starts.
-        self.ln_events = [torch.cuda.Event() for _ in range(4)]
+        self.ln_events = [current_platform.Event() for _ in range(4)]
 
         assert cache_config is not None, "DeepseekV4 attention requires cache_config"
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -305,8 +309,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
         o = o_padded[:, : self.n_local_heads, :]
 
-        # Keep ROCm on the BF16 reference wo_a path util kernel ready.
-        if current_platform.is_rocm():
+        # Keep ROCm / XPU on the BF16 reference wo_a path until kernel ready.
+        if current_platform.is_rocm() or current_platform.is_xpu():
             z = rocm_inv_rope_einsum(
                 self.rotary_emb,
                 o,
@@ -536,6 +540,24 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
+
+        if current_platform.is_xpu():
+            from vllm.v1.attention.ops.deepseek_v4_ops.xpu_qnorm_rope_kv_fp8_insert import (  # noqa: E501
+                xpu_qnorm_rope_kv_fp8_insert,
+            )
+
+            xpu_qnorm_rope_kv_fp8_insert(
+                q,
+                kv,
+                swa_kv_cache,
+                swa_metadata.slot_mapping,
+                positions.to(torch.int64),
+                self.rotary_emb.cos_sin_cache,
+                self.eps,
+                swa_metadata.block_size,
+            )
+            return
+
         swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
 
         # Horizontally fused:
@@ -660,7 +682,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.prefix = prefix  # Alias for compatibility with compressor
 
         self.aux_stream = aux_stream
-        self.ln_events = [torch.cuda.Event(), torch.cuda.Event()]
+        self.ln_events = [current_platform.Event(), current_platform.Event()]
 
         # Determine padded head count for FlashMLA
         if num_heads not in self.SUPPORTED_HEAD_COUNTS:
@@ -696,9 +718,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             f"DeepseekV4 only supports fp8 kv-cache format for now, "
             f"got {kv_cache_dtype}"
         )
-        assert issubclass(self.get_attn_backend(), FlashMLASparseBackend), (
-            "Only FlashMLA Sparse Attention backend is supported for DeepseekV4 for now"
-        )
+        if not current_platform.is_xpu():
+            assert issubclass(self.get_attn_backend(), FlashMLASparseBackend), (
+                "Only FlashMLA Sparse Attention backend is supported "
+                "for DeepseekV4 for now"
+            )
         # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
         # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
         if (
@@ -851,6 +875,14 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_indices = swa_metadata.decode_swa_indices
         swa_lens = swa_metadata.decode_swa_lens
 
+        if current_platform.is_xpu():
+            assert swa_indices is not None and swa_lens is not None
+            self._forward_decode_xpu(
+                q, kv_cache, swa_only, topk_indices, topk_lens,
+                swa_indices, swa_lens, output,
+            )
+            return
+
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
         # q arrives pre-padded to self.padded_heads by the outer wrapper.
@@ -903,6 +935,39 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
+        )
+
+    def _forward_decode_xpu(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor | None,
+        swa_only: bool,
+        topk_indices: torch.Tensor | None,
+        topk_lens: torch.Tensor | None,
+        swa_indices: torch.Tensor,
+        swa_lens: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """XPU decode: dequant FP8 pages to BF16 then Triton sparse MLA."""
+        from vllm.v1.attention.ops.deepseek_v4_ops.xpu_sparse_decode_fp8 import (
+            xpu_sparse_decode_fp8,
+        )
+
+        xpu_sparse_decode_fp8(
+            q=q,
+            kv_cache=kv_cache,
+            swa_kv_cache=self.swa_cache_layer.kv_cache,
+            swa_only=swa_only,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            attn_sink=self.attn_sink,
+            softmax_scale=self.scale,
+            head_dim=self.head_dim,
+            nope_head_dim=self.nope_head_dim,
+            rope_head_dim=self.rope_head_dim,
+            out=output,
         )
 
     def _forward_prefill(
@@ -1014,15 +1079,31 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 M,
                 N,
             )
-            flash_mla_sparse_fwd(
-                q=q[query_start:query_end],
-                kv=kv.view(-1, 1, q.shape[-1]),
-                indices=combined_indices.unsqueeze(1),
-                sm_scale=self.scale,
-                attn_sink=self.attn_sink,
-                topk_length=combined_lens,
-                out=output[query_start:query_end],
-            )
+            if current_platform.is_xpu():
+                from vllm.v1.attention.ops.deepseek_v4_ops.xpu_sparse_mla_bf16 import (  # noqa: E501
+                    xpu_sparse_mla_bf16,
+                )
+
+                kv_ws = kv[:chunk_size].reshape(-1, q.shape[-1])
+
+                xpu_sparse_mla_bf16(
+                    q=q[query_start:query_end],
+                    kv_workspace=kv_ws,
+                    topk_indices=combined_indices,
+                    topk_lens=combined_lens,
+                    softmax_scale=self.scale,
+                    out=output[query_start:query_end],
+                )
+            else:
+                flash_mla_sparse_fwd(
+                    q=q[query_start:query_end],
+                    kv=kv.view(-1, 1, q.shape[-1]),
+                    indices=combined_indices.unsqueeze(1),
+                    sm_scale=self.scale,
+                    attn_sink=self.attn_sink,
+                    topk_length=combined_lens,
+                    out=output[query_start:query_end],
+                )
 
 
 class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
