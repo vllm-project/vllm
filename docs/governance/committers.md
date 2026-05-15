@@ -20,7 +20,7 @@ Sorted alphabetically by GitHub handle:
 - [@chaunceyjiang](https://github.com/chaunceyjiang): Tool use and reasoning parser
 - [@DarkLight1337](https://github.com/DarkLight1337): Multimodality, API server
 - [@esmeetu](https://github.com/esmeetu): developer marketing, community
-- [@gshtras](https://github.com/gshtras): AMD integration
+- [@dllehr-amd](https://github.com/dllehr-amd): AMD integration
 - [@heheda12345](https://github.com/heheda12345): Hybrid memory allocator
 - [@hmellor](https://github.com/hmellor): Hugging Face integration, documentation
 - [@houseroad](https://github.com/houseroad): Engine core and Llama models
