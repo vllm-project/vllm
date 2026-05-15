@@ -347,17 +347,17 @@ class Proxy:
 
             if self.nixl:
                 body = json.loads(b"".join(chunks))
-                kv_transfer_params = body.get("kv_transfer_params") or {}
-                if kv_transfer_params:
-                    request["kv_transfer_params"] = {
-                        "do_remote_prefill": True,
-                        **kv_transfer_params,
-                    }
-                else:
-                    logger.warning(
-                        "Prefill response had no kv_transfer_params; "
-                        "NIXL P/D handshake will not complete."
-                    )
+                kv_transfer_params = body.get("kv_transfer_params") if isinstance(
+                    body, dict) else None
+                if not kv_transfer_params:
+                    raise HTTPException(
+                        status_code=status.HTTP_502_BAD_GATEWAY,
+                        detail=f"Prefill node failed to provide kv_transfer_params. "
+                        f"Response: {body}")
+                request["kv_transfer_params"] = {
+                    "do_remote_prefill": True,
+                    **kv_transfer_params,
+                }
 
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
