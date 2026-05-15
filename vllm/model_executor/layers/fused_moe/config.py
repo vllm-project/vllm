@@ -981,8 +981,10 @@ class FusedMoEParallelConfig:
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
     ) -> tuple[int, int]:
         tp_rank = 0 if tp_size == 1 else get_tensor_model_parallel_rank()
-        # There are actually dp_size * pcp_size * tp_size devices.
-        # Update tp_size and tp_rank so we shard across all devices.
+        # Flatten the DP/PCP/TP dimensions selected by the caller into a
+        # single TP-like rank space. In non-EP mode callers pass dp_size=1
+        # and dp_rank=0 so DP remains a replica dimension; in EP mode callers
+        # pass the real DP size/rank so DP participates in the EP rank space.
         flatten_tp_size = dp_size * pcp_size * tp_size
         flatten_tp_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
         return flatten_tp_size, flatten_tp_rank
