@@ -100,6 +100,12 @@ class LogitsProcessor(PluggableLayer):
 
         # Remove paddings in vocab (if any).
         if logits is not None:
+            loaded_org_vocab_size = getattr(lm_head, "loaded_org_vocab_size", None)
+            if (
+                loaded_org_vocab_size is not None
+                and loaded_org_vocab_size < self.org_vocab_size
+            ):
+                logits[..., loaded_org_vocab_size : self.org_vocab_size] = -float("inf")
             logits = logits[..., : self.org_vocab_size]
         return logits
 
@@ -129,6 +135,18 @@ class LogitsProcessor(PluggableLayer):
             logits = logits * self.scale
 
         # Mask out padding entries beyond org_vocab_size on this shard.
+        loaded_org_vocab_size = getattr(lm_head, "loaded_org_vocab_size", None)
+        if (
+            loaded_org_vocab_size is not None
+            and loaded_org_vocab_size < lm_head.org_vocab_size
+        ):
+            vocab_start = lm_head.shard_indices.org_vocab_start_index
+            vocab_end = lm_head.shard_indices.org_vocab_end_index
+            mask_start = max(loaded_org_vocab_size, vocab_start) - vocab_start
+            mask_end = vocab_end - vocab_start
+            if mask_start < mask_end:
+                logits[..., mask_start:mask_end] = -float("inf")
+
         num_pad = lm_head.shard_indices.num_org_vocab_padding
         if num_pad > 0:
             logits[..., -num_pad:] = -float("inf")

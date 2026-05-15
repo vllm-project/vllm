@@ -138,6 +138,10 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+    allow_draft_model_vocab_padding: bool = False
+    """Allow a draft model checkpoint with a suffix-shorter vocabulary to be
+    zero-padded to the target model vocabulary size. This is only supported for
+    draft_model speculative decoding and assumes token IDs are prefix-compatible."""
 
     use_heterogeneous_vocab: bool = False
     """Allow draft and target models to use different vocabularies.
@@ -179,6 +183,8 @@ class SpeculativeConfig:
     """The configuration of the draft model initialized internal."""
     draft_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
+    draft_model_unpadded_vocab_size: int | None = None
+    """The draft checkpoint vocabulary size before opt-in vocab padding."""
 
     # Suffix decoding configuration
     suffix_decoding_max_tree_depth: int = 24
@@ -1061,6 +1067,57 @@ class SpeculativeConfig:
 
         return draft_parallel_config
 
+    @staticmethod
+    def _set_model_config_vocab_size(
+        model_config: ModelConfig, vocab_size: int
+    ) -> None:
+        hf_config = model_config.hf_config
+        hf_text_config = model_config.hf_text_config
+        for hf_config_obj in (
+            hf_config,
+            hf_text_config,
+            getattr(hf_config, "text_config", None),
+        ):
+            if hf_config_obj is not None and hasattr(hf_config_obj, "vocab_size"):
+                hf_config_obj.vocab_size = vocab_size
+        model_config.model_arch_config.vocab_size = vocab_size
+
+    def _maybe_enable_draft_model_vocab_padding(self) -> None:
+        if not self.allow_draft_model_vocab_padding:
+            self.draft_model_unpadded_vocab_size = None
+            return
+
+        if self.method != "draft_model":
+            raise ValueError(
+                "allow_draft_model_vocab_padding is only supported with "
+                "method='draft_model'."
+            )
+        if self.target_model_config is None or self.draft_model_config is None:
+            raise ValueError(
+                "allow_draft_model_vocab_padding requires both target and draft "
+                "model configs."
+            )
+
+        target_vocab_size = self.target_model_config.get_vocab_size()
+        draft_vocab_size = self.draft_model_config.get_vocab_size()
+        if target_vocab_size <= draft_vocab_size:
+            raise ValueError(
+                "allow_draft_model_vocab_padding requires the target model "
+                "vocabulary to be larger than the draft model vocabulary. "
+                f"Got target vocab_size={target_vocab_size}, draft "
+                f"vocab_size={draft_vocab_size}."
+            )
+
+        self.draft_model_unpadded_vocab_size = draft_vocab_size
+        self._set_model_config_vocab_size(self.draft_model_config, target_vocab_size)
+        logger.warning_once(
+            "Zero-padding draft model vocabulary from %d to %d tokens. This "
+            "requires suffix-compatible token IDs; heterogeneous tokenizers or "
+            "token ID reordering are not supported.",
+            draft_vocab_size,
+            target_vocab_size,
+        )
+
     @field_validator("attention_backend", mode="before")
     @classmethod
     def _parse_attention_backend(cls, value: Any) -> Any:
@@ -1125,6 +1182,13 @@ class SpeculativeConfig:
                 "omit it."
             )
 
+        if self.allow_draft_model_vocab_padding and self.use_heterogeneous_vocab:
+            raise ValueError(
+                "allow_draft_model_vocab_padding and use_heterogeneous_vocab "
+                "cannot be enabled together."
+            )
+
+        self._maybe_enable_draft_model_vocab_padding()
         if not self.use_heterogeneous_vocab:
             self.verify_equal_vocab_size_if_draft_model()
         return self
