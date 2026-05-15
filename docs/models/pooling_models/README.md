@@ -35,6 +35,8 @@ the latest features of vLLM as well.
 
 ### Cheat Sheet
 
+As illustrated in the figure below, we have summarized the relationships among the key elements of pooling models as a takeaway.
+
 ![Cheat Sheet](../../assets/models/pooling_models/cheat_sheet.svg)
 
 ### Sequence-wise Task and Token-wise Task

@@ -27,8 +27,7 @@ The score models is designed to compute similarity scores between two input prom
 
 ### Score Types
 
-The scoring models is designed to compute similarity scores between two input prompts. It supports three model types
-(aka `score_type`): `cross-encoder`, `late-interaction`, and `bi-encoder`.
+The three supported scoring functions are as illustrated in the figure below.
 
 ![Score Types](../../assets/models/pooling_models/score_types.svg)
 
