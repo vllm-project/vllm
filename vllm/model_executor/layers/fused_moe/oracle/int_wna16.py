@@ -28,8 +28,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
     from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
-    from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 
 logger = init_logger(__name__)
 
@@ -213,7 +213,7 @@ def make_wna16_moe_kernel(
 
 def _process_weights_marlin(
     layer: torch.nn.Module,
-    quant_config: "GPTQMarlinConfig",
+    quant_config: "AutoGPTQConfig",
     input_dtype: torch.dtype | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
@@ -571,11 +571,11 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
+        )
         from vllm.model_executor.layers.quantization.awq_marlin import (
             AWQMarlinConfig,
-        )
-        from vllm.model_executor.layers.quantization.gptq_marlin import (
-            GPTQMarlinConfig,
         )
 
         if isinstance(quant_config, AWQMarlinConfig):
@@ -595,9 +595,9 @@ def convert_to_wna16_moe_kernel_format(
                 w2_bias,
             )
 
-        if not isinstance(quant_config, GPTQMarlinConfig):
+        if not isinstance(quant_config, AutoGPTQConfig):
             raise TypeError(
-                "Marlin WNA16 MoE backend requires GPTQMarlinConfig or "
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig or "
                 "AWQMarlinConfig, got "
                 f"{type(quant_config).__name__}."
             )

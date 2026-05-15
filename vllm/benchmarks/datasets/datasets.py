@@ -1941,6 +1941,19 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             dataset_class = MTBenchDataset
             args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
+            args.dataset_path in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in HumanEvalDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = HumanEvalDataset
+            args.hf_split = args.hf_split if args.hf_split else "test"
+        elif (
+            args.dataset_path in GSM8KDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in GSM8KDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = GSM8KDataset
+            args.hf_subset = args.hf_subset if args.hf_subset else "main"
+            args.hf_split = args.hf_split if args.hf_split else "test"
+        elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
         ):
@@ -3098,6 +3111,126 @@ class MTBenchDataset(HuggingFaceDataset):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# HumanEval Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class HumanEvalDataset(HuggingFaceDataset):
+    """
+    HumanEvalDataset Dataset.
+    https://huggingface.co/datasets/openai/openai_humaneval
+
+    We create a single turn dataset for HumanEval.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "openai/openai_humaneval",
+    }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            # apply template
+            if not skip_chat_template:
+                prompt = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# GSM8K Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class GSM8KDataset(HuggingFaceDataset):
+    """
+    GSM8K Dataset.
+    https://huggingface.co/datasets/openai/gsm8k
+
+    We create a single turn dataset for GSM8K.
+    """
+
+    DEFAULT_OUTPUT_LEN = 256
+    SUPPORTED_DATASET_PATHS = {
+        "openai/gsm8k",
+    }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+        sampled_requests = []
+
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["question"]
 
             # apply template
             if not skip_chat_template:
