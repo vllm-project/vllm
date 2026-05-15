@@ -153,28 +153,17 @@ class MooncakeStoreConnector(KVConnectorBase_V1):
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.
 
-        Called by ``Scheduler.reset_connector_cache()`` after
-        ``BlockPool.reset_prefix_cache`` succeeds with
-        ``reset_connector=True``. Cascades a ``remove_all(force=True)`` on
-        the Mooncake master via the LookupKey ZMQ admin channel to
-        worker rank 0.
+        Drains the worker send queue, then runs ``remove_all`` on the
+        Mooncake master. Caller must first pause generation (e.g.
+        ``pause_generation``) so no new puts are enqueued during drain.
 
-        For RL workflows the caller (e.g. verl) is expected to invoke
-        ``engine.reset_prefix_cache(reset_running_requests=False,
-        reset_connector=True)`` immediately after each weight update so
-        that Mooncake's external KV blocks (computed with the previous
-        weights) are dropped before any new request can hit them.
-
-        Ordering assumption: caller MUST ensure no in-flight Mooncake
-        lookups or transfers at the moment of invocation. Outside the
-        RL step-boundary pattern, the caller is responsible.
-
-        Returns True on success, False on failure, None for the
-        non-applicable worker role (worker reset is driven from the
-        scheduler-side ZMQ admin channel).
+        Returns True on ack, False on failure, None for the worker role.
         """
         if self.role == KVConnectorRole.SCHEDULER:
             assert self.connector_scheduler is not None
+            # Clear local references to keys we're about to wipe.
+            self.connector_scheduler.load_specs.clear()
+            self._kv_cache_events = None
             return self.connector_scheduler.reset_store()
         return None
 

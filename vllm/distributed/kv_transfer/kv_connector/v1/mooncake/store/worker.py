@@ -898,18 +898,11 @@ class MooncakeStoreWorker:
 class LookupKeyServer:
     """ZMQ server on worker rank 0 for the LookupKey admin channel.
 
-    Handles two request types, discriminated by the named tag at frame 0
-    (see ``protocol.py`` for the wire format):
-
-    - ``LOOKUP_MSG``: prefix-cache hit query. Returns hit count as
-      4-byte big-endian.
-    - ``RESET_MSG``: ``store.remove_all(force=True)`` admin command.
-      Returns ``RESP_OK`` on success or ``RESP_ERR`` on failure.
-
-    Reset semantics: the caller must ensure no in-flight Mooncake
-    lookups/transfers when invoking reset. The ZMQ socket is REQ/REP
-    and serialises requests, but pending puts/gets in worker transfer
-    threads are independent of this channel.
+    Handles two request types, tagged at frame 0:
+    - ``LOOKUP_MSG``: prefix-cache hit query, returns hit count.
+    - ``RESET_MSG``: drains the send thread queue, then runs
+      ``store.remove_all(force=True)``. Caller must have paused the
+      scheduler first.
     """
 
     def __init__(
@@ -947,10 +940,12 @@ class LookupKeyServer:
 
                 elif msg_type == RESET_MSG:
                     try:
+                        # Drain in-flight puts before wiping the master;
+                        # otherwise stale puts can repopulate it post-reset.
+                        if self.store_worker.kv_send_thread is not None:
+                            self.store_worker.kv_send_thread.request_queue.join()
                         self.store_worker.store.remove_all(force=True)
-                        logger.info(
-                            "Mooncake store reset via remove_all(force=True) succeeded."
-                        )
+                        logger.info("Mooncake store reset via remove_all succeeded.")
                         self.socket.send(RESP_OK)
                     except Exception as e:
                         logger.error("Mooncake remove_all failed: %s", e)

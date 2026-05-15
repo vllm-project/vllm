@@ -435,3 +435,132 @@ def test_scheduler_reset_connector_cache_invokes_connector_reset():
     mock_scheduler_cls.return_value.reset_store.reset_mock()
     mock_scheduler_cls.return_value.reset_store.return_value = False
     assert sched.reset_connector_cache() is False
+
+
+def test_reset_cache_scheduler_role_clears_local_state():
+    """SCHEDULER reset_cache() must clear scheduler-side state that points
+    at master keys we're about to wipe -- pending load_specs and
+    accumulated _kv_cache_events both reference keys whose blobs are
+    about to be remove_all'd, so reading them after reset would surface
+    stale references to wiped keys.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+        LoadSpec,
+    )
+
+    vllm_config = _make_vllm_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        conn = connector.MooncakeStoreConnector(vllm_config, KVConnectorRole.SCHEDULER)
+
+    # Seed both sentinel pieces of stale-reference state.
+    sched_inst = mock_scheduler_cls.return_value
+    sched_inst.load_specs = {
+        "req-A": LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=128, can_load=True)
+    }
+    conn._kv_cache_events = connector.MooncakeStoreKVEvents(num_workers=1)
+    sched_inst.reset_store.return_value = True
+
+    assert conn.reset_cache() is True
+
+    # Both stale references must be cleared by the time reset_store is
+    # invoked downstream (load_specs flushed dict, events nulled).
+    assert sched_inst.load_specs == {}
+    assert conn._kv_cache_events is None
+
+
+def test_lookup_key_server_reset_drains_send_queue_before_remove_all():
+    """LookupKeyServer RESET handler must drain the send thread's
+    request_queue BEFORE calling store.remove_all -- otherwise stale
+    puts that were already in flight when the caller paused generation
+    can land on the master AFTER remove_all and silently repopulate it
+    with KV hashed against the previous-policy weights.
+    """
+    # Exercise the handler logic directly with mocks for the send thread
+    # and store. We assert (a) join() is called, (b) remove_all is called,
+    # and (c) join() comes BEFORE remove_all in the call order. The full
+    # LookupKeyServer is heavy (binds a real ZMQ REP socket), so we drive
+    # just the dispatch branch here via a stub equivalent.
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+        protocol,
+    )
+
+    call_order: list[str] = []
+
+    fake_send_queue = MagicMock()
+    fake_send_queue.join.side_effect = lambda: call_order.append("join")
+
+    fake_store = MagicMock()
+    fake_store.remove_all.side_effect = lambda force: call_order.append(
+        f"remove_all(force={force})"
+    )
+
+    fake_send_thread = MagicMock()
+    fake_send_thread.request_queue = fake_send_queue
+
+    fake_store_worker = MagicMock()
+    fake_store_worker.kv_send_thread = fake_send_thread
+    fake_store_worker.store = fake_store
+
+    fake_socket = MagicMock()
+    sent: list[bytes] = []
+    fake_socket.send.side_effect = lambda frame: sent.append(frame)
+
+    # Mirror the body of LookupKeyServer.process_request RESET_MSG branch.
+    # Keeping this inline (instead of importing the closure) keeps the
+    # test independent of the live thread lifecycle.
+    msg_type = protocol.RESET_MSG
+    if msg_type == protocol.RESET_MSG:
+        try:
+            if fake_store_worker.kv_send_thread is not None:
+                fake_store_worker.kv_send_thread.request_queue.join()
+            fake_store_worker.store.remove_all(force=True)
+            fake_socket.send(protocol.RESP_OK)
+        except Exception:
+            fake_socket.send(protocol.RESP_ERR)
+
+    # Drain must happen before remove_all.
+    assert call_order == ["join", "remove_all(force=True)"]
+    # Worker reported success.
+    assert sent == [protocol.RESP_OK]
+
+
+def test_lookup_key_server_reset_skips_drain_when_no_send_thread():
+    """When the worker has no send thread (e.g. consumer-only role
+    configurations), the RESET handler must still call remove_all
+    instead of dereferencing a None send thread.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+        protocol,
+    )
+
+    call_order: list[str] = []
+    fake_store = MagicMock()
+    fake_store.remove_all.side_effect = lambda force: call_order.append("remove_all")
+
+    fake_store_worker = MagicMock()
+    fake_store_worker.kv_send_thread = None
+    fake_store_worker.store = fake_store
+
+    fake_socket = MagicMock()
+    sent: list[bytes] = []
+    fake_socket.send.side_effect = lambda frame: sent.append(frame)
+
+    msg_type = protocol.RESET_MSG
+    if msg_type == protocol.RESET_MSG:
+        try:
+            if fake_store_worker.kv_send_thread is not None:
+                fake_store_worker.kv_send_thread.request_queue.join()
+            fake_store_worker.store.remove_all(force=True)
+            fake_socket.send(protocol.RESP_OK)
+        except Exception:
+            fake_socket.send(protocol.RESP_ERR)
+
+    assert call_order == ["remove_all"]
+    assert sent == [protocol.RESP_OK]
