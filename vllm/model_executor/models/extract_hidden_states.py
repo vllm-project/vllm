@@ -34,8 +34,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    HiddenStateCacheSpec,
     KVCacheSpec,
-    MLAAttentionSpec,
 )
 
 ########## Custom Ops ########
@@ -79,13 +79,12 @@ def dummy_attention(layer_name, _placeholder):
 
 
 def basic_cache(
-    to_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
-    kv_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
+    to_cache: torch.Tensor,  # shape: [seq_len, num_heads, head_size]
+    kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
-    num_blocks, block_size, num_heads, head_size = kv_cache.shape
-    token_kv_cache = kv_cache.view(num_blocks * block_size, num_heads, head_size)
-    token_kv_cache[slot_mapping] = to_cache
+    block_size = kv_cache.shape[1]
+    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
 
 
 ######### CacheOnlyAttentionBackend ########
@@ -322,11 +321,9 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Note: we use MLAAttentionSpec here to because it will
-        # produce page sizes of (block_size * num_kv_heads * head_size * dtype_size)
-        # whereas FullAttentionSpec will add an additional factor of 2
-        return MLAAttentionSpec(
-            block_size=self.block_size,
+        # Re-read block_size: hybrid models may bump it after __init__.
+        return HiddenStateCacheSpec(
+            block_size=vllm_config.cache_config.block_size,
             num_kv_heads=self.num_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
