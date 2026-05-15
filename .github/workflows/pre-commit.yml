@@ -86,7 +86,7 @@ jobs:
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
           pre-commit run \
             --from-ref "${{ github.event.pull_request.base.sha }}" \
-            --to-ref "${{ github.sha }}" \
+            --to-ref "${{ github.event.pull_request.head.sha }}" \
             --hook-stage manual
         else
           pre-commit run --all-files --hook-stage manual
