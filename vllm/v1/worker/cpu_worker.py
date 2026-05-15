@@ -71,8 +71,11 @@ class CPUWorker(Worker):
                 f"is less than desired CPU memory utilization "
                 f"({vllm_config.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_cpu_memory)} GiB). "
-                "Decrease --gpu-memory-utilization"
-                f" or reduce CPU memory used by other processes."
+                "On the CPU backend, the `--gpu-memory-utilization` flag "
+                "controls the fraction of CPU memory reserved (despite its "
+                "name). To resolve: decrease `--gpu-memory-utilization` "
+                "(e.g. `--gpu-memory-utilization 0.5`) "
+                "or reduce CPU memory used by other processes."
             )
 
         super().__init__(
