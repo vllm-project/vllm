@@ -466,7 +466,7 @@ libnacl==2.1.0
     # via tensorizer
 librosa==0.10.2.post1
     # via -r requirements/test/rocm.in
-llguidance==1.3.0
+llguidance==1.7.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
