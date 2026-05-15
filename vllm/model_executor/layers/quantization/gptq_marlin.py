@@ -691,6 +691,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             w2_g_idx,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
+            _w13_qzeros,
+            _w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
             w13_bias,

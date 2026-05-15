@@ -9,7 +9,6 @@ from torch.nn import Parameter
 from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -28,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     select_wna16_moe_backend,
 )
@@ -48,11 +48,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_act_int8_process_scales,
     marlin_make_workspace_new,
-    marlin_moe_permute_scales,
-    marlin_permute_bias,
-    moe_awq_to_marlin_zero_points,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -617,52 +613,38 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        num_experts = layer.w13_qweight.shape[0]
-        device = layer.w13_qweight.device
-        is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
-
-        if self.input_dtype == torch.float8_e4m3fn:
-            ops.marlin_int4_fp8_preprocess(
-                layer.w13_qweight.view(-1, layer.w13_qweight.size(2)),
-                layer.w13_qzeros.view(-1, layer.w13_qzeros.size(2)),
-                inplace=True,
-            )
-            ops.marlin_int4_fp8_preprocess(
-                layer.w2_qweight.view(-1, layer.w2_qweight.size(2)),
-                layer.w2_qzeros.view(-1, layer.w2_qzeros.size(2)),
-                inplace=True,
-            )
-            layer.w13_scales.data = layer.w13_scales.data * 512
-            layer.w2_scales.data = layer.w2_scales.data * 512
-
-        layer.w13_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
+        (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_qzeros,
+            w2_qzeros,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            w13_bias,
+            w2_bias,
+        ) = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_moe_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=self.input_dtype,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_qzeros=layer.w13_qzeros,
+            w2_qzeros=layer.w2_qzeros,
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
-        layer.w2_g_idx_sort_indices = torch.nn.Parameter(
-            torch.empty((num_experts, 0), dtype=torch.int32, device=device),
-            requires_grad=False,
-        )
 
-        marlin_w13_qweight = ops.awq_marlin_moe_repack(
-            layer.w13_qweight,
-            layer.w13_g_idx_sort_indices,
-            size_k=layer.w13_qweight.shape[1],
-            size_n=layer.w13_qweight.shape[2] * self.quant_config.pack_factor,
-            num_bits=self.quant_config.weight_bits,
-            is_a_8bit=is_a_8bit,
-        )
-        replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
-
-        marlin_w2_qweight = ops.awq_marlin_moe_repack(
-            layer.w2_qweight,
-            layer.w2_g_idx_sort_indices,
-            size_k=layer.w2_qweight.shape[1],
-            size_n=layer.w2_qweight.shape[2] * self.quant_config.pack_factor,
-            num_bits=self.quant_config.weight_bits,
-            is_a_8bit=is_a_8bit,
-        )
-        replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
+        replace_parameter(layer, "w13_qweight", w13)
+        replace_parameter(layer, "w2_qweight", w2)
 
         # The modular kernel expects w13_weight and w2_weight,
         # but AWQ uses w13_qweight and w2_qweight
@@ -671,66 +653,72 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         # Alias for modular kernel
         layer.w2_weight = layer.w2_qweight
 
-        # Why does this take the intermediate size for size_k?
-        marlin_w13_scales = marlin_moe_permute_scales(
-            s=layer.w13_scales,
-            size_k=layer.intermediate_size_per_partition,
-            size_n=layer.w13_scales.shape[2],
-            group_size=self.quant_config.group_size,
-            is_a_8bit=is_a_8bit,
-        )
-        if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
-            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w13_scales
-            )
+        replace_parameter(layer, "w13_scales", w13_scale)
+        replace_parameter(layer, "w2_scales", w2_scale)
+        if hasattr(layer, "w13_g_idx_sort_indices"):
+            replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+        else:
             layer.register_parameter(
-                "w13_input_global_scale",
-                Parameter(w13_input_global_scale, requires_grad=False),
+                "w13_g_idx_sort_indices",
+                Parameter(w13_g_idx_sort_indices, requires_grad=False),
             )
-
-        replace_parameter(layer, "w13_scales", marlin_w13_scales)
-
-        marlin_w2_scales = marlin_moe_permute_scales(
-            s=layer.w2_scales,
-            size_k=layer.intermediate_size_per_partition,
-            size_n=layer.w2_scales.shape[2],
-            group_size=self.quant_config.group_size,
-            is_a_8bit=is_a_8bit,
-        )
-        if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
-            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w2_scales
-            )
+        if hasattr(layer, "w2_g_idx_sort_indices"):
+            replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+        else:
             layer.register_parameter(
-                "w2_input_global_scale",
-                Parameter(w2_input_global_scale, requires_grad=False),
+                "w2_g_idx_sort_indices",
+                Parameter(w2_g_idx_sort_indices, requires_grad=False),
             )
-
-        replace_parameter(layer, "w2_scales", marlin_w2_scales)
-
-        marlin_w13_zp = moe_awq_to_marlin_zero_points(
-            layer.w13_qzeros,
-            size_k=layer.w13_qzeros.shape[1],
-            size_n=layer.w13_qzeros.shape[2] * self.quant_config.pack_factor,
-            num_bits=self.quant_config.weight_bits,
-            is_a_8bit=is_a_8bit,
-        )
-        replace_parameter(layer, "w13_qzeros", marlin_w13_zp)
-
-        marlin_w2_zp = moe_awq_to_marlin_zero_points(
-            layer.w2_qzeros,
-            size_k=layer.w2_qzeros.shape[1],
-            size_n=layer.w2_qzeros.shape[2] * self.quant_config.pack_factor,
-            num_bits=self.quant_config.weight_bits,
-            is_a_8bit=is_a_8bit,
-        )
-        replace_parameter(layer, "w2_qzeros", marlin_w2_zp)
-
-        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
-            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
-
-        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
-            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+        if w13_g_idx is not None:
+            if hasattr(layer, "w13_g_idx"):
+                replace_parameter(layer, "w13_g_idx", w13_g_idx)
+            else:
+                layer.register_parameter(
+                    "w13_g_idx", Parameter(w13_g_idx, requires_grad=False)
+                )
+        if w2_g_idx is not None:
+            if hasattr(layer, "w2_g_idx"):
+                replace_parameter(layer, "w2_g_idx", w2_g_idx)
+            else:
+                layer.register_parameter(
+                    "w2_g_idx", Parameter(w2_g_idx, requires_grad=False)
+                )
+        if w13_qzeros is not None:
+            replace_parameter(layer, "w13_qzeros", w13_qzeros)
+        if w2_qzeros is not None:
+            replace_parameter(layer, "w2_qzeros", w2_qzeros)
+        if w13_input_global_scale is not None:
+            if hasattr(layer, "w13_input_global_scale"):
+                replace_parameter(
+                    layer, "w13_input_global_scale", w13_input_global_scale
+                )
+            else:
+                layer.register_parameter(
+                    "w13_input_global_scale",
+                    Parameter(w13_input_global_scale, requires_grad=False),
+                )
+        if w2_input_global_scale is not None:
+            if hasattr(layer, "w2_input_global_scale"):
+                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
+            else:
+                layer.register_parameter(
+                    "w2_input_global_scale",
+                    Parameter(w2_input_global_scale, requires_grad=False),
+                )
+        if w13_bias is not None:
+            if hasattr(layer, "w13_bias"):
+                replace_parameter(layer, "w13_bias", w13_bias)
+            else:
+                layer.register_parameter(
+                    "w13_bias", Parameter(w13_bias, requires_grad=False)
+                )
+        if w2_bias is not None:
+            if hasattr(layer, "w2_bias"):
+                replace_parameter(layer, "w2_bias", w2_bias)
+            else:
+                layer.register_parameter(
+                    "w2_bias", Parameter(w2_bias, requires_grad=False)
+                )
 
         self._setup_kernel(layer)
 
