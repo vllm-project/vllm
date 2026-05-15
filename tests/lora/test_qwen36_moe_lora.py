@@ -42,7 +42,6 @@ def _build_prompts() -> list[dict]:
 
 
 def _generate(llm: vllm.LLM, lora_request) -> list[str]:
-
     outputs = llm.generate(
         _build_prompts(),
         vllm.SamplingParams(temperature=0, max_tokens=128),
@@ -57,7 +56,6 @@ def _run_mixed_2d_3d_lora_test(
     tensor_parallel_size: int,
     fully_sharded_loras: bool,
 ) -> None:
-
     llm = vllm.LLM(
         model=MODEL_PATH,
         max_model_len=4096,
@@ -126,6 +124,7 @@ def _run_mixed_2d_3d_lora_test(
     )
 
 
+@pytest.mark.skip(reason="This model is too big, so skip this test temporarily.")
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=2)
 def test_qwen36_moe_mixed_2d_3d_lora_tp2(
@@ -141,6 +140,7 @@ def test_qwen36_moe_mixed_2d_3d_lora_tp2(
     )
 
 
+@pytest.mark.skip(reason="This model is too big, so skip this test temporarily.")
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @multi_gpu_test(num_gpus=4)
 def test_qwen36_moe_mixed_2d_3d_lora_tp4(
