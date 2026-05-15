@@ -343,6 +343,7 @@ jobs:
           result_root = Path(os.environ['GITHUB_WORKSPACE']) / '.benchmarks' / 'ci' / run_id
           raw_result = result_root / 'raw_benchmark.json'
           leaderboard_entry = result_root / 'submissions' / run_id / 'run_leaderboard.json'
+          runner_preflight_failure = result_root / 'runner_preflight_failure.txt'
           summary_path = Path(os.environ['GITHUB_STEP_SUMMARY'])
           comment_path = result_root / 'benchmark_comment.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
@@ -370,6 +371,13 @@ jobs:
             f'- Publish mode: `{publish_mode}`',
             f'- Workflow run: [view run]({run_url})',
           ]
+          if runner_preflight_failure.is_file():
+            skip_note = (
+              '- Runner health: `unhealthy` '
+              '(benchmark skipped before vLLM startup because torch_npu basic allocation failed)'
+            )
+            lines.append(skip_note)
+            comment_lines.append(skip_note)
           if raw_result.is_file():
             payload = json.loads(raw_result.read_text(encoding='utf-8'))
             metric_lines = [

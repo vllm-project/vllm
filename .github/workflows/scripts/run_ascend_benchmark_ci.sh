@@ -13,6 +13,7 @@ SUBMISSIONS_ROOT=${SUBMISSIONS_ROOT:-$RESULT_ROOT/submissions}
 SUBMISSION_DIR=${SUBMISSION_DIR:-$SUBMISSIONS_ROOT/$RUN_ID}
 AGGREGATE_OUTPUT_DIR=${AGGREGATE_OUTPUT_DIR:-$RESULT_ROOT/leaderboard-data}
 SERVER_LOG=${SERVER_LOG:-$RESULT_ROOT/server.log}
+RUNNER_PREFLIGHT_FAILURE_FILE=${RUNNER_PREFLIGHT_FAILURE_FILE:-$RESULT_ROOT/runner_preflight_failure.txt}
 BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
@@ -80,6 +81,61 @@ cleanup() {
   if [[ -n "$marker_pid_file" || -n "$marker_pgid_file" ]]; then
     rm -f "$marker_pid_file" "$marker_pgid_file"
   fi
+}
+
+run_runner_npu_preflight_once() {
+  "$PYTHON_BIN" - <<'PY'
+import importlib.util
+import os
+import sys
+
+import torch
+
+if importlib.util.find_spec("torch_npu") is None:
+    raise RuntimeError("torch_npu is not installed in the benchmark environment")
+
+import torch_npu  # noqa: F401
+
+device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
+print(f"preflight device={device}")
+print("torch_npu import ok=True")
+if not torch.npu.is_available():
+    raise RuntimeError("torch.npu.is_available() returned False")
+torch.npu.set_device(device)
+_ = torch.zeros(1, device=device)
+print("torch.zeros preflight ok")
+PY
+}
+
+ensure_runner_npu_ready() {
+  local max_attempts=${RUNNER_NPU_PREFLIGHT_ATTEMPTS:-3}
+  local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
+  local attempt=1
+  local preflight_output=""
+
+  while [[ "$attempt" -le "$max_attempts" ]]; do
+    if preflight_output=$(run_runner_npu_preflight_once 2>&1); then
+      rm -f "$RUNNER_PREFLIGHT_FAILURE_FILE"
+      return 0
+    fi
+
+    printf '%s\n' "$preflight_output" > "$RUNNER_PREFLIGHT_FAILURE_FILE"
+    echo "Runner NPU preflight failed ($attempt/$max_attempts)" >&2
+    cat "$RUNNER_PREFLIGHT_FAILURE_FILE" >&2
+
+    if [[ "$attempt" -lt "$max_attempts" ]]; then
+      sleep "$delay_seconds"
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  echo "Self-hosted runner NPU runtime is unhealthy before vLLM startup." >&2
+  if [[ "${GITHUB_EVENT_NAME:-}" == "pull_request" ]]; then
+    echo "Skipping benchmark for this PR run because the failure is below vLLM and the runner cannot allocate a basic torch_npu tensor." >&2
+    return 2
+  fi
+
+  return 1
 }
 
 start_server() {
@@ -207,6 +263,14 @@ fi
 if [[ ! -f "$EFFECTIVE_CONSTRAINTS_FILE" ]]; then
   echo "constraints file not found: $EFFECTIVE_CONSTRAINTS_FILE" >&2
   exit 2
+fi
+
+if ! ensure_runner_npu_ready; then
+  status=$?
+  if [[ "$status" -eq 2 ]]; then
+    exit 0
+  fi
+  exit "$status"
 fi
 
 start_server
