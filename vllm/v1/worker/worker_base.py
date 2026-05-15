@@ -90,8 +90,10 @@ class WorkerBase:
 
         # IR op priority and torch-wrap state are constant for the worker's
         # lifetime.
-        vllm_config.kernel_config.ir_op_priority.init_priority()
-        vllm.ir.init_torch_wrap(vllm_config.compilation_config.ir_enable_torch_wrap)
+        vllm_config.kernel_config.ir_op_priority.set_default()
+        vllm.ir.set_default_torch_wrap(
+            vllm_config.compilation_config.ir_enable_torch_wrap
+        )
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """Get specifications for KV cache implementation."""

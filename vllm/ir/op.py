@@ -51,7 +51,7 @@ _ENABLE_TORCH_WRAP: bool = True
 """Global override flag to control torch op layer wrapping."""
 
 
-def init_torch_wrap(enable: bool = True) -> None:
+def set_default_torch_wrap(enable: bool = True) -> None:
     """
     Permanently set the torch wrap flag.
     """
@@ -406,11 +406,11 @@ class IrOp:
         filtered_impls.append(self.impls["native"])
         return filtered_impls
 
-    def init_priority(self, priority: list[str]) -> None:
+    def set_default(self, priority: list[str]) -> None:
         """
         Permanently set the dispatch priority for this op. Use this for
-        process-lifetime setup (e.g., worker startup). For scoped overrides
-        in tests, use ``set_priority`` instead.
+        process-lifetime setup (e.g., worker startup). For scoped overrides,
+        use ``set_priority`` instead.
         """
         self._priority_impls = self._filter_priority_impls(priority)
         logger.debug(

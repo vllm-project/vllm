@@ -20,8 +20,8 @@ logger = init_logger(__name__)
 class IrOpPriorityConfig:
     """
     Configuration for vLLM IR op priority for dispatching/lowering during the
-    forward pass. Each member is a list of strings, which will be passed to
-    vllm.ir.ops.<op_name>.set_priority() for the duration of the forward pass.
+    forward pass. Each member is a list of strings, which will be installed
+    in worker init via vllm.ir.ops.<op_name>.set_default().
     A single comma-separated string is accepted as well,
 
     If specified manually, platform defaults will be appended to the lists.
@@ -85,12 +85,12 @@ class IrOpPriorityConfig:
             logger.debug("Setting IR op priority for %s to %s", field.name, op_priority)
             yield IrOp.registry[field.name], op_priority
 
-    def init_priority(self) -> None:
+    def set_default(self) -> None:
         """
         Permanently set the IR op priority for all op members.
         """
         for ir_op, op_priority in self._iter_op_priorities():
-            ir_op.init_priority(op_priority)
+            ir_op.set_default(op_priority)
 
     @contextlib.contextmanager
     def set_priority(self):
