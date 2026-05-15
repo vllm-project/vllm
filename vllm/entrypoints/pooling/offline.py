@@ -52,7 +52,7 @@ class PoolingOfflineMixin(ABC):
     llm_engine: "LLMEngine"
     model_config: ModelConfig
     runner_type: str
-    chat_template: str
+    chat_template: str | None
     supported_tasks: tuple[SupportedTask, ...]
 
     def __init__(self):
