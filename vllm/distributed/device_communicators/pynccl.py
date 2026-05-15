@@ -21,7 +21,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 )
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import current_stream
+from vllm.utils.torch_utils import current_stream, is_float8_dtype
 
 logger = init_logger(__name__)
 
@@ -328,15 +328,9 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
-        if tensor.dtype in [
-            torch.float8_e5m2,
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
-            torch.float8_e5m2fnuz,
-        ]:
-            nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
-        else:
-            nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
+        nccl_dtype = ncclDataTypeEnum.from_torch(
+            torch.uint8 if is_float8_dtype(tensor.dtype) else tensor.dtype
+        )
         self.nccl.ncclSend(
             buffer_type(tensor.data_ptr()),
             tensor.numel(),
@@ -355,15 +349,9 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
-        if tensor.dtype in [
-            torch.float8_e5m2,
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
-            torch.float8_e5m2fnuz,
-        ]:
-            nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
-        else:
-            nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
+        nccl_dtype = ncclDataTypeEnum.from_torch(
+            torch.uint8 if is_float8_dtype(tensor.dtype) else tensor.dtype
+        )
         self.nccl.ncclRecv(
             buffer_type(tensor.data_ptr()),
             tensor.numel(),
@@ -382,15 +370,9 @@ class PyNcclCommunicator:
         )
         if stream is None:
             stream = current_stream()
-        if tensor.dtype in [
-            torch.float8_e5m2,
-            torch.float8_e4m3fn,
-            torch.float8_e4m3fnuz,
-            torch.float8_e5m2fnuz,
-        ]:
-            nccl_dtype = ncclDataTypeEnum.from_torch(torch.uint8)
-        else:
-            nccl_dtype = ncclDataTypeEnum.from_torch(tensor.dtype)
+        nccl_dtype = ncclDataTypeEnum.from_torch(
+            torch.uint8 if is_float8_dtype(tensor.dtype) else tensor.dtype
+        )
         if src == self.rank:
             sendbuff = buffer_type(tensor.data_ptr())
             # NCCL requires the sender also to have a receive buffer

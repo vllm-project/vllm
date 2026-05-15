@@ -50,6 +50,20 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "nvfp4": torch.uint8,
 }
 
+FLOAT8_DTYPES = frozenset(
+    {
+        torch.float8_e5m2,
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2fnuz,
+    }
+)
+
+
+def is_float8_dtype(dtype: torch.dtype) -> bool:
+    return dtype in FLOAT8_DTYPES
+
+
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float16: np.float16,
     torch.float32: np.float32,
