@@ -3,6 +3,7 @@
 from collections import deque
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
@@ -28,6 +29,47 @@ def _make_model_runner_output(
         prompt_logprobs_dict={},
         pooler_output=[],
     )
+
+
+def test_get_generated_token_ids_accepts_numpy_sampled_token_ids():
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    sampled_token_ids = np.array(
+        [
+            [123, -1],
+            [456, 789],
+        ],
+        dtype=np.int64,
+    )
+    num_sampled_tokens = np.array([1, 2], dtype=np.int64)
+
+    assert Scheduler._get_generated_token_ids(
+        sampled_token_ids,
+        req_index=0,
+        num_sampled_tokens=num_sampled_tokens,
+    ) == [123]
+    assert Scheduler._get_generated_token_ids(
+        sampled_token_ids,
+        req_index=1,
+        num_sampled_tokens=num_sampled_tokens,
+    ) == [456, 789]
+
+
+def test_get_generated_token_ids_accepts_list_sampled_token_ids():
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    sampled_token_ids = [[123], [456, 789]]
+
+    assert Scheduler._get_generated_token_ids(
+        sampled_token_ids,
+        req_index=0,
+        num_sampled_tokens=None,
+    ) == [123]
+    assert Scheduler._get_generated_token_ids(
+        sampled_token_ids,
+        req_index=1,
+        num_sampled_tokens=None,
+    ) == [456, 789]
 
 
 @pytest.mark.parametrize("max_tokens", [1, 2, 3, 5])
