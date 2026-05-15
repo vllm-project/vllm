@@ -112,28 +112,23 @@ class SimpleCPUOffloadPromMetrics(OffloadPromMetrics):
         self.gauges: dict[str, dict[int, PromMetricT]] = {}
         for name, documentation in {
             "vllm:simple_cpu_offload_total_blocks": (
-                "Total usable CPU KV cache blocks managed by "
-                "SimpleCPUOffloadConnector."
+                "Total usable CPU KV cache blocks managed by SimpleCPUOffloadConnector."
             ),
             "vllm:simple_cpu_offload_free_blocks": (
-                "Free usable CPU KV cache blocks managed by "
-                "SimpleCPUOffloadConnector."
+                "Free usable CPU KV cache blocks managed by SimpleCPUOffloadConnector."
             ),
             "vllm:simple_cpu_offload_used_blocks": (
-                "Used usable CPU KV cache blocks managed by "
-                "SimpleCPUOffloadConnector."
+                "Used usable CPU KV cache blocks managed by SimpleCPUOffloadConnector."
             ),
             "vllm:simple_cpu_offload_usage_perc": (
                 "CPU KV cache usage for SimpleCPUOffloadConnector. "
                 "1 means 100 percent usage."
             ),
             "vllm:simple_cpu_offload_pending_loads": (
-                "Requests with pending CPU-to-GPU loads in "
-                "SimpleCPUOffloadConnector."
+                "Requests with pending CPU-to-GPU loads in SimpleCPUOffloadConnector."
             ),
             "vllm:simple_cpu_offload_pending_stores": (
-                "Store events pending worker completion in "
-                "SimpleCPUOffloadConnector."
+                "Store events pending worker completion in SimpleCPUOffloadConnector."
             ),
         }.items():
             gauge = self._gauge_cls(
