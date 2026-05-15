@@ -115,6 +115,36 @@ async def test_generate_endpoint(client):
 
 
 @pytest.mark.asyncio
+async def test_generate_defaults_max_tokens_when_omitted(client):
+    """Regression: omitting ``max_tokens`` must not silently cap at 16.
+
+    ``SamplingParams.max_tokens`` defaults to 16. Before the server-side
+    defaulting was wired up, every request that didn't set ``max_tokens``
+    truncated mid-generation. The server should now fill it in from
+    ``max_model_len - prompt_len`` (matching ``/v1/chat/completions``).
+    """
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "temperature": 0.0,
+            "ignore_eos": True,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    completion_tokens = len(data["choices"][0]["token_ids"])
+    # max_model_len=1024 in the test fixture, prompt is 3 tokens, so we
+    # should get ~1021 tokens of output (capped at max_model_len boundary).
+    assert completion_tokens > 16, (
+        f"expected server-side default to exceed the legacy 16-token cap, "
+        f"got {completion_tokens}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_generate_stream(client):
     payload = {
         "model": MODEL_NAME,

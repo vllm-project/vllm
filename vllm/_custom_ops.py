@@ -2465,6 +2465,36 @@ def dsv3_router_gemm(
     return output
 
 
+def dsv4_norm_router_gemm(
+    x: torch.Tensor,
+    norm_weight: torch.Tensor,
+    gate_weight: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused RMSNorm + router GEMV for DeepSeek V4.
+
+    Returns ``(normed_x, router_logits)`` where
+        normed_x[m,k]      = x[m,k] * rsqrt(mean(x[m]^2) + eps) * norm_weight[k]
+        router_logits[m,n] = sum_k(normed_x[m,k] * gate_weight[n,k])
+
+    DSV4-specific constraints (caller must check before dispatching here):
+      - x, norm_weight, gate_weight all bf16 contiguous
+      - x.shape == [num_tokens, 7168] with num_tokens in [1, 16]
+      - gate_weight.shape == [num_experts, 7168] with num_experts in {256, 384}
+      - SM 9.x or 10.x device
+
+    Logits output is fp32 (hard-coded by DSV4 router).
+    """
+    num_tokens, hidden = x.shape
+    num_experts = gate_weight.shape[0]
+    normed_x = torch.empty_like(x)
+    logits = torch.empty(num_tokens, num_experts, device=x.device, dtype=torch.float32)
+    torch.ops._moe_C.dsv4_norm_router_gemm(
+        logits, normed_x, x, norm_weight, gate_weight, float(eps)
+    )
+    return normed_x, logits
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2805,6 +2835,7 @@ def swap_blocks_batch(
     src_ptrs: torch.Tensor,
     dst_ptrs: torch.Tensor,
     sizes: torch.Tensor,
+    is_src_access_order_any: bool = False,
 ) -> None:
     """
     Batch version of swap_blocks: submit all copies in a single driver call.
@@ -2813,8 +2844,16 @@ def swap_blocks_batch(
     of sizes[i] bytes. All three tensors must be int64 CPU tensors.
     On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
     overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
+
+    is_src_access_order_any: if True, pass CU_MEMCPY_SRC_ACCESS_ORDER_ANY to
+        cuMemcpyBatchAsync, letting the DMA engine prefetch source bytes
+        out of stream order. Only safe when no GPU stream is concurrently
+        writing to the source. Defaults to False (STREAM ordering), which
+        is always safe.
     """
-    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+    torch.ops._C_cache_ops.swap_blocks_batch(
+        src_ptrs, dst_ptrs, sizes, is_src_access_order_any
+    )
 
 
 def convert_fp8(
