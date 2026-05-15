@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+
+# Verify hypothesis: vLLM's kernels are batch-shape-dependent by default.
+# Setting this env var forces deterministic block sizes (e.g., flex_attention
+# uses BLOCK_M=BLOCK_N=16 unconditionally), which should make cross-config
+# outputs bit-identical and eliminate the rank=5217<->5218 flake.
+# See examples/features/batch_invariance/reproducibility_offline.py — the
+# comment there is literally:
+#   "Enable batch invariance to get consistent results regardless of scheduling."
+# That's exactly what this test needs.
+os.environ.setdefault("VLLM_BATCH_INVARIANT", "1")
 from itertools import repeat
 from typing import Any
 
