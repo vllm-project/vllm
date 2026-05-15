@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
@@ -689,8 +690,16 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
-        # write the latent and rope to kv cache
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        # Quantize Q to FP8 and view the KV cache as FP8 when FP8 KV cache
+        # is enabled (the cache itself is written in FP8 by the dispatcher).
+        # VLLM_ROCM_SPARSE_MLA_FP8_DISABLE is a binary-search lever: set it
+        # to 1 to keep Q in bf16 and skip the FP8 view, even when the KV
+        # cache dtype is fp8. Useful for isolating FP8-path bugs from
+        # sparse indexing or decode bugs.
+        fp8_attention = (
+            self.kv_cache_dtype.startswith("fp8")
+            and not envs.VLLM_ROCM_SPARSE_MLA_FP8_DISABLE
+        )
         if fp8_attention:
             original_q_shape = q.shape
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
