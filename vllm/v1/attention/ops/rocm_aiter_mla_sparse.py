@@ -562,6 +562,64 @@ def _topk_indices_torch(logits: torch.Tensor, topk_tokens: int) -> torch.Tensor:
     return padded
 
 
+# topk_tokens values with dedicated fused C++ kernel support.
+_TOPK_FAST_PATH_VALUES = frozenset({2048})
+
+
+def _topk_indices_prefill(
+    logits: torch.Tensor,
+    topk_tokens: int,
+    topk_out: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+) -> None:
+    """Top-k indices for the prefill path.
+
+    Writes ``logits.shape[0]`` rows into ``topk_out``; caller must size the
+    view accordingly.
+    """
+    if topk_tokens in _TOPK_FAST_PATH_VALUES:
+        torch.ops._C.top_k_per_row_prefill(
+            logits,
+            cu_seqlen_ks,
+            cu_seqlen_ke,
+            topk_out,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )
+    else:
+        topk_out.copy_(_topk_indices_torch(logits, topk_tokens))
+
+
+def _topk_indices_decode(
+    logits: torch.Tensor,
+    topk_tokens: int,
+    topk_out: torch.Tensor,
+    seq_lens: torch.Tensor,
+    next_n: int,
+) -> None:
+    """Top-k indices for the decode path.
+
+    Writes ``logits.shape[0] == batch_size * next_n`` rows into ``topk_out``;
+    caller must size the view to ``num_padded_tokens``.
+    """
+    if topk_tokens in _TOPK_FAST_PATH_VALUES:
+        torch.ops._C.top_k_per_row_decode(
+            logits,
+            next_n,
+            seq_lens,
+            topk_out,
+            logits.shape[0],
+            logits.stride(0),
+            logits.stride(1),
+            topk_tokens,
+        )
+    else:
+        topk_out.copy_(_topk_indices_torch(logits, topk_tokens))
+
+
 def rocm_aiter_sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -709,7 +767,13 @@ def rocm_aiter_sparse_attn_indexer_native(
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
-            topk_indices.copy_(_topk_indices_torch(logits, topk_tokens))
+            _topk_indices_prefill(
+                logits,
+                topk_tokens,
+                topk_indices,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+            )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -746,14 +810,23 @@ def rocm_aiter_sparse_attn_indexer_native(
             max_model_len=max_model_len,
         )
 
-        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-        topk_indices.copy_(_topk_indices_torch(logits, topk_tokens)[:num_decode_tokens])
+        # Size the view to num_padded_tokens: top_k_per_row_decode writes
+        # logits.shape[0] == num_padded_tokens rows, and the unpack below
+        # reshapes to (batch_size, next_n, ...).
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        _topk_indices_decode(
+            logits,
+            topk_tokens,
+            topk_indices,
+            decode_metadata.seq_lens,
+            next_n,
+        )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
             topk_indices = unpack_seq_triton(
-                topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
+                topk_indices.reshape(batch_size, next_n, topk_indices.shape[-1]),
                 decode_lens,
             )
             topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
