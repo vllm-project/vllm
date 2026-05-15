@@ -221,7 +221,11 @@ class GenerateResponse(BaseModel):
             "through out the inference process and return in response."
         ),
     )
+    model: str | None = None
+    created: int | None = None
     choices: list[GenerateResponseChoice]
+
+    usage: UsageInfo | None = None
 
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
 
