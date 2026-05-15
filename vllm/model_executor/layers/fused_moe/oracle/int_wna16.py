@@ -78,8 +78,8 @@ def select_wna16_moe_backend(
 
     Args:
         config: the shared ``FusedMoEConfig`` for this layer.
-        weight_bits: quantization bit-width (4 or 8). 8-bit weights are not
-            supported by the modular Marlin kernel, so ``NONE`` is returned.
+        weight_key: The QuantKey describing the weight quantization.
+                    Must have int4 or int8 type.
 
     Returns:
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
