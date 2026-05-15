@@ -9,8 +9,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers import utils
-from vllm.platforms import current_platform
-from vllm.platforms import zen_cpu
+from vllm.platforms import current_platform, zen_cpu
 
 
 @pytest.fixture(scope="module")
@@ -87,8 +86,7 @@ def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
 
     assert log_calls == [
         (
-            "CPU unquantized GEMM dispatch: using zentorch_linear_unary "
-            "(prepacked=%s)",
+            "CPU unquantized GEMM dispatch: using zentorch_linear_unary (prepacked=%s)",
             expected_prepacked,
         )
     ]
@@ -102,9 +100,7 @@ def test_zen_cpu_platform_logs_activation(monkeypatch):
     monkeypatch.setitem(sys.modules, "zentorch", fake_zentorch)
     monkeypatch.setattr(zen_cpu.envs, "VLLM_ZENTORCH_WEIGHT_PREPACK", 1)
     monkeypatch.setattr(zen_cpu.torch.cpu, "_is_avx512_supported", lambda: True)
-    monkeypatch.setattr(
-        zen_cpu.torch.cpu, "_is_avx512_bf16_supported", lambda: False
-    )
+    monkeypatch.setattr(zen_cpu.torch.cpu, "_is_avx512_bf16_supported", lambda: False)
 
     log_calls = []
     monkeypatch.setattr(

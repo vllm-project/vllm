@@ -9,7 +9,7 @@ On AMD Zen 4 / Zen 5 (Genoa, Bergamo, Turin) CPUs, vLLM auto-activates a
 [`zentorch`](https://github.com/amd/ZenDNN-pytorch-plugin) package is
 available. For release wheels, install the CPU wheel with the `zen` extra so
 vLLM pulls the tested `zentorch` version for that release. See
-[AMD Zen optimizations](#amd-zen-optimizations) below.
+[AMD Zen optimizations](cpu.md#amd-zen-optimizations) below.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
