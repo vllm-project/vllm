@@ -105,7 +105,7 @@
                     </g>
                     <g id="List-Item-Copy" xlink:href="#path-14">
                         <text id="Sequence-wise">
-                            <tspan x="10" y="20.3333333">Classify</tspan>
+                            <tspan x="10" y="20.3333333">classify</tspan>
                         </text>
                     </g>
                 </g>
@@ -222,7 +222,7 @@
                     </g>
                     <g id="List-Item" transform="translate(0, 52)" xlink:href="#path-39">
                         <text id="Sequence-wise">
-                            <tspan x="10" y="20.3333333">Openai-compatible Emveddings API (/v1/embeddings)</tspan>
+                            <tspan x="10" y="20.3333333">OpenAI-compatible Embeddings API (/v1/embeddings)</tspan>
                         </text>
                     </g>
                     <g id="List-Item-Copy-2" transform="translate(0, 26)" xlink:href="#path-40">
