@@ -149,3 +149,21 @@ steps:
   - vllm/model_executor/models/whisper.py
   commands: # LMEval
   - pytest -s entrypoints/openai/correctness/
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/
+      - vllm/entrypoints/openai/
+      - vllm/model_executor/models/whisper.py
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/model_loader/
+      commands:
+      - bash ../tools/install_torchcodec_rocm.sh || exit 1
+      - pytest -s entrypoints/openai/correctness/
