@@ -28,6 +28,8 @@ STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
 # Each entry point resolves to a factory returning an `EndpointPlugin`
 # (see `vllm/plugins/endpoint_plugins/interface.py`).
 ENDPOINT_PLUGINS_GROUP = "vllm.endpoint_plugins"
+# File search plugins are loaded in the API server process when requested.
+FILE_SEARCH_PLUGINS_GROUP = "vllm.file_search_plugins"
 
 # make sure one process only loads plugins once
 plugins_loaded = False

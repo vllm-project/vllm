@@ -11,6 +11,9 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
 
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses.response_file_search_tool_call import (
+    Result as FileSearchResult,
+)
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
@@ -18,6 +21,7 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
+from openai.types.responses.tool import Tool as ResponseTool
 from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
@@ -68,6 +72,77 @@ def _map_tool_name_to_tool_type(tool_name: str) -> str:
             f"Available tools: {available_tools}"
         )
     return _TOOL_NAME_TO_TYPE_MAP[tool_name]
+
+
+def _file_search_placeholder_payload() -> dict[str, list]:
+    return {"results": []}
+
+
+def _to_jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", by_alias=True)
+    return value
+
+
+def _file_search_args(
+    model_args: dict[str, Any], tools: list[ResponseTool]
+) -> dict[str, Any]:
+    query = model_args.get("query")
+    args: dict[str, Any] = {"query": query if isinstance(query, str) else ""}
+    for tool in tools:
+        if tool.type != "file_search":
+            continue
+        for key in (
+            "vector_store_ids",
+            "filters",
+            "max_num_results",
+            "ranking_options",
+        ):
+            value = getattr(tool, key, None)
+            if value is not None:
+                args[key] = _to_jsonable(value)
+        break
+    return args
+
+
+async def _run_file_search_handler(args: dict[str, Any]) -> dict[str, Any]:
+    from vllm.plugins.file_search import get_file_search_handler
+
+    handler = get_file_search_handler()
+    if handler is None:
+        return _file_search_placeholder_payload()
+    try:
+        payload = await handler.search(
+            query=args.get("query", ""),
+            vector_store_ids=args.get("vector_store_ids"),
+            filters=args.get("filters"),
+            max_num_results=args.get("max_num_results"),
+            ranking_options=args.get("ranking_options"),
+        )
+    except Exception:
+        logger.exception("file_search handler raised an exception")
+        return _file_search_placeholder_payload()
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        logger.error("file_search handler returned invalid results")
+        return _file_search_placeholder_payload()
+
+    normalized_results = []
+    for result in results:
+        try:
+            validated = FileSearchResult.model_validate(result)
+        except Exception:
+            logger.exception("file_search handler returned an invalid result")
+            continue
+        normalized_results.append(
+            validated.model_dump(
+                mode="json",
+                include={"attributes", "file_id", "filename", "score", "text"},
+                exclude_none=True,
+            )
+        )
+    return {"results": normalized_results}
 
 
 class TurnMetrics:
@@ -606,6 +681,7 @@ class HarmonyContext(ConversationContext):
         messages: list,
         available_tools: list[str],
         function_tool_names: frozenset[str],
+        tools: list[ResponseTool] | None = None,
         response_parser: Parser | None = None,
     ):
         from vllm.parser.harmony import HarmonyParser, Segment
@@ -616,6 +692,7 @@ class HarmonyContext(ConversationContext):
         self.response_parser: HarmonyParser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.tools = tools or []
         self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
@@ -781,6 +858,8 @@ class HarmonyContext(ConversationContext):
             return "python" in self.available_tools
         if recipient.startswith("container."):
             return "container" in self.available_tools
+        if recipient == "functions.file_search":
+            return any(tool.type == "file_search" for tool in self.tools)
         return False
 
     async def call_tool(self) -> list[Message]:
@@ -801,6 +880,26 @@ class HarmonyContext(ConversationContext):
                 return await self.call_container_tool(
                     self._tool_sessions["container"], last_msg
                 )
+            elif recipient == "functions.file_search" and any(
+                tool.type == "file_search" for tool in self.tools
+            ):
+                try:
+                    model_args = json.loads(last_msg.content[0].text)
+                except json.JSONDecodeError:
+                    model_args = {}
+                if not isinstance(model_args, dict):
+                    model_args = {}
+                payload = await _run_file_search_handler(
+                    _file_search_args(model_args, self.tools)
+                )
+                return [
+                    Message(
+                        author=Author(role=Role.TOOL, name="functions.file_search"),
+                        content=[TextContent(text=json.dumps(payload))],
+                        recipient=Role.ASSISTANT,
+                        channel=last_msg.channel,
+                    )
+                ]
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:

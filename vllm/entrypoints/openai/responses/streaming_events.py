@@ -30,6 +30,10 @@ from openai.types.responses import (
     ResponseCodeInterpreterToolCallParam,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFileSearchCallCompletedEvent,
+    ResponseFileSearchCallInProgressEvent,
+    ResponseFileSearchCallSearchingEvent,
+    ResponseFileSearchToolCall,
     ResponseFunctionCallArgumentsDeltaEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
@@ -111,6 +115,10 @@ class StreamingState:
     current_call_id: str = ""
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
+    include_file_search_results: bool = False
+    file_search_results: list[dict[str, Any]] | None = None
+    pending_file_search_item: HarmonyMessage | None = None
+    processed_message_count: int = 0
 
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
@@ -119,6 +127,7 @@ class StreamingState:
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
+        self.file_search_results = None
 
 
 def is_mcp_tool_by_namespace(
@@ -374,6 +383,42 @@ def emit_code_interpreter_delta_events(
     return events
 
 
+def emit_file_search_delta_events(
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    """Open the native file_search output-item lifecycle."""
+    if state.sent_output_item_added:
+        return []
+    state.sent_output_item_added = True
+    state.current_item_id = f"fs_{random_uuid()}"
+    return [
+        ResponseOutputItemAddedEvent(
+            type="response.output_item.added",
+            sequence_number=-1,
+            output_index=state.current_output_index,
+            item=ResponseFileSearchToolCall(
+                type="file_search_call",
+                id=state.current_item_id,
+                queries=[],
+                results=None,
+                status="in_progress",
+            ),
+        ),
+        ResponseFileSearchCallInProgressEvent(
+            type="response.file_search_call.in_progress",
+            sequence_number=-1,
+            output_index=state.current_output_index,
+            item_id=state.current_item_id,
+        ),
+        ResponseFileSearchCallSearchingEvent(
+            type="response.file_search_call.searching",
+            sequence_number=-1,
+            output_index=state.current_output_index,
+            item_id=state.current_item_id,
+        ),
+    ]
+
+
 # =====================================================================
 # Shared leaf helpers — done events
 # =====================================================================
@@ -558,6 +603,70 @@ def emit_mcp_completion_events(
     return events
 
 
+def _file_search_queries(arguments: str) -> list[str]:
+    try:
+        args = json.loads(arguments)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(args, dict):
+        return []
+    queries = args.get("queries")
+    if isinstance(queries, list):
+        return [query for query in queries if isinstance(query, str) and query]
+    query = args.get("query")
+    return [query] if isinstance(query, str) and query else []
+
+
+def emit_file_search_done_events(
+    arguments: str,
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    events: list[StreamingResponsesResponse] = [
+        ResponseFileSearchCallCompletedEvent(
+            type="response.file_search_call.completed",
+            sequence_number=-1,
+            output_index=state.current_output_index,
+            item_id=state.current_item_id,
+        ),
+        ResponseOutputItemDoneEvent(
+            type="response.output_item.done",
+            sequence_number=-1,
+            output_index=state.current_output_index,
+            item=ResponseFileSearchToolCall(
+                type="file_search_call",
+                id=state.current_item_id,
+                queries=_file_search_queries(arguments),
+                results=(
+                    state.file_search_results
+                    if state.include_file_search_results
+                    else None
+                ),
+                status="completed",
+            ),
+        ),
+    ]
+    return events
+
+
+def consume_file_search_tool_result(
+    message: HarmonyMessage,
+    state: StreamingState,
+) -> list[StreamingResponsesResponse]:
+    if state.pending_file_search_item is None:
+        return []
+    try:
+        payload = json.loads(message.content[0].text)
+    except json.JSONDecodeError:
+        payload = {}
+    results = payload.get("results") if isinstance(payload, dict) else None
+    state.file_search_results = results if isinstance(results, list) else None
+    events = emit_file_search_done_events(
+        state.pending_file_search_item.content[0].text, state
+    )
+    state.pending_file_search_item = None
+    return events
+
+
 # =====================================================================
 # Harmony-specific dispatchers
 # =====================================================================
@@ -588,6 +697,8 @@ def emit_content_delta_events(
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
         fn_names = function_tool_names
+        if recipient == "functions.file_search":
+            return emit_file_search_delta_events(state)
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)
             return emit_function_call_delta_events(delta, function_name, state)
@@ -620,6 +731,9 @@ def emit_previous_item_done_events(
     text = previous_item.content[0].text
     if previous_item.recipient is not None:
         # Deal with tool call
+        if previous_item.recipient == "functions.file_search":
+            state.pending_file_search_item = previous_item
+            return []
         if is_function_recipient(previous_item.recipient, function_tool_names):
             function_name = extract_function_from_recipient(previous_item.recipient)
             return emit_function_call_done_events(function_name, text, state)
