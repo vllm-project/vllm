@@ -1590,6 +1590,9 @@ class SupportsEncoderCudaGraph(Protocol):
         - Qwen-family: slice concatenated pixel_values by cumulative
           patch offsets, subset grid_thw by indices.
         - Batched models (CLIP): index pixel_values along dim 0.
+
+        Models with a second CUDA-graph capture axis accept keyword-only
+        ``secondary_capture_axis_key`` (see ``EncoderCudaGraphManager``).
         """
         ...
 
@@ -1601,7 +1604,11 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
     ) -> "EncoderCudaGraphCaptureInputs":
-        """Create dummy inputs and buffers for CUDA graph capture."""
+        """Create dummy inputs and buffers for CUDA graph capture.
+
+        Models with a second capture axis accept keyword-only
+        ``secondary_capture_axis_key``.
+        """
         ...
 
     def prepare_encoder_cudagraph_replay_buffers(

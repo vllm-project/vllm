@@ -26,7 +26,7 @@
 
 import math
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from functools import partial
 from itertools import chain
 from typing import Annotated, Any, ClassVar, Literal, TypeAlias
@@ -1242,6 +1242,23 @@ _MINICPMV_CUDAGRAPH_BUF_KEY_PATCH_MASK = "minicpmv_patch_attn_mask"
 # mm_kwargs keys for the flat pixel-value tensor
 _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE = "minicpmv_encoder_input_flat"
 _MINICPMV_CUDAGRAPH_FLAT_KEY_VIDEO = "minicpmv_video_encoder_input_flat"
+_MINICPMV_CUDAGRAPH_PIXEL_HW_KEY = "minicpmv_encoder_pixel_hw"
+_MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY = "minicpmv_encoder_max_patches"
+
+_MINICPMV_BASE_PATCH_BUCKETS: tuple[tuple[int, int], ...] = (
+    (32, 32),
+    (32, 64),
+    (64, 32),
+)
+
+_ENCODER_CUDAGRAPH_MM_KWARGS_SKIP_KEYS = frozenset(
+    {
+        _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE,
+        _MINICPMV_CUDAGRAPH_FLAT_KEY_VIDEO,
+        _MINICPMV_CUDAGRAPH_PIXEL_HW_KEY,
+        _MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY,
+    }
+)
 
 
 def _mcpmv_tgt_sizes_tensor(
@@ -1333,10 +1350,68 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         image_size = int(self.vpm.embeddings.image_size)
         return image_size, image_size
 
+    def _mcpmv_patch_grid_pixel_hw(
+        self, secondary_capture_axis_key: tuple[int, int]
+    ) -> tuple[int, int]:
+        patch_size = int(self.vpm.embeddings.patch_size)
+        th, tw = secondary_capture_axis_key
+        return th * patch_size, tw * patch_size
+
+    def _mcpmv_patch_grid_num_patches(
+        self, secondary_capture_axis_key: tuple[int, int]
+    ) -> int:
+        th, tw = secondary_capture_axis_key
+        return th * tw
+
     def _mcpmv_max_patches_per_slice(self) -> int:
         image_size = int(self.vpm.embeddings.image_size)
         patch_size = int(self.vpm.embeddings.patch_size)
         return (image_size // patch_size) ** 2
+
+    def get_encoder_cudagraph_secondary_capture_axis_keys(
+        self,
+    ) -> tuple[tuple[int, int], ...]:
+        """Ordered patch-grid keys ``(nb_h, nb_w)`` for the second capture axis."""
+        max_side = int(self.vpm.embeddings.image_size) // int(
+            self.vpm.embeddings.patch_size
+        )
+        keys: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for th, tw in _MINICPMV_BASE_PATCH_BUCKETS:
+            if th <= max_side and tw <= max_side:
+                keys.append((th, tw))
+                seen.add((th, tw))
+        full = (max_side, max_side)
+        if full not in seen:
+            keys.append(full)
+        return tuple(keys)
+
+    def resolve_encoder_cudagraph_secondary_capture_axis_key(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+        token_budget: int,
+        ordered_secondary_capture_axis_keys: Sequence[Hashable],
+    ) -> Hashable:
+        _ = token_budget
+        keys = ordered_secondary_capture_axis_keys
+        if not indices:
+            return keys[0]
+        video = self.get_input_modality(mm_kwargs) == "video"
+        pixel_values_key = "video_pixel_values" if video else "pixel_values"
+        pixel_values: list[list[torch.Tensor]] = mm_kwargs[pixel_values_key]
+        slice_counts = [len(img) for img in pixel_values]
+        tgt_sizes = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
+        tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
+        tgt_groups = torch.split(tgt_sizes, slice_counts)
+        selected = torch.cat([tgt_groups[i] for i in indices], dim=0)
+        need_h = int(selected[:, 0].max().item())
+        need_w = int(selected[:, 1].max().item())
+        for candidate_key in keys:
+            th, tw = int(candidate_key[0]), int(candidate_key[1])
+            if th >= need_h and tw >= need_w:
+                return candidate_key
+        return keys[-1]
 
     def _mcpmv_max_slices_cap(
         self,
@@ -1436,6 +1511,8 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        *,
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         video = self.get_input_modality(mm_kwargs) == "video"
         pixel_values_key = "video_pixel_values" if video else "pixel_values"
@@ -1446,13 +1523,17 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             else _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE
         )
         device = next(self.vpm.parameters()).device
-        pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
         pixel_values: list[list[torch.Tensor]] = mm_kwargs[pixel_values_key]
         tgt_sizes = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
 
-        subset = {k: v for k, v in mm_kwargs.items() if k != flat_key}
+        subset = {
+            k: v
+            for k, v in mm_kwargs.items()
+            if k not in _ENCODER_CUDAGRAPH_MM_KWARGS_SKIP_KEYS
+        }
 
         if not indices:
+            pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
             subset.update(
                 {
                     pixel_values_key: [],
@@ -1464,11 +1545,23 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             )
             return subset
 
-        # Select per-item nested slices and matching tgt_sizes rows.
         slice_counts = [len(item_slices) for item_slices in pixel_values]
-
         tgt_sizes = _mcpmv_normalize_tgt_sizes(tgt_sizes, slice_counts)
         tgt_groups = torch.split(tgt_sizes, slice_counts)
+
+        if secondary_capture_axis_key is None:
+            patch_grid_key = self.resolve_encoder_cudagraph_secondary_capture_axis_key(
+                mm_kwargs,
+                indices,
+                0,
+                self.get_encoder_cudagraph_secondary_capture_axis_keys(),
+            )
+        else:
+            patch_grid_key = secondary_capture_axis_key
+        patch_grid = (int(patch_grid_key[0]), int(patch_grid_key[1]))
+        pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(patch_grid)
+        max_patches = self._mcpmv_patch_grid_num_patches(patch_grid)
+
         selected_pixel_values = [pixel_values[i] for i in indices]
         selected_tgt_sizes_list = [tgt_groups[i] for i in indices]
         selected_tgt_sizes = torch.cat(selected_tgt_sizes_list, dim=0)
@@ -1490,6 +1583,8 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
                 pixel_values_key: selected_pixel_values,
                 tgt_key: selected_tgt_sizes_list,
                 flat_key: packed_flat_pixels,
+                _MINICPMV_CUDAGRAPH_PIXEL_HW_KEY: (pixel_h, pixel_w),
+                _MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY: max_patches,
             }
         )
         return subset
@@ -1501,9 +1596,22 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        *,
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
-        max_patches = self._mcpmv_max_patches_per_slice()
+        patch_size = int(self.vpm.embeddings.patch_size)
+        if secondary_capture_axis_key is None:
+            pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
+            max_patches = self._mcpmv_max_patches_per_slice()
+            patch_hw = pixel_h // patch_size
+            tgt_th = tgt_tw = patch_hw
+        else:
+            th = int(secondary_capture_axis_key[0])
+            tw = int(secondary_capture_axis_key[1])
+            normalized_key = (th, tw)
+            pixel_h, pixel_w = self._mcpmv_patch_grid_pixel_hw(normalized_key)
+            max_patches = self._mcpmv_patch_grid_num_patches(normalized_key)
+            tgt_th, tgt_tw = normalized_key
         max_num_slices = self._mcpmv_max_slices_cap(
             token_budget,
             max_batch_size,
@@ -1513,10 +1621,11 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         flat_pixel_buffer = torch.zeros(
             (max_num_slices, flat_dim), device=device, dtype=dtype
         )
-        patch_hw = pixel_h // int(self.vpm.embeddings.patch_size)
-        dummy_tgt_sizes = torch.full(
-            (max_num_slices, 2), patch_hw, dtype=torch.long, device=device
+        dummy_tgt_sizes = torch.zeros(
+            (max_num_slices, 2), dtype=torch.long, device=device
         )
+        dummy_tgt_sizes[:, 0] = tgt_th
+        dummy_tgt_sizes[:, 1] = tgt_tw
         dummy_patch_mask = torch.ones(
             (max_num_slices, max_patches), dtype=torch.bool, device=device
         )
@@ -1526,6 +1635,8 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         }
         mm_kwargs: dict[str, Any] = {
             _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE: flat_pixel_buffer,
+            _MINICPMV_CUDAGRAPH_PIXEL_HW_KEY: (pixel_h, pixel_w),
+            _MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY: max_patches,
         }
         return EncoderCudaGraphCaptureInputs(mm_kwargs=mm_kwargs, buffers=buffers)
 
@@ -1538,7 +1649,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         _ = max_frames_per_batch
         _ = max_batch_size
         video = self.get_input_modality(mm_kwargs) == "video"
-        max_patches = self._mcpmv_max_patches_per_slice()
+        max_patches = int(mm_kwargs[_MINICPMV_CUDAGRAPH_MAX_PATCHES_KEY])
         device = next(self.vpm.parameters()).device
         tgt_sizes_raw = _mcpmv_tgt_sizes_tensor(mm_kwargs, video=video)
         if isinstance(tgt_sizes_raw, list):
@@ -1570,7 +1681,8 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             else _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE
         )
         flat_pixel_buffer = mm_kwargs[flat_key]
-        pixel_h, pixel_w = self._mcpmv_slice_pixel_size()
+        pixel_hw = mm_kwargs[_MINICPMV_CUDAGRAPH_PIXEL_HW_KEY]
+        pixel_h, pixel_w = int(pixel_hw[0]), int(pixel_hw[1])
         max_num_slices, flat_dim = flat_pixel_buffer.shape
         assert flat_dim == 3 * pixel_h * pixel_w
         all_pixel_values = flat_pixel_buffer.view(max_num_slices, 3, pixel_h, pixel_w)
@@ -1600,11 +1712,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         mm_kwargs_no_flat = {
             k: v
             for k, v in mm_kwargs.items()
-            if k
-            not in (
-                _MINICPMV_CUDAGRAPH_FLAT_KEY_IMAGE,
-                _MINICPMV_CUDAGRAPH_FLAT_KEY_VIDEO,
-            )
+            if k not in _ENCODER_CUDAGRAPH_MM_KWARGS_SKIP_KEYS
         }
         modalities = self._parse_and_validate_multimodal_inputs(**mm_kwargs_no_flat)
         segments: list[torch.Tensor] = []

@@ -1,6 +1,6 @@
 # Vision Encoder (ViT) CUDA Graphs
 
-The [CUDA Graphs](cuda_graphs.md) infrastructure in vLLM primarily targets the **decoder** (language model) forward pass. vLLM also supports capturing the **encoder** (vision transformer) forward pass as CUDA Graphs, independently from the decoder. This is based on <https://github.com/vllm-project/vllm/pull/35963>.
+The [CUDA Graphs](cuda_graphs.md) infrastructure in vLLM primarily targets the **decoder** (language model) forward pass. vLLM also supports capturing the **encoder** (vision transformer) forward pass as CUDA Graphs, independently from the decoder. This is based on [https://github.com/vllm-project/vllm/pull/35963](https://github.com/vllm-project/vllm/pull/35963).
 
 !!! note
     Encoder CUDA Graphs are orthogonal to decoder CUDA Graphs — both can be enabled simultaneously. Encoder graphs capture the vision encoder execution (e.g., ViT in Qwen3-VL), while decoder graphs capture the language model execution as described in the [CUDA Graphs design document](cuda_graphs.md).
@@ -15,9 +15,9 @@ Encoder CUDA Graphs eliminate this overhead by pre-capturing the full encoder fo
 
 The encoder CUDA Graph system uses a **budget-based capture/replay** strategy, managed by [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]. The system contains the following core components:
 
-* [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]: orchestrates capture, replay, greedy packing, and data-parallel execution for encoder CUDA Graphs.
-* [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph]: a runtime-checkable protocol that models implement to opt-in to encoder CUDA Graphs.
-* [BudgetGraphMetadata][vllm.v1.worker.encoder_cudagraph.BudgetGraphMetadata]: holds the captured CUDA Graph and its associated I/O buffers for a single token budget level.
+- [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]: orchestrates capture, replay, greedy packing, and data-parallel execution for encoder CUDA Graphs.
+- [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph]: a runtime-checkable protocol that models implement to opt-in to encoder CUDA Graphs.
+- [BudgetGraphMetadata][vllm.v1.worker.encoder_cudagraph.BudgetGraphMetadata]: holds the captured CUDA Graph and its associated I/O buffers for a single token budget level.
 
 ### Budget-based graph capture
 
@@ -54,40 +54,44 @@ When `mm_encoder_tp_mode="data"`, the manager distributes images across TP ranks
 
 ### Video inference support
 
-Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph support for image inference), <https://github.com/vllm-project/vllm/pull/38061> extends the encoder CUDA graph framework to support video inference for Qwen3-VL. Previously, the CUDA graph capture/replay path only handled image inputs (`pixel_values` + `image_grid_thw`). Video inputs use different keys (`pixel_values_videos` + `video_grid_thw`) and require larger `cu_seqlens` buffers because each video item contributes multiple frames (`T` attention sequences). This PR generalizes the protocol and manager to handle both modalities through a single shared graph manager.
+Following [https://github.com/vllm-project/vllm/pull/35963](https://github.com/vllm-project/vllm/pull/35963) (ViT full CUDA graph support for image inference), [https://github.com/vllm-project/vllm/pull/38061](https://github.com/vllm-project/vllm/pull/38061) extends the encoder CUDA graph framework to support video inference for Qwen3-VL. Previously, the CUDA graph capture/replay path only handled image inputs (`pixel_values` + `image_grid_thw`). Video inputs use different keys (`pixel_values_videos` + `video_grid_thw`) and require larger `cu_seqlens` buffers because each video item contributes multiple frames (`T` attention sequences). This PR generalizes the protocol and manager to handle both modalities through a single shared graph manager.
 
 !!! note
     Video CUDA graphs are automatically disabled when EVS (Efficient Video Sampling) pruning is enabled, since EVS makes the token count data-dependent and incompatible with CUDA graph capture.
 
-    Mixed inputs (image+video) per prompt are also supported now.
+```
+Mixed inputs (image+video) per prompt are also supported now.
+```
 
 ## Model integration via `SupportsEncoderCudaGraph`
 
 Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph] protocol. This protocol encapsulates all model-specific logic so that the manager remains model-agnostic. The protocol defines the following methods:
 
-* `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, input key, buffer keys, output hidden size).
-* `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
-* `get_encoder_cudagraph_num_items(mm_kwargs)` — returns the number of items (e.g. images) in the batch.
-* `get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)` — returns per-item output token counts, used for greedy packing.
-* `get_encoder_cudagraph_per_item_input_sizes(mm_kwargs)` — returns per-item input sizes (e.g. patch counts), used for DP load balancing.
-* `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding.
-* `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture.
-* `prepare_encoder_cudagraph_replay_buffers(...)` — computes new buffer values from actual batch inputs before replay.
-* `encoder_cudagraph_forward(...)` — forward pass using precomputed buffers (called during capture and replay).
-* `encoder_eager_forward(...)` — fallback eager forward when no graph fits.
-* `get_input_modality(...)` - return the modality of the inputs.
-* `get_max_frames_per_video()` - return model-specific max frames per video.
+- `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, input key, buffer keys, output hidden size).
+- `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
+- `get_encoder_cudagraph_num_items(mm_kwargs)` — returns the number of items (e.g. images) in the batch.
+- `get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)` — returns per-item output token counts, used for greedy packing.
+- `get_encoder_cudagraph_per_item_input_sizes(mm_kwargs)` — returns per-item input sizes (e.g. patch counts), used for DP load balancing.
+- `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding. Models with a second CUDA-graph capture axis may accept keyword-only `secondary_capture_axis_key`.
+- `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture (same optional keyword as above).
+- `prepare_encoder_cudagraph_replay_buffers(...)` — computes new buffer values from actual batch inputs before replay.
+- `encoder_cudagraph_forward(...)` — forward pass using precomputed buffers (called during capture and replay).
+- `encoder_eager_forward(...)` — fallback eager forward when no graph fits.
+- `get_input_modality(...)` - return the modality of the inputs.
+- `get_max_frames_per_video()` - return model-specific max frames per video.
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
 **Supported models:**
 
-| Architecture | Models | CG for Image | CG for Video |
-| ------------ | ------ | ------------ | ------------ |
-| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
-| `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ |
-| `MiniCPMV` | `MiniCPMV2.5`,`MiniCPMV2.6`,`MiniCPMV4.0` | ✅︎ | ✅︎ |
+
+| Architecture                         | Models                                    | CG for Image | CG for Video |
+| ------------------------------------ | ----------------------------------------- | ------------ | ------------ |
+| `Qwen3VLForConditionalGeneration`    | `Qwen3-VL`                                | ✅︎           | ✅︎           |
+| `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL`                              | ✅︎           | ✅︎           |
+| `MiniCPMV`                           | `MiniCPMV2.5`,`MiniCPMV2.6`,`MiniCPMV4.0` | ✅︎           | ✅︎           |
+
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
@@ -97,10 +101,10 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 Three fields in `CompilationConfig` control encoder CUDA Graphs:
 
-* `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
-* `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
-* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
-* `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value according to its `processing_info`). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
+- `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
+- `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
+- `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
+- `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value according to its `processing_info`). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 ## Usage guide
 
@@ -183,10 +187,12 @@ The following benchmarks were run on Blackwell GPUs (GB200) using `vllm bench mm
 
 Model: `Qwen/Qwen3-VL-30B-A3B-Instruct`, dataset: `lmarena-ai/VisionArena-Chat` (3000 prompts, 300 warmup), `max_model_len=32768`.
 
-| Backend | Mean latency improvement | P99 latency improvement |
-| :------ | :----------------------- | :---------------------- |
-| FLASH_ATTN | +11.8% (5.13→4.52ms) | +31.6% (9.16→6.26ms) |
-| FLASHINFER | +19.6% (5.42→4.36ms) | +40.3% (10.87→6.49ms) |
+
+| Backend    | Mean latency improvement | P99 latency improvement |
+| ---------- | ------------------------ | ----------------------- |
+| FLASH_ATTN | +11.8% (5.13→4.52ms)     | +31.6% (9.16→6.26ms)    |
+| FLASHINFER | +19.6% (5.42→4.36ms)     | +40.3% (10.87→6.49ms)   |
+
 
 To reproduce:
 
@@ -204,10 +210,12 @@ vllm bench mm-processor \
 
 Model: `Qwen/Qwen3-VL-32B-Instruct`, dataset: `random-mm` (1000 prompts, 200 warmup, 20 images/request at 336x336), `max_model_len=8192`.
 
-| Backend | Mean latency improvement | P99 latency improvement |
-| :------ | :----------------------- | :---------------------- |
-| FLASH_ATTN | +18.4% (28.39→23.16ms) | +14.0% (238.78→205.28ms) |
-| FLASHINFER | +44.4% (23.24→12.91ms) | +84.9% (172.41→26.05ms) |
+
+| Backend    | Mean latency improvement | P99 latency improvement  |
+| ---------- | ------------------------ | ------------------------ |
+| FLASH_ATTN | +18.4% (28.39→23.16ms)   | +14.0% (238.78→205.28ms) |
+| FLASHINFER | +44.4% (23.24→12.91ms)   | +84.9% (172.41→26.05ms)  |
+
 
 To reproduce:
 
