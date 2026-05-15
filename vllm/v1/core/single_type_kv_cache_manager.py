@@ -658,9 +658,21 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
 
 class MLAAttentionManager(FullAttentionManager):
-    """KV cache manager for DeepSeek V4 compressed MLA cache."""
+    """KV cache manager for compressed / fp8 MLA cache layouts.
+
+    Used by any MLA spec whose hit semantics need prompt-block
+    protection across decode and unrelated cache churn. ``_should_
+    protect_prompt_blocks`` enumerates the triggering conditions.
+    """
 
     def _should_protect_prompt_blocks(self) -> bool:
+        # Three independent triggers:
+        # 1. ``model_version == "deepseek_v4"``: DSv4 explicitly opts in.
+        # 2. ``cache_dtype_str == "fp8_ds_mla"``: fp8 DeepSeek-style
+        #    MLA cache; protection is needed for the same hybrid-align
+        #    reuse pattern.
+        # 3. ``compress_ratio > 1``: any compressed MLA cache (today
+        #    only DSv4 sets ``compress_ratio > 1``; V3.2 keeps it at 1).
         return (
             self.kv_cache_spec.model_version == "deepseek_v4"
             or self.kv_cache_spec.cache_dtype_str == "fp8_ds_mla"
