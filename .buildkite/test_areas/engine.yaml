@@ -36,6 +36,12 @@ steps:
   commands:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
 
 - label: e2e Scheduling (1 GPU)
   key: e2e-scheduling-1-gpu
@@ -46,6 +52,12 @@ steps:
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_async_scheduling.py
+  mirror:
+    amd:
+      device: mi250_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: e2e Core (1 GPU)
   key: e2e-core-1-gpu
