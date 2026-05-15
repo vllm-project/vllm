@@ -664,8 +664,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    finfo = torch.finfo(dtype)
-    fp8_min, fp8_max = finfo.min, finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     # compute DeepGEMM-style packed scale tensor shape.
     hidden_dim = x.shape[-1]
