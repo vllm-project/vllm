@@ -21,9 +21,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     invoke_fused_moe_wna16_triton_kernel,
     try_get_optimal_moe_config,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    is_deep_gemm_e8m0_used,
-)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -33,6 +30,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    is_deep_gemm_e8m0_used,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
