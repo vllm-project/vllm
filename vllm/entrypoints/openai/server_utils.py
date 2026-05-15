@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from argparse import Namespace
@@ -44,8 +45,29 @@ class AuthenticationMiddleware:
     -----
     There are two cases in which authentication is skipped:
         1. The HTTP method is OPTIONS.
-        2. The request path doesn't start with /v1 (e.g. /health).
+        2. The request path is not under one of ``AUTH_REQUIRED_PREFIXES``
+           (e.g. /health, /metrics).
     """
+
+    # Path prefixes that require API-key authentication.
+    #
+    # ``/v1`` covers the bulk of the OpenAI-compatible surface
+    # (/v1/completions, /v1/chat/completions, /v1/responses, /v1/realtime,
+    # /v1/load_lora_adapter, ...).
+    #
+    # ``/inference/v1`` covers the disaggregated-serving generate route at
+    # ``/inference/v1/generate``, which performs full token-in / token-out
+    # inference and was previously reachable without authentication because
+    # its path does not *start* with ``/v1`` even though it is a versioned
+    # inference endpoint.
+    AUTH_REQUIRED_PREFIXES: tuple[str, ...] = ("/v1", "/inference/v1")
+
+    # Collapses runs of consecutive ``/`` so that path-prefix checks cannot be
+    # bypassed by sending e.g. ``//v1/completions`` or ``///v1/completions``.
+    # ASGI servers (uvicorn, hypercorn) do not always normalize these, but the
+    # downstream router still happily matches them after its own normalization,
+    # so the middleware must normalize *before* the prefix check.
+    _MULTI_SLASH_RE: re.Pattern[str] = re.compile(r"/+")
 
     def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
         self.app = app
@@ -68,6 +90,17 @@ class AuthenticationMiddleware:
 
         return token_match
 
+    @classmethod
+    def _normalize_path(cls, url_path: str) -> str:
+        # Collapse any run of ``/`` into a single ``/`` so that
+        # ``startswith("/v1")`` cannot be evaded by ``//v1`` / ``///v1`` /
+        # encoded variants that uvicorn passes through verbatim.
+        return cls._MULTI_SLASH_RE.sub("/", url_path)
+
+    def _requires_auth(self, url_path: str) -> bool:
+        normalized = self._normalize_path(url_path)
+        return any(normalized.startswith(p) for p in self.AUTH_REQUIRED_PREFIXES)
+
     def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
         if (
             scope["type"] not in ("http", "websocket")
@@ -80,7 +113,7 @@ class AuthenticationMiddleware:
         url_path = URL(scope=scope).path.removeprefix(root_path)
         headers = Headers(scope=scope)
         # Type narrow to satisfy mypy.
-        if url_path.startswith("/v1") and not self.verify_token(headers):
+        if self._requires_auth(url_path) and not self.verify_token(headers):
             response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
             return response(scope, receive, send)
         return self.app(scope, receive, send)
