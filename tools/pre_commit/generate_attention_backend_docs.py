@@ -879,6 +879,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
 
     # Analyze the functions to determine FA3/FA4-specific features
     fa3_supports_fp8 = False
+    fa4_supports_fp8 = False
     fa3_supports_sinks = False
     fa4_supports_sinks = False
     fa3_compute_cap: str | None = None
@@ -888,17 +889,30 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         if not isinstance(node, ast.FunctionDef):
             continue
 
-        # Check flash_attn_supports_fp8 - looks for `get_flash_attn_version() == 3`
-        if node.name == "flash_attn_supports_fp8":
+        # Check flash_attn_supports_kv_cache_dtype for fp8 support per FA version.
+        # Looks for `fa_version == 3/4` or `get_flash_attn_version() == 3/4`.
+        if node.name == "flash_attn_supports_kv_cache_dtype":
             for n in ast.walk(node):
                 if (
                     isinstance(n, ast.Compare)
-                    and isinstance(n.left, ast.Call)
-                    and isinstance(n.left.func, ast.Name)
-                    and n.left.func.id == "get_flash_attn_version"
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.Eq)
                 ):
-                    fa3_supports_fp8 = True
-                    break
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare and isinstance(
+                        n.comparators[0], ast.Constant
+                    ):
+                        val = n.comparators[0].value
+                        if val == 3:
+                            fa3_supports_fp8 = True
+                        elif val == 4:
+                            fa4_supports_fp8 = True
 
         # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
         # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
@@ -1006,7 +1020,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         },
         "fa4": {
             "compute_capability": fa4_compute_cap,
-            "supports_fp8": False,
+            "supports_fp8": fa4_supports_fp8,
             "supports_sink": fa4_supports_sinks,
         },
     }
