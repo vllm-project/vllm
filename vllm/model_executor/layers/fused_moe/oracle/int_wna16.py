@@ -510,12 +510,8 @@ def convert_to_wna16_moe_kernel_format(
     Args:
         backend: the selected ``WNA16MoEBackend``.
         layer: the ``FusedMoE`` layer whose parameters are being prepared.
-        quant_config: the ``QuantizationConfig`` for this layer (GPTQ/AWQ).
+        quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
-        num_bits: quantization bits (compressed tensors only).
-        pack_factor: packing factor (compressed tensors only).
-        group_size: group size for quantization (compressed tensors only).
-        actorder: activation ordering mode (compressed tensors only).
     """
     if backend in (
         WNA16MoEBackend.MARLIN,
