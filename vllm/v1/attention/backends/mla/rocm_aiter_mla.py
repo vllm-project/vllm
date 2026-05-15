@@ -115,6 +115,21 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
     reduce_final_map: torch.Tensor | None = None
     reduce_partial_map: torch.Tensor | None = None
 
+    # FP8 ASM prefill persistent-scheduling (PS) metadata.  Populated by
+    # AiterMLAMetadataBuilder._build_fp8_prefill_ps_metadata when prefill
+    # tokens are present and FP8 MLA prefill is supported on the device.
+    # Left as None on hosts/configs that fall back to flash_attn_varlen_func.
+    fp8_prefill_qo_indptr: torch.Tensor | None = None
+    fp8_prefill_kv_indptr: torch.Tensor | None = None
+    fp8_prefill_kv_indices: torch.Tensor | None = None
+    fp8_prefill_work_indptr: torch.Tensor | None = None
+    fp8_prefill_work_info_set: torch.Tensor | None = None
+    fp8_prefill_reduce_indptr: torch.Tensor | None = None
+    fp8_prefill_reduce_final_map: torch.Tensor | None = None
+    fp8_prefill_reduce_partial_map: torch.Tensor | None = None
+    fp8_prefill_max_q_len: int | None = None
+    fp8_prefill_num_partial_tiles: int | None = None
+
 
 # Tile size used by the mla_prefill_ps_asm_fwd assembly kernel.
 _FP8_PREFILL_TILE_Q = 256
@@ -325,6 +340,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         from aiter import get_ps_metadata_v1
 
         prefill = metadata.prefill
+        # Caller (build()) only invokes this when prefill tokens exist, so
+        # metadata.prefill is guaranteed non-None.  Assert to narrow for mypy.
+        assert prefill is not None
         qo_indptr = prefill.query_start_loc
         kv_indptr = qo_indptr  # new tokens: KV length == Q length
 
@@ -732,7 +750,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         # num_partial_tiles is resolved during metadata build to avoid an
         # in-forward .item() sync that would prevent CUDA Graph capture.
+        # forward_mha gates the FP8 path on fp8_prefill_qo_indptr being set,
+        # and the builder always sets every fp8_prefill_* field together, so
+        # num_partial_tiles is non-None here.
         num_partial_tiles = attn_metadata.fp8_prefill_num_partial_tiles
+        assert num_partial_tiles is not None
 
         # Reuse the caller's output buffer to skip the per-call alloc + copy.
         # The ASM and reduce kernels both write to a [total_q, nhead, v_head_dim]
@@ -787,7 +809,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: AiterMLAMetadata,
+        attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
@@ -796,9 +818,16 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         Falls back to the parent (``flash_attn_varlen_func``) when FP8
         MLA prefill is disabled, PS metadata is missing, or chunked
         context requires two-pass merge.
+
+        The annotation uses the base ``MLACommonMetadata`` to honour LSP
+        with ``MLACommonImpl.forward_mha``; the AITER builder always
+        produces ``AiterMLAMetadata`` instances at runtime, so we narrow
+        with ``isinstance`` before reading the AITER-specific FP8 fields.
         """
-        if not self._fp8_prefill_enabled or not hasattr(
-            attn_metadata, "fp8_prefill_qo_indptr"
+        if (
+            not self._fp8_prefill_enabled
+            or not isinstance(attn_metadata, AiterMLAMetadata)
+            or attn_metadata.fp8_prefill_qo_indptr is None
         ):
             return super().forward_mha(
                 q,
