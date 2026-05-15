@@ -2048,6 +2048,11 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        # TODO(bnell): why is this required only for mxfp8?
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+        layer._already_called_process_weights_after_loading = True
+
         self._check_weight_dtypes(layer)
 
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
@@ -2115,6 +2120,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             x,
