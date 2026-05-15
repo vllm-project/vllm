@@ -855,8 +855,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Optional override: install mooncake-transfer-engine from a URL instead of the
 # PyPI release pulled in above. Use this for wheels built with non-default CMake
-# flags (e.g. `STORE_USE_ETCD=ON` for master HA). arm64 manylinux_2_39 wheels
-# require UBUNTU_VERSION=24.04+ as the final base.
+# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
+# floor must be <= the FINAL_BASE_IMAGE's glibc.
 ARG MOONCAKE_WHEEL_AARCH64
 ARG MOONCAKE_WHEEL_X86_64
 RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
