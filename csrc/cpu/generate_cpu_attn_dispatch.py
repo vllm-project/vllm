@@ -20,7 +20,8 @@ ISA_TYPES = {
     "VEC16": 2,
     "NEON": 3,
     "VXE": 4,
-    "VSX": 5,
+    "RVV": 5,
+    "VSX": 6,
 }
 
 # KV cache index: 0 = auto (same as scalar_t), 1 = fp8_e4m3, 2 = fp8_e5m2
@@ -38,7 +39,7 @@ KV_CACHE_CPP_TYPES = {
 }
 
 # ISAs supported for head_dims divisible by 32
-ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE", "VSX"]
+ISA_FOR_32 = ["AMX", "NEON", "VEC", "VEC16", "VXE", "RVV", "VSX"]
 
 # ISAs supported for head_dims divisible by 16 only
 ISA_FOR_16 = ["VEC16"]
@@ -149,6 +150,15 @@ def generate_header_file() -> str:
   #include "cpu_attn_vxe.hpp"
 #endif
 
+// cpu_attn_rvv.hpp is hardcoded to VLEN==128 (m1/m2 intrinsics, vl=8) and
+// itself includes <riscv_vector.h>, which is unavailable on scalar
+// (-march=rv64gc) builds. Gate the include the same way as the dispatch
+// macro below, so non-128 / scalar RISC-V builds skip it entirely.
+#if defined(__riscv) && defined(__riscv_v_min_vlen) && \
+    __riscv_v_min_vlen == 128
+  #include "cpu_attn_rvv.hpp"
+#endif
+
 #ifdef __powerpc__
   #include "cpu_attn_vsx.hpp"
 #endif
@@ -212,6 +222,23 @@ def generate_header_file() -> str:
         ["VXE", "VEC", "VEC16"],
         fp8=False,
     )
+    # RISC-V with RVV.  cpu_attn_rvv.hpp is hardcoded to VLEN==128
+    # (riscv_rvv_vector_bits(128) typedefs + vl=8 m1/m2 intrinsics), so
+    # we split the dispatch into two top-level branches: VLEN==128 builds
+    # get the full RVV+VEC+VEC16 case set, other VLEN builds get a
+    # VEC/VEC16-only fallback.  Preprocessor directives cannot appear
+    # inside a #define body, so this duplication is necessary.
+    header += _macro_block(
+        "#elif defined(__riscv) && defined(__riscv_v_min_vlen) "
+        "&& __riscv_v_min_vlen == 128",
+        ["RVV", "VEC", "VEC16"],
+        fp8=False,
+    )
+    header += _macro_block(
+        "#elif defined(__riscv)",
+        ["VEC", "VEC16"],
+        fp8=False,
+    )
     header += _macro_block(
         "#elif defined(__powerpc__)",
         ["VSX", "VEC", "VEC16"],
@@ -233,8 +260,8 @@ def generate_header_file() -> str:
         fp8=False,
     )
     header += (
-        "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / "
-        "__s390x__ / __powerpc__ */\n\n"
+        "#endif  /* CPU_CAPABILITY_AMXBF16 / __aarch64__ / __s390x__ /"
+        " __riscv / __powerpc__ */\n\n"
         "#endif  // CPU_ATTN_DISPATCH_GENERATED_H\n"
     )
 
