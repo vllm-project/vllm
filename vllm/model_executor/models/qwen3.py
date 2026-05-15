@@ -56,34 +56,43 @@ from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe
 logger = init_logger(__name__)
 
 
-# PROBE: determinism check helper. Calls fn(*args) twice with cloned tensor
-# args and prints max abs diff between the two outputs. Used to find which
-# sub-op of the first transformer layer has non-deterministic output.
-def _det_check_call(name: str, fn, *args):
+# PROBE: dump sub-op outputs at layer 0 position 1 for ACROSS-PASS comparison.
+# Previous within-call _det_check_call showed all sub-ops bit-deterministic
+# within a single forward pass. But that doesn't catch ACROSS-GENERATE
+# non-determinism (e.g., cuBLAS algo caching changes between generates).
+# This dump captures the value at position 1 of each sub-op output every
+# time the forward pass contains token 2701 (the failing prompt position).
+# Post-process: extract per-pid-per-pass values and compare pass 6 vs pass 7
+# within the same config to find the FIRST sub-op whose output differs
+# across passes — that's the actual non-deterministic op.
+def _dump_subop_out(name: str, output):
     import os as _os
 
     if _os.environ.get("VLLM_DET_CHECK", "") != "1":
-        return fn(*args)
-    cloned = tuple(a.clone() if isinstance(a, torch.Tensor) else a for a in args)
-    out_a = fn(*args)
-    out_b = fn(*cloned)
-    if isinstance(out_a, tuple):
-        diffs = []
-        for ta, tb in zip(out_a, out_b):
-            if isinstance(ta, torch.Tensor) and isinstance(tb, torch.Tensor):
-                diffs.append((ta - tb).abs().max().item())
-        diff = max(diffs) if diffs else 0.0
+        return
+    t = output[0] if isinstance(output, tuple) else output
+    if not isinstance(t, torch.Tensor):
+        return
+    if t.ndim >= 2 and t.shape[0] >= 2:
+        flat = t[1].detach().reshape(-1)[:8].cpu().float().tolist()
     else:
-        diff = (out_a - out_b).abs().max().item()
-    if diff != 0:
-        import sys as _sys
+        return
+    import sys as _sys
 
-        print(
-            f"[DET_CHECK] {name} max_diff={diff:.3e}",
-            file=_sys.stderr,
-            flush=True,
-        )
-    return out_a
+    print(
+        f"[SUBOP_OUT] layer0 op={name} pos=1 first8={flat}",
+        file=_sys.stderr,
+        flush=True,
+    )
+
+
+# Wrapper that calls fn once and dumps its output. Replaces the old
+# within-call _det_check_call which we showed only catches within-call
+# non-determinism — not the across-generate variety we need.
+def _det_check_call(name: str, fn, *args):
+    out = fn(*args)
+    _dump_subop_out(name, out)
+    return out
 
 
 class Qwen3Attention(nn.Module):
@@ -204,11 +213,17 @@ class Qwen3Attention(nn.Module):
             q, k = _det_check_call("rotary_emb", self.rotary_emb, positions, q, k)
         else:
             q, k = self.rotary_emb(positions, q, k)
-        # NOTE: self.attn mutates KV cache, so we don't double-call it.
-        # If all other sub-ops are deterministic but the layer output still
-        # diverges across configs, attention is the culprit by elimination.
+        # PROBE: also dump q/k AFTER rotary (the input to attention) and
+        # attn_output (the output of attention) for cross-pass comparison.
+        # self.attn mutates KV cache so we don't re-call it, but we still
+        # dump its output to see if it differs across passes.
+        if _det:
+            _dump_subop_out("q_after_rotary", q)
+            _dump_subop_out("k_after_rotary", k)
+            _dump_subop_out("v_input", v)
         attn_output = self.attn(q, k, v)
         if _det:
+            _dump_subop_out("attn_output", attn_output)
             output, _ = _det_check_call("o_proj", self.o_proj, attn_output)
         else:
             output, _ = self.o_proj(attn_output)
