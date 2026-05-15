@@ -208,7 +208,10 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         K = self.moe_config.hidden_dim
         N = self.moe_config.intermediate_size_per_partition
         assert self.quant_config.block_shape is not None
-        group_size = self.quant_config.block_shape[1]
+        if self.quant_config.is_per_act_token:
+            group_size = -1
+        else:
+            group_size = self.quant_config.block_shape[1]
 
         # Call the dynamic 4-bit int MoE kernel
         return torch.ops._C.dynamic_4bit_int_moe(

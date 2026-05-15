@@ -234,10 +234,10 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         )
 
         replace_parameter(
-            layer, "w13_weight", torch.nn.Parameter(None, requires_grad=False)
+            layer, "w13_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
         )
         replace_parameter(
-            layer, "w2_weight", torch.nn.Parameter(None, requires_grad=False)
+            layer, "w2_weight", torch.nn.Parameter(torch.empty(0), requires_grad=False)
         )
         replace_parameter(
             layer,

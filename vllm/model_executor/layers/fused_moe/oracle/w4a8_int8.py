@@ -304,8 +304,9 @@ def convert_to_w4a8_int8_moe_format(
     # Stack all experts
     w13_packed = torch.stack(w13_packed_list, dim=0)
     w2_packed = torch.stack(w2_packed_list, dim=0)
+    empty = torch.empty(0)
 
-    return w13_packed, w2_packed, None, None, None, None
+    return w13_packed, w2_packed, empty, empty, empty, empty
 
 
 def make_w4a8_int8_moe_kernel(
