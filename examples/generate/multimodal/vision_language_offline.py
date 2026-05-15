@@ -2561,6 +2561,9 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "qwen3_5",
     "qwen3_5_moe",
     "stepvl",
+    "minicpmv2_5_vl",
+    "minicpmv2_6_vl",
+    "minicpmv4_vl",
 ]
 
 

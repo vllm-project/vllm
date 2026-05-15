@@ -70,8 +70,8 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 * `get_encoder_cudagraph_num_items(mm_kwargs)` — returns the number of items (e.g. images) in the batch.
 * `get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)` — returns per-item output token counts, used for greedy packing.
 * `get_encoder_cudagraph_per_item_input_sizes(mm_kwargs)` — returns per-item input sizes (e.g. patch counts), used for DP load balancing.
-* `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding.
-* `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture.
+* `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding. Models with a second CUDA-graph capture axis may accept keyword-only `secondary_capture_axis_key`.
+* `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture. Models with a second CUDA-graph capture axis may accept keyword-only `secondary_capture_axis_key`.
 * `prepare_encoder_cudagraph_replay_buffers(...)` — computes new buffer values from actual batch inputs before replay.
 * `encoder_cudagraph_forward(...)` — forward pass using precomputed buffers (called during capture and replay).
 * `encoder_eager_forward(...)` — fallback eager forward when no graph fits.
@@ -91,6 +91,9 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
 | `Qwen3_5ForConditionalGeneration` | `Qwen3.5` | ✅︎ | ✅︎ |
 | `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ |
+| `MiniCPMV` | `MiniCPMV2.5` | ✅︎ | ❌︎ |
+| `MiniCPMV` | `MiniCPMV2.6` | ✅︎ | ✅︎ |
+| `MiniCPMV` | `MiniCPMV4.0` | ✅︎ | ✅︎ |
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.

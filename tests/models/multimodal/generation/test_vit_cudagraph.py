@@ -50,6 +50,20 @@ def step3_vl_chat_template(content: str) -> str:
     )
 
 
+def minicpmv_25_chat_template(content: str) -> str:
+    """Llama3-style chat template used by MiniCPM-V 2.5."""
+    return (
+        f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+        f"{content}"
+        f"<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
+
+def minicpmv_chat_template(content: str) -> str:
+    """ChatML template used by MiniCPM-V 2.6 / 4.0 / 4.5."""
+    return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
     "qwen2_5_vl": VitCudagraphTestConfig(
         model="Qwen/Qwen2.5-VL-3B-Instruct",
@@ -121,6 +135,37 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="StepVLForConditionalGeneration",
             ),
         },
+    ),
+    "minicpmv_25": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-Llama3-V-2_5",
+        modalities=["image"],
+        image_prompt=minicpmv_25_chat_template(
+            "(<image>./</image>)\nWhat is in this image?"
+        ),
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "minicpmv_26": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-V-2_6",
+        image_prompt=minicpmv_chat_template(
+            "(<image>./</image>)\nWhat is in this image?"
+        ),
+        video_prompt=minicpmv_chat_template(
+            "(<video>./</video>)\nDescribe this video in one sentence."
+        ),
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
+    ),
+    "minicpmv_40": VitCudagraphTestConfig(
+        model="openbmb/MiniCPM-V-4",
+        image_prompt=minicpmv_chat_template(
+            "(<image>./</image>)\nWhat is in this image?"
+        ),
+        video_prompt=minicpmv_chat_template(
+            "(<video>./</video>)\nDescribe this video in one sentence."
+        ),
+        vllm_runner_kwargs={"trust_remote_code": True},
+        marks=[pytest.mark.core_model],
     ),
 }
 

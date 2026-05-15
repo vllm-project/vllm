@@ -108,6 +108,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
     mgr.use_dp = False
+    mgr._ordered_secondary_capture_axis_keys = None
     mgr.budget_graphs = {}
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -408,6 +409,7 @@ def _make_manager_for_gpu(
         max_frames_per_batch if max_frames_per_batch is not None else max_batch_size * 2
     )
     mgr.use_dp = False
+    mgr._ordered_secondary_capture_axis_keys = None
     mgr.budget_graphs = {}
     mgr.graph_hits = 0
     mgr.graph_misses = 0
