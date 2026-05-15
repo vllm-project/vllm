@@ -173,7 +173,12 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]] = field(default_factory=list)
+    sampled_token_ids: list[list[int]] | np.ndarray = field(default_factory=list)
+
+    # [num_reqs]
+    # Number of valid generated tokens in each sampled_token_ids row when
+    # sampled_token_ids is kept in padded array form.
+    num_sampled_tokens: list[int] | np.ndarray | None = None
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
